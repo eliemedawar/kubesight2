@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import subprocess
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .cluster_access import ClusterAccess, custom_cluster_public_id, is_custom_cluster_id, parse_custom_cluster_db_id
 from .kubeconfig_vault import (
@@ -70,16 +71,19 @@ def invalidate_namespace_resources_cache(
         _K8S_READ_CACHE.invalidate(f"nslist:{cluster_id}")
         _K8S_READ_CACHE.invalidate(f"nscounts:{cluster_id}")
         _K8S_READ_CACHE.invalidate(f"nsmetrics:{cluster_id}")
+        _K8S_READ_CACHE.invalidate(f"all:{cluster_id}:")
     elif cluster_id:
         _K8S_READ_CACHE.invalidate(f"res:{cluster_id}:")
         _K8S_READ_CACHE.invalidate(f"nslist:{cluster_id}")
         _K8S_READ_CACHE.invalidate(f"nscounts:{cluster_id}")
         _K8S_READ_CACHE.invalidate(f"nsmetrics:{cluster_id}")
+        _K8S_READ_CACHE.invalidate(f"all:{cluster_id}:")
     else:
         _K8S_READ_CACHE.invalidate("res:")
         _K8S_READ_CACHE.invalidate("nslist:")
         _K8S_READ_CACHE.invalidate("nscounts:")
         _K8S_READ_CACHE.invalidate("nsmetrics:")
+        _K8S_READ_CACHE.invalidate("all:")
 
 
 def _is_true(value: str) -> bool:
@@ -182,6 +186,16 @@ def _refuse_unsafe_kubectl_args(args: List[str]) -> None:
         )
 
 
+# Upper bound on kubectl processes running at once. Every read is a kubectl
+# subprocess that decodes and re-encodes JSON; under load, a hundred or more of
+# them at once starved the CPU, each took ten times longer, slow ones hit their
+# timeout and tripped the unreachable-cluster breaker on healthy clusters.
+# Past the bound, callers queue for a slot (the subprocess timeout starts once
+# a slot is free). Long-lived streams (logs -f, exec) do not take a slot.
+_KUBECTL_MAX_CONCURRENCY = max(1, int(os.getenv("KUBECTL_MAX_CONCURRENCY", "8")))
+_KUBECTL_SLOTS = threading.BoundedSemaphore(_KUBECTL_MAX_CONCURRENCY)
+
+
 def _run_kubectl(
     args: List[str],
     context: Optional[str] = None,
@@ -203,6 +217,26 @@ def _run_kubectl(
 
     _refuse_unsafe_kubectl_args(args)
     effective_timeout = timeout if timeout is not None else _KUBECTL_DEFAULT_TIMEOUT
+
+    from . import kube_direct
+
+    if kube_direct.enabled():
+        # Plain reads straight to the API (opt-in, see kube_direct); None means
+        # "not a read it handles" and kubectl runs below exactly as before.
+        request_timeout = (
+            effective_timeout
+            if effective_timeout > _KUBECTL_DEFAULT_TIMEOUT
+            else min(_KUBECTL_REQUEST_TIMEOUT, effective_timeout)
+        )
+        try:
+            direct = kube_direct.try_read(args, kubeconfig_path, context, request_timeout)
+        except kube_direct.DirectReadError as exc:
+            if exc.network and breaker_enabled:
+                _K8S_READ_CACHE.set(breaker_key, True, _UNREACHABLE_BACKOFF_SECONDS)
+            raise K8sCommandError(str(exc)) from exc
+        if direct is not None:
+            return direct
+
     try:
         with materialized_kubeconfig(kubeconfig_path) as plain_kubeconfig:
             command = ["kubectl"]
@@ -219,14 +253,15 @@ def _run_kubectl(
             elif not env.get("KUBECONFIG") and env.get("K8S_KUBECONFIG"):
                 env["KUBECONFIG"] = env["K8S_KUBECONFIG"]
 
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                check=False,
-                env=env,
-                timeout=effective_timeout,
-            )
+            with _KUBECTL_SLOTS:
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=env,
+                    timeout=effective_timeout,
+                )
     except KubeconfigDecryptError as exc:
         raise K8sCommandError(str(exc)) from exc
     except FileNotFoundError:
@@ -435,28 +470,22 @@ def _custom_cluster_item(cluster_snapshot: Dict[str, Any], now: str) -> Dict[str
             display_name=cluster_snapshot["name"],
             is_custom=True,
         )
-        try:
-            version_output = _run_for_access(access, ["version", "-o", "json"])
-            version_data = json.loads(version_output)
-            version = (
-                version_data.get("serverVersion", {}).get("gitVersion")
-                or version_data.get("serverVersion", {}).get("major", "unknown")
-            )
-        except Exception:
-            status = "warning"
-        try:
-            nodes_output = _run_for_access(access, ["get", "nodes", "-o", "json"])
-            node_items = json.loads(nodes_output).get("items", [])
-            nodes = len(node_items)
-            if node_items:
-                from .k8s_metrics import cluster_resource_usage
+        from concurrent.futures import ThreadPoolExecutor
 
-                cpu_capacity, mem_capacity = _node_capacity_totals(node_items)
-                cpu_usage_percent, memory_usage_percent, _, _ = cluster_resource_usage(
-                    access, cpu_capacity, mem_capacity
+        # The version probe runs alongside the node list + usage reads.
+        with ThreadPoolExecutor(max_workers=1) as version_pool:
+            version_future = version_pool.submit(_run_for_access, access, ["version", "-o", "json"])
+            node_status, nodes, cpu_usage_percent, memory_usage_percent = _custom_cluster_node_usage(access)
+            if node_status:
+                status = node_status
+            try:
+                version_data = json.loads(version_future.result())
+                version = (
+                    version_data.get("serverVersion", {}).get("gitVersion")
+                    or version_data.get("serverVersion", {}).get("major", "unknown")
                 )
-        except Exception:
-            status = "warning"
+            except Exception:
+                status = "warning"
 
     return {
         "id": public_id,
@@ -477,16 +506,39 @@ def _custom_cluster_item(cluster_snapshot: Dict[str, Any], now: str) -> Dict[str
     }
 
 
-def _custom_clusters_as_items() -> List[Dict[str, Any]]:
-    from concurrent.futures import ThreadPoolExecutor
+def _custom_cluster_node_usage(
+    access: ClusterAccess,
+) -> Tuple[Optional[str], int, Optional[float], Optional[float]]:
+    """(status override or None, node count, cpu %, memory %) for one cluster."""
+    status: Optional[str] = None
+    nodes = 0
+    cpu_usage_percent: Optional[float] = None
+    memory_usage_percent: Optional[float] = None
+    try:
+        nodes_output = _run_for_access(access, ["get", "nodes", "-o", "json"])
+        node_items = json.loads(nodes_output).get("items", [])
+        nodes = len(node_items)
+        if node_items:
+            from .k8s_metrics import cluster_resource_usage
 
+            cpu_capacity, mem_capacity = _node_capacity_totals(node_items)
+            cpu_usage_percent, memory_usage_percent, _, _ = cluster_resource_usage(
+                access, cpu_capacity, mem_capacity
+            )
+    except Exception:
+        status = "warning"
+    return status, nodes, cpu_usage_percent, memory_usage_percent
+
+
+def _custom_clusters_as_items() -> List[Dict[str, Any]]:
+    return _custom_cluster_items_from_snapshots(_custom_cluster_snapshots())
+
+
+def _custom_cluster_snapshots() -> List[Dict[str, Any]]:
+    """The ORM fields a cluster-list row needs, read on the calling thread
+    (it needs the app context); probing them is kubectl-only."""
     from .cluster_store import list_active_custom_clusters
 
-    now = datetime.now(timezone.utc).isoformat()
-
-    # Snapshot ORM fields on this thread (valid session), then probe each
-    # cluster in parallel — probing serially meant one slow/unreachable
-    # cluster delayed the whole cluster list by its full timeout.
     snapshots: List[Dict[str, Any]] = []
     for cluster in list_active_custom_clusters():
         if cluster.last_connection_status == "error":
@@ -509,18 +561,36 @@ def _custom_clusters_as_items() -> List[Dict[str, Any]]:
                 "protocol": cluster.protocol,
             }
         )
+    return snapshots
 
+
+def _custom_cluster_items_from_snapshots(snapshots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Probe every custom cluster at once — probing serially meant one
+    slow/unreachable cluster delayed the whole cluster list by its full timeout."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    now = datetime.now(timezone.utc).isoformat()
     if not snapshots:
         return []
     if len(snapshots) == 1:
         return [_custom_cluster_item(snapshots[0], now)]
 
-    with ThreadPoolExecutor(max_workers=min(4, len(snapshots))) as pool:
+    with ThreadPoolExecutor(max_workers=min(8, len(snapshots))) as pool:
         return list(pool.map(lambda snap: _custom_cluster_item(snap, now), snapshots))
 
 
 _CLUSTER_LIST_CACHE_TTL_SECONDS = 30
-_cluster_list_cache: Dict[str, Any] = {"expires_at": 0.0, "payload": None}
+# After the TTL a stale list is still served for this long while one
+# background refresh probes the clusters; past it, callers wait for a fresh one.
+_CLUSTER_LIST_STALE_SECONDS = int(os.getenv("CLUSTER_LIST_STALE_SECONDS", "120"))
+_cluster_list_cache: Dict[str, Any] = {
+    "expires_at": 0.0,
+    "stale_until": 0.0,
+    "payload": None,
+    "generation": 0,
+    "refreshing": False,
+    "flight": None,
+}
 _cluster_list_cache_lock = threading.Lock()
 
 
@@ -529,8 +599,16 @@ def invalidate_cluster_list_cache() -> None:
     with _cluster_list_cache_lock:
         _cluster_list_cache["payload"] = None
         _cluster_list_cache["expires_at"] = 0.0
+        _cluster_list_cache["stale_until"] = 0.0
+        # A refresh already in flight read the old cluster rows; its result
+        # must not land after this.
+        _cluster_list_cache["generation"] += 1
     _K8S_READ_CACHE.invalidate("custom-clusters-active")
     _K8S_READ_CACHE.invalidate("contexts")
+    _K8S_READ_CACHE.invalidate("kcfg-server:")
+    from . import kube_direct
+
+    kube_direct.forget_endpoints()
 
 
 def _cluster_list_cache_disabled() -> bool:
@@ -542,31 +620,112 @@ def _cluster_list_cache_disabled() -> bool:
         return False
 
 
-def list_clusters_from_k8s() -> Dict[str, Any]:
-    if not _cluster_list_cache_disabled():
-        now_ts = time.time()
-        with _cluster_list_cache_lock:
-            cached = _cluster_list_cache.get("payload")
-            expires_at = float(_cluster_list_cache.get("expires_at") or 0)
-        if cached and expires_at > now_ts:
-            return cached
-
+def _cluster_list_payload(
+    include_discovered: bool, custom_items_fn: Callable[[], List[Dict[str, Any]]]
+) -> Dict[str, Any]:
     discovered: List[Dict[str, Any]] = []
-    if is_real_mode_enabled() or _kubectl_has_contexts():
+    if include_discovered:
         try:
             discovered = _discovered_clusters_from_k8s()
         except K8sCommandError:
             discovered = []
-    custom_items = _custom_clusters_as_items()
-    items = discovered + custom_items
-    payload = {"items": items, "count": len(items)}
+    items = discovered + custom_items_fn()
+    return {"items": items, "count": len(items)}
 
-    if not _cluster_list_cache_disabled():
+
+def _store_cluster_list(payload: Dict[str, Any], generation: int) -> None:
+    now_ts = time.time()
+    with _cluster_list_cache_lock:
+        if _cluster_list_cache["generation"] != generation:
+            return
+        _cluster_list_cache["payload"] = payload
+        _cluster_list_cache["expires_at"] = now_ts + _CLUSTER_LIST_CACHE_TTL_SECONDS
+        _cluster_list_cache["stale_until"] = (
+            now_ts + _CLUSTER_LIST_CACHE_TTL_SECONDS + _CLUSTER_LIST_STALE_SECONDS
+        )
+
+
+def _refresh_cluster_list_in_background(generation: int) -> None:
+    # DB reads stay on this (request) thread; the thread only runs kubectl.
+    include_discovered = is_real_mode_enabled() or _kubectl_has_contexts()
+    snapshots = _custom_cluster_snapshots()
+
+    def _refresh() -> None:
+        try:
+            payload = _cluster_list_payload(
+                include_discovered, lambda: _custom_cluster_items_from_snapshots(snapshots)
+            )
+            _store_cluster_list(payload, generation)
+        except Exception:
+            logging.getLogger(__name__).warning("cluster list refresh failed", exc_info=True)
+        finally:
+            with _cluster_list_cache_lock:
+                _cluster_list_cache["refreshing"] = False
+
+    threading.Thread(target=_refresh, name="cluster-list-refresh", daemon=True).start()
+
+
+def list_clusters_from_k8s() -> Dict[str, Any]:
+    """Every cluster with its version, node count and usage.
+
+    Nearly every page loads this list, and building it runs a few kubectl
+    calls per cluster, so it is cached for 30 s with two guards against the
+    whole user base rebuilding it at once when it expires: an expired list is
+    served while ONE background refresh rebuilds it, and when there is no list
+    at all, concurrent callers wait for the one caller already building it."""
+    if _cluster_list_cache_disabled():
+        return _cluster_list_payload(
+            is_real_mode_enabled() or _kubectl_has_contexts(), _custom_clusters_as_items
+        )
+
+    now_ts = time.time()
+    with _cluster_list_cache_lock:
+        cached = _cluster_list_cache["payload"]
+        generation = _cluster_list_cache["generation"]
+        if cached is not None and _cluster_list_cache["expires_at"] > now_ts:
+            return cached
+        serve_stale = cached is not None and _cluster_list_cache["stale_until"] > now_ts
+        start_refresh = serve_stale and not _cluster_list_cache["refreshing"]
+        if start_refresh:
+            _cluster_list_cache["refreshing"] = True
+        flight = _cluster_list_cache["flight"]
+        leader = not serve_stale and flight is None
+        if leader:
+            flight = threading.Event()
+            _cluster_list_cache["flight"] = flight
+
+    if serve_stale:
+        if start_refresh:
+            try:
+                _refresh_cluster_list_in_background(generation)
+            except Exception:
+                with _cluster_list_cache_lock:
+                    _cluster_list_cache["refreshing"] = False
+                raise
+        return cached
+
+    if not leader:
+        flight.wait(timeout=120)
         with _cluster_list_cache_lock:
-            _cluster_list_cache["payload"] = payload
-            _cluster_list_cache["expires_at"] = time.time() + _CLUSTER_LIST_CACHE_TTL_SECONDS
+            payload = _cluster_list_cache["payload"]
+        if payload is not None:
+            return payload
+        # The leader failed (or the list was invalidated meanwhile): build it here.
+        return _cluster_list_payload(
+            is_real_mode_enabled() or _kubectl_has_contexts(), _custom_clusters_as_items
+        )
 
-    return payload
+    try:
+        payload = _cluster_list_payload(
+            is_real_mode_enabled() or _kubectl_has_contexts(), _custom_clusters_as_items
+        )
+        _store_cluster_list(payload, generation)
+        return payload
+    finally:
+        with _cluster_list_cache_lock:
+            if _cluster_list_cache["flight"] is flight:
+                _cluster_list_cache["flight"] = None
+        flight.set()
 
 
 def resolve_cluster_access(cluster_id: str) -> Optional[ClusterAccess]:
@@ -630,23 +789,18 @@ def _cluster_overview_from_k8s_uncached(access: ClusterAccess) -> Dict[str, Any]
     from concurrent.futures import ThreadPoolExecutor
 
     with ThreadPoolExecutor(max_workers=5) as pool:
-        nodes_future = pool.submit(_run_for_access, access, ["get", "nodes", "-o", "json"])
-        pods_future = pool.submit(
-            _run_for_access, access, ["get", "pods", "--all-namespaces", "-o", "json"]
-        )
+        nodes_future = pool.submit(cluster_list_items, access, "nodes")
+        pods_future = pool.submit(cluster_list_items, access, "pods")
         # Workload counts and storage are best-effort extras: a token that may
         # not list PVs (cluster-scoped) must not take the whole overview down.
         workloads_future = pool.submit(_overview_workload_counts, access)
         pv_future = pool.submit(_overview_pv_capacity_gib, access)
         pvc_future = pool.submit(_overview_pvc_claimed_gib, access)
-        nodes_data = json.loads(nodes_future.result())
-        pods_data = json.loads(pods_future.result())
+        node_items = nodes_future.result()
+        pod_items = pods_future.result()
         workloads = workloads_future.result()
         pv_capacity_gib = pv_future.result()
         pvc_claimed_gib = pvc_future.result()
-
-    node_items = nodes_data.get("items", [])
-    pod_items = pods_data.get("items", [])
 
     running = sum(1 for pod in pod_items if pod.get("status", {}).get("phase") == "Running")
     pending = sum(1 for pod in pod_items if pod.get("status", {}).get("phase") == "Pending")
@@ -995,6 +1149,33 @@ def cached_namespace_read(access: ClusterAccess, namespace: str, bucket: str, co
     )
 
 
+# Cluster-wide lists (every pod, deployment, ...) that several views each used
+# to fetch for themselves: the dashboard snapshot, alert scan, inventory,
+# namespace list, cluster overview and pod-issues view all read `get pods -A`.
+# Each view keeps its own cache; this short one only lets their refreshes share
+# one kubectl call (and one JSON parse — a big cluster's pod list is ~10 MB)
+# when they land within a few seconds of each other.
+_CLUSTER_LIST_SHARE_SECONDS = int(os.getenv("K8S_CLUSTER_LIST_SHARE_SECONDS", "5"))
+_CLUSTER_SCOPED_KINDS = {"nodes", "namespaces", "persistentvolumes", "storageclasses"}
+
+
+def cluster_list_items(
+    access: ClusterAccess, kind: str, timeout: Optional[int] = None
+) -> List[Dict[str, Any]]:
+    """``kubectl get <kind> --all-namespaces -o json`` items, shared briefly.
+
+    The returned objects are shared between callers: read them, never mutate
+    them. Raises K8sCommandError (kubectl failed) or ValueError (bad JSON)."""
+    args = ["get", kind, "-o", "json"] if kind in _CLUSTER_SCOPED_KINDS else ["get", kind, "--all-namespaces", "-o", "json"]
+
+    def _fetch() -> List[Dict[str, Any]]:
+        return json.loads(_run_for_access(access, args, timeout)).get("items", [])
+
+    return _K8S_READ_CACHE.get_or_compute(
+        f"all:{access.cluster_id}:{kind}", _CLUSTER_LIST_SHARE_SECONDS, _fetch
+    )
+
+
 def _list_namespaces_from_k8s_uncached(
     access: ClusterAccess, include_metrics: bool = True
 ) -> Dict[str, Any]:
@@ -1009,10 +1190,10 @@ def _list_namespaces_from_k8s_uncached(
     top_timeout = int(os.getenv("KUBECTL_TOP_TIMEOUT_SECONDS", "8"))
     max_workers = 5 if include_metrics else 4
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        ns_future = pool.submit(_run_for_access, access, ["get", "namespaces", "-o", "json"])
-        pods_future = pool.submit(_run_for_access, access, ["get", "pods", "-A", "-o", "json"])
-        dep_future = pool.submit(_run_for_access, access, ["get", "deployments", "-A", "-o", "json"])
-        svc_future = pool.submit(_run_for_access, access, ["get", "services", "-A", "-o", "json"])
+        ns_future = pool.submit(cluster_list_items, access, "namespaces")
+        pods_future = pool.submit(cluster_list_items, access, "pods")
+        dep_future = pool.submit(cluster_list_items, access, "deployments")
+        svc_future = pool.submit(cluster_list_items, access, "services")
         pod_top_future = (
             pool.submit(fetch_pod_top_metrics, access, False, top_timeout)
             if include_metrics
@@ -1020,19 +1201,19 @@ def _list_namespaces_from_k8s_uncached(
         )
 
         try:
-            namespaces_raw = json.loads(ns_future.result()).get("items", [])
+            namespaces_raw = ns_future.result()
         except Exception:
             namespaces_raw = []
         try:
-            pod_items = json.loads(pods_future.result()).get("items", [])
+            pod_items = pods_future.result()
         except Exception:
             pod_items = []
         try:
-            deployments_raw = json.loads(dep_future.result()).get("items", [])
+            deployments_raw = dep_future.result()
         except Exception:
             deployments_raw = []
         try:
-            services_raw = json.loads(svc_future.result()).get("items", [])
+            services_raw = svc_future.result()
         except Exception:
             services_raw = []
         if pod_top_future is not None:
@@ -2124,8 +2305,7 @@ def cluster_pod_issues_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
     from .k8s_metrics import fetch_pod_top_metrics
 
     try:
-        output = _run_for_access(access, ["get", "pods", "--all-namespaces", "-o", "json"])
-        pod_items = json.loads(output).get("items", [])
+        pod_items = cluster_list_items(access, "pods")
     except K8sCommandError:
         pod_items = []
 
@@ -2611,18 +2791,22 @@ def list_alerts_for_access(access: ClusterAccess, cluster_id: Optional[str] = No
 def _list_alerts_for_access_uncached(
     access: ClusterAccess, cluster_id: Optional[str] = None
 ) -> Dict[str, Any]:
+    from concurrent.futures import ThreadPoolExecutor
+
     from .k8s_metrics import CPU_ALERT_THRESHOLD_PERCENT, fetch_pod_cpu_usage_cores
 
     current_cluster_id = cluster_id or access.cluster_id
     generated_at = datetime.now(timezone.utc).isoformat()
     metrics_unavailable = False
 
-    usage_by_pod = fetch_pod_cpu_usage_cores(access)
+    # Usage and the pod list are independent reads: fetch them together.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pods_future = pool.submit(cluster_list_items, access, "pods")
+        usage_by_pod = fetch_pod_cpu_usage_cores(access)
+        pod_items = pods_future.result()
     if not usage_by_pod:
         metrics_unavailable = True
 
-    pods_output = _run_for_access(access, ["get", "pods", "--all-namespaces", "-o", "json"])
-    pod_items = json.loads(pods_output).get("items", [])
     items = list_cpu_alerts_from_pod_data(access, current_cluster_id, pod_items, usage_by_pod)
 
     metadata = {
@@ -2639,6 +2823,35 @@ def _list_alerts_for_access_uncached(
         metadata["detail"] = "Install metrics-server or ensure kubectl top pods works."
 
     return {"items": items, "count": len(items), "metadata": metadata}
+
+
+def list_alerts_for_clusters(cluster_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Alert scans for several clusters at once, keyed by cluster id.
+
+    Access is resolved here (it reads the database); the scans themselves are
+    kubectl-only and run side by side, so a cold all-clusters view costs the
+    slowest cluster rather than the sum of all of them. Clusters that cannot
+    be resolved are left out; one whose scan fails maps to None, so a single
+    unreachable cluster no longer hides every other cluster's alerts."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    resolved = [(cid, resolve_cluster_access(cid)) for cid in cluster_ids]
+    resolved = [(cid, access) for cid, access in resolved if access]
+
+    def _scan(entry: Tuple[str, ClusterAccess]) -> Optional[Dict[str, Any]]:
+        cid, access = entry
+        try:
+            return list_alerts_for_access(access, cid)
+        except Exception:
+            return None
+
+    if len(resolved) <= 1 or caching_disabled():
+        # Tests (caching off) keep the plain serial path on the app context.
+        results = [_scan(entry) for entry in resolved]
+    else:
+        with ThreadPoolExecutor(max_workers=min(8, len(resolved))) as pool:
+            results = list(pool.map(_scan, resolved))
+    return {cid: result for (cid, _), result in zip(resolved, results)}
 
 
 def list_alerts_from_k8s(cluster_id: Optional[str] = None) -> Dict[str, Any]:
@@ -2663,18 +2876,17 @@ def list_alerts_from_k8s(cluster_id: Optional[str] = None) -> Dict[str, Any]:
     generated_at = datetime.now(timezone.utc).isoformat()
     metrics_unavailable = False
 
-    for cluster in clusters:
-        current_cluster_id = cluster.get("id")
-        if not current_cluster_id:
+    cluster_ids = [cluster.get("id") for cluster in clusters if cluster.get("id")]
+    unavailable: List[str] = []
+    for current_cluster_id, result in list_alerts_for_clusters(cluster_ids).items():
+        if result is None:
+            unavailable.append(current_cluster_id)
             continue
-        access = resolve_cluster_access(current_cluster_id)
-        if not access:
-            continue
-
-        result = list_alerts_for_access(access, current_cluster_id)
         items.extend(result.get("items", []))
         if not result.get("metadata", {}).get("hasLiveAlertsSource", True):
             metrics_unavailable = True
+    if unavailable and len(unavailable) == len(cluster_ids):
+        raise K8sCommandError("No cluster could be scanned for alerts.")
 
     metadata = {
         "mode": "real",
@@ -2685,6 +2897,8 @@ def list_alerts_from_k8s(cluster_id: Optional[str] = None) -> Dict[str, Any]:
         "hasLiveAlertsSource": not metrics_unavailable,
         "clusterId": cluster_id,
     }
+    if unavailable:
+        metadata["unavailableClusters"] = unavailable
     if metrics_unavailable:
         metadata["reason"] = "metrics_server_unavailable"
         metadata["detail"] = "Install metrics-server or ensure kubectl top pods works."

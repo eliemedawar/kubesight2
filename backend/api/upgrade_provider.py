@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import threading
@@ -17,6 +18,66 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 _version_cache: Dict[str, Any] = {}
 _version_cache_lock = threading.Lock()
 _VERSION_CACHE_TTL = 300  # seconds — stable.txt changes at most a few times a year
+# A known answer keeps being served (while one background lookup refreshes
+# it) for this long; a failed lookup is retried after _VERSION_FAILURE_RETRY.
+_VERSION_STALE_TTL = 24 * 3600
+_VERSION_FAILURE_RETRY = 60
+# How long a request waits for a lookup that has no answer yet. dl.k8s.io
+# answers in well under a second when it is reachable; when it is not (an
+# offline network), a lookup can take 5 s per URL and the kubeadm fallback
+# probes up to 31 URLs, so it must never run on a page load.
+_VERSION_LOOKUP_WAIT_SECONDS = float(os.getenv("K8S_RELEASE_LOOKUP_WAIT_SECONDS", "1.5"))
+_version_lookups: Dict[str, threading.Event] = {}
+
+
+def _cached_release_lookup(key: str, fetch: Callable[[], Optional[str]], fallback: Optional[str]) -> Optional[str]:
+    """``fetch()`` through the version cache, off the caller's thread.
+
+    Fresh answers come straight from the cache. Otherwise one background
+    lookup runs (never two for the same key); the caller gets the previous
+    answer immediately if there is one, else waits up to
+    _VERSION_LOOKUP_WAIT_SECONDS for the lookup and then gets ``fallback``."""
+    now = time.monotonic()
+    with _version_cache_lock:
+        entry = _version_cache.get(key)
+        stale_value_ok = False
+        if entry:
+            ok = entry.get("ok", True)
+            age = now - entry["ts"]
+            if age < (_VERSION_CACHE_TTL if ok else _VERSION_FAILURE_RETRY):
+                return entry["value"]
+            stale_value_ok = ok and age < _VERSION_STALE_TTL
+        event = _version_lookups.get(key)
+        start = event is None
+        if start:
+            event = threading.Event()
+            _version_lookups[key] = event
+
+    if start:
+        def _lookup() -> None:
+            try:
+                value = fetch()
+            except Exception:
+                value = None
+            with _version_cache_lock:
+                ok = value not in (None, "", "unknown")
+                previous = _version_cache.get(key)
+                if ok or not (previous and previous.get("ok", True)):
+                    _version_cache[key] = {"value": value if ok else fallback, "ts": time.monotonic(), "ok": ok}
+                else:
+                    # Keep the last good answer; just retry the lookup later.
+                    previous["ts"] = time.monotonic() - _VERSION_CACHE_TTL + _VERSION_FAILURE_RETRY
+                _version_lookups.pop(key, None)
+            event.set()
+
+        threading.Thread(target=_lookup, name=f"k8s-release-{key}", daemon=True).start()
+
+    if stale_value_ok:
+        return entry["value"]
+    event.wait(_VERSION_LOOKUP_WAIT_SECONDS)
+    with _version_cache_lock:
+        entry = _version_cache.get(key)
+    return entry["value"] if entry else fallback
 
 from .cluster_access import ClusterAccess
 from .upgrade_config import auto_upgrade_enabled
@@ -112,15 +173,12 @@ def _fetch_release_text(url: str) -> Optional[str]:
 
 
 def _fetch_latest_k8s_version() -> str:
-    key = "latest_k8s_stable"
-    with _version_cache_lock:
-        entry = _version_cache.get(key)
-        if entry and time.monotonic() - entry["ts"] < _VERSION_CACHE_TTL:
-            return entry["value"]
-    result = _fetch_release_text("https://dl.k8s.io/release/stable.txt") or "unknown"
-    with _version_cache_lock:
-        _version_cache[key] = {"value": result, "ts": time.monotonic()}
-    return result
+    """Latest stable Kubernetes release, or "unknown" while it cannot be read."""
+    return _cached_release_lookup(
+        "latest_k8s_stable",
+        lambda: _fetch_release_text("https://dl.k8s.io/release/stable.txt"),
+        "unknown",
+    ) or "unknown"
 
 
 def _is_prerelease_version(version: str) -> bool:
@@ -155,14 +213,9 @@ def recommended_kubeadm_target(current_version: str) -> Optional[str]:
     if current_tuple == (0, 0, 0):
         return None
     key = f"kubeadm_target_{current_tuple[0]}_{current_tuple[1] + 1}"
-    with _version_cache_lock:
-        entry = _version_cache.get(key)
-        if entry and time.monotonic() - entry["ts"] < _VERSION_CACHE_TTL:
-            return entry["value"]
-    result = _fetch_latest_patch_for_minor(current_tuple[0], current_tuple[1] + 1)
-    with _version_cache_lock:
-        _version_cache[key] = {"value": result, "ts": time.monotonic()}
-    return result
+    return _cached_release_lookup(
+        key, lambda: _fetch_latest_patch_for_minor(current_tuple[0], current_tuple[1] + 1), None
+    )
 
 
 def kubeadm_minor_jump_blocked(current_version: str, target_version: str) -> Optional[str]:
@@ -220,6 +273,27 @@ def _cli_available(name: str) -> bool:
     return shutil.which(name) is not None
 
 
+def _kubeconfig_server_url(access: ClusterAccess, run_kubectl: RunKubectlFn) -> str:
+    """The API server URL in the cluster's kubeconfig, lowercased.
+
+    It only changes when the cluster is edited (which clears it, see
+    invalidate_cluster_list_cache), but provider detection runs on every
+    dashboard rebuild and each read was a kubectl process."""
+    from .k8s_provider import _K8S_READ_CACHE
+    from .kubeconfig_vault import kubeconfig_identity
+
+    def _fetch() -> str:
+        view_data = json.loads(run_kubectl(access, ["config", "view", "--minify", "-o", "json"]))
+        clusters = view_data.get("clusters", [])
+        return (clusters[0].get("cluster", {}).get("server") or "").lower() if clusters else ""
+
+    return _K8S_READ_CACHE.get_or_compute(
+        f"kcfg-server:{kubeconfig_identity(access.kubeconfig_path)}:{access.context_name or ''}",
+        300,
+        _fetch,
+    )
+
+
 def detect_cluster_provider(
     access: ClusterAccess,
     run_kubectl: RunKubectlFn,
@@ -246,11 +320,7 @@ def detect_cluster_provider(
     try:
         cluster_name = version_data.get("contextName") or access.context_name or ""
         if cluster_name:
-            view_output = run_kubectl(access, ["config", "view", "--minify", "-o", "json"])
-            view_data = json.loads(view_output)
-            clusters = view_data.get("clusters", [])
-            if clusters:
-                server_url = (clusters[0].get("cluster", {}).get("server") or "").lower()
+            server_url = _kubeconfig_server_url(access, run_kubectl)
     except Exception:
         pass
 

@@ -28,6 +28,7 @@ from ..k8s_provider import (
     should_use_real_k8s,
 )
 from ..mock_data import ALERTS, CLUSTERS, HELM_RELEASES, HELM_RELEASE_DETAILS, INVENTORY_DETAIL_EXTRAS, NAMESPACE_RESOURCES, NAMESPACES
+from ..cluster_access import ClusterAccess
 from ..models import User
 from ..ttl_cache import TTLCache
 
@@ -37,6 +38,9 @@ import os as _os
 # looking at the same cluster for a short window.
 _INVENTORY_DISCOVERY_CACHE = TTLCache("inventory-discovery")
 _INVENTORY_DISCOVERY_TTL_SECONDS = int(_os.getenv("INVENTORY_DISCOVERY_TTL_SECONDS", "20"))
+# Past the TTL, the old list is served for up to this long while one
+# background refresh rebuilds it, instead of the next viewer waiting on it.
+_INVENTORY_DISCOVERY_STALE_SECONDS = int(_os.getenv("INVENTORY_DISCOVERY_STALE_SECONDS", "60"))
 
 
 def invalidate_inventory_discovery_cache(cluster_id: Optional[str] = None) -> None:
@@ -556,16 +560,24 @@ def _discover_cluster_inventory_real(cluster_id: str) -> List[Dict[str, Any]]:
     The result is user-independent (RBAC filtering happens in list_inventory),
     so it is safe to share. Rows are shallow-copied on the way out because
     callers merge Helm/catalog metadata into them in place."""
+    # Access is resolved here (database); the discovery itself is kubectl-only,
+    # so an expired list can be served while one background refresh runs.
+    access = resolve_cluster_access(cluster_id)
+    if not access:
+        return []
     rows = _INVENTORY_DISCOVERY_CACHE.get_or_compute(
         f"inv:{cluster_id}",
         _INVENTORY_DISCOVERY_TTL_SECONDS,
-        lambda: _discover_cluster_inventory_real_uncached(cluster_id),
+        lambda: _discover_cluster_inventory_real_uncached(cluster_id, access),
+        stale_ttl=_INVENTORY_DISCOVERY_STALE_SECONDS,
     )
     return [dict(row) for row in rows]
 
 
-def _discover_cluster_inventory_real_uncached(cluster_id: str) -> List[Dict[str, Any]]:
-    access = resolve_cluster_access(cluster_id)
+def _discover_cluster_inventory_real_uncached(
+    cluster_id: str, access: Optional[ClusterAccess] = None
+) -> List[Dict[str, Any]]:
+    access = access or resolve_cluster_access(cluster_id)
     if not access:
         return []
     now = datetime.now(timezone.utc).isoformat()
@@ -573,7 +585,7 @@ def _discover_cluster_inventory_real_uncached(cluster_id: str) -> List[Dict[str,
 
     from concurrent.futures import ThreadPoolExecutor
 
-    from ..k8s_provider import _run_for_access
+    from ..k8s_provider import cluster_list_items
 
     resource_specs = [
         ("deployments", "Deployment"),
@@ -587,8 +599,7 @@ def _discover_cluster_inventory_real_uncached(cluster_id: str) -> List[Dict[str,
     # batch instead of the previous sequential chain of up to nine subprocesses.
     def _fetch_items(kind: str) -> List[Dict[str, Any]]:
         try:
-            output = _run_for_access(access, ["get", kind, "-A", "-o", "json"])
-            return json.loads(output).get("items", [])
+            return cluster_list_items(access, kind)
         except K8sCommandError:
             return []
 
@@ -772,16 +783,15 @@ def list_namespace_workloads(
 
 
 def _merge_catalog_metadata(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    from .app_catalog_service import get_entry_for_inventory, list_active_entries
+    from .app_catalog_service import list_active_entries, match_catalog_entry
 
+    # One query for every entry, grouped per namespace in query order, then
+    # matched in memory the same way get_entry_for_inventory matches — it used
+    # to run one query per inventory row.
     entries = list_active_entries()
-    entry_by_key: Dict[Tuple[str, str, str], Any] = {}
+    entries_by_namespace: Dict[Tuple[str, str], List[Any]] = defaultdict(list)
     for entry in entries:
-        key = (entry.cluster_id, entry.namespace, entry.display_name)
-        entry_by_key[key] = entry
-        if entry.workload_name:
-            wkey = (entry.cluster_id, entry.namespace, entry.workload_name)
-            entry_by_key.setdefault(wkey, entry)
+        entries_by_namespace[(entry.cluster_id, entry.namespace)].append(entry)
 
     merged_keys = set()
     result: List[Dict[str, Any]] = []
@@ -792,7 +802,11 @@ def _merge_catalog_metadata(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         app_name = item.get("name")
         workload_names = item.get("workloadNames") or []
 
-        entry = get_entry_for_inventory(cluster_id, namespace, app_name, workload_names[0] if workload_names else None)
+        entry = match_catalog_entry(
+            entries_by_namespace.get((cluster_id, namespace), ()),
+            app_name,
+            workload_names[0] if workload_names else None,
+        )
         row = dict(item)
         if entry:
             row["ownerTeam"] = entry.owner_team or "Unassigned"

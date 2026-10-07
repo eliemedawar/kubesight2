@@ -589,11 +589,18 @@ def _run_kubectl_diff(cluster_id: str, path: str, namespace: str) -> str:
             if diff_executable:
                 env["KUBECTL_EXTERNAL_DIFF"] = kubectl_external_diff_env_value(diff_executable)
 
+            from ..k8s_provider import _KUBECTL_LONG_TIMEOUT
+
+            # Bounded like every other kubectl call: an unreachable cluster
+            # must not pin a request thread forever.
             completed = subprocess.run(
-                command, capture_output=True, text=True, check=False, env=env
+                command, capture_output=True, text=True, check=False, env=env,
+                timeout=_KUBECTL_LONG_TIMEOUT,
             )
     except KubeconfigDecryptError as exc:
         raise K8sCommandError(str(exc)) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise K8sCommandError(f"kubectl diff timed out after {_KUBECTL_LONG_TIMEOUT}s") from exc
     if completed.returncode == 0:
         return completed.stdout or "No differences found."
     if completed.returncode == 1:

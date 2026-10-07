@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import os
-import threading
-import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -12,8 +10,6 @@ from .k8s_provider import K8sCommandError, _cpu_to_cores, _run_kubectl
 CPU_ALERT_THRESHOLD_PERCENT = float(os.getenv("ALERT_CPU_THRESHOLD_PERCENT", "80"))
 
 _POD_TOP_CACHE_TTL = int(os.getenv("POD_TOP_CACHE_TTL_SECONDS", "15"))
-_pod_top_cache: Dict[str, Tuple[float, "PodTopMetrics"]] = {}
-_pod_top_cache_lock = threading.Lock()
 
 PodTopKey = Tuple[str, str]
 PodTopMetrics = Dict[PodTopKey, Dict[str, float]]
@@ -82,40 +78,60 @@ def fetch_pod_top_metrics(access: Union[ClusterAccess, str], _bypass_cache: bool
     multiple callers within the same dashboard request share one kubectl top invocation.
     """
     context_name, kubeconfig_path = _access_kwargs(access)
+    from .k8s_provider import _K8S_READ_CACHE
     from .kubeconfig_vault import kubeconfig_identity
 
-    cache_key = f"{context_name}:{kubeconfig_identity(kubeconfig_path)}"
+    cache_key = f"top-pods:{context_name}:{kubeconfig_identity(kubeconfig_path)}"
 
-    if not _bypass_cache:
-        with _pod_top_cache_lock:
-            entry = _pod_top_cache.get(cache_key)
-        if entry and entry[0] > time.time():
-            return entry[1]
-
-    try:
+    def _fetch() -> PodTopMetrics:
         output = _run_kubectl(
             ["top", "pods", "-A", "--no-headers"],
             context=context_name,
             kubeconfig_path=kubeconfig_path,
             timeout=timeout,
         )
+        usage: PodTopMetrics = {}
+        for line in output.splitlines():
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            namespace, pod_name = parts[0], parts[1]
+            metrics: Dict[str, float] = {"cpu": _cpu_to_cores(parts[2])}
+            if len(parts) >= 4:
+                metrics["memory"] = _memory_to_mib(parts[3])
+            usage[(namespace, pod_name)] = metrics
+        return usage
+
+    try:
+        if _bypass_cache:
+            usage = _fetch()
+            _K8S_READ_CACHE.set(cache_key, usage, _POD_TOP_CACHE_TTL)
+            return usage
+        # Single-flight: concurrent misses share one kubectl top.
+        return _K8S_READ_CACHE.get_or_compute(cache_key, _POD_TOP_CACHE_TTL, _fetch)
     except K8sCommandError:
         return {}
 
-    usage: PodTopMetrics = {}
-    for line in output.splitlines():
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        namespace, pod_name = parts[0], parts[1]
-        metrics: Dict[str, float] = {"cpu": _cpu_to_cores(parts[2])}
-        if len(parts) >= 4:
-            metrics["memory"] = _memory_to_mib(parts[3])
-        usage[(namespace, pod_name)] = metrics
 
-    with _pod_top_cache_lock:
-        _pod_top_cache[cache_key] = (time.time() + _POD_TOP_CACHE_TTL, usage)
-    return usage
+def _top_nodes_output(access: Union[ClusterAccess, str], timeout: Optional[int] = None) -> str:
+    """``kubectl top nodes`` output, shared for _POD_TOP_CACHE_TTL seconds.
+
+    Cluster list rows, dashboards, inventory and the metrics-server probe each
+    ran their own copy of this call. Raises K8sCommandError like kubectl."""
+    context_name, kubeconfig_path = _access_kwargs(access)
+    from .k8s_provider import _K8S_READ_CACHE
+    from .kubeconfig_vault import kubeconfig_identity
+
+    return _K8S_READ_CACHE.get_or_compute(
+        f"top-nodes:{context_name}:{kubeconfig_identity(kubeconfig_path)}",
+        _POD_TOP_CACHE_TTL,
+        lambda: _run_kubectl(
+            ["top", "nodes", "--no-headers"],
+            context=context_name,
+            kubeconfig_path=kubeconfig_path,
+            timeout=timeout,
+        ),
+    )
 
 
 def fetch_pod_cpu_usage_cores(access: Union[ClusterAccess, str]) -> Dict[PodTopKey, float]:
@@ -269,14 +285,8 @@ def aggregate_pod_top_by_namespace(access: Union[ClusterAccess, str]) -> Dict[st
 
 def fetch_node_top_usage(access: Union[ClusterAccess, str], timeout: Optional[int] = None) -> Tuple[float, float]:
     """Return (cpu_cores, memory_mib) summed across nodes from kubectl top nodes."""
-    context_name, kubeconfig_path = _access_kwargs(access)
     try:
-        output = _run_kubectl(
-            ["top", "nodes", "--no-headers"],
-            context=context_name,
-            kubeconfig_path=kubeconfig_path,
-            timeout=timeout,
-        )
+        output = _top_nodes_output(access, timeout)
     except K8sCommandError:
         return 0.0, 0.0
 
@@ -295,15 +305,9 @@ def fetch_node_top_per_node(
     access: Union[ClusterAccess, str], timeout: Optional[int] = None
 ) -> Dict[str, Dict[str, float]]:
     """Return per-node usage {name: {"cpu": cores, "mem_mib": MiB}} from kubectl top nodes."""
-    context_name, kubeconfig_path = _access_kwargs(access)
     result: Dict[str, Dict[str, float]] = {}
     try:
-        output = _run_kubectl(
-            ["top", "nodes", "--no-headers"],
-            context=context_name,
-            kubeconfig_path=kubeconfig_path,
-            timeout=timeout,
-        )
+        output = _top_nodes_output(access, timeout)
     except K8sCommandError:
         return result
 
@@ -320,13 +324,8 @@ def fetch_node_top_per_node(
 
 
 def metrics_server_available(access: Union[ClusterAccess, str]) -> bool:
-    context_name, kubeconfig_path = _access_kwargs(access)
     try:
-        _run_kubectl(
-            ["top", "nodes", "--no-headers"],
-            context=context_name,
-            kubeconfig_path=kubeconfig_path,
-        )
+        _top_nodes_output(access)
         return True
     except K8sCommandError:
         return False
