@@ -65,6 +65,17 @@ def ethernet_cards(devices) -> List[Any]:
     return [d for d in devices or [] if type(d).__name__.split(".")[-1] in inventory._NIC_TYPES]
 
 
+def cards_needing_connect(devices) -> List[Any]:
+    """Cards of a running VM that are not both connected and set to connect at
+    power on — the state every deployed VM's card must end up in."""
+    out = []
+    for card in ethernet_cards(devices):
+        connectable = getattr(card, "connectable", None)
+        if not (getattr(connectable, "connected", False) and getattr(connectable, "startConnected", False)):
+            out.append(card)
+    return out
+
+
 def nic_states(devices) -> List[Tuple[str, bool]]:
     """(label, connected) for each network card, as vCenter reports it."""
     out = []
@@ -164,10 +175,11 @@ class VmWatcher:
                 for line in describe_changes(name, facts.get(name, {}), now):
                     self._say(line)
                 facts[name] = now
-                # A running VM whose card is not connected never gets its
-                # address: connect it (once) instead of waiting for the timeout.
+                # A running VM's card must be connected now AND set to connect
+                # at power on; one that is not never gets (or keeps) its address.
+                # Fix it once instead of waiting for the timeout.
                 if (now["power"] == "poweredOn" and name not in tried_connect
-                        and any(not connected for _, connected in now["nics"])):
+                        and cards_needing_connect(devices)):
                     tried_connect.add(name)
                     self._say(self._connect_cards(name, vm, devices))
                 for event in self._events(content, vm):
@@ -184,18 +196,16 @@ class VmWatcher:
         from pyVmomi import vim
 
         changes = []
-        for card in ethernet_cards(devices):
+        for card in cards_needing_connect(devices):
             connectable = getattr(card, "connectable", None)
             if connectable is None:
                 connectable = card.connectable = vim.vm.device.VirtualDevice.ConnectInfo()
-            if connectable.connected and connectable.startConnected:
-                continue
             connectable.connected = True
             connectable.startConnected = True
             connectable.allowGuestControl = True
             changes.append(vim.vm.device.VirtualDeviceSpec(operation="edit", device=card))
         if not changes:
-            return f"{PREFIX} {name}: network card connected"
+            return f"{PREFIX} {name}: network card connected and set to connect at power on"
         try:
             task = vm.ReconfigVM_Task(spec=vim.vm.ConfigSpec(deviceChange=changes))
             deadline = time.monotonic() + 60
@@ -206,7 +216,8 @@ class VmWatcher:
                 return f"{PREFIX} {name}: could not connect the network card: {reason}"[:_MESSAGE_CHARS]
         except Exception as exc:  # noqa: BLE001 — report it; the apply goes on
             return f"{PREFIX} {name}: could not connect the network card: {exc}"[:_MESSAGE_CHARS]
-        return f"{PREFIX} {name}: the network card was not connected — KubeSight connected it"
+        return (f"{PREFIX} {name}: the network card was not connected and set to connect at power on "
+                "— KubeSight set both")
 
     def _events(self, content, vm) -> List[Any]:
         from pyVmomi import vim

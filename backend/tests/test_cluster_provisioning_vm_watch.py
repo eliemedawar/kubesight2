@@ -154,7 +154,8 @@ def test_a_running_vm_with_its_card_disconnected_gets_it_connected(monkeypatch):
     while not sink.empty():
         said.append(sink.get())
     assert "vCenter · test-vm-1: network card Network adapter 1 NOT connected" in said
-    assert "vCenter · test-vm-1: the network card was not connected — KubeSight connected it" in said
+    assert ("vCenter · test-vm-1: the network card was not connected and set to connect at power on "
+            "— KubeSight set both") in said
     assert "vCenter · test-vm-1: network card Network adapter 1 connected" in said
     assert len(sent) == 1  # once, not on every poll
     change = sent[0].deviceChange[0]
@@ -169,3 +170,12 @@ def test_the_template_cards_connect_setting_is_read():
     )
     nics = inventory._template_hardware([off])["nics"]
     assert nics == [{"type": "vmxnet3", "networkId": "network-14763", "startConnected": False}]
+
+
+def test_a_connected_card_not_set_to_connect_at_power_on_is_fixed_too():
+    card = vim.vm.device.VirtualVmxnet3(
+        key=4000, connectable=vim.vm.device.VirtualDevice.ConnectInfo(connected=True, startConnected=False))
+    fine = vim.vm.device.VirtualVmxnet3(
+        key=4001, connectable=vim.vm.device.VirtualDevice.ConnectInfo(connected=True, startConnected=True))
+    assert vm_watch.cards_needing_connect([card, fine]) == [card]
+    assert vm_watch.cards_needing_connect([fine]) == []

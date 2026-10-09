@@ -1,5 +1,5 @@
 diff --git a/vsphere/internal/virtualdevice/virtual_machine_network_interface_subresource.go b/vsphere/internal/virtualdevice/virtual_machine_network_interface_subresource.go
-index fb76d09..2aa493f 100644
+index fb76d09..d2985ad 100644
 --- a/vsphere/internal/virtualdevice/virtual_machine_network_interface_subresource.go
 +++ b/vsphere/internal/virtualdevice/virtual_machine_network_interface_subresource.go
 @@ -525,7 +525,11 @@ func NetworkInterfacePostCloneOperation(d *schema.ResourceData, c *govmomi.Clien
@@ -15,7 +15,7 @@ index fb76d09..2aa493f 100644
  	log.Printf("[DEBUG] NetworkInterfacePostCloneOperation: Layout from source: %d devices", len(devices))
  
  	// Populate the source set as if the devices were orphaned. This give us a
-@@ -1070,6 +1074,18 @@ func (r *NetworkInterfaceSubresource) Update(l object.VirtualDeviceList) ([]type
+@@ -1070,6 +1074,23 @@ func (r *NetworkInterfaceSubresource) Update(l object.VirtualDeviceList) ([]type
  	}
  	card.ExternalId = newExternalID.(string)
  
@@ -30,6 +30,11 @@ index fb76d09..2aa493f 100644
 +	}
 +	card.Connectable.StartConnected = true
 +	card.Connectable.AllowGuestControl = true
++	// And connected right now when the VM is already running; a powered-off
++	// VM's card connects at power on through StartConnected above.
++	if state, ok := r.rdd.Get("power_state").(string); ok && state == "on" {
++		card.Connectable.Connected = true
++	}
 +
  	if r.Get("use_static_mac").(bool) {
  		card.AddressType = string(types.VirtualEthernetCardMacTypeManual)

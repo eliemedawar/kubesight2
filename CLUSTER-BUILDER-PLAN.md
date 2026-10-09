@@ -593,10 +593,12 @@ Destroy (destroy plan → a second person with cluster_builds:execute approves).
 - **Second patch, same file:** the provider never sets a card's connection flags, so a kept card
   keeps the template's — and a template's card is often *not* set to connect at power on. The
   clone then boots disconnected and "timeout waiting for an available IP address" follows. The
-  patch sets connect-at-power-on and guest control on every card the provider edits (the edit it
+  patch sets connect-at-power-on and guest control on every card the provider edits — and
+  `Connected` too when the VM is already powered on (`power_state == "on"`) — (the edit it
   already makes, so no extra privilege). The plan says when the template's card has it off, and
   the apply-time vCenter watcher (`vm_watch`) reports each card's state and, once, connects a
-  running VM's disconnected card (needs "Connect devices" / "Modify device settings").
+  running VM's card that is not both connected and set to connect at power on (needs "Connect
+  devices" / "Modify device settings").
 - `requirements.txt` gains `pyvmomi`.
 - Env: `KUBESIGHT_INTERNAL_URL` (default `http://127.0.0.1:5000`, where `tofu` reaches the state
   backend), `KUBESIGHT_TOFU_WORKDIR` (scratch dir for job working copies),
