@@ -233,3 +233,40 @@ def test_failed_tasks_are_reported_even_after_the_vm_is_gone(monkeypatch):
     assert failed == ["vCenter · test-vm-1: vCenter task VirtualMachine.reconfigure FAILED: Permission denied. "
                       "— missing privilege VirtualMachine.Config.EditDevice"]
     assert destroyed  # collectors are cleaned up
+
+
+def test_the_ssh_wait_gives_each_attempt_the_app_context(app):
+    """The real transport's host-key check reads and writes the database. The
+    connect step's pool threads had no app context, so every attempt failed
+    (silently) for 15 minutes while SSH by hand worked."""
+    from api.models import SshHostKey
+    from api.services.ssh import set_transport_factory
+
+    tries = {"n": 0}
+
+    class Transport:
+        def run(self, target, command, timeout_s=30):
+            tries["n"] += 1
+            SshHostKey.query.count()  # what the host-key policy does
+            if tries["n"] == 1:
+                raise RuntimeError("sudo: a password is required")
+            return SimpleNamespace(exit_status=0, stdout="", stderr="")
+
+    set_transport_factory(lambda: Transport())
+    try:
+        results, attempts = {}, []
+        jobs_sleep = jobs.time.sleep
+        jobs.time.sleep = lambda s: None  # no 10 s pauses in a test
+        try:
+            jobs._default_ssh_waiter(
+                [("vm-1", SimpleNamespace(host="10.0.0.5"))], 60,
+                lambda name, ok, detail: results.__setitem__(name, (ok, detail)),
+                on_attempt=lambda name, detail: attempts.append((name, detail)),
+                app=app,
+            )
+        finally:
+            jobs.time.sleep = jobs_sleep
+        assert results == {"vm-1": (True, "")}
+        assert attempts == [("vm-1", "sudo: a password is required")]  # the reason is reported
+    finally:
+        set_transport_factory(None)

@@ -12,7 +12,8 @@ import ReadinessBar from "./ReadinessBar.jsx";
 import { AddonChips, LiveBadge, SectionHead, ShapeGlyph, StatusPill } from "./common.jsx";
 import { useState } from "react";
 import { parseApiTime } from "../../lib/apiTime";
-import { cancelClusterBuild, deleteClusterBuild } from "../../api/clusterBuildsApi.js";
+import { cancelClusterBuild, deleteClusterBuild, stopProvisionWait } from "../../api/clusterBuildsApi.js";
+import { PROVISION_STATUS_LABELS } from "../../utils/clusterProvisioning.js";
 import {
   PHASE_LABELS,
   PHASE_NOTES,
@@ -82,6 +83,54 @@ function InFlightStrip({ build, now, onOpen, canExecute, notify, onChanged }) {
       setBusy(false);
     }
   };
+  // A VMware build that is still creating VMs (or waiting for them to answer
+  // SSH) has no Kubernetes phase yet: say what OpenTofu is doing instead.
+  const job = build.provisioning?.job;
+  if (["provisioning", "destroying"].includes(build.status)) {
+    const stopWait = async () => {
+      if (!window.confirm(`Stop waiting for ${build.name}'s VMs to answer SSH? The VMs stay; you can try SSH again later.`)) return;
+      setBusy(true);
+      try {
+        await stopProvisionWait(build.id, job.id);
+        notify(`Stopped waiting for ${build.name}.`);
+        if (onChanged) onChanged();
+      } catch (error) {
+        notify(error.message || String(error), true);
+      } finally {
+        setBusy(false);
+      }
+    };
+    const vms = build.nodeShape?.length || 0;
+    return (
+      <div className="card sg-cb-flight" aria-live="polite">
+        <div className="sg-cb-flight-top">
+          <LiveBadge label={PROVISION_STATUS_LABELS[build.provisionStatus] || "Creating VMs"} />
+          <h3>{build.name}</h3>
+          <span className="muted sg-cb-mono sg-cb-flight-meta">
+            {build.vmsOnly ? "VMs only" : `v${build.k8sVersion}`} · {vms} VM{vms === 1 ? "" : "s"} · OpenTofu
+          </span>
+        </div>
+        <div className="sg-cb-flight-now">
+          <b>{PROVISION_STATUS_LABELS[build.provisionStatus] || "Creating VMs"}</b>
+          <span className="muted">
+            {job?.status === "connecting"
+              ? "The VMs exist; KubeSight is logging in to each with the build's SSH route."
+              : "OpenTofu is working in vCenter."}
+          </span>
+          <span className="sg-cb-flight-acts">
+            {canExecute && job?.status === "connecting" ? (
+              <button className="btn-ghost" type="button" disabled={busy} onClick={stopWait}>
+                {busy ? "Stopping…" : "Stop"}
+              </button>
+            ) : null}
+            <button className="btn-outline sg-cb-flight-cta" type="button" onClick={() => onOpen(build.id)}>
+              Watch
+            </button>
+          </span>
+        </div>
+      </div>
+    );
+  }
   const rail = railFromCurrentPhase(build);
   const started = parseApiTime(runStartedAt(build));
   const elapsed = Number.isFinite(started) ? now - started : null;
@@ -172,7 +221,13 @@ function LibraryRow({ build, catalog, now, onOpen, canCreate, notify, onChanged 
       </span>
       <span className="sg-cb-librow-go" aria-hidden="true">›</span>
     </button>
-    {canCreate ? (
+    {canCreate && policy.destroyFirst ? (
+      // Its VMs must go first: open the build, where Destroy VMs is.
+      <button className="btn-ghost btn-sm sg-cb-librow-del" type="button"
+              title={policy.reason} onClick={() => onOpen(build.id)}>
+        Destroy VMs…
+      </button>
+    ) : canCreate ? (
       <button
         className="btn-ghost btn-sm sg-cb-librow-del"
         type="button"

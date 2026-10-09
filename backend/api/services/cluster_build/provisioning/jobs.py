@@ -1291,22 +1291,39 @@ def _record_created_vms(build: ClusterBuild, job: ClusterProvisionJob) -> List[C
 # ---------------------------------------------------------------------------
 
 def _default_ssh_waiter(targets: List[Tuple[str, Any]], timeout_s: int,
-                        on_ready: Callable[[str, bool, str], None]) -> None:
+                        on_ready: Callable[[str, bool, str], None], *,
+                        on_attempt: Optional[Callable[[str, str], None]] = None,
+                        app=None, stop: Optional[threading.Event] = None) -> None:
     from ...ssh import get_transport
 
     transport = get_transport()
     deadline = time.monotonic() + timeout_s
+    app = app or current_app._get_current_object()
 
     def _wait(item: Tuple[str, Any]) -> Tuple[str, bool, str]:
         name, target = item
         last = ""
         while time.monotonic() < deadline:
+            if stop is not None and stop.is_set():
+                return name, False, "stopped"
             try:
-                transport.run(target, "true", timeout_s=30)
+                # The host-key check reads and records keys in KubeSight's
+                # database, so each pool thread needs the app context — without
+                # it every attempt failed, unseen, until the deadline.
+                with app.app_context():
+                    try:
+                        transport.run(target, "true", timeout_s=30)
+                    finally:
+                        db.session.remove()
                 return name, True, ""
             except Exception as exc:  # noqa: BLE001 — retried until the deadline
                 last = str(exc)
-                time.sleep(10)
+                if on_attempt is not None:
+                    on_attempt(name, last)
+                if stop is not None:
+                    stop.wait(10)
+                else:
+                    time.sleep(10)
         return name, False, last
 
     with ThreadPoolExecutor(max_workers=min(len(targets), 8) or 1) as pool:
@@ -1366,8 +1383,12 @@ def _do_connect(job: ClusterProvisionJob) -> None:
         raise JobFailed(f"KubeSight cannot reach the new VMs: {scrub(str(exc))}") from exc
 
     results: Dict[str, Tuple[bool, str]] = {}
+    record = lambda name, ok, detail: results.__setitem__(name, (ok, detail))  # noqa: E731
     waiter = _ssh_waiter or (_simulated_ssh_waiter if inventory.simulation_enabled() else _default_ssh_waiter)
-    waiter(targets, _SSH_TIMEOUT_S, lambda name, ok, detail: results.__setitem__(name, (ok, detail)))
+    if waiter is _default_ssh_waiter:
+        _wait_and_report(job, targets, record)
+    else:
+        waiter(targets, _SSH_TIMEOUT_S, record)
 
     vms = dict((job.progress_json or {}).get("vms") or {})
     failed = []
@@ -1387,6 +1408,88 @@ def _do_connect(job: ClusterProvisionJob) -> None:
             "The VMs exist; check that the template accepts the build's SSH credential "
             "and that guest customization set the address. Retry when fixed."
         )
+
+
+def _wait_and_report(job: ClusterProvisionJob, targets, record) -> None:
+    """Run the SSH wait on its own threads and, from this (the job's) thread,
+    write every new reason an attempt failed into the job log and next to the
+    VM — "Waiting for SSH" with no reason for 15 minutes explains nothing."""
+    app = current_app._get_current_object()
+    attempts: "queue.Queue[Tuple[str, str]]" = queue.Queue()
+    output = _Output(job, [])
+    said: Dict[str, str] = {}
+
+    def drain() -> None:
+        vms = dict((job.progress_json or {}).get("vms") or {})
+        changed = False
+        while True:
+            try:
+                name, detail = attempts.get_nowait()
+            except queue.Empty:
+                break
+            detail = scrub(detail)[:300]
+            if said.get(name) == detail:
+                continue
+            said[name] = detail
+            output.on_line(f"SSH · {name}: {detail} (retrying every 10 s)")
+            vms[name] = {**(vms.get(name) or {}), "state": "connecting", "error": detail}
+            changed = True
+        if changed:
+            progress = {**(job.progress_json or {}), "vms": vms}
+            # Keep a Stop someone saved meanwhile (another request, maybe
+            # another process): this thread's copy of the row predates it.
+            fresh = db.session.query(ClusterProvisionJob.progress_json).filter_by(id=job.id).scalar() or {}
+            if isinstance(fresh, dict) and fresh.get("stopRequested"):
+                progress["stopRequested"] = fresh["stopRequested"]
+            job.progress_json = progress
+            output.flush()
+
+    first = targets[0][1] if targets else None
+    via = ""
+    if first is not None and getattr(first, "bastion", None) is not None:
+        via = f" through bastion {getattr(first.bastion, 'host', '')}"
+    output.on_line(
+        f"SSH · logging in to {len(targets)} VM(s) as "
+        f"{getattr(first, 'username', '?')} on port {getattr(first, 'port', 22)}{via} "
+        f"(host-key policy: {getattr(first, 'host_key_policy', '?')})"
+    )
+    output.flush()
+    stop = threading.Event()
+    runner = threading.Thread(
+        target=_default_ssh_waiter,
+        args=(targets, _SSH_TIMEOUT_S, record),
+        kwargs={"on_attempt": lambda name, detail: attempts.put((name, detail)),
+                "app": app, "stop": stop},
+        name=f"provision-job-{job.id}-ssh", daemon=True,
+    )
+    runner.start()
+    stopped_by = None
+    while runner.is_alive():
+        runner.join(3)
+        drain()
+        stopped_by = stop_requested(job.id)
+        if stopped_by is not None:
+            stop.set()
+            runner.join(15)
+            break
+    drain()
+    if stopped_by is not None:
+        output.on_line(f"SSH · stopped by {stopped_by or 'someone'}")
+        output.flush()
+        raise JobFailed(
+            f"Stopped by {stopped_by or 'someone'} while waiting for the VMs to answer SSH. "
+            "The VMs exist: fix what the log says, then Try SSH again — or destroy them."
+        )
+
+
+def stop_requested(job_id: int) -> Optional[str]:
+    """Who asked to stop this job's SSH wait, read fresh from the database (the
+    request may have reached another backend process). None: keep going."""
+    progress = db.session.query(ClusterProvisionJob.progress_json).filter_by(id=job_id).scalar() or {}
+    stop = progress.get("stopRequested") if isinstance(progress, dict) else None
+    if not stop:
+        return None
+    return str(stop.get("by") or "") if isinstance(stop, dict) else ""
 
 
 # Preflight warnings that only restate a placement the approved plan chose —

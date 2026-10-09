@@ -116,6 +116,23 @@ def _migrate_ticket_agent_columns() -> None:
         )
 
 
+def _purge_orphan_provisioning_rows() -> None:
+    """Rows a deleted build left behind where foreign keys are not enforced
+    (SQLite): reserved addresses (which kept later builds off them), OpenTofu
+    state and job records. Idempotent; finds nothing on PostgreSQL."""
+    from sqlalchemy import inspect
+
+    tables = set(inspect(db.engine).get_table_names())
+    if "cluster_builds" not in tables:
+        return
+    with db.engine.begin() as conn:
+        for table in ("vsphere_ip_reservations", "cluster_provision_jobs", "cluster_infra_states"):
+            if table in tables:
+                conn.execute(text(
+                    f"DELETE FROM {table} WHERE build_id NOT IN (SELECT id FROM cluster_builds)"
+                ))
+
+
 def _migrate_cluster_build_columns() -> None:
     """Columns added after Cluster Builder's initial release.
 
@@ -1490,6 +1507,7 @@ def run_migrations() -> None:
     # SELECT fail, and on PostgreSQL that aborts the session's transaction.
     _migrate_ci_columns()
     _migrate_cluster_build_columns()
+    _purge_orphan_provisioning_rows()
     _sanitize_legacy_build_profile_proxies()
     _migrate_zoho_integration_columns()
     _migrate_ticketing_tables()

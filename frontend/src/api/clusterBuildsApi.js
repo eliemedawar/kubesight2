@@ -219,6 +219,8 @@ export const approveClusterDestroy = (id, jobId, note = "") => jobAction(id, job
 export const rejectClusterDestroy = (id, jobId, note = "") => jobAction(id, jobId, "reject", { note });
 export const discardProvisionJob = (id, jobId) => jobAction(id, jobId, "discard");
 export const retryProvisionConnect = (id, jobId) => jobAction(id, jobId, "retry-connect");
+/** Stop waiting for the new VMs to answer SSH (nothing in vCenter changes). */
+export const stopProvisionWait = (id, jobId) => jobAction(id, jobId, "stop");
 
 /** A VMs-only build whose VMs are ready: preflight them and build Kubernetes. */
 export const installKubernetesOnVms = (id, payload = {}) =>

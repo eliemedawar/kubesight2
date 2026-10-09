@@ -973,7 +973,7 @@ def delete_build(build_id: int, *, confirm_name: Optional[str] = None) -> Dict[s
     build = get_build(build_id)
     if build.status in ("building", "preflighting", "provisioning", "destroying"):
         raise ValueError("Cancel the build before deleting it.")
-    if provisioning_state.has_resources(build.id):
+    if provisioning_state.vm_instances(build.id):
         raise ValueError(
             "KubeSight created VMs for this build and they still exist. Destroy "
             "the cluster first, so nothing is left running in vCenter."
@@ -998,6 +998,13 @@ def delete_build(build_id: int, *, confirm_name: Optional[str] = None) -> Dict[s
             for n in build.nodes
         ],
     }
+    # The provisioning rows say ON DELETE CASCADE, but SQLite does not enforce
+    # foreign keys here: without these, a deleted build kept its reserved
+    # addresses forever and later builds were pushed further up the range.
+    from ...models import ClusterInfraState, ClusterProvisionJob, VSphereIpReservation
+
+    for model in (VSphereIpReservation, ClusterProvisionJob, ClusterInfraState):
+        model.query.filter_by(build_id=build.id).delete(synchronize_session=False)
     db.session.delete(build)
     db.session.commit()
     return summary

@@ -347,6 +347,27 @@ def install_kubernetes(build_id: int):
     return _build_response(build)
 
 
+@cluster_provisioning_bp.route(
+    "/api/cluster-builds/<int:build_id>/provision/jobs/<int:job_id>/stop", methods=["POST"]
+)
+@require_permission("cluster_builds:execute")
+def stop_waiting(build_id: int, job_id: int):
+    """Stop waiting for the VMs to answer SSH (nothing in vCenter changes)."""
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    job, err = _job_or_404(build_id, job_id)
+    if err:
+        return err
+    user, actor = _actor()
+    try:
+        provisioning.stop_waiting(build, job, actor=actor)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    _audit_job("cluster_build_vm_wait_stopped", user, build, job)
+    return _build_response(build)
+
+
 # ---------------------------------------------------------------------------
 # vCenter placement, networks, the provisioning account
 # ---------------------------------------------------------------------------

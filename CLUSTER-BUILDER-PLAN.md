@@ -583,6 +583,13 @@ Destroy (destroy plan → a second person with cluster_builds:execute approves).
   version number); the generated CLI config installs the provider from that mirror only. Bump
   `TOFU_VERSION` / `VSPHERE_PROVIDER_VERSION` together with `tofu_config.PROVIDER_VERSION`, and
   check the patch still applies (and is still needed) on the new version.
+- **CI compiles the provider once.** Bitbucket builds start with an empty Docker cache, so
+  compiling on every build cost minutes. `bitbucket-pipelines.yml` tags the provider as
+  `kubesight-vsphere-provider:<version>-<hash of the patch + the Dockerfile's provider stage>`,
+  pulls it if the registry has it, otherwise builds `--target vsphere-provider-image` (a
+  `scratch` image holding only the binary) and pushes it; the backend is then built with
+  `--build-arg VSPHERE_PROVIDER_IMAGE=<that tag>` (BuildKit skips the source stage). A local
+  `docker build backend` without the argument still compiles from source.
 - **Why a patched provider:** from v2.7.0 to at least v2.17.1 (and `main` on 2026-10-09),
   `NetworkInterfacePostCloneOperation` starts its list of existing cards as
   `make([]interface{}, maxNetworkInterfaceCount)` and *appends* to it, so the clone's card sits

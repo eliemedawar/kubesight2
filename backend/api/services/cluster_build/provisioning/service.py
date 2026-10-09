@@ -584,11 +584,34 @@ def discard(build: ClusterBuild, job: ClusterProvisionJob, *, actor: str = "", u
     return job
 
 
+def stop_waiting(build: ClusterBuild, job: ClusterProvisionJob, *, actor: str = "") -> ClusterProvisionJob:
+    """Stop waiting for the new VMs to answer SSH. Nothing in vCenter changes
+    then, so this is always safe; the VMs stay and can be tried again."""
+    if job.status != "connecting":
+        raise ValueError("Only a job waiting for the VMs to answer SSH can be stopped.")
+    # Read the worker's heartbeat before writing: saving the flag refreshes it.
+    heartbeat = jobs._as_utc(job.updated_at)
+    no_worker = heartbeat is None or (_utcnow() - heartbeat).total_seconds() > jobs._STALE_SECONDS
+    progress = dict(job.progress_json or {})
+    progress["stopRequested"] = {"by": actor or None, "at": _utcnow().isoformat()}
+    job.progress_json = progress
+    db.session.commit()
+    # No live worker (e.g. it died with an older backend): fail it here.
+    if no_worker:
+        jobs._fail(job.id, "connect_failed",
+                   f"Stopped by {actor or 'someone'} while waiting for the VMs to answer SSH.")
+        db.session.refresh(job)
+    return job
+
+
 def retry_connect(build: ClusterBuild, job: ClusterProvisionJob) -> ClusterProvisionJob:
     if job.status != "connect_failed":
         raise ValueError("Only a job whose VMs did not answer can be retried this way.")
     job.status = "connecting"
     job.error = None
+    progress = dict(job.progress_json or {})
+    progress.pop("stopRequested", None)
+    job.progress_json = progress
     job.finished_at = None
     build.status = "provisioning"
     jobs._sync_build_status(build, job)
@@ -710,6 +733,9 @@ def summary_for_list(build: ClusterBuild) -> Optional[Dict[str, Any]]:
     return {
         "provisionStatus": build.provision_status,
         "job": jobs.serialize_job(current) if current else None,
+        # VMs OpenTofu's state still lists: these, not a leftover folder,
+        # are what must be destroyed before the build can be deleted.
+        "vmCount": len(state_store.vm_instances(build.id)),
     }
 
 

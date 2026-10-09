@@ -467,6 +467,108 @@ class TestPartialFailure:
         assert "can no longer change" in recount.get_json()["error"]
 
 
+class TestStopAndDelete:
+    """A VMs build stuck waiting for SSH can be stopped; a failed one whose
+    state holds no VM (only a folder) can be deleted."""
+
+    def make_connecting(self, client, admin_token, ssh_profile, vcenter, engine):
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter)
+        job = plan(client, admin_token, build["id"])["provisioning"]["job"]
+        row = ClusterProvisionJob.query.get(job["id"])
+        row.status = "connecting"
+        build_row = ClusterBuild.query.get(build["id"])
+        build_row.status = "provisioning"
+        db.session.commit()
+        return build, row
+
+    def test_stopping_a_wait_with_no_live_worker_fails_it_now(
+        self, client, admin_token, ssh_profile, vcenter, engine
+    ):
+        build, job = self.make_connecting(client, admin_token, ssh_profile, vcenter, engine)
+        job.updated_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+        db.session.commit()
+        response = client.post(f"/api/cluster-builds/{build['id']}/provision/jobs/{job.id}/stop",
+                               headers=auth_headers(admin_token))
+        assert response.status_code == 200, response.get_json()
+        data = response.get_json()["data"]
+        assert data["status"] == "provision_failed"
+        assert data["provisioning"]["job"]["status"] == "connect_failed"
+        assert "Stopped by admin" in data["provisioning"]["job"]["error"]
+
+    def test_stopping_a_live_wait_asks_the_worker(self, client, admin_token, ssh_profile, vcenter, engine):
+        build, job = self.make_connecting(client, admin_token, ssh_profile, vcenter, engine)
+        job.updated_at = datetime.now(timezone.utc)
+        db.session.commit()
+        response = client.post(f"/api/cluster-builds/{build['id']}/provision/jobs/{job.id}/stop",
+                               headers=auth_headers(admin_token))
+        assert response.status_code == 200
+        assert jobs.stop_requested(job.id) == "admin"
+        again = client.post(f"/api/cluster-builds/{build['id']}/provision/jobs/{job.id}/stop",
+                            headers=auth_headers(admin_token))
+        assert again.status_code == 200  # still connecting until the worker notices
+
+    def test_the_waiter_stops_when_asked(self, app):
+        import threading
+
+        from api.services.ssh import set_transport_factory
+
+        class Never:
+            def run(self, target, command, timeout_s=30):
+                raise RuntimeError("Connection refused")
+
+        set_transport_factory(lambda: Never())
+        try:
+            stop = threading.Event()
+            stop.set()
+            results = {}
+            jobs._default_ssh_waiter(
+                [("vm-1", object())], 600,
+                lambda name, ok, detail: results.__setitem__(name, (ok, detail)),
+                app=app, stop=stop,
+            )
+            assert results == {"vm-1": (False, "stopped")}
+        finally:
+            set_transport_factory(None)
+
+    def test_a_failed_build_holding_only_a_folder_can_be_deleted(
+        self, client, admin_token, ssh_profile, vcenter, engine
+    ):
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter)
+        job = plan(client, admin_token, build["id"])["provisioning"]["job"]
+        state_store.write_state(build["id"], json.dumps({
+            "version": 4, "serial": 1, "resources": [{
+                "mode": "managed", "type": "vsphere_folder", "name": "cluster",
+                "instances": [{"attributes": {"id": "group-v99", "path": "KubeSight/uat-02"}}],
+            }],
+        }))
+        row = ClusterBuild.query.get(build["id"])
+        row.status = "provision_failed"
+        db.session.commit()
+        data = client.get("/api/cluster-builds", headers=auth_headers(admin_token)).get_json()["data"]
+        items = data if isinstance(data, list) else data.get("items") or data.get("builds") or []
+        listed = next(b for b in items if b["id"] == build["id"])
+        assert listed["provisioning"]["vmCount"] == 0
+        deleted = client.delete(f"/api/cluster-builds/{build['id']}", headers=auth_headers(admin_token))
+        assert deleted.status_code == 200, deleted.get_json()
+        assert VSphereIpReservation.query.filter_by(build_id=build["id"]).count() == 0
+
+    def test_a_build_whose_vm_exists_is_not_deleted(self, client, admin_token, ssh_profile, vcenter, engine):
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter)
+        job = plan(client, admin_token, build["id"])["provisioning"]["job"]
+        state_store.write_state(build["id"], json.dumps({
+            "version": 4, "serial": 1, "resources": [{
+                "mode": "managed", "type": "vsphere_virtual_machine", "name": "node",
+                "instances": [{"index_key": "uat-02-cp-1", "attributes": {"id": "x"}}],
+            }],
+        }))
+        row = ClusterBuild.query.get(build["id"])
+        row.status = "provision_failed"
+        db.session.commit()
+        refused = client.delete(f"/api/cluster-builds/{build['id']}", headers=auth_headers(admin_token))
+        assert refused.status_code == 400 and "Destroy" in refused.get_json()["error"]
+
+
+
 class TestVmsOnly:
     """VMs first — just how many — and Kubernetes later, in a shape that fits them."""
 

@@ -935,8 +935,11 @@ export function deletePolicy(build) {
   if (RUNNING_STATUSES.has(build.status)) {
     return { allowed: false, reason: "Cancel the build first." };
   }
-  if (build.machineSource === "vmware" && build.canDestroy) {
-    return { allowed: false, reason: "Its VMs still exist — destroy them first." };
+  // VMs OpenTofu still tracks — not a leftover folder — block deleting.
+  const vmCount = build.provisioning?.vmCount;
+  const hasVms = typeof vmCount === "number" ? vmCount > 0 : Boolean(build.canDestroy);
+  if (build.machineSource === "vmware" && hasVms) {
+    return { allowed: false, reason: "Its VMs still exist — destroy them first.", destroyFirst: true };
   }
   const madeCluster = ["completed", "destroyed"].includes(build.status) || Boolean(build.resultClusterId);
   return { allowed: true, reason: "", needsName: madeCluster };

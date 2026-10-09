@@ -30,6 +30,7 @@ import {
   discardProvisionJob,
   getProvisionJobConfig,
   installKubernetesOnVms,
+  stopProvisionWait,
   planClusterVms,
   planMoreWorkers,
   rejectClusterDestroy,
@@ -590,7 +591,25 @@ export function ProvisionCard({
     );
   }
   if (["applying", "connecting", "interrupted"].includes(job.status)) {
-    return <ProvisionProgress build={build} now={now} />;
+    return (
+      <>
+        {job.status === "connecting" && canExecute ? (
+          <div className="card sg-cb-addonline">
+            <span className="sg-cb-config-label">Waiting for SSH</span>
+            <span className="muted">
+              Each failed login and its reason is in the log below. Stopping changes nothing in vCenter;
+              the VMs stay and you can try SSH again.
+            </span>
+            <button className="btn-outline btn-sm" type="button" disabled={busy}
+                    onClick={() => act(() => stopProvisionWait(build.id, job.id))}>
+              Stop waiting
+            </button>
+          </div>
+        ) : null}
+        {refusalNote}
+        <ProvisionProgress build={build} now={now} />
+      </>
+    );
   }
   if (job.status === "apply_failed" || job.status === "connect_failed") {
     const created = build.provisioning?.state?.vmCount || 0;

@@ -1124,5 +1124,10 @@ describe("deletePolicy", () => {
     expect(deletePolicy({ status: "building" })).toEqual({ allowed: false, reason: "Cancel the build first." });
     expect(deletePolicy({ status: "vms_ready", machineSource: "vmware", canDestroy: true }).allowed).toBe(false);
     expect(deletePolicy({ status: "provision_failed", machineSource: "vmware", canDestroy: false }).allowed).toBe(true);
+    // OpenTofu's VM count decides, not a leftover folder (canDestroy can be true for that).
+    expect(deletePolicy({ status: "provision_failed", machineSource: "vmware", canDestroy: true,
+      provisioning: { vmCount: 0 } }).allowed).toBe(true);
+    expect(deletePolicy({ status: "provision_failed", machineSource: "vmware",
+      provisioning: { vmCount: 1 } })).toMatchObject({ allowed: false, destroyFirst: true });
   });
 });
