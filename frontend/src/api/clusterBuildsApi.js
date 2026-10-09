@@ -203,6 +203,10 @@ export const requestClusterDestroy = (id, payload) =>
 export const getProvisionJob = (id, jobId) =>
   request(`/api/cluster-builds/${id}/provision/jobs/${jobId}`);
 
+/** The main.tf.json OpenTofu ran for a job: {filename, content}. No credentials in it. */
+export const getProvisionJobConfig = (id, jobId) =>
+  request(`/api/cluster-builds/${id}/provision/jobs/${jobId}/config`);
+
 const jobAction = (id, jobId, action, body = {}) =>
   request(`/api/cluster-builds/${id}/provision/jobs/${jobId}/${action}`, { method: "POST", body });
 

@@ -704,6 +704,23 @@ class TestCloneMirrorsTemplate:
 
 
 
+class TestExportConfig:
+    def test_the_jobs_main_tf_json_can_be_downloaded(self, client, admin_token, ssh_profile, vcenter, engine):
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter)
+        job = plan(client, admin_token, build["id"])["provisioning"]["job"]
+        response = client.get(f"/api/cluster-builds/{build['id']}/provision/jobs/{job['id']}/config",
+                              headers=auth_headers(admin_token))
+        assert response.status_code == 200, response.get_json()
+        data = response.get_json()["data"]
+        assert data["filename"] == f"uat-02-job-{job['id']}-main.tf.json"
+        config = json.loads(data["content"])
+        assert "vsphere_virtual_machine" in config["resource"]
+        assert "prov-pass" not in data["content"] and "ro-pass" not in data["content"]
+        missing = client.get(f"/api/cluster-builds/{build['id']}/provision/jobs/999999/config",
+                             headers=auth_headers(admin_token))
+        assert missing.status_code == 404
+
+
 class TestFolderAndSizeModes:
     """An admin-made folder the account works in, and an account that may not resize VMs."""
 

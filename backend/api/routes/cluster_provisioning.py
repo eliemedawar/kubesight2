@@ -183,6 +183,31 @@ def get_provision_job(build_id: int, job_id: int):
 
 
 @cluster_provisioning_bp.route(
+    "/api/cluster-builds/<int:build_id>/provision/jobs/<int:job_id>/config", methods=["GET"]
+)
+@require_permission("cluster_builds:view")
+def get_provision_job_config(build_id: int, job_id: int):
+    """The main.tf.json OpenTofu ran for this job, to read or share.
+
+    It never holds credentials: vCenter's and the state backend's reach
+    OpenTofu through its environment only (tofu_config's docstring)."""
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    job, err = _job_or_404(build_id, job_id)
+    if err:
+        return err
+    config = (job.config_json or {}).get("tofu")
+    if not config:
+        return error_response("This job has no OpenTofu configuration yet: it is written when the plan is made.", 404)
+    safe_name = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in build.name) or "build"
+    return success_response({
+        "filename": f"{safe_name}-job-{job.id}-main.tf.json",
+        "content": json.dumps(config, indent=2) + "\n",
+    })
+
+
+@cluster_provisioning_bp.route(
     "/api/cluster-builds/<int:build_id>/provision/jobs/<int:job_id>/apply", methods=["POST"]
 )
 @require_permission("cluster_builds:execute")

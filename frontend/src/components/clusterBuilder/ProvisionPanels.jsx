@@ -28,6 +28,7 @@ import {
   approveClusterDestroy,
   createClusterTemplate,
   discardProvisionJob,
+  getProvisionJobConfig,
   installKubernetesOnVms,
   planClusterVms,
   planMoreWorkers,
@@ -406,6 +407,37 @@ function InstallChooser({ build, catalog, k8sVersions, busy, onInstall, onClose 
   );
 }
 
+/** Download the main.tf.json this job's OpenTofu ran, to read or share. */
+function ExportConfig({ build, job, notify }) {
+  const [busy, setBusy] = useState(false);
+  if (!job?.id) return null;
+  const download = async () => {
+    setBusy(true);
+    try {
+      const { filename, content } = await getProvisionJobConfig(build.id, job.id);
+      const url = URL.createObjectURL(new Blob([content], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      // Revoking in the same tick as the click can cancel the download.
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    } catch (error) {
+      if (notify) notify(refusalText(error), true);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <button className="btn-ghost btn-sm" type="button" disabled={busy} onClick={download}
+            title="The OpenTofu configuration for this job. It holds no passwords.">
+      {busy ? "Preparing…" : "Download main.tf.json"}
+    </button>
+  );
+}
+
 function Failure({ title, error, children }) {
   return (
     <div className="card sg-cb-blowup sg-cb-pv-fail">
@@ -544,6 +576,7 @@ export function ProvisionCard({
         busy={busy}
       >
         {refusalNote}
+        <ExportConfig build={build} job={job} notify={notify} />
       </PlanReview>
     );
   }
@@ -551,6 +584,7 @@ export function ProvisionCard({
     return (
       <Failure title="The plan could not be made" error={job.error}>
         {planAgain}
+        <ExportConfig build={build} job={job} notify={notify} />
         <span className="sg-cb-safe">Nothing was created. Fix what the message says, then plan again.</span>
       </Failure>
     );
@@ -579,6 +613,7 @@ export function ProvisionCard({
               Remove the created VMs…
             </button>
           ) : null}
+          <ExportConfig build={build} job={job} notify={notify} />
           <span className="sg-cb-safe">
             OpenTofu&apos;s state was saved and its lock released. A new plan creates only what is missing.
           </span>
