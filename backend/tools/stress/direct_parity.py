@@ -46,6 +46,29 @@ def scrub(value):
     return value
 
 
+def first_diff_path(a, b, path=""):
+    """The first field path where two parsed documents differ, or None."""
+    if type(a) is not type(b):
+        return f"{path or '.'} (type)"
+    if isinstance(a, dict):
+        for key in sorted(set(a) | set(b)):
+            if key not in a or key not in b:
+                return f"{path}.{key} (only in {'kubectl' if key in a else 'direct'})"
+            found = first_diff_path(a[key], b[key], f"{path}.{key}")
+            if found:
+                return found
+        return None
+    if isinstance(a, list):
+        if len(a) != len(b):
+            return f"{path} (length {len(a)} vs {len(b)})"
+        for i, (x, y) in enumerate(zip(a, b)):
+            found = first_diff_path(x, y, f"{path}[{i}]")
+            if found:
+                return found
+        return None
+    return None if a == b else f"{path} ({str(a)[:40]!r} vs {str(b)[:40]!r})"
+
+
 def keyed(doc):
     if isinstance(doc, dict) and "items" in doc:
         return {(i["metadata"].get("namespace", ""), i["metadata"]["name"]): scrub(i) for i in doc["items"]}
@@ -70,6 +93,8 @@ def main() -> int:
                     missing = set(a) ^ set(b)
                     diff = next((k for k in a if k in b and a[k] != b[k]), None)
                     detail += f" only-one-side={list(missing)[:3]} first-diff={diff}"
+                    if diff is not None:
+                        detail += f" at {first_diff_path(a[diff], b[diff])}"
             print(f"{'OK  ' if same else 'DIFF'} {os.path.basename(kubeconfig):16} {' '.join(args):45} {detail}")
             failures += 0 if same else 1
     return 1 if failures else 0

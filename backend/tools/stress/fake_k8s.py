@@ -217,10 +217,18 @@ class FakeCluster:
               labels: Optional[Dict[str, str]] = None, owner: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if age_days is None:
             age_days = self.rng.uniform(0.2, 90)
+        created = _ts(_now() - timedelta(days=age_days))
         meta: Dict[str, Any] = {
             "name": name,
-            "creationTimestamp": _ts(_now() - timedelta(days=age_days)),
+            "creationTimestamp": created,
             "labels": labels or {},
+            # Real API servers attach server-side-apply bookkeeping to every
+            # object; `kubectl get -o json` hides it, the raw API does not.
+            "managedFields": [{
+                "manager": "kubectl-client-side-apply", "operation": "Update", "apiVersion": "v1",
+                "time": created, "fieldsType": "FieldsV1",
+                "fieldsV1": {"f:metadata": {"f:labels": {"f:app": {}}}},
+            }],
         }
         if namespace:
             meta["namespace"] = namespace

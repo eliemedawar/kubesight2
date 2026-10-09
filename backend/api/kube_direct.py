@@ -354,6 +354,17 @@ def _get(endpoint: _Endpoint, path: str, query: Dict[str, str], timeout: float) 
         raise DirectReadError(f"Unable to connect to the server: {exc}", network=True) from exc
 
 
+def _without_managed_fields(obj: Any) -> Any:
+    """Drop metadata.managedFields, as ``kubectl get -o json`` does by default
+    (--show-managed-fields=false). It is server-side-apply bookkeeping that
+    real clusters attach to every object, often the bulk of its size."""
+    if isinstance(obj, dict):
+        meta = obj.get("metadata")
+        if isinstance(meta, dict):
+            meta.pop("managedFields", None)
+    return obj
+
+
 def try_read(args: List[str], kubeconfig_path: Optional[str], context: Optional[str], timeout: float) -> Optional[str]:
     """What ``kubectl <args>`` would print, or None to fall back to kubectl.
 
@@ -374,7 +385,7 @@ def try_read(args: List[str], kubeconfig_path: Optional[str], context: Optional[
     if plan.raw:
         return _get(endpoint, plan.path, plan.query, timeout).decode("utf-8", "replace")
     if plan.list_kind is None:
-        return _get(endpoint, plan.path, plan.query, timeout).decode("utf-8", "replace")
+        return json.dumps(_without_managed_fields(json.loads(_get(endpoint, plan.path, plan.query, timeout))))
 
     # Lists are read in pages of 500 like kubectl does, then joined into the
     # same {"kind": "List", "items": [...]} document kubectl prints, with each
@@ -387,7 +398,7 @@ def try_read(args: List[str], kubeconfig_path: Optional[str], context: Optional[
         for item in page.get("items") or []:
             item.setdefault("apiVersion", api_version)
             item.setdefault("kind", kind)
-            items.append(item)
+            items.append(_without_managed_fields(item))
         token = (page.get("metadata") or {}).get("continue")
         if not token:
             break

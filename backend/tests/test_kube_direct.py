@@ -97,7 +97,9 @@ class _FakeApi(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         if self.path.split("?")[0] == "/api/v1/namespaces/ns1/pods":
             if "continue=2" in self.path:
-                body = {"kind": "PodList", "metadata": {}, "items": [{"metadata": {"name": "p3"}}]}
+                body = {"kind": "PodList", "metadata": {}, "items": [
+                    {"metadata": {"name": "p3", "managedFields": [{"manager": "kubectl", "operation": "Update"}]}}
+                ]}
             else:
                 body = {"kind": "PodList", "metadata": {"continue": "2"}, "items": [{"metadata": {"name": "p1"}}, {"metadata": {"name": "p2"}}]}
             data = json.dumps(body).encode()
@@ -130,6 +132,8 @@ def test_list_pages_are_joined_like_kubectl(fake_api):
     assert doc["kind"] == "List"
     assert [i["metadata"]["name"] for i in doc["items"]] == ["p1", "p2", "p3"]
     assert all(i["kind"] == "Pod" and i["apiVersion"] == "v1" for i in doc["items"])
+    # kubectl -o json hides server-side-apply bookkeeping; so must we.
+    assert all("managedFields" not in i["metadata"] for i in doc["items"])
 
 
 def test_api_errors_read_like_kubectl(fake_api):
