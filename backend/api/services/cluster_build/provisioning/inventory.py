@@ -475,6 +475,34 @@ def _fetch_placement(cfg: VSphereConfig) -> Dict[str, Any]:
         _disconnect(si)
 
 
+# vCenter's built-in Administrator role. It holds every privilege, including
+# ones added after the role list was read.
+_ADMIN_ROLE_ID = -1
+
+
+def privileges_from_roles(role_ids, role_list) -> Optional[set]:
+    """Privileges held through ``role_ids`` (an entity's ``effectiveRole``), or
+    None when one of them is the Administrator role (everything)."""
+    wanted = set(role_ids or [])
+    if _ADMIN_ROLE_ID in wanted:
+        return None
+    held: set = set()
+    for role in role_list or []:
+        if role.roleId in wanted:
+            held.update(role.privilege or [])
+    return held
+
+
+def no_permission_detail(exc: Exception) -> str:
+    """What vCenter said was missing, from a vim.fault.NoPermission."""
+    privilege = getattr(exc, "privilegeId", None)
+    target = getattr(exc, "object", None)
+    target_id = getattr(target, "_moId", None) or (str(target) if target is not None else "")
+    if privilege and target_id:
+        return f"{privilege} on {target_id}"
+    return privilege or target_id or ""
+
+
 def _check_privileges(cfg: VSphereConfig, entity_ids: Dict[str, str]) -> List[Dict[str, Any]]:
     """Which REQUIRED_PRIVILEGES this session holds on the given entities.
 
@@ -505,15 +533,42 @@ def _check_privileges(cfg: VSphereConfig, entity_ids: Dict[str, str]) -> List[Di
             kind = kinds[scope] if entity_ids.get(scope) else vim.Datacenter
             stubs[moid] = kind(moid, si._stub)
             by_entity.setdefault(moid, []).append((privilege, purpose))
+        # HasPrivilegeOnEntities needs System.View where vCenter checks it (the
+        # root), which an account whose role is granted only on a datacenter,
+        # cluster or folder does not have. Then the privileges are worked out
+        # from the roles the account holds on each entity instead, which needs
+        # nothing beyond reading that entity.
+        denied: Optional[Exception] = None
+        role_list = None
         for moid, wanted in by_entity.items():
             granted: Dict[str, bool] = {}
-            answer = manager.HasPrivilegeOnEntities(
-                entity=[stubs[moid]], sessionId=session_key,
-                privId=[privilege for privilege, _ in wanted],
-            )
-            for entity_privilege in answer or []:
-                for availability in entity_privilege.privAvailability or []:
-                    granted[availability.privId] = bool(availability.isGranted)
+            if denied is None:
+                try:
+                    answer = manager.HasPrivilegeOnEntities(
+                        entity=[stubs[moid]], sessionId=session_key,
+                        privId=[privilege for privilege, _ in wanted],
+                    )
+                    for entity_privilege in answer or []:
+                        for availability in entity_privilege.privAvailability or []:
+                            granted[availability.privId] = bool(availability.isGranted)
+                except vim.fault.NoPermission as exc:
+                    denied = exc
+            if denied is not None:
+                try:
+                    if role_list is None:
+                        role_list = list(manager.roleList or [])
+                    held = privileges_from_roles(stubs[moid].effectiveRole, role_list)
+                except vim.fault.NoPermission as exc:
+                    raise VSphereError(
+                        "vCenter will not tell the provisioning account which privileges it holds "
+                        f"(missing {no_permission_detail(denied) or 'System.View'}; reading its roles "
+                        f"was refused too: {no_permission_detail(exc) or 'no detail'}). Give the "
+                        "account the Read-only role at the top of the vCenter (no need to "
+                        "propagate), then check again."
+                    ) from exc
+                granted = {
+                    privilege: held is None or privilege in held for privilege, _ in wanted
+                }
             for privilege, purpose in wanted:
                 results.append({
                     "privilege": privilege, "purpose": purpose,
@@ -536,6 +591,9 @@ def _as_vsphere_error(what: str, exc: Exception) -> VSphereError:
     logger.exception("vCenter %s failed", what)
     name = type(exc).__name__
     detail = str(getattr(exc, "msg", "") or exc).strip()
+    missing = no_permission_detail(exc)
+    if missing:
+        detail = f"{detail} (missing {missing})"
     return VSphereError(f"vCenter {what} failed ({name}){': ' + detail[:500] if detail else ''}")
 
 

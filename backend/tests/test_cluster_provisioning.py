@@ -776,6 +776,63 @@ class TestVCenterAccounts:
         assert checked.status_code == 200
         assert "privilege check failed (AttributeError)" in checked.get_json()["data"]["error"]
 
+    def test_privileges_read_from_roles_when_vcenter_refuses_to_say(self, monkeypatch):
+        """An account whose role sits on a datacenter, not the vCenter root, may
+        not call HasPrivilegeOnEntities (System.View at the root). Its roles on
+        the entity still say what it holds."""
+        from pyVmomi import vim
+
+        from api.services.vsphere_client import VSphereConfig
+
+        roles = [
+            vim.AuthorizationManager.Role(roleId=-2, name="View", privilege=["System.View"]),
+            vim.AuthorizationManager.Role(
+                roleId=501, name="Kubesight-RW",
+                privilege=[p for p, _, _ in inventory.REQUIRED_PRIVILEGES if p != "Folder.Create"],
+            ),
+        ]
+
+        class Stub:
+            def InvokeAccessor(self, mo, info):
+                assert info.name == "effectiveRole"
+                return [501]
+
+        class Manager:
+            roleList = roles
+
+            def HasPrivilegeOnEntities(self, **kwargs):
+                raise vim.fault.NoPermission(
+                    privilegeId="System.View", object=vim.Folder("group-d1", None),
+                )
+
+        class Content:
+            authorizationManager = Manager()
+
+            class sessionManager:
+                class currentSession:
+                    key = "session-1"
+
+        class Si:
+            _stub = Stub()
+
+            def RetrieveContent(self):
+                return Content()
+
+        monkeypatch.setattr(inventory, "_connect", lambda cfg: Si())
+        monkeypatch.setattr(inventory, "_disconnect", lambda si: None)
+        cfg = VSphereConfig(base_url="https://vc.example.test", username="u", password="p")
+        result = inventory._check_privileges(cfg, {"datacenter": "datacenter-3"})
+        assert len(result) == len(inventory.REQUIRED_PRIVILEGES)
+        assert [r["privilege"] for r in result if not r["granted"]] == ["Folder.Create"]
+
+        Manager.roleList = property(lambda self: (_ for _ in ()).throw(
+            vim.fault.NoPermission(privilegeId="System.View", object=vim.Folder("group-d1", None))
+        ))
+        with pytest.raises(Exception) as refused:
+            inventory._check_privileges(cfg, {"datacenter": "datacenter-3"})
+        assert "System.View on group-d1" in str(refused.value)
+        assert "Read-only role at the top of the vCenter" in str(refused.value)
+
     def test_placement_lists_templates_with_verdicts(self, client, admin_token, vcenter):
         data = client.get(
             f"/api/vsphere-connections/{vcenter['connection'].id}/placement",
