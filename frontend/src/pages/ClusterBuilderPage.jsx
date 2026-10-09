@@ -211,6 +211,8 @@ export default function ClusterBuilderPage({
             setTab("new");
           }}
           addonCatalog={options?.addons || []}
+          templateCatalog={options?.clusterTemplates}
+          k8sVersions={options?.k8sVersions || []}
           buildProfiles={infra.buildProfiles}
           canManageTemplates={canManageTemplates}
           currentUserId={currentUserId}

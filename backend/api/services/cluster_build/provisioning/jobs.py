@@ -559,6 +559,7 @@ def _render_config(build: ClusterBuild, job: ClusterProvisionJob, cfg) -> Dict[s
         {
             "name": m["name"], "role": m["role"], "ip": m["ip"],
             "cpu": m["cpu"], "memoryGb": m["memoryGb"], "diskGb": m["diskGb"],
+            "memoryMb": m.get("memoryMb"),
         }
         for m in machines
     ]
@@ -693,14 +694,50 @@ def _vcenter_checks(build: ClusterBuild, job: ClusterProvisionJob, connection, c
     except Exception as exc:  # noqa: BLE001 — some vCenters refuse the query itself
         checks.append(_check("warn", "Account privileges", f"could not be checked: {scrub(str(exc))[:200]}"))
     else:
+        unneeded = _privileges_not_needed(spec, machines)
+        privileges = [p for p in privileges if p["privilege"] not in unneeded]
         missing = [p["privilege"] for p in privileges if not p["granted"]]
         if missing:
+            hints = []
+            if set(missing) & _RESIZE_PRIVILEGES:
+                hints.append("choose \"Keep the VM template's size\" if the account may not change CPU or memory")
+            if set(missing) & _FOLDER_PRIVILEGES:
+                hints.append("choose \"Put the VMs straight into this folder\" to use a folder made for you")
             raise JobFailed(
                 "The provisioning account is missing vCenter privileges: "
                 f"{', '.join(missing[:8])}{' …' if len(missing) > 8 else ''}."
+                + (f" Or {'; or '.join(hints)}." if hints else "")
             )
-        checks.append(_check("ok", "Account privileges", f"all {len(privileges)} granted"))
+        checks.append(_check("ok", "Account privileges", f"all {len(privileges)} needed are granted"))
+    if spec.get("sizeMode") == "template":
+        size = (machines or [{}])[0]
+        checks.append(_check(
+            "ok", "Machine sizes",
+            f"kept from the template: {size.get('cpu')} vCPU · {size.get('memoryGb')} GB · "
+            f"{size.get('diskGb')} GB disk",
+        ))
     return checks
+
+
+_FOLDER_PRIVILEGES = {"Folder.Create", "Folder.Delete"}
+_RESIZE_PRIVILEGES = {
+    "VirtualMachine.Config.CPUCount", "VirtualMachine.Config.Memory",
+    "VirtualMachine.Config.DiskExtend",
+}
+
+
+def _privileges_not_needed(spec: Dict[str, Any], machines: List[Dict[str, Any]]) -> set:
+    """Privileges this plan never uses, so an account without them is not refused."""
+    unneeded: set = set()
+    if spec.get("folderMode") == "existing":
+        unneeded |= _FOLDER_PRIVILEGES
+    if spec.get("sizeMode") == "template":
+        unneeded |= _RESIZE_PRIVILEGES
+    counts = spec.get("counts") or {}
+    if not (spec.get("antiAffinity", True) and spec.get("clusterId")
+            and (counts.get("controlPlane", 0) > 1 or counts.get("loadbalancer", 0) > 1)):
+        unneeded.add("Host.Inventory.EditCluster")  # no keep-apart rule to create
+    return unneeded
 
 
 def _machines_in_scope(build: ClusterBuild, job: ClusterProvisionJob) -> List[Dict[str, Any]]:

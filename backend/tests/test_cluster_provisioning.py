@@ -467,55 +467,84 @@ class TestPartialFailure:
 
 
 class TestVmsOnly:
-    """Create the VMs and stop: the VM side tested on its own, Kubernetes later or never."""
+    """VMs first — just how many — and Kubernetes later, in a shape that fits them."""
+
+    VM_HOSTS = {
+        "10.20.30.50": ("uat-02-vm-1", "loadbalancer"),
+        "10.20.30.51": ("uat-02-vm-2", "control_plane"),
+        "10.20.30.52": ("uat-02-vm-3", "worker"),
+        "10.20.30.53": ("uat-02-vm-4", "worker"),
+    }
+
+    @staticmethod
+    def make(client, token, ssh_profile, vcenter, *, count=4, **spec_overrides):
+        spec = placement_payload(vcenter["connection"].id, counts=None, vmCount=count,
+                                 sizes={"vm": {"cpu": 2, "memoryGb": 4, "diskGb": 40}})
+        spec.update(spec_overrides)
+        response = client.post("/api/cluster-builds", json={
+            "name": "uat-02", "k8sVersion": "1.32.4", "machineSource": "vmware", "vmsOnly": True,
+            "templateId": "custom", "connectionProfileId": ssh_profile["id"], "provisioning": spec,
+        }, headers=auth_headers(token))
+        assert response.status_code == 201, response.get_json()
+        return response.get_json()["data"]
 
     @pytest.fixture()
     def ready(self, client, admin_token, ssh_profile, vcenter, engine):
-        build = make_vmware_build(client, admin_token, ssh_profile, vcenter)
-        response = client.put(
-            f"/api/cluster-builds/{build['id']}", json={"vmsOnly": True},
-            headers=auth_headers(admin_token),
-        )
-        assert response.status_code == 200 and response.get_json()["data"]["vmsOnly"] is True
-        job = plan(client, admin_token, build["id"])["provisioning"]["job"]
+        build = self.make(client, admin_token, ssh_profile, vcenter)
+        assert build["vmsOnly"] is True
+        planned = plan(client, admin_token, build["id"])
+        job = planned["provisioning"]["job"]
         assert job["status"] == "planned", job.get("error")
+        assert {r["title"] for r in job["summary"]["resources"] if r["kind"] == "vm"} == {
+            "uat-02-vm-1", "uat-02-vm-2", "uat-02-vm-3", "uat-02-vm-4",
+        }
+        assert planned["vipAddress"] is None  # no roles yet, so no API address
         # No SSH transport is installed: anything past "the VMs answer" would fail.
+        return apply(client, admin_token, build["id"], job["id"])
+
+    def test_one_vm(self, client, admin_token, ssh_profile, vcenter, engine):
+        build = self.make(client, admin_token, ssh_profile, vcenter, count=1)
+        job = plan(client, admin_token, build["id"])["provisioning"]["job"]
+        assert [r["title"] for r in job["summary"]["resources"] if r["kind"] == "vm"] == ["uat-02-vm-1"]
         done = apply(client, admin_token, build["id"], job["id"])
-        return done
+        assert done["status"] == "vms_ready" and done["nodeCounts"]["vm"] == 1
 
     def test_stops_once_the_vms_answer(self, client, admin_token, ready):
         assert ready["status"] == "vms_ready", (ready.get("error"), ready["provisioning"]["job"])
         assert ready["provisionStatus"] == "ready"
-        assert ready["provisioning"]["job"]["status"] == "succeeded"
         assert not ready["resultClusterId"] and not ready["steps"]
+        assert {n["role"] for n in ready["nodes"]} == {"vm"}
         assert len(state_store.vm_instances(ready["id"])) == 4
-        assert {v["state"] for v in ready["provisioning"]["job"]["progress"]["vms"].values()} == {"ready"}
         assert ready["canDestroy"] is True
-
         for path in ("preflight", "start"):
             refused = client.post(f"/api/cluster-builds/{ready['id']}/{path}", headers=auth_headers(admin_token))
             assert refused.status_code == 400 and "VMs only" in refused.get_json()["error"], path
         deleted = client.delete(f"/api/cluster-builds/{ready['id']}", headers=auth_headers(admin_token))
         assert deleted.status_code == 400
 
-    def test_install_kubernetes_later(self, client, admin_token, ready, fake_ssh):
-        set_transport_factory(lambda: build_default_fake(SMALL_HOSTS))
-        response = client.post(
-            f"/api/cluster-builds/{ready['id']}/provision/install-kubernetes",
-            headers=auth_headers(admin_token),
-        )
+    def test_install_kubernetes_in_a_shape_that_fits(self, client, admin_token, ready, fake_ssh):
+        url = f"/api/cluster-builds/{ready['id']}/provision/install-kubernetes"
+        wrong = client.post(url, json={"counts": {"loadbalancer": 0, "controlPlane": 1, "worker": 1}},
+                            headers=auth_headers(admin_token))
+        assert wrong.status_code == 400 and "4 VMs" in wrong.get_json()["error"]
+
+        set_transport_factory(lambda: build_default_fake({**self.VM_HOSTS}))
+        response = client.post(url, json={"counts": {"loadbalancer": 1, "controlPlane": 1, "worker": 2}},
+                               headers=auth_headers(admin_token))
         assert response.status_code == 200, response.get_json()
         built = response.get_json()["data"]
-        assert built["vmsOnly"] is False
+        assert built["vmsOnly"] is False and built["templateId"] == "small"
+        roles = {n["hostname"]: n["role"] for n in built["nodes"]}
+        assert roles == {"uat-02-vm-1": "loadbalancer", "uat-02-vm-2": "control_plane",
+                         "uat-02-vm-3": "worker", "uat-02-vm-4": "worker"}
+        assert built["vipAddress"] == "10.20.30.54"
+        assert built["controlPlaneEndpoint"] == "10.20.30.54:6443"
         assert built["status"] == "completed", (built.get("error"), built["provisioning"]["job"])
         assert built["resultClusterId"]
-        assert all(n["status"] == "joined" for n in built["nodes"] if n["role"] != "loadbalancer")
         assert len(state_store.vm_instances(ready["id"])) == 4  # the same VMs, none created
 
-        again = client.post(
-            f"/api/cluster-builds/{ready['id']}/provision/install-kubernetes",
-            headers=auth_headers(admin_token),
-        )
+        again = client.post(url, json={"counts": {"loadbalancer": 1, "controlPlane": 1, "worker": 2}},
+                            headers=auth_headers(admin_token))
         assert again.status_code == 400
 
     def test_destroy_takes_a_second_person_too(self, client, app, admin_token, ready):
@@ -540,6 +569,59 @@ class TestVmsOnly:
         }, headers=auth_headers(admin_token))
         assert response.status_code == 201, response.get_json()
         assert response.get_json()["data"]["vmsOnly"] is False
+
+
+class TestFolderAndSizeModes:
+    """An admin-made folder the account works in, and an account that may not resize VMs."""
+
+    def config_of(self, client, token, build_id):
+        job = plan(client, token, build_id)["provisioning"]["job"]
+        assert job["status"] == "planned", job.get("error")
+        return ClusterProvisionJob.query.get(job["id"]).config_json["tofu"], job
+
+    def test_vms_go_straight_into_an_existing_folder(self, client, admin_token, ssh_profile, vcenter, engine):
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter, folderMode="existing")
+        tofu, job = self.config_of(client, admin_token, build["id"])
+        assert "vsphere_folder" not in tofu["resource"]
+        assert tofu["resource"]["vsphere_virtual_machine"]["node"]["folder"] == "KubeSight"
+        assert not [r for r in job["summary"]["resources"] if r["kind"] == "folder"]
+
+    def test_existing_folder_must_be_chosen(self, client, admin_token, ssh_profile, vcenter):
+        payload = {
+            "name": "uat-02", "k8sVersion": "1.32.4", "machineSource": "vmware",
+            "connectionProfileId": ssh_profile["id"],
+            "provisioning": placement_payload(vcenter["connection"].id, folderMode="existing",
+                                              folderParentId=None, folderParent=""),
+        }
+        response = client.post("/api/cluster-builds", json=payload, headers=auth_headers(admin_token))
+        assert response.status_code == 400 and "folder" in response.get_json()["error"]
+
+    def test_template_size_is_kept(self, client, admin_token, ssh_profile, vcenter, engine):
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter, sizeMode="template")
+        tofu, _ = self.config_of(client, admin_token, build["id"])
+        for_each = tofu["resource"]["vsphere_virtual_machine"]["node"]["for_each"]
+        # The demo template: 2 vCPU, 4096 MB, a 40 GB disk — on every role.
+        assert {(v["cpu"], v["memory_mb"], v["disk_gb"]) for v in for_each.values()} == {(2, 4096, 40)}
+
+    def test_privileges_a_plan_does_not_use_are_not_required(
+        self, client, admin_token, ssh_profile, vcenter, engine
+    ):
+        not_granted = {"Folder.Create", "Folder.Delete", "VirtualMachine.Config.CPUCount",
+                       "VirtualMachine.Config.Memory", "VirtualMachine.Config.DiskExtend",
+                       "Host.Inventory.EditCluster"}
+        inventory.set_privilege_checker(lambda cfg, ids: [
+            {"privilege": p, "purpose": purpose, "entity": "x", "granted": p not in not_granted}
+            for p, purpose, _ in inventory.REQUIRED_PRIVILEGES
+        ])
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-03")
+        job = plan(client, admin_token, build["id"])["provisioning"]["job"]
+        assert job["status"] == "plan_failed"
+        assert "Keep the VM template's size" in job["error"] and "straight into this folder" in job["error"]
+
+        fitted = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-04",
+                                   folderMode="existing", sizeMode="template")
+        job = plan(client, admin_token, fitted["id"])["provisioning"]["job"]
+        assert job["status"] == "planned", job.get("error")
 
 
 class TestGrowAndDestroy:

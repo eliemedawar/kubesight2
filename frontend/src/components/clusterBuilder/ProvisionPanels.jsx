@@ -16,6 +16,7 @@ import {
   ROLE_ONE,
   ROLE_TITLE,
   destroyStance,
+  shapesForVms,
   growthState,
   shapeLabel,
   planGroups,
@@ -325,6 +326,86 @@ function DestroyDecision({ build, job, currentUserId, canExecute, busy, act, ref
   );
 }
 
+/** Install Kubernetes on a VMs-only build: the shapes that fit its VMs. */
+function InstallChooser({ build, catalog, k8sVersions, busy, onInstall, onClose }) {
+  const machines = build.provisioning?.spec?.machines || [];
+  const shapes = shapesForVms(machines.length, catalog);
+  const [key, setKey] = useState(shapes[0]?.key || "");
+  const versions = k8sVersions.includes(build.k8sVersion) || !build.k8sVersion
+    ? k8sVersions : [build.k8sVersion, ...k8sVersions];
+  const [version, setVersion] = useState(build.k8sVersion || versions[0] || "");
+  const chosen = shapes.find((shape) => shape.key === key);
+  // Roles go to the VMs in order: balancers first, then control planes, then workers.
+  const roles = chosen
+    ? [
+      ...Array(chosen.counts.loadbalancer).fill("loadbalancer"),
+      ...Array(chosen.counts.controlPlane).fill("controlPlane"),
+      ...Array(chosen.counts.worker).fill("worker"),
+    ]
+    : [];
+  return (
+    <div className="card sg-cb-card sg-cb-pv-panel">
+      <div className="sg-cb-sect">
+        <h2>Install Kubernetes on {machines.length} VM{machines.length === 1 ? "" : "s"}</h2>
+        <button className="btn-ghost btn-sm" type="button" onClick={onClose}>Close</button>
+      </div>
+      <p className="muted sg-cb-pv-lede">
+        Shapes that fit exactly {machines.length} VM{machines.length === 1 ? "" : "s"}. Nothing is cloned again: the VMs
+        keep their names and addresses and take the roles below. Preflight runs first, and the build starts on its own
+        when it is clean.
+      </p>
+      {shapes.length ? (
+        <div className="sg-cb-choices">
+          {shapes.map((shape) => (
+            <button key={shape.key} type="button" className="sg-cb-choice" aria-pressed={shape.key === key}
+                    onClick={() => setKey(shape.key)}>
+              <span className="ct">
+                {shape.name || (shape.counts.worker ? "Custom" : "Single node")}
+                {shape.name ? <span className="sg-cb-pill is-muted">template</span> : null}
+              </span>
+              <span className="cd sg-cb-mono">{shape.label}</span>
+              {shape.note ? <span className="cd">{shape.note}</span> : null}
+            </button>
+          ))}
+        </div>
+      ) : <p className="sg-cb-field-error">No Kubernetes shape fits {machines.length} VMs.</p>}
+      {chosen ? (
+        <div className="table-wrap">
+          <table className="sg-cb-pv-vms">
+            <thead><tr><th>VM</th><th>Address</th><th>Becomes</th></tr></thead>
+            <tbody>
+              {machines.map((machine, index) => (
+                <tr key={machine.name}>
+                  <td className="sg-cb-mono">{machine.name}</td>
+                  <td className="sg-cb-mono">{machine.ip || "—"}</td>
+                  <td>{ROLE_ONE[roles[index]] || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      {chosen?.counts.loadbalancer ? (
+        <p className="muted">The API address (VIP) is reserved from the network&apos;s range when you install.</p>
+      ) : null}
+      <div className="sg-cb-actions">
+        {versions.length ? (
+          <label className="sg-cb-inlinecheck">
+            Kubernetes
+            <select className="sg-cb-input" value={version} onChange={(event) => setVersion(event.target.value)}>
+              {versions.map((item) => <option key={item} value={item}>v{item}</option>)}
+            </select>
+          </label>
+        ) : null}
+        <button className="primary" type="button" disabled={busy || !chosen}
+                onClick={() => onInstall({ counts: chosen.counts, k8sVersion: version || undefined })}>
+          {busy ? "Running preflight…" : `Install Kubernetes${chosen?.name ? ` (${chosen.name})` : ""}`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function Failure({ title, error, children }) {
   return (
     <div className="card sg-cb-blowup sg-cb-pv-fail">
@@ -341,9 +422,11 @@ function Failure({ title, error, children }) {
  */
 export function ProvisionCard({
   build, canExecute, canCreate, currentUserId, notify, onChanged, onRequestDestroy,
+  templateCatalog = null, k8sVersions = [],
 }) {
   const [busy, setBusy] = useState(false);
   const [refusal, setRefusal] = useState("");
+  const [installOpen, setInstallOpen] = useState(false);
   const job = build.provisioning?.job;
   const active = ["planning", "applying", "connecting"].includes(job?.status);
   const now = useTicker(active);
@@ -513,20 +596,29 @@ export function ProvisionCard({
             <b>{count} VM{count === 1 ? "" : "s"} running · Kubernetes not installed</b>
             <p className="muted">
               This build creates VMs only, and stopped once every VM answered SSH. Log in with the
-              build&apos;s SSH route to test them. Install Kubernetes runs preflight on these same VMs,
-              then builds the cluster{build.k8sVersion ? ` (v${build.k8sVersion})` : ""} — nothing is
-              cloned again. When you are done, Destroy VMs frees them and their addresses.
+              build&apos;s SSH route to test them. Install Kubernetes lets you pick a shape that fits
+              these VMs (Lab, Small, Standard HA …), then preflights and builds the cluster on them —
+              nothing is cloned again. When you are done, Destroy VMs frees them and their addresses.
             </p>
           </div>
           <div className="sg-cb-pv-vmsonly-acts">
-            {canExecute ? (
-              <button className="primary" type="button" disabled={busy}
-                      onClick={() => act(() => installKubernetesOnVms(build.id))}>
-                {busy ? "Starting…" : "Install Kubernetes"}
+            {canExecute && !installOpen ? (
+              <button className="primary" type="button" disabled={busy} onClick={() => setInstallOpen(true)}>
+                Install Kubernetes…
               </button>
             ) : null}
           </div>
         </div>
+        {installOpen && canExecute ? (
+          <InstallChooser
+            build={build}
+            catalog={templateCatalog}
+            k8sVersions={k8sVersions}
+            busy={busy}
+            onClose={() => setInstallOpen(false)}
+            onInstall={(payload) => act(() => installKubernetesOnVms(build.id, payload))}
+          />
+        ) : null}
         {refusalNote}
         <ProvisionProgress build={build} now={now} />
       </>

@@ -591,17 +591,41 @@ Destroy (destroy plan → a second person with cluster_builds:execute approves).
 
 ### VMs only (built 2026-10-09)
 
-The wizard's Machines step offers **Create VMs only** next to "Create new VMs" and "Use machines
-you already have". The build carries `ClusterBuild.vms_only` (`vmsOnly`), skips the Add-ons and
-Workloads steps, and runs plan → apply → SSH exactly as above. At the hand-off
-(`jobs._handoff`) it stops instead: status `vms_ready`, audit `cluster_build_vms_ready`.
-Preflight and start are refused while `vms_only` is set.
+The wizard's first question is **What do you want to create?** — a Kubernetes cluster, or **VMs
+only**. VMs only asks for a name and a number (1–20, `spec.vmCount`, one size `sizes.vm`), never a
+template or roles: the VMs are `<name>-vm-1 … -vm-N`, role `vm` (node role `vm`, Blueprint tier
+"Virtual machines"), no API address. The build carries `ClusterBuild.vms_only` (`vmsOnly`), skips
+Add-ons and Workloads, and runs plan → apply → SSH exactly as above. At the hand-off
+(`jobs._handoff`) it stops: status `vms_ready`, audit `cluster_build_vms_ready`. Preflight and start
+are refused while `vms_only` is set.
 
-From `vms_ready`: **Install Kubernetes** (`POST /provision/install-kubernetes`, `cluster_builds:execute`)
-clears the flag and runs the same hand-off a normal VMware build takes
-(`jobs.start_kubernetes`: preflight, start when clean or only the plan's placement warned, else a
-note); the VMs are not cloned again. **Destroy** works as for any VMware build (second person).
-The flag cannot be flipped by editing once VMs exist.
+From `vms_ready`: **Install Kubernetes…** opens a chooser of the shapes that fit N VMs
+(`shapesForVms`: the built-in/saved templates whose counts sum to N first — 2 → Lab, 4 → Small,
+8 → Standard HA — then every other valid split; 1 VM is a single-node cluster, no worker).
+`POST /provision/install-kubernetes {counts, k8sVersion?}` (`templates.counts_for_vms`: same etcd /
+balancer rules, workers may be 0, must sum to N) gives the VMs roles in order — balancers, control
+planes, workers — reserves a VIP from the range when there are balancers, then runs the normal
+hand-off (`jobs.start_kubernetes`). Names and addresses never change and nothing is cloned again.
+Not done at install: DRS keep-apart rules for an HA shape (preflight still checks placement).
+**Destroy** works as for any VMware build (second person).
+
+### A folder made for you, and template sizes (built 2026-10-09)
+
+For a provisioning account a vSphere admin scoped to one folder:
+
+- `spec.folderMode`: `create` (default — OpenTofu makes `<folder>/<build>` and removes it) or
+  `existing` (the VMs go straight into the chosen folder; no `vsphere_folder` resource, and
+  `Folder.Create` / `Folder.Delete` are not required).
+- `spec.sizeMode`: `custom` (default) or `template` — every VM keeps the VM template's own CPU,
+  memory (exact MB) and disk, and `VirtualMachine.Config.CPUCount` / `Memory` / `DiskExtend` are not
+  required. The wizard starts in `template` when the vCenter's last privilege check says the
+  account may not change CPU or memory.
+- The plan only requires privileges it uses (`jobs._privileges_not_needed`; also
+  `Host.Inventory.EditCluster` when no keep-apart rule is created), and a refusal names the
+  option that avoids the missing ones.
+
+Untested against a real vCenter: whether a clone whose CPU/memory equal the template's still asks
+vCenter for the resize privileges.
 
 ### Not covered yet
 

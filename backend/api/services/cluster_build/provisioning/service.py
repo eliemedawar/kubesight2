@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ....db import db
 from ....models import ClusterBuild, ClusterInfraState, ClusterProvisionJob, VSphereConnection
@@ -87,6 +87,10 @@ def _normalize_template(raw: Any) -> Dict[str, Any]:
         "guestFullName": _text(raw, "guestFullName") or None,
         "firmware": (_text(raw, "firmware", 8) or "bios").lower(),
         "scsiType": _text(raw, "scsiType", 16) or "pvscsi",
+        # The template's own size: what a clone keeps when KubeSight does not
+        # resize it (sizeMode "template").
+        "cpu": int(raw.get("cpu") or 0) or None,
+        "memoryMb": int(raw.get("memoryMb") or 0) or None,
         "nicType": (nics[0]["type"] if nics else "vmxnet3"),
         "nics": nics,
         "disks": disks,
@@ -95,8 +99,17 @@ def _normalize_template(raw: Any) -> Dict[str, Any]:
 
 _LOCKED_ONCE_CREATED = (
     "vsphereConnectionId", "datacenterId", "clusterId", "resourcePoolId",
-    "folderParentId", "folderParent", "networkId", "counts",
+    "folderParentId", "folderParent", "folderMode", "networkId", "counts", "vmCount",
 )
+# create: OpenTofu makes <folder>/<cluster name> and removes it with the
+#         cluster (needs Folder.Create / Folder.Delete on the chosen folder).
+# existing: the VMs go straight into a folder someone already made — often
+#         the one a vSphere admin set aside and granted the account on.
+_FOLDER_MODES = ("create", "existing")
+# custom: KubeSight sets CPU / memory / disk per role.
+# template: every clone keeps the VM template's own size, for an account that
+#         may not change CPU or memory.
+_SIZE_MODES = ("custom", "template")
 
 
 def normalize_spec(build: ClusterBuild, raw: Any) -> Dict[str, Any]:
@@ -116,8 +129,30 @@ def normalize_spec(build: ClusterBuild, raw: Any) -> Dict[str, Any]:
     if connection is None:
         raise ValueError("vCenter connection not found.")
 
-    counts = templates.normalize_counts(raw.get("counts") or previous.get("counts"))
-    sizes = templates.normalize_sizes(raw.get("sizes") or previous.get("sizes"), counts)
+    template = _normalize_template(raw.get("template"))
+    size_mode = str(raw.get("sizeMode") or previous.get("sizeMode") or "custom").strip()
+    if size_mode not in _SIZE_MODES:
+        raise ValueError("sizeMode must be 'custom' or 'template'.")
+    if size_mode == "template":
+        templates.template_size(template)  # refuses a template with no reported size
+    if build.vms_only:
+        # VMs first: just how many. Their roles are chosen when (if) someone
+        # installs Kubernetes on them.
+        counts = None
+        vm_count = templates.normalize_vm_count(raw.get("vmCount") or previous.get("vmCount"))
+        raw_sizes = raw.get("sizes") or previous.get("sizes") or {}
+        sizes = {templates.VM_ROLE: templates.normalize_vm_size(
+            raw_sizes.get(templates.VM_ROLE) if isinstance(raw_sizes, dict) else None
+        ) if size_mode == "custom" else templates.template_size(template)}
+    else:
+        vm_count = None
+        counts = templates.normalize_counts(raw.get("counts") or previous.get("counts"))
+        sizes = templates.normalize_sizes(
+            raw.get("sizes") or previous.get("sizes"), counts if size_mode == "custom" else {}
+        )
+    folder_mode = str(raw.get("folderMode") or previous.get("folderMode") or "create").strip()
+    if folder_mode not in _FOLDER_MODES:
+        raise ValueError("folderMode must be 'create' or 'existing'.")
     network_name = _text(raw, "networkName")
     range_row = ip_pool.range_for_network(connection.id, network_name)
     if range_row is None:
@@ -134,19 +169,26 @@ def normalize_spec(build: ClusterBuild, raw: Any) -> Dict[str, Any]:
         "clusterName": _text(raw, "clusterName"),
         "resourcePoolId": _object_id(raw, "resourcePoolId", "resource pool"),
         "resourcePoolName": _text(raw, "resourcePoolName"),
-        "folderParentId": _object_id(raw, "folderParentId", "folder", required=False),
+        "folderParentId": _object_id(raw, "folderParentId", "folder",
+                                     required=folder_mode == "existing"),
         "folderParent": _text(raw, "folderParent", 512).strip("/"),
+        "folderMode": folder_mode,
         "datastoreId": _object_id(raw, "datastoreId", "datastore"),
         "datastoreName": _text(raw, "datastoreName"),
         "networkId": _object_id(raw, "networkId", "network"),
         "networkName": network_name,
         "networkRangeId": range_row.id,
-        "template": _normalize_template(raw.get("template")),
+        "template": template,
         "counts": counts,
+        "vmCount": vm_count,
         "sizes": sizes,
+        "sizeMode": size_mode,
         "antiAffinity": bool(raw.get("antiAffinity", True)),
         "machines": list(previous.get("machines") or []),
     }
+
+    if folder_mode == "existing" and not spec["folderParent"]:
+        raise ValueError("Choose the folder the VMs go into.")
 
     if state_store.has_resources(build.id):
         changed = [key for key in _LOCKED_ONCE_CREATED if spec.get(key) != previous.get(key)]
@@ -175,6 +217,26 @@ def apply_shape_to_build(build: ClusterBuild) -> None:
 # Machines and addresses
 # ---------------------------------------------------------------------------
 
+def machine_size(spec: Dict[str, Any], role: str, sizes: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
+    """CPU, memory (GB and MB) and disk one new machine of ``role`` gets."""
+    if spec.get("sizeMode") == "template":
+        return templates.template_size(spec.get("template") or {})
+    size = (sizes or spec.get("sizes") or {})[role]
+    return {
+        "cpu": int(size["cpu"]),
+        "memoryGb": int(size["memoryGb"]),
+        "memoryMb": int(size["memoryGb"]) * 1024,
+        "diskGb": int(size["diskGb"]),
+    }
+
+
+def _wanted_roles(spec: Dict[str, Any]) -> List[Tuple[str, int]]:
+    if spec.get("vmCount"):
+        return [(templates.VM_ROLE, int(spec["vmCount"]))]
+    counts = spec["counts"]
+    return [(role, counts[role]) for role in ("loadbalancer", "controlPlane", "worker")]
+
+
 def _plan_machines(build: ClusterBuild) -> List[Dict[str, Any]]:
     """Every VM the build should have, with reserved addresses.
 
@@ -183,12 +245,12 @@ def _plan_machines(build: ClusterBuild) -> List[Dict[str, Any]]:
     and plan again" works after a partial failure.
     """
     spec = dict(build.provisioning_json or {})
-    counts, sizes = spec["counts"], spec["sizes"]
+    counts = spec.get("counts") or {}
     created = set(state_store.vm_instances(build.id))
     previous = {m["name"]: m for m in spec.get("machines") or []}
     wanted: List[Dict[str, Any]] = []
-    for role in ("loadbalancer", "controlPlane", "worker"):
-        for index in range(1, counts[role] + 1):
+    for role, count in _wanted_roles(spec):
+        for index in range(1, count + 1):
             name = f"{build.name}-{templates.ROLE_SHORT[role]}-{index}"
             if name in created and name in previous:
                 wanted.append(previous[name])
@@ -196,15 +258,13 @@ def _plan_machines(build: ClusterBuild) -> List[Dict[str, Any]]:
             wanted.append({
                 "name": name,
                 "role": role,
-                "cpu": sizes[role]["cpu"],
-                "memoryGb": sizes[role]["memoryGb"],
-                "diskGb": sizes[role]["diskGb"],
+                **machine_size(spec, role),
                 "datastoreId": spec["datastoreId"],
             })
 
     range_row = ip_pool.get_range(int(spec["networkRangeId"]))
     keys = [{"key": m["name"], "purpose": "node"} for m in wanted]
-    if counts["loadbalancer"]:
+    if counts.get("loadbalancer"):
         keys.insert(0, {"key": "vip", "purpose": "vip"})
     addresses = ip_pool.reserve(range_row, build.id, keys)
     stale = {
@@ -217,13 +277,14 @@ def _plan_machines(build: ClusterBuild) -> List[Dict[str, Any]]:
         machine["ip"] = addresses[machine["name"]]
     spec["machines"] = wanted
     build.provisioning_json = spec
-    if counts["loadbalancer"]:
+    if counts.get("loadbalancer"):
         build.vip_address = addresses["vip"]
         build.control_plane_endpoint = f"{addresses['vip']}:6443"
     else:
-        primary = next(m for m in wanted if m["role"] == "controlPlane")
+        # A VMs-only build has no API endpoint until Kubernetes is installed.
+        primary = next((m for m in wanted if m["role"] == "controlPlane"), None)
         build.vip_address = None
-        build.control_plane_endpoint = f"{primary['ip']}:6443"
+        build.control_plane_endpoint = f"{primary['ip']}:6443" if primary else ""
     return wanted
 
 
@@ -316,10 +377,11 @@ def request_create_plan(build: ClusterBuild, *, actor: str = "", user=None) -> C
     apply_shape_to_build(build)
     machines = _plan_machines(build)
     _sync_nodes(build, machines)
-    build_service._validate_topology(
-        build,
-        [{"role": n.role, "hostname": n.hostname, "address": n.address} for n in build.nodes],
-    )
+    if not build.vms_only:
+        build_service._validate_topology(
+            build,
+            [{"role": n.role, "hostname": n.hostname, "address": n.address} for n in build.nodes],
+        )
     if build.status == "provision_failed":
         build.status = "draft"
     build.error = None
@@ -375,7 +437,9 @@ def request_grow_plan(build: ClusterBuild, payload: Dict[str, Any], *, actor: st
             raw_sizes[role] = size
     if payload.get("size") and isinstance(payload["size"], dict):
         raw_sizes["worker"] = payload["size"]  # the workers-only form
-    sizes = templates.normalize_sizes(raw_sizes, adding)
+    sizes = templates.normalize_sizes(
+        raw_sizes, adding if spec.get("sizeMode") != "template" else {}
+    )
 
     new: List[Dict[str, Any]] = []
     for role in ("loadbalancer", "controlPlane", "worker"):
@@ -391,8 +455,7 @@ def request_grow_plan(build: ClusterBuild, payload: Dict[str, Any], *, actor: st
         new.extend({
             "name": f"{build.name}-{short}-{start + offset}",
             "role": role,
-            "cpu": sizes[role]["cpu"], "memoryGb": sizes[role]["memoryGb"],
-            "diskGb": sizes[role]["diskGb"],
+            **machine_size(spec, role, sizes),
             "datastoreId": spec["datastoreId"],
         } for offset in range(adding[role]))
     range_row = ip_pool.get_range(int(spec["networkRangeId"]))
@@ -535,14 +598,59 @@ def retry_connect(build: ClusterBuild, job: ClusterProvisionJob) -> ClusterProvi
     return job
 
 
-def install_kubernetes(build: ClusterBuild, *, actor: str = "", user=None) -> Optional[str]:
+def _assign_roles(build: ClusterBuild, counts: Dict[str, int]) -> List[Dict[str, Any]]:
+    """Give the build's VMs Kubernetes roles, in VM order: balancers first, then
+    control planes, then workers. Names and addresses stay as they are."""
+    spec = dict(build.provisioning_json or {})
+    machines = [dict(m) for m in spec.get("machines") or []]
+    roles = (["loadbalancer"] * counts["loadbalancer"]
+             + ["controlPlane"] * counts["controlPlane"]
+             + ["worker"] * counts["worker"])
+    for machine, role in zip(machines, roles):
+        machine["role"] = role
+    sizes = dict(spec.get("sizes") or {})
+    for role in ("loadbalancer", "controlPlane", "worker"):
+        first = next((m for m in machines if m["role"] == role), None)
+        if first is not None:
+            sizes[role] = {"cpu": first["cpu"], "memoryGb": first["memoryGb"], "diskGb": first["diskGb"]}
+    spec.update(machines=machines, counts=counts, sizes=sizes, vmCount=None)
+    build.provisioning_json = spec
+    offered = templates.catalog()
+    build.template_id = next(
+        (t["id"] for t in offered["builtin"] + offered["custom"] if (t.get("counts") or {}) == counts),
+        "custom",
+    )
+    return machines
+
+
+def _reserve_vip(build: ClusterBuild) -> str:
+    """An API address for a VMs-only build that turns out to need balancers."""
+    spec = build.provisioning_json or {}
+    range_row = ip_pool.get_range(int(spec["networkRangeId"]))
+    skip: set = set()
+    for _ in range(3):
+        address = ip_pool.reserve(range_row, build.id, [{"key": "vip", "purpose": "vip"}], skip=skip)["vip"]
+        if not ip_pool.probe_in_use([address]):
+            ip_pool.mark_in_use(build.id, {"vip"})
+            return address
+        skip.add(address)
+    raise ValueError(f"No free API address on {spec.get('networkName')}: the ones tried all answer.")
+
+
+def install_kubernetes(build: ClusterBuild, payload: Optional[Dict[str, Any]] = None, *,
+                       actor: str = "", user=None) -> Optional[str]:
     """Turn a VMs-only build into a cluster build on the VMs it already has.
 
-    The same hand-off a normal VMware build takes once its VMs answer:
-    preflight, then the build starts on its own when preflight is clean (or
-    only repeats a placement the plan chose). Returns what a person still has
-    to look at, or None when the build started.
+    ``payload["counts"]`` says which shape the VMs take (Lab, Small, …); it must
+    add up to the number of VMs. Then the same hand-off a normal VMware build
+    takes once its VMs answer: preflight, then the build starts on its own when
+    preflight is clean. Returns what a person still has to look at, or None
+    when the build started.
     """
+    from .. import service as build_service
+    from .. import k8s_versions
+
+    payload = payload or {}
     _require_vmware(build)
     if not build.vms_only or build.status != "vms_ready":
         raise ValueError("Kubernetes can be installed only on a VMs-only build whose VMs are ready.")
@@ -553,6 +661,26 @@ def install_kubernetes(build: ClusterBuild, *, actor: str = "", user=None) -> Op
     )
     if created is None or not state_store.has_resources(build.id):
         raise ValueError("OpenTofu's state lists no VMs for this build.")
+    total = len((build.provisioning_json or {}).get("machines") or [])
+    counts = templates.counts_for_vms(payload.get("counts"), total)
+    if payload.get("k8sVersion"):
+        build.k8s_version = k8s_versions.validate_version(payload["k8sVersion"])
+
+    machines = _assign_roles(build, counts)
+    _sync_nodes(build, machines)
+    apply_shape_to_build(build)
+    if counts["loadbalancer"]:
+        vip = build.vip_address or _reserve_vip(build)
+        build.vip_address = vip
+        build.control_plane_endpoint = f"{vip}:6443"
+    else:
+        primary = next(m for m in machines if m["role"] == "controlPlane")
+        build.vip_address = None
+        build.control_plane_endpoint = f"{primary['ip']}:6443"
+    build_service._validate_topology(
+        build,
+        [{"role": n.role, "hostname": n.hostname, "address": n.address} for n in build.nodes],
+    )
     build.vms_only = False
     build.status = "draft"
     build.finished_at = None

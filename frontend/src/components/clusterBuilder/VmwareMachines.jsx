@@ -14,9 +14,13 @@ import {
   ROLE_KEYS,
   ROLE_ONE,
   ROLE_TITLE,
+  VM_ROLE,
+  cannotResize,
   datastoreFit,
+  effectiveSizes,
   minimumDisk,
   sizeErrors,
+  templateSize,
   totals,
 } from "../../utils/clusterProvisioning.js";
 import { getVSpherePlacement } from "../../api/clusterBuildsApi.js";
@@ -91,9 +95,41 @@ function TemplatePicker({ templates, value, onChange }) {
   );
 }
 
+/** Kept from the template: every VM gets the template's own size, read-only. */
+function TemplateSizes({ counts, template }) {
+  const kept = templateSize(template);
+  const roles = [...ROLE_KEYS, VM_ROLE].filter((role) => counts[role]);
+  if (!kept) {
+    return (
+      <p className="sg-cb-field-error">
+        vCenter did not report {template?.name || "this template"}&apos;s CPU and memory, so its size cannot be kept.
+        Refresh the vCenter list, or set the sizes.
+      </p>
+    );
+  }
+  return (
+    <div className="table-wrap">
+      <table className="sg-cb-sizes">
+        <thead><tr><th>Role</th><th>Count</th><th>vCPU</th><th>Memory GB</th><th>Disk GB</th></tr></thead>
+        <tbody>
+          {roles.map((role) => (
+            <tr key={role}>
+              <td><span className={`sg-cb-rolechip is-${role}`}><i />{ROLE_TITLE[role]}</span></td>
+              <td className="sg-cb-mono">{counts[role]}</td>
+              <td className="sg-cb-mono">{kept.cpu}</td>
+              <td className="sg-cb-mono">{kept.memoryMb % 1024 ? (kept.memoryMb / 1024).toFixed(1) : kept.memoryGb}</td>
+              <td className="sg-cb-mono">{kept.diskGb}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function SizesTable({ counts, sizes, setSizes, template, minimums }) {
   const errors = sizeErrors(counts, sizes, minimums);
-  const roles = ROLE_KEYS.filter((role) => counts[role]);
+  const roles = [...ROLE_KEYS, VM_ROLE].filter((role) => counts[role]);
   return (
     <>
       <div className="table-wrap">
@@ -103,7 +139,7 @@ function SizesTable({ counts, sizes, setSizes, template, minimums }) {
           </thead>
           <tbody>
             {roles.map((role) => {
-              const min = minimums[role] || DEFAULT_MINIMUMS[role];
+              const min = minimums?.[role] || DEFAULT_MINIMUMS[role];
               const diskFloor = minimumDisk(role, template, minimums);
               return (
                 <tr key={role}>
@@ -150,7 +186,10 @@ export default function VmwareMachines({
   const { data, loading, error, refresh } = placementState;
   const datacenters = data?.datacenters || [];
   const { dc, cluster, datastore, network, template, range } = resolved;
-  const sum = totals(counts, sizes);
+  const keepTemplate = vm.sizeMode === "template";
+  const existingFolder = vm.folderMode === "existing";
+  const connection = connections.find((row) => String(row.id) === String(vm.connectionId));
+  const sum = totals(counts, effectiveSizes(counts, sizes, vm.sizeMode, template));
   const fit = datastoreFit(datastore, sum.diskGb);
   const set = (key, value) => setVm({ ...vm, [key]: value });
 
@@ -178,7 +217,10 @@ export default function VmwareMachines({
           </span>
         </div>
         <p className="muted sg-cb-pv-lede">
-          Read with the provisioning account. The VM folder is created by OpenTofu and removed with the cluster.
+          Read with the provisioning account.{" "}
+          {existingFolder
+            ? "The VMs go straight into the folder you choose; KubeSight never creates or deletes that folder."
+            : "OpenTofu creates a folder for this build inside the one you choose, and removes it with the VMs."}
         </p>
         {error ? <p className="sg-cb-field-error">{error}</p> : null}
         <div className="sg-cb-qgrid">
@@ -212,12 +254,23 @@ export default function VmwareMachines({
             </select>
           </Field>
           <Field label="VM folder" htmlFor="vm-folder"
-                 hint={`New folder: ${resolved.folder ? `${resolved.folder.path}/` : ""}<cluster name>`}>
+                 hint={existingFolder
+                   ? (resolved.folder ? `VMs go into ${resolved.folder.path}` : "")
+                   : `New folder: ${resolved.folder ? `${resolved.folder.path}/` : ""}<cluster name>`}
+                 error={existingFolder && !resolved.folder ? "Choose the folder the VMs go into." : ""}>
             <select id="vm-folder" className="sg-cb-input" value={vm.folderParentId}
                     onChange={(e) => set("folderParentId", e.target.value)}>
-              <option value="">At the datacenter&apos;s top level</option>
+              <option value="">{existingFolder ? "Choose…" : "At the datacenter's top level"}</option>
               {(dc?.folders || []).map((f) => <option key={f.id} value={f.id}>{f.path}</option>)}
             </select>
+            <div className="sg-cb-seg sg-cb-pv-mode" role="group" aria-label="Folder">
+              <button type="button" aria-pressed={!existingFolder} onClick={() => set("folderMode", "create")}>
+                Create a folder inside it
+              </button>
+              <button type="button" aria-pressed={existingFolder} onClick={() => set("folderMode", "existing")}>
+                Put the VMs straight in
+              </button>
+            </div>
           </Field>
           <Field label="Datastore" htmlFor="vm-ds">
             <select id="vm-ds" className="sg-cb-input" value={vm.datastoreId}
@@ -281,7 +334,25 @@ export default function VmwareMachines({
           <h2>Machine sizes</h2>
           <span className="sg-cb-sect-right">{sum.machines} VMs · {sum.cpu} vCPU · {sum.memoryGb} GB</span>
         </div>
-        <SizesTable counts={counts} sizes={sizes} setSizes={setSizes} template={template} minimums={minimums} />
+        <div className="sg-cb-seg sg-cb-pv-mode" role="group" aria-label="Machine sizes">
+          <button type="button" aria-pressed={!keepTemplate} onClick={() => set("sizeMode", "custom")}>
+            Set the sizes
+          </button>
+          <button type="button" aria-pressed={keepTemplate} onClick={() => set("sizeMode", "template")}>
+            Keep the VM template&apos;s size
+          </button>
+        </div>
+        <p className="muted sg-cb-pv-lede">
+          {keepTemplate
+            ? "Every VM gets the template's own CPU, memory and disk, so KubeSight never resizes a VM — for an account that may not change CPU or memory."
+            : "KubeSight sets CPU, memory and disk on each clone. The account needs the CPU, memory and disk-extend privileges for that."}
+          {!keepTemplate && cannotResize(connection)
+            ? ` The last privilege check on ${connection.name} says this account may not change CPU or memory.`
+            : ""}
+        </p>
+        {keepTemplate
+          ? <TemplateSizes counts={counts} template={template} />
+          : <SizesTable counts={counts} sizes={sizes} setSizes={setSizes} template={template} minimums={minimums} />}
       </div>
 
       <div className="card sg-cb-card">

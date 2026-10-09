@@ -3,6 +3,10 @@ import {
   countsError,
   datastoreFit,
   defaultPlacement,
+  effectiveSizes,
+  shapesForVms,
+  vmCountError,
+  vmsOnlyCounts,
   destroyStance,
   growthState,
   machineNames,
@@ -262,5 +266,63 @@ describe("growing a running cluster", () => {
     expect(state.loadbalancer.allowed).toBe(false);
     expect(state.controlPlane.allowed).toBe(false);
     expect(state.controlPlane.reason).toMatch(/Five/);
+  });
+});
+
+describe("VMs first", () => {
+  const catalog = {
+    builtin: [
+      { id: "lab", name: "Lab", counts: { loadbalancer: 0, controlPlane: 1, worker: 1 } },
+      { id: "small", name: "Small", counts: { loadbalancer: 1, controlPlane: 1, worker: 2 } },
+      { id: "standard-ha", name: "Standard HA", counts: { loadbalancer: 2, controlPlane: 3, worker: 3 } },
+    ],
+    custom: [],
+  };
+
+  it("counts any number of plain VMs", () => {
+    expect(vmCountError(1)).toBe("");
+    expect(vmCountError(0)).toMatch(/at least 1/);
+    expect(vmCountError(21)).toMatch(/At most 20/);
+    const counts = vmsOnlyCounts(2);
+    expect(machineNames("t", counts).map((m) => m.name)).toEqual(["t-vm-1", "t-vm-2"]);
+    expect(shapeLabel(counts)).toBe("2 VMs");
+    expect(totals(counts, { vm: { cpu: 2, memoryGb: 4, diskGb: 40 } })).toEqual(
+      { machines: 2, cpu: 4, memoryGb: 8, diskGb: 80 }
+    );
+    expect(sizeErrors(counts, { vm: { cpu: 0, memoryGb: 4, diskGb: 40 } })[0]).toMatch(/VMs need at least 1 vCPU/);
+  });
+
+  it("offers the shapes that fit, named templates first", () => {
+    expect(shapesForVms(1, catalog).map((s) => s.label)).toEqual(["1 control plane"]);
+    expect(shapesForVms(1, catalog)[0].note).toMatch(/No worker/);
+    expect(shapesForVms(2, catalog)[0]).toMatchObject({ name: "Lab", templateId: "lab" });
+    const four = shapesForVms(4, catalog);
+    expect(four[0]).toMatchObject({ name: "Small" });
+    expect(four.map((s) => s.key)).toEqual(expect.arrayContaining(["1-1-2", "0-1-3"]));
+    expect(shapesForVms(8, catalog)[0]).toMatchObject({ name: "Standard HA" });
+    expect(shapesForVms(8, catalog).every((s) => s.counts.loadbalancer + s.counts.controlPlane + s.counts.worker === 8)).toBe(true);
+  });
+
+  it("keeps the template's size when asked", () => {
+    const template = { cpu: 2, memoryMb: 3072, disks: [{ sizeGb: 50 }] };
+    const kept = effectiveSizes(vmsOnlyCounts(2), { vm: { cpu: 8, memoryGb: 32, diskGb: 200 } }, "template", template);
+    expect(kept.vm).toEqual({ cpu: 2, memoryGb: 3, memoryMb: 3072, diskGb: 50 });
+    expect(effectiveSizes(SMALL, SIZES, "custom", template)).toBe(SIZES);
+  });
+
+  it("sends only the VM count for a VMs-only build", () => {
+    const resolved = { dc: { id: "dc" }, cluster: { id: "c" }, folder: { id: "f", path: "Team/k8s" },
+      datastore: { id: "ds" }, network: { id: "n" }, template: { id: "t" } };
+    const vm = { antiAffinity: true, folderMode: "existing", sizeMode: "template" };
+    const payload = provisioningPayload(1, resolved, vm, vmsOnlyCounts(3), { vm: { cpu: 2 } }, { vmsOnly: true });
+    expect(payload).toMatchObject({ counts: null, vmCount: 3, sizes: { vm: { cpu: 2 } },
+      folderMode: "existing", sizeMode: "template", folderParent: "Team/k8s" });
+    expect(placementProblem({ ...resolved, folder: null, range: { size: 9 }, folderMode: "existing" }, vmsOnlyCounts(1)))
+      .toMatch(/folder/);
+  });
+
+  it("draws plain VMs as their own tier", () => {
+    const plan = machinesBlueprint({ machines: [{ name: "t-vm-1", role: "vm", ip: "10.0.0.5" }] });
+    expect(plan.tiers.map((t) => t.role)).toEqual(["vm"]);
   });
 });

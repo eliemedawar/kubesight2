@@ -62,13 +62,16 @@ export const ROLE_LABELS = {
   control_plane: "Control plane",
   worker: "Worker",
   loadbalancer: "Load balancer",
+  vm: "VM (no role yet)",
 };
 
-const TIER_ORDER = ["loadbalancer", "control_plane", "worker"];
+// "vm": a VMs-only build's machines, before Kubernetes gives them a role.
+const TIER_ORDER = ["loadbalancer", "control_plane", "worker", "vm"];
 const TIER_LABELS = {
   loadbalancer: "Load balancers",
   control_plane: "Control planes",
   worker: "Workers",
+  vm: "Virtual machines",
 };
 
 /** Statuses that mean "this machine is part of the cluster now". */
@@ -404,7 +407,9 @@ function assemble({ tiers, targets, bus, state }) {
     bus,
     conflictHosts,
     tiers: TIER_ORDER
-      .filter((role) => targets[role] > 0 || (tiers[role] || []).length > 0 || role === "control_plane")
+      // A drawing always has a control-plane tier — except plain VMs, which have none yet.
+      .filter((role) => targets[role] > 0 || (tiers[role] || []).length > 0
+        || (role === "control_plane" && !(tiers.vm || []).length))
       .map((role) => ({
         role,
         label: TIER_LABELS[role],
@@ -513,8 +518,8 @@ export function machinesBlueprint({
   machines = [], vip = null, endpoint = "", state = "outline", slotState = () => "set",
   busState = "idle", stamp = () => null,
 }) {
-  const roleOf = { loadbalancer: "loadbalancer", controlPlane: "control_plane", worker: "worker" };
-  const tiers = { loadbalancer: [], control_plane: [], worker: [] };
+  const roleOf = { loadbalancer: "loadbalancer", controlPlane: "control_plane", worker: "worker", vm: "vm" };
+  const tiers = { loadbalancer: [], control_plane: [], worker: [], vm: [] };
   machines.forEach((machine) => {
     const tier = tiers[roleOf[machine.role] || machine.role];
     if (!tier) return;
@@ -532,6 +537,7 @@ export function machinesBlueprint({
     loadbalancer: tiers.loadbalancer.length,
     control_plane: tiers.control_plane.length,
     worker: tiers.worker.length,
+    vm: tiers.vm.length,
   };
   return assemble({
     tiers,

@@ -40,7 +40,15 @@ def vm_address(name: str) -> str:
 
 def folder_path(spec: Dict[str, Any], cluster_name: str) -> str:
     parent = str(spec.get("folderParent") or "").strip("/")
+    if spec.get("folderMode") == "existing":
+        # A folder someone else made (and may have granted the account on):
+        # the VMs go straight in, and OpenTofu never creates or deletes it.
+        return parent
     return f"{parent}/{cluster_name}" if parent else cluster_name
+
+
+def creates_folder(spec: Dict[str, Any]) -> bool:
+    return spec.get("folderMode") != "existing"
 
 
 def render(
@@ -67,7 +75,9 @@ def render(
             "role": node["role"],
             "ip": node["ip"],
             "cpu": int(node["cpu"]),
-            "memory_mb": int(node["memoryGb"]) * 1024,
+            # Exact MB, so a clone that keeps the template's size asks for
+            # precisely what the template has (and nothing is reconfigured).
+            "memory_mb": int(node.get("memoryMb") or int(node["memoryGb"]) * 1024),
             "disk_gb": max(int(node["diskGb"]), int(disks[0].get("sizeGb") or 0)),
         }
         for node in nodes
@@ -104,7 +114,8 @@ def render(
         "name": "${each.key}",
         "resource_pool_id": spec["resourcePoolId"],
         "datastore_id": spec["datastoreId"],
-        "folder": "${vsphere_folder.cluster.path}",
+        "folder": ("${vsphere_folder.cluster.path}" if creates_folder(spec)
+                   else folder_path(spec, cluster_name)),
         "num_cpus": "${each.value.cpu}",
         "memory": "${each.value.memory_mb}",
         "guest_id": template.get("guestId") or "otherLinux64Guest",
@@ -130,15 +141,15 @@ def render(
         }],
     }
 
-    resources: Dict[str, Any] = {
-        "vsphere_folder": {
+    resources: Dict[str, Any] = {}
+    if creates_folder(spec):
+        resources["vsphere_folder"] = {
             "cluster": {
                 "path": folder_path(spec, cluster_name),
                 "type": "vm",
                 "datacenter_id": spec["datacenterId"],
             }
-        },
-    }
+        }
     if for_each:
         resources["vsphere_virtual_machine"] = {"node": vm}
 

@@ -6,32 +6,42 @@
  */
 
 export const ROLE_KEYS = ["loadbalancer", "controlPlane", "worker"];
+// A VMs-only build's machines, before Kubernetes gives them a role.
+export const VM_ROLE = "vm";
+// Every key a counts object may carry: the three Kubernetes roles, then "vm".
+const COUNT_KEYS = [...ROLE_KEYS, VM_ROLE];
 
 export const ROLE_TO_NODE = {
   loadbalancer: "loadbalancer",
   controlPlane: "control_plane",
   worker: "worker",
+  vm: "vm",
 };
 
-export const ROLE_SHORT = { loadbalancer: "lb", controlPlane: "cp", worker: "wk" };
+export const ROLE_SHORT = { loadbalancer: "lb", controlPlane: "cp", worker: "wk", vm: "vm" };
 
 export const ROLE_TITLE = {
   loadbalancer: "Load balancers",
   controlPlane: "Control planes",
   worker: "Workers",
+  vm: "VMs",
 };
 
 export const ROLE_ONE = {
   loadbalancer: "load balancer",
   controlPlane: "control plane",
   worker: "worker",
+  vm: "VM",
 };
 
 export const DEFAULT_MINIMUMS = {
   loadbalancer: { cpu: 1, memoryGb: 2, diskGb: 20 },
   controlPlane: { cpu: 2, memoryGb: 4, diskGb: 40 },
   worker: { cpu: 2, memoryGb: 4, diskGb: 40 },
+  vm: { cpu: 1, memoryGb: 1, diskGb: 10 },
 };
+
+export const MAX_VMS = 20;
 
 export const DEFAULT_MAXIMUM = { cpu: 64, memoryGb: 512, diskGb: 4096 };
 
@@ -63,13 +73,52 @@ export function countsError(counts) {
   return "";
 }
 
+/** VMs first: how many plain VMs a VMs-only build makes. Empty string = fine. */
+export function vmCountError(count, max = MAX_VMS) {
+  const n = Number(count);
+  if (!Number.isInteger(n) || n < 1) return "Create at least 1 VM.";
+  if (n > max) return `At most ${max} VMs in one build.`;
+  return "";
+}
+
+/** The counts object a VMs-only build of ``n`` VMs uses in these helpers. */
+export function vmsOnlyCounts(n) {
+  return { loadbalancer: 0, controlPlane: 0, worker: 0, vm: Number(n) || 0 };
+}
+
+/** The VM template's own size, or null when vCenter did not report it. */
+export function templateSize(template) {
+  if (!template?.cpu || !template?.memoryMb) return null;
+  return {
+    cpu: template.cpu,
+    memoryGb: Math.max(1, Math.ceil(template.memoryMb / 1024)),
+    memoryMb: template.memoryMb,
+    diskGb: template.disks?.[0]?.sizeGb || 0,
+  };
+}
+
+/** Sizes as the VMs will really get them: the template's when it is kept. */
+export function effectiveSizes(counts, sizes, sizeMode, template) {
+  if (sizeMode !== "template") return sizes;
+  const kept = templateSize(template);
+  if (!kept) return sizes;
+  return Object.fromEntries(COUNT_KEYS.map((role) => [role, kept]));
+}
+
+/** Privileges the last "Check privileges" said the account lacks for resizing. */
+export function cannotResize(connection) {
+  const resize = new Set(["VirtualMachine.Config.CPUCount", "VirtualMachine.Config.Memory"]);
+  return (connection?.provisioningPrivileges || [])
+    .some((item) => resize.has(item.privilege) && item.granted === false);
+}
+
 /** One message per role and field that is out of bounds. */
 export function sizeErrors(counts, sizes, minimums = DEFAULT_MINIMUMS, maximum = DEFAULT_MAXIMUM) {
   const errors = [];
-  ROLE_KEYS.forEach((role) => {
+  COUNT_KEYS.forEach((role) => {
     if (!counts?.[role]) return;
     const size = sizes?.[role] || {};
-    const min = minimums[role] || DEFAULT_MINIMUMS[role];
+    const min = minimums?.[role] || DEFAULT_MINIMUMS[role];
     [["cpu", "vCPU"], ["memoryGb", "GB of memory"], ["diskGb", "GB of disk"]].forEach(([key, unit]) => {
       const value = Number(size[key]);
       if (!Number.isFinite(value) || value < min[key]) {
@@ -95,11 +144,11 @@ export function shapeFor(counts) {
 }
 
 export function machineCount(counts) {
-  return ROLE_KEYS.reduce((sum, role) => sum + (counts?.[role] || 0), 0);
+  return COUNT_KEYS.reduce((sum, role) => sum + (counts?.[role] || 0), 0);
 }
 
 export function totals(counts, sizes) {
-  return ROLE_KEYS.reduce((acc, role) => {
+  return COUNT_KEYS.reduce((acc, role) => {
     const n = counts?.[role] || 0;
     const size = sizes?.[role] || {};
     return {
@@ -113,16 +162,47 @@ export function totals(counts, sizes) {
 
 /** A short shape label: "1 load balancer · 1 control plane · 2 workers". */
 export function shapeLabel(counts) {
-  return ROLE_KEYS
+  return COUNT_KEYS
     .filter((role) => counts?.[role])
     .map((role) => `${counts[role]} ${ROLE_ONE[role]}${counts[role] === 1 ? "" : "s"}`)
     .join(" · ");
 }
 
+/** Kubernetes shapes ``n`` existing VMs can take: the saved and built-in
+ *  templates that fit exactly first, then every other valid split. Mirrors
+ *  templates.counts_for_vms (a cluster of existing VMs may have no worker). */
+export function shapesForVms(n, catalog) {
+  const shapes = [];
+  [1, 3, 5].forEach((controlPlane) => {
+    (controlPlane === 1 ? [0, 1] : [2]).forEach((loadbalancer) => {
+      const worker = n - controlPlane - loadbalancer;
+      if (worker < 0) return;
+      shapes.push({ loadbalancer, controlPlane, worker });
+    });
+  });
+  const named = allTemplates(catalog);
+  return shapes
+    .map((counts) => {
+      const template = named.find((t) => ROLE_KEYS.every((role) => (t.counts?.[role] || 0) === counts[role]));
+      return {
+        key: `${counts.loadbalancer}-${counts.controlPlane}-${counts.worker}`,
+        counts,
+        templateId: template?.id || "custom",
+        name: template?.name || null,
+        description: template?.description || "",
+        label: shapeLabel(counts),
+        note: !counts.worker
+          ? "No worker: the control plane must also run your workloads (they need a toleration). Add workers on day two."
+          : "",
+      };
+    })
+    .sort((a, b) => Number(Boolean(b.name)) - Number(Boolean(a.name)));
+}
+
 /** The VM names a build will get, in the order the backend makes them. */
 export function machineNames(clusterName, counts) {
   const out = [];
-  ROLE_KEYS.forEach((role) => {
+  COUNT_KEYS.forEach((role) => {
     for (let index = 1; index <= (counts?.[role] || 0); index += 1) {
       out.push({ name: `${clusterName || "cluster"}-${ROLE_SHORT[role]}-${index}`, role });
     }
@@ -408,6 +488,11 @@ export const EMPTY_VM_PLACEMENT = {
   networkId: "",
   templateId: "",
   antiAffinity: true,
+  // create: OpenTofu makes <folder>/<build name>; existing: VMs go straight
+  // into the chosen folder (one a vSphere admin made for this account).
+  folderMode: "create",
+  // custom: sizes set per role; template: every VM keeps the template's size.
+  sizeMode: "custom",
 };
 
 /** Fill the blanks from what vCenter offers: the likeliest sane choice for each. */
@@ -445,6 +530,10 @@ export function defaultPlacement(placement, current = EMPTY_VM_PLACEMENT, ranges
 }
 
 /** Look up every chosen object; null where something is not chosen or gone. */
+function vmFolderMode(resolved) {
+  return resolved.folderMode || "create";
+}
+
 export function resolvePlacement(placement, vm, ranges = []) {
   const dc = (placement?.datacenters || []).find((d) => d.id === vm.datacenterId) || null;
   const cluster = dc?.clusters.find((c) => c.id === vm.clusterId) || null;
@@ -454,7 +543,11 @@ export function resolvePlacement(placement, vm, ranges = []) {
   const network = dc?.networks.find((n) => n.id === vm.networkId) || null;
   const template = dc?.templates.find((t) => t.id === vm.templateId) || null;
   const range = network ? ranges.find((r) => r.networkName === network.name) || null : null;
-  return { dc, cluster, pool, folder, datastore, network, template, range };
+  return {
+    dc, cluster, pool, folder, datastore, network, template, range,
+    folderMode: vm.folderMode || "create",
+    sizeMode: vm.sizeMode || "custom",
+  };
 }
 
 /** What is still missing before a plan can be made, as one sentence. */
@@ -464,7 +557,11 @@ export function placementProblem(resolved, counts) {
   if (!resolved.datastore) return "Choose a datastore.";
   if (!resolved.network) return "Choose the network the VMs connect to.";
   if (!resolved.range) return `${resolved.network.name} has no address range. An administrator adds one in Sources.`;
+  if (vmFolderMode(resolved) === "existing" && !resolved.folder) return "Choose the folder the VMs go into.";
   if (!resolved.template) return "Choose the VM template to clone.";
+  if (resolved.sizeMode === "template" && !templateSize(resolved.template)) {
+    return `vCenter did not report ${resolved.template.name}'s CPU and memory, so its size cannot be kept. Set the sizes instead.`;
+  }
   if (resolved.template.compatibility?.status === "bad") {
     const bad = resolved.template.compatibility.checks.find((c) => c.status === "bad");
     return `${resolved.template.name} cannot be used: ${bad?.label} — ${bad?.detail}.`;
@@ -476,7 +573,7 @@ export function placementProblem(resolved, counts) {
 }
 
 /** The ``provisioning`` object the backend's normalize_spec reads. */
-export function provisioningPayload(connectionId, resolved, vm, counts, sizes) {
+export function provisioningPayload(connectionId, resolved, vm, counts, sizes, { vmsOnly = false } = {}) {
   const { dc, cluster, pool, folder, datastore, network, template } = resolved;
   return {
     vsphereConnectionId: Number(connectionId),
@@ -493,8 +590,12 @@ export function provisioningPayload(connectionId, resolved, vm, counts, sizes) {
     networkId: network?.id,
     networkName: network?.name,
     template,
-    counts,
-    sizes,
+    // VMs first: a VMs-only build says only how many; roles come at install.
+    counts: vmsOnly ? null : counts,
+    vmCount: vmsOnly ? counts?.vm || 0 : null,
+    sizes: vmsOnly ? { vm: sizes?.vm } : sizes,
+    sizeMode: vm.sizeMode || "custom",
+    folderMode: vm.folderMode || "create",
     antiAffinity: vm.antiAffinity !== false,
   };
 }
@@ -512,5 +613,7 @@ export function placementFromSpec(spec) {
     networkId: spec.networkId || "",
     templateId: spec.template?.id || "",
     antiAffinity: spec.antiAffinity !== false,
+    folderMode: spec.folderMode || "create",
+    sizeMode: spec.sizeMode || "custom",
   };
 }

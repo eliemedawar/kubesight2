@@ -22,13 +22,17 @@ from ....db import db
 from ....models import ClusterTemplate
 
 ROLES = ("loadbalancer", "controlPlane", "worker")
+# A VMs-only build's machines have no Kubernetes role until someone installs
+# Kubernetes on them; until then they are plain "vm"s (<cluster>-vm-1 …).
+VM_ROLE = "vm"
 ROLE_TO_NODE_ROLE = {
     "loadbalancer": "loadbalancer",
     "controlPlane": "control_plane",
     "worker": "worker",
+    VM_ROLE: VM_ROLE,
 }
 # Short role names used in VM names: <cluster>-cp-1, <cluster>-wk-3, <cluster>-lb-1.
-ROLE_SHORT = {"loadbalancer": "lb", "controlPlane": "cp", "worker": "wk"}
+ROLE_SHORT = {"loadbalancer": "lb", "controlPlane": "cp", "worker": "wk", VM_ROLE: "vm"}
 
 # The smallest machine each role is allowed. Below these, kubeadm's own
 # preflight refuses a control plane (2 vCPU) and a node has no room to run.
@@ -39,6 +43,9 @@ MINIMUM_SIZES = {
 }
 MAXIMUM_SIZE = {"cpu": 64, "memoryGb": 512, "diskGb": 4096}
 MAX_WORKERS = 50
+# A VMs-only build: any number of plain VMs, held only to what a VM needs to boot.
+MINIMUM_VM_SIZE = {"cpu": 1, "memoryGb": 1, "diskGb": 10}
+MAX_VMS = 20
 
 BUILTIN_TEMPLATES: List[Dict[str, Any]] = [
     {
@@ -172,6 +179,80 @@ def normalize_sizes(raw: Any, counts: Optional[Dict[str, int]] = None) -> Dict[s
     return sizes
 
 
+def normalize_vm_count(raw: Any) -> int:
+    count = _int(raw if raw not in (None, "") else 0, "vmCount")
+    if count < 1:
+        raise ValueError("Create at least 1 VM.")
+    if count > MAX_VMS:
+        raise ValueError(f"At most {MAX_VMS} VMs in one build.")
+    return count
+
+
+def normalize_vm_size(raw: Any) -> Dict[str, int]:
+    """The one size every VM of a VMs-only build gets."""
+    entry = raw if isinstance(raw, dict) else {}
+    size = {
+        key: _int(entry.get(key, MINIMUM_VM_SIZE[key]), f"sizes.vm.{key}")
+        for key in ("cpu", "memoryGb", "diskGb")
+    }
+    for key, unit in (("cpu", "vCPU"), ("memoryGb", "GB of memory"), ("diskGb", "GB of disk")):
+        if size[key] < MINIMUM_VM_SIZE[key]:
+            raise ValueError(f"A VM needs at least {MINIMUM_VM_SIZE[key]} {unit}.")
+        if size[key] > MAXIMUM_SIZE[key]:
+            raise ValueError(f"{size[key]} {unit} is more than the {MAXIMUM_SIZE[key]} a single VM may have here.")
+    return size
+
+
+def template_size(template: Dict[str, Any]) -> Dict[str, int]:
+    """The VM template's own CPU, memory and first disk — what a clone gets when
+    KubeSight does not resize it (the account may not be allowed to)."""
+    cpu = int(template.get("cpu") or 0)
+    memory_mb = int(template.get("memoryMb") or 0)
+    disk_gb = int(((template.get("disks") or [{}])[0]).get("sizeGb") or 0)
+    if not cpu or not memory_mb:
+        raise ValueError(
+            "vCenter did not report this VM template's CPU and memory, so its size "
+            "cannot be kept. Refresh the vCenter list, or set the sizes."
+        )
+    return {
+        "cpu": cpu,
+        "memoryMb": memory_mb,
+        "memoryGb": max(1, -(-memory_mb // 1024)),
+        "diskGb": disk_gb,
+    }
+
+
+def counts_for_vms(raw: Any, total: int) -> Dict[str, int]:
+    """Roles for ``total`` VMs that already exist, when Kubernetes goes on them.
+
+    The same etcd and load-balancer rules as a new cluster, except a cluster of
+    existing VMs may have no worker (one VM is a single-node cluster whose
+    control plane also runs the workloads).
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    counts = {role: _int(raw.get(role, 0), f"counts.{role}") for role in ROLES}
+    if any(n < 0 for n in counts.values()):
+        raise ValueError("Role counts cannot be negative.")
+    if counts["controlPlane"] not in (1, 3, 5):
+        raise ValueError(
+            "Control planes must be 1, 3 or 5 — etcd needs an odd number of "
+            "members to keep quorum, and 2 is less safe than 1."
+        )
+    if counts["controlPlane"] == 1 and counts["loadbalancer"] not in (0, 1):
+        raise ValueError("One control plane takes 0 or 1 load balancer.")
+    if counts["controlPlane"] > 1 and counts["loadbalancer"] != 2:
+        raise ValueError(
+            "Highly available control planes need exactly 2 load balancers for "
+            "the floating API address."
+        )
+    if sum(counts.values()) != total:
+        raise ValueError(
+            f"This build has {total} VM{'' if total == 1 else 's'}; the roles add up to "
+            f"{sum(counts.values())}."
+        )
+    return counts
+
+
 def topology_for(counts: Dict[str, int]) -> Dict[str, str]:
     """How the Cluster Builder's existing topology fields read for a shape."""
     if counts["controlPlane"] == 1:
@@ -282,6 +363,8 @@ def catalog() -> Dict[str, Any]:
         "minimumSizes": MINIMUM_SIZES,
         "maximumSize": MAXIMUM_SIZE,
         "maxWorkers": MAX_WORKERS,
+        "minimumVmSize": MINIMUM_VM_SIZE,
+        "maxVms": MAX_VMS,
     }
 
 

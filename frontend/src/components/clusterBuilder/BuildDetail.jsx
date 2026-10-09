@@ -400,6 +400,8 @@ export default function BuildDetail({
   onDeleted,
   onEdit = null,
   addonCatalog = [],
+  templateCatalog = null,
+  k8sVersions = [],
   buildProfiles = [],
   canManageTemplates = false,
   currentUserId = null,
@@ -743,6 +745,8 @@ export default function BuildDetail({
           notify={notify}
           onChanged={load}
           onRequestDestroy={destroyable ? () => setDestroyOpen(true) : null}
+          templateCatalog={templateCatalog}
+          k8sVersions={k8sVersions}
         />
       ) : null}
 

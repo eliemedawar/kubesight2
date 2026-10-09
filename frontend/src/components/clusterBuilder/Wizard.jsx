@@ -38,7 +38,10 @@ import {
 import {
   DEFAULT_MINIMUMS,
   EMPTY_VM_PLACEMENT,
+  MAX_VMS,
+  cannotResize,
   countsError,
+  effectiveSizes,
   defaultPlacement,
   findTemplate,
   machineCount,
@@ -51,6 +54,8 @@ import {
   shapeLabel,
   sizeErrors,
   totals,
+  vmCountError,
+  vmsOnlyCounts,
   vmwareNameError,
 } from "../../utils/clusterProvisioning.js";
 import {
@@ -83,6 +88,7 @@ const DEFAULT_SIZES = {
   loadbalancer: { cpu: 2, memoryGb: 2, diskGb: 40 },
   controlPlane: { cpu: 4, memoryGb: 8, diskGb: 80 },
   worker: { cpu: 4, memoryGb: 8, diskGb: 100 },
+  vm: { cpu: 2, memoryGb: 4, diskGb: 40 },
 };
 
 // Named because the rail, the right-hand footer and the preflight hand-off
@@ -113,6 +119,7 @@ const EMPTY_BASICS = {
   sizes: DEFAULT_SIZES,
   machineSource: "existing",
   vmsOnly: false,
+  vmCount: 2,
   vm: EMPTY_VM_PLACEMENT,
   topologyType: "single_cp",
   endpointMode: "managed_haproxy",
@@ -139,12 +146,13 @@ function basicsFromBuild(build) {
     templateId: build.templateId || "custom",
     machineSource: vmware ? "vmware" : "existing",
     vmsOnly: vmware && Boolean(build.vmsOnly),
+    vmCount: spec?.vmCount || EMPTY_BASICS.vmCount,
     counts: spec?.counts || {
       loadbalancer: nodeCounts.loadbalancer || 0,
       controlPlane: nodeCounts.controlPlane || 1,
       worker: nodeCounts.worker || 1,
     },
-    sizes: spec?.sizes || DEFAULT_SIZES,
+    sizes: { ...DEFAULT_SIZES, ...(spec?.sizes || {}) },
     vm: vmware ? placementFromSpec(spec) : EMPTY_VM_PLACEMENT,
     name: build.name || "",
     k8sVersion: build.k8sVersion || "",
@@ -381,7 +389,7 @@ function EndpointFields({ basics, setBasic, primaryAddress }) {
   );
 }
 
-/** ``value`` is "vmware" (VMs + Kubernetes), "vms" (VMs only) or "existing". */
+/** ``value`` is "vmware" (KubeSight creates the VMs) or "existing". */
 function SourceChoice({ value, onChange, canVmware }) {
   const needsVcenter = "Needs a vCenter with a provisioning account — an administrator adds one under Sources.";
   return (
@@ -397,21 +405,75 @@ function SourceChoice({ value, onChange, canVmware }) {
               : needsVcenter}
           </span>
         </button>
-        <button type="button" className="sg-cb-choice" aria-pressed={value === "vms"}
-                disabled={!canVmware} onClick={() => onChange("vms")}>
-          <span className="ct">Create VMs only <span className="sg-cb-pill is-brand">OpenTofu</span></span>
-          <span className="cd">
-            {canVmware
-              ? "The same VMs, without Kubernetes: KubeSight stops once every VM answers SSH. Install Kubernetes on them later, or destroy them."
-              : needsVcenter}
-          </span>
-        </button>
         <button type="button" className="sg-cb-choice" aria-pressed={value === "existing"}
                 onClick={() => onChange("existing")}>
           <span className="ct">Use machines you already have</span>
           <span className="cd">Pick running VMs from vCenter or add hosts by address. Nothing is created in vCenter.</span>
         </button>
       </div>
+    </div>
+  );
+}
+
+/** The first question: a cluster, or VMs now and Kubernetes later (or never). */
+function GoalChoice({ vmsOnly, onChange, canVmware }) {
+  return (
+    <div className="card sg-cb-card">
+      <div className="sg-cb-sect"><h2>What do you want to create?</h2></div>
+      <div className="sg-cb-choices">
+        <button type="button" className="sg-cb-choice" aria-pressed={!vmsOnly} onClick={() => onChange(false)}>
+          <span className="ct">A Kubernetes cluster</span>
+          <span className="cd">Pick a shape (Lab, Small, Standard HA), then new VMs or machines you already have.</span>
+        </button>
+        <button type="button" className="sg-cb-choice" aria-pressed={vmsOnly}
+                disabled={!canVmware} onClick={() => onChange(true)}>
+          <span className="ct">VMs only <span className="sg-cb-pill is-brand">OpenTofu</span></span>
+          <span className="cd">
+            {canVmware
+              ? "Just say how many. KubeSight creates them in VMware and stops once each answers SSH. Install Kubernetes on them later — it offers the shapes that fit that many VMs — or destroy them."
+              : "Needs a vCenter with a provisioning account — an administrator adds one under Sources."}
+          </span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** VMs only: a name and how many. Where they go and how big comes next. */
+function VmsOnlyStep({ basics, setBasic }) {
+  const countError = vmCountError(basics.vmCount);
+  const step = (delta) => setBasic(
+    "vmCount", Math.min(Math.max((Number(basics.vmCount) || 0) + delta, 1), MAX_VMS)
+  );
+  return (
+    <div className="card sg-cb-card sg-cb-fields">
+      <Field
+        label="Name"
+        htmlFor="cb-name"
+        hint={`Names the VMs: ${basics.name || "name"}-vm-1, ${basics.name || "name"}-vm-2 …`}
+        error={vmwareNameError(basics.name)}
+      >
+        <input
+          id="cb-name"
+          className="sg-cb-input sg-cb-mono"
+          value={basics.name}
+          onChange={(event) => setBasic("name", event.target.value)}
+          placeholder="vm-test-01"
+        />
+      </Field>
+      <Field
+        label="Number of VMs"
+        hint="All the same size. When you install Kubernetes later, KubeSight offers the shapes that fit: 1 VM → single node, 2 → Lab, 4 → Small, 8 → Standard HA, and others."
+        error={countError}
+      >
+        <div className="sg-cb-vmcount">
+          <div className="sg-cb-stepper" role="group" aria-label="Number of VMs">
+            <button type="button" className="btn-ghost" aria-label="Fewer VMs" onClick={() => step(-1)}>−</button>
+            <output>{basics.vmCount}</output>
+            <button type="button" className="btn-ghost" aria-label="More VMs" onClick={() => step(1)}>+</button>
+          </div>
+        </div>
+      </Field>
     </div>
   );
 }
@@ -1118,7 +1180,11 @@ export default function Wizard({
       vsphereConnectionId: vcenter ? String(vcenter.id) : "",
       connectionProfileId: route ? String(route.id) : "",
       buildProfileId: buildProfile ? String(buildProfile.id) : "",
-      ...(small ? { counts: { ...small.counts }, sizes: JSON.parse(JSON.stringify(small.sizes)) } : {}),
+      ...(small ? {
+        counts: { ...small.counts },
+        // A template carries role sizes only; the plain-VM size stays.
+        sizes: { ...previous.sizes, ...JSON.parse(JSON.stringify(small.sizes)) },
+      } : {}),
     }));
   }, [options, infra]);
 
@@ -1200,6 +1266,16 @@ export default function Wizard({
 
   // --- VMware placement -----------------------------------------------------
   const placementState = useVmwarePlacement(vmware ? basics.vm.connectionId : "", notify);
+  // When the last privilege check says this account may not change CPU or
+  // memory, start from "keep the template's size". Once; the user can switch.
+  const sizeModeTouched = useRef(Boolean(initialBuild));
+  useEffect(() => {
+    if (!vmware || sizeModeTouched.current) return;
+    const connection = provisioningConnections.find((row) => String(row.id) === String(basics.vm.connectionId));
+    if (!cannotResize(connection)) return;
+    sizeModeTouched.current = true;
+    setBasics((previous) => ({ ...previous, vm: { ...previous.vm, sizeMode: "template" } }));
+  }, [vmware, basics.vm.connectionId, provisioningConnections]);
   const ranges = placementState.data?.networks || [];
   useEffect(() => {
     if (!placementState.data) return;
@@ -1212,7 +1288,10 @@ export default function Wizard({
     () => resolvePlacement(placementState.data, basics.vm, ranges),
     [placementState.data, basics.vm, ranges]
   );
-  const neededAddresses = machineCount(basics.counts) + (basics.counts?.loadbalancer ? 1 : 0);
+  // A VMs-only build has plain VMs; every helper below reads them as role "vm".
+  const shapeCounts = vmsOnly ? vmsOnlyCounts(basics.vmCount) : basics.counts;
+  const shapeSizes = effectiveSizes(shapeCounts, basics.sizes, basics.vm.sizeMode, resolved.template);
+  const neededAddresses = machineCount(shapeCounts) + (shapeCounts?.loadbalancer ? 1 : 0);
   useEffect(() => {
     if (!vmware || !resolved.range || !neededAddresses) { setAddresses([]); return undefined; }
     let ignore = false;
@@ -1228,15 +1307,15 @@ export default function Wizard({
     return () => { ignore = true; clearTimeout(id); };
   }, [vmware, resolved.range, neededAddresses]);
   const preview = useMemo(
-    () => previewMachines(basics.name, basics.counts, basics.sizes, addresses),
-    [basics.name, basics.counts, basics.sizes, addresses]
+    () => previewMachines(basics.name, shapeCounts, shapeSizes, addresses),
+    [basics.name, shapeCounts, shapeSizes, addresses]
   );
   const vmProblem = vmware
-    ? (countsError(basics.counts)
+    ? ((vmsOnly ? vmCountError(basics.vmCount) : countsError(basics.counts))
       || vmwareNameError(basics.name)
       || (placementState.loading && !placementState.data ? "Reading vCenter…" : "")
-      || placementProblem(resolved, basics.counts)
-      || sizeErrors(basics.counts, basics.sizes, minimums)[0]
+      || placementProblem(resolved, shapeCounts)
+      || (basics.vm.sizeMode === "template" ? "" : sizeErrors(shapeCounts, basics.sizes, minimums)[0])
       || previewError)
     : "";
 
@@ -1283,7 +1362,7 @@ export default function Wizard({
     basics.name.trim()
     && basics.k8sVersion
     && basics.connectionProfileId
-    && !countsError(basics.counts)
+    && !(vmsOnly ? vmCountError(basics.vmCount) : countsError(basics.counts))
     && !(vmware && vmwareNameError(basics.name))
   );
   const machinesReady = vmware
@@ -1291,10 +1370,11 @@ export default function Wizard({
     : countsOk && !plan.conflictHosts.length && endpointReady;
 
   // Why a Next button is disabled, said next to it rather than left to guess.
-  const shapeProblem = !basics.name.trim() ? "Name the cluster."
+  const shapeProblem = !basics.name.trim() ? (vmsOnly ? "Name the VMs." : "Name the cluster.")
     : vmware && vmwareNameError(basics.name) ? vmwareNameError(basics.name)
       : !basics.k8sVersion ? "Choose a Kubernetes version."
-        : countsError(basics.counts) ? countsError(basics.counts)
+        : vmsOnly && vmCountError(basics.vmCount) ? vmCountError(basics.vmCount)
+        : !vmsOnly && countsError(basics.counts) ? countsError(basics.counts)
           : !basics.connectionProfileId
             ? "Choose the SSH route in the Sources row above. KubeSight logs in to every machine with it."
             : "";
@@ -1315,7 +1395,7 @@ export default function Wizard({
         ...previous,
         templateId: template.id,
         counts: { ...template.counts },
-        sizes: JSON.parse(JSON.stringify(template.sizes || DEFAULT_SIZES)),
+        sizes: { ...previous.sizes, ...JSON.parse(JSON.stringify(template.sizes || DEFAULT_SIZES)) },
       };
       if (template.network?.cniPlugin) next.cniPlugin = template.network.cniPlugin;
       if (template.network?.podCidr) next.podCidr = template.network.podCidr;
@@ -1356,7 +1436,7 @@ export default function Wizard({
       return {
         ...common,
         provisioning: provisioningPayload(
-          basics.vm.connectionId, resolved, basics.vm, basics.counts, basics.sizes
+          basics.vm.connectionId, resolved, basics.vm, shapeCounts, basics.sizes, { vmsOnly }
         ),
       };
     }
@@ -1550,9 +1630,11 @@ export default function Wizard({
       ? { tone: "good", text: "✓ Placement is clean — every HA tier spans distinct ESXi hosts." }
       : { tone: "plain", text: `Assign ${shapeLabel(basics.counts)}. Nothing is reserved until preflight runs.` };
 
-  const sum = totals(basics.counts, basics.sizes);
+  const sum = totals(shapeCounts, shapeSizes);
   const vmwareFacts = [
-    { label: "Template", value: findTemplate(catalog, basics.templateId)?.name || "Custom" },
+    vmsOnly
+      ? { label: "Kubernetes", value: "later, or never" }
+      : { label: "Template", value: findTemplate(catalog, basics.templateId)?.name || "Custom" },
     { label: "Machines", value: `${sum.machines} VMs · ${sum.cpu} vCPU · ${sum.memoryGb} GB` },
     { label: "Disk (thin)", value: `up to ${sum.diskGb} GB` },
     ...(resolved.template ? [{ label: "Clone of", value: resolved.template.name }] : []),
@@ -1707,7 +1789,7 @@ export default function Wizard({
                   : "Ready to plan. Nothing is created until you approve the plan." })
               : {
                 tone: "plain",
-                text: `${shapeLabel(basics.counts)}. Addresses are previews until the plan reserves them.`,
+                text: `${shapeLabel(shapeCounts)}. Addresses are previews until the plan reserves them.`,
               }}
           footer={footer}
         />
@@ -1751,6 +1833,23 @@ export default function Wizard({
       <div className="sg-cb-split">
         <div className="sg-cb-vstack">
           {step === STEP_SHAPE ? (
+            <GoalChoice
+              vmsOnly={vmsOnly}
+              canVmware={provisioningConnections.length > 0}
+              onChange={(only) => setBasics((previous) => ({
+                ...previous,
+                vmsOnly: only,
+                machineSource: only ? "vmware" : previous.machineSource,
+                vm: only && !previous.vm.connectionId && provisioningConnections[0]
+                  ? { ...previous.vm, connectionId: String(provisioningConnections[0].id) }
+                  : previous.vm,
+              }))}
+            />
+          ) : null}
+
+          {step === STEP_SHAPE && vmsOnly ? <VmsOnlyStep basics={basics} setBasic={setBasic} /> : null}
+
+          {step === STEP_SHAPE && !vmsOnly ? (
             <>
               <div className="card sg-cb-card">
                 <div className="sg-cb-sect">
@@ -1759,7 +1858,7 @@ export default function Wizard({
                 </div>
                 <p className="muted sg-cb-pv-lede">
                   A template sets the shape, the machine sizes and, for saved ones, the add-ons. Next you choose
-                  whether KubeSight creates the VMs (with or without Kubernetes) or uses machines you already have.
+                  whether KubeSight creates the VMs or uses machines you already have.
                 </p>
                 <TemplateGallery
                   catalog={catalog}
@@ -1782,29 +1881,30 @@ export default function Wizard({
 
           {step === STEP_MACHINES ? (
             <>
-              <SourceChoice
-                value={vmsOnly ? "vms" : basics.machineSource}
-                canVmware={provisioningConnections.length > 0}
-                onChange={(choice) => {
-                  const source = choice === "existing" ? "existing" : "vmware";
-                  setBasics((previous) => ({
+              {vmsOnly ? null : (
+                <SourceChoice
+                  value={basics.machineSource}
+                  canVmware={provisioningConnections.length > 0}
+                  onChange={(source) => setBasics((previous) => ({
                     ...previous,
                     machineSource: source,
-                    vmsOnly: choice === "vms",
                     vm: source === "vmware" && !previous.vm.connectionId && provisioningConnections[0]
                       ? { ...previous.vm, connectionId: String(provisioningConnections[0].id) }
                       : previous.vm,
-                  }));
-                }}
-              />
+                  }))}
+                />
+              )}
               {vmware ? (
                 <VmwareMachines
                   connections={provisioningConnections}
                   placementState={placementState}
                   ranges={ranges}
                   vm={basics.vm}
-                  setVm={(vm) => setBasic("vm", vm)}
-                  counts={basics.counts}
+                  setVm={(vm) => {
+                    if (vm.sizeMode !== basics.vm.sizeMode) sizeModeTouched.current = true;
+                    setBasic("vm", vm);
+                  }}
+                  counts={shapeCounts}
                   sizes={basics.sizes}
                   setSizes={(sizes) => setBasic("sizes", sizes)}
                   minimums={minimums}

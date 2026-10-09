@@ -332,3 +332,6 @@
 @media (prefers-reduced-motion: reduce) {
   .sg-cb-pv-rail li.is-now i, .sg-cb-pv-state.is-live i { animation: none; }
 }
+.sg-cb-pv-mode { margin-top: 8px; }
+.sg-cb-card > .sg-cb-pv-mode { margin: 0 0 4px; }
+.sg-cb-vmcount { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }

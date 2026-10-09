@@ -182,6 +182,8 @@ def serialize_build(build: ClusterBuild, *, include_detail: bool = False) -> Dic
             "controlPlane": sum(1 for n in build.nodes if n.role == "control_plane"),
             "worker": sum(1 for n in build.nodes if n.role == "worker"),
             "loadbalancer": sum(1 for n in build.nodes if n.role == "loadbalancer"),
+            # A VMs-only build's machines, before they have a Kubernetes role.
+            **({"vm": vm_nodes} if (vm_nodes := sum(1 for n in build.nodes if n.role == "vm")) else {}),
         },
         # Minimal per-node shape for the build-card glyph (LBs, then CPs, then
         # workers): circles = LB, red = CP, filled = joined.

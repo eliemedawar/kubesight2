@@ -213,8 +213,8 @@ export const discardProvisionJob = (id, jobId) => jobAction(id, jobId, "discard"
 export const retryProvisionConnect = (id, jobId) => jobAction(id, jobId, "retry-connect");
 
 /** A VMs-only build whose VMs are ready: preflight them and build Kubernetes. */
-export const installKubernetesOnVms = (id) =>
-  request(`/api/cluster-builds/${id}/provision/install-kubernetes`, { method: "POST" });
+export const installKubernetesOnVms = (id, payload = {}) =>
+  request(`/api/cluster-builds/${id}/provision/install-kubernetes`, { method: "POST", body: payload });
 
 export const getProvisioningOverview = () => request("/api/cluster-provisioning");
 

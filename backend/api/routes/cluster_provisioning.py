@@ -310,7 +310,9 @@ def install_kubernetes(build_id: int):
         return err
     user, actor = _actor()
     try:
-        note = provisioning.install_kubernetes(build, actor=actor, user=user)
+        note = provisioning.install_kubernetes(
+            build, request.get_json(silent=True) or {}, actor=actor, user=user
+        )
     except ValueError as exc:
         return error_response(str(exc), 400)
     except PermissionError as exc:
