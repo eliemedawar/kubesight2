@@ -239,6 +239,8 @@ def create_custom_cluster():
 
     test_result = test_cluster_connection(cluster)
     record_connection_test(cluster, test_result)
+    # A list built while the test ran cached the row before its result landed.
+    invalidate_cluster_list_cache()
 
     return success_response(
         {

@@ -460,11 +460,18 @@ def _custom_cluster_item(cluster_snapshot: Dict[str, Any], now: str) -> Dict[str
     public_id = cluster_snapshot["public_id"]
     status = cluster_snapshot["status"]
     version = "unknown"
-    nodes = 0
+    nodes: Optional[int] = 0
     cpu_usage_percent: Optional[float] = None
     memory_usage_percent: Optional[float] = None
+    issue: Optional[str] = None
     kubeconfig_path = cluster_snapshot["kubeconfig_path"]
-    if kubeconfig_exists(kubeconfig_path):
+    if not kubeconfig_exists(kubeconfig_path):
+        # Nothing was probed: the stored "connected" from the last test must not
+        # read as a healthy cluster with 0 nodes.
+        status = "warning"
+        nodes = None
+        issue = "kubeconfig_missing"
+    else:
         access = ClusterAccess(
             cluster_id=public_id,
             context_name=cluster_snapshot["context_name"],
@@ -505,6 +512,7 @@ def _custom_cluster_item(cluster_snapshot: Dict[str, Any], now: str) -> Dict[str
         "port": cluster_snapshot["port"],
         "protocol": cluster_snapshot["protocol"],
         "source": "custom",
+        "issue": issue,
     }
 
 

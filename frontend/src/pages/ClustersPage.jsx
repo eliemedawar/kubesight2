@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import AccessScopeView from "../components/common/AccessScopeView.jsx";
 import RequestDeploymentModal from "../components/clusters/RequestDeploymentModal.jsx";
 import ConfigureRecipientsModal from "../components/clusters/ConfigureRecipientsModal.jsx";
@@ -92,8 +92,35 @@ function buildSubtitle(clusters) {
   return segments.join(" · ");
 }
 
-export default function ClustersPage({ data, hasClusters, coreLoading = false, accessError = "" }) {
+// Why a card has no usage bars. nodes === null means the cluster was not probed.
+function usageNote(cluster, nodeCount) {
+  if (cluster.issue === "kubeconfig_missing") {
+    return "Kubeconfig file is missing on the server, so this cluster was not checked. Edit it in Cluster Management and save its credentials again.";
+  }
+  if (nodeCount === 0 && String(cluster.status).toLowerCase() !== "healthy") {
+    return "Could not read this cluster's nodes.";
+  }
+  if (nodeCount) {
+    return "Usage metrics unavailable — Metrics Server is not answering on this cluster.";
+  }
+  return "Usage metrics unavailable for this cluster.";
+}
+
+export default function ClustersPage({
+  data,
+  hasClusters,
+  coreLoading = false,
+  accessError = "",
+  onRefresh,
+}) {
   const { user, hasPermission } = useAuth();
+
+  // The list is loaded once at sign-in; a cluster added or built since then
+  // would otherwise keep the row it had when it was first seen.
+  useEffect(() => {
+    onRefresh?.().catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // Admins/managers configure who gets the request emails. Everyone — admins
   // included — requests approval on clusters that require it.
   const canManageRecipients = hasPermission("deployment_requests:manage");
@@ -224,7 +251,7 @@ export default function ClustersPage({ data, hasClusters, coreLoading = false, a
               ) : (
                 <p className="sg-cnote sg-cnote--muted">
                   <ActivityIcon />
-                  Usage metrics unavailable for this cluster.
+                  {usageNote(cluster, nodeCount)}
                 </p>
               )}
               <footer>

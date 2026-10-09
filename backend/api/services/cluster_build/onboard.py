@@ -12,6 +12,8 @@ from typing import Tuple
 from ...cluster_store import (
     build_cluster_kubeconfig,
     custom_cluster_public_id,
+    record_connection_test,
+    test_cluster_connection,
     validate_name,
     write_kubeconfig_file,
 )
@@ -62,4 +64,11 @@ def register_cluster(build: ClusterBuild, admin_conf: str) -> str:
     public_id = custom_cluster_public_id(cluster.id)
     build.result_cluster_id = public_id
     db.session.commit()
+
+    # Same as adding a cluster by hand: record a connection test so the row is
+    # not "unknown", and drop the cached list so the cluster shows up now.
+    from ...k8s_provider import invalidate_cluster_list_cache
+
+    record_connection_test(cluster, test_cluster_connection(cluster))
+    invalidate_cluster_list_cache()
     return public_id

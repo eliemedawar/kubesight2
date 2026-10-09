@@ -105,3 +105,25 @@ def test_refresh_started_before_invalidation_does_not_land(app):
     invalidate_cluster_list_cache()
     provider._store_cluster_list({"items": [{"id": "custom-9"}], "count": 1}, generation)
     assert provider._cluster_list_cache["payload"] is None
+
+
+def test_missing_kubeconfig_is_not_reported_as_a_healthy_empty_cluster(tmp_path):
+    # The last test said "connected", but the file is gone: nothing was probed.
+    row = provider._custom_cluster_item(
+        {
+            "public_id": "custom-7",
+            "name": "qa-dr",
+            "status": "healthy",
+            "kubeconfig_path": str(tmp_path / "cluster-7.yaml.enc"),
+            "context_name": "qa-dr",
+            "region": "https://10.0.0.2:6443",
+            "last_sync": None,
+            "host": "10.0.0.2",
+            "port": 6443,
+            "protocol": "https",
+        },
+        "2026-10-09T00:00:00+00:00",
+    )
+    assert row["status"] == "warning"
+    assert row["nodes"] is None
+    assert row["issue"] == "kubeconfig_missing"

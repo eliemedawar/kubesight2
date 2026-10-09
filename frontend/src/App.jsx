@@ -1672,6 +1672,7 @@ export default function App() {
             hasClusters={hasClusters}
             coreLoading={loadingState.core}
             accessError={pageAccessError}
+            onRefresh={reloadClusters}
           />
         );
       case "clusterManagement":
