@@ -344,7 +344,7 @@ export default function VmwareMachines({
         </div>
         <p className="muted sg-cb-pv-lede">
           {keepTemplate
-            ? "Every VM is left exactly as the template is: CPU, memory, disks, network cards, CD drive and settings. Only the hostname and address are set, so the account needs no CPU, memory or device privileges."
+            ? "Every VM is left exactly as the template is: CPU, memory, disks, network cards, CD drive and settings. Only the hostname and address are set, so the account needs no CPU or memory privileges — only Modify device settings, for the network card."
             : "KubeSight sets CPU, memory and disk on each clone. That needs Change CPU count and Change memory on the folder."}
           {cannotResize(connection)
             ? ` The last privilege check on ${connection.name} says this account may not change CPU or memory — keep the template's size.`

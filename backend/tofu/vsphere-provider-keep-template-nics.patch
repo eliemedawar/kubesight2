@@ -1,0 +1,17 @@
+diff --git a/vsphere/internal/virtualdevice/virtual_machine_network_interface_subresource.go b/vsphere/internal/virtualdevice/virtual_machine_network_interface_subresource.go
+index fb76d09..e2f5f2e 100644
+--- a/vsphere/internal/virtualdevice/virtual_machine_network_interface_subresource.go
++++ b/vsphere/internal/virtualdevice/virtual_machine_network_interface_subresource.go
+@@ -525,7 +525,11 @@ func NetworkInterfacePostCloneOperation(d *schema.ResourceData, c *govmomi.Clien
+ 	// Create arrays for the refreshed set of network interfaces which we will now populate. We have a maximum number
+ 	// of 10 network interfaces, so for simplicity create arrays of this length. The final array is the length of
+ 	// the count of network interfaces though.
+-	srcSet := make([]interface{}, maxNetworkInterfaceCount)
++	// KubeSight patch: start empty (capacity only). With a length of
++	// maxNetworkInterfaceCount the existing cards were appended after ten nil
++	// slots, so every card in the configuration looked new: the clone's card
++	// was removed and a new one added ("Add or remove device", new MAC).
++	srcSet := make([]interface{}, 0, maxNetworkInterfaceCount)
+ 	log.Printf("[DEBUG] NetworkInterfacePostCloneOperation: Layout from source: %d devices", len(devices))
+ 
+ 	// Populate the source set as if the devices were orphaned. This give us a

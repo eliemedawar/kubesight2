@@ -591,7 +591,7 @@ class TestCloneMirrorsTemplate:
             vim.vm.device.VirtualAHCIController(key=15000, busNumber=0),
             vim.vm.device.VirtualDisk(
                 key=2000, controllerKey=1000, unitNumber=0,
-                capacityInBytes=40 * 1024 ** 3 + 5, capacityInKB=40 * 1024 ** 2, backing=disk_backing,
+                capacityInBytes=40 * 1024 ** 3, capacityInKB=40 * 1024 ** 2, backing=disk_backing,
                 storageIOAllocation=vim.StorageResourceManager.IOAllocationInfo(
                     limit=-1, reservation=0, shares=vim.SharesInfo(level="normal", shares=1000)),
             ),
@@ -607,6 +607,9 @@ class TestCloneMirrorsTemplate:
             vim.vm.device.VirtualTPM(key=11000),
         ]
         hardware = inventory._template_hardware(devices)
+        odd = vim.vm.device.VirtualDisk(key=2001, controllerKey=1000, unitNumber=1,
+                                        capacityInBytes=40 * 1024 ** 3 + 1024, backing=disk_backing)
+        assert inventory._template_hardware([devices[0], odd])["disks"][0]["sizeGb"] == 41  # up, like the provider
         assert hardware["controllers"] == {"scsi": 1, "sata": 1, "ide": 2, "nvme": 0}
         assert hardware["scsiType"] == "pvscsi"
         assert hardware["disks"] == [{
@@ -687,13 +690,13 @@ class TestCloneMirrorsTemplate:
         assert said["Clone"]["status"] == "ok" and "left exactly as" in said["Clone"]["detail"]
         assert "Network card" not in said
 
-    def test_moving_the_card_to_another_network_needs_edit_device(
-        self, client, admin_token, ssh_profile, vcenter, engine
-    ):
+    def test_the_network_card_edit_needs_edit_device(self, client, admin_token, ssh_profile, vcenter, engine):
+        # The provider re-applies the clone's card once (vCenter gave it a MAC
+        # the config cannot know): an edit, so Modify device settings is needed.
         self.with_template(nics=[{"type": "vmxnet3", "networkId": "dvportgroup-42"}])
         inventory.set_privilege_checker(lambda cfg, ids: [
             {"privilege": p, "purpose": purpose, "entity": ids.get(scope) or ids.get("datacenter"),
-             "granted": p in inventory.REQUIRED_TO_CLONE}
+             "granted": p in inventory.REQUIRED_TO_CLONE and p != inventory.EDIT_DEVICE}
             for p, purpose, scope in inventory.REQUIRED_PRIVILEGES
         ])
         build = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-08",
@@ -701,6 +704,15 @@ class TestCloneMirrorsTemplate:
         job = plan(client, admin_token, build["id"])["provisioning"]["job"]
         assert job["status"] == "plan_failed"
         assert "VirtualMachine.Config.EditDevice" in job["error"]
+
+    def test_moving_the_card_to_another_network_is_said(self, client, admin_token, ssh_profile, vcenter, engine):
+        self.with_template(nics=[{"type": "vmxnet3", "networkId": "dvportgroup-42"}])
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-09",
+                                  sizeMode="template", folderMode="existing")
+        job = plan(client, admin_token, build["id"])["provisioning"]["job"]
+        assert job["status"] == "planned", job.get("error")
+        card = next(c for c in job["summary"]["checks"] if c["label"] == "Network card")
+        assert card["status"] == "warn" and "VM-Net-DMZ-12" in card["detail"]
 
 
 

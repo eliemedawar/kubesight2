@@ -104,13 +104,18 @@ REQUIRED_TO_CLONE = {
     "Datastore.AllocateSpace",
     "Network.Assign",
     "VirtualMachine.Interact.PowerOn",
+    # The provider always edits the clone's network card once: its config
+    # cannot know the MAC address vCenter gave the clone, so it re-applies the
+    # card (same network, same type). An edit, never an add or remove — with
+    # KubeSight's patched provider (backend/tofu/vsphere-provider-*.patch).
+    "VirtualMachine.Config.EditDevice",
 }
 # Changing CPU, memory or disk size; a VM that keeps the template's size never does.
 RESIZE_PRIVILEGES = {
     "VirtualMachine.Config.CPUCount", "VirtualMachine.Config.Memory",
     "VirtualMachine.Config.DiskExtend",
 }
-# Moving the template's network card to another network is an edit to the card.
+# Editing a device (the network card above, or moving it to another network).
 EDIT_DEVICE = "VirtualMachine.Config.EditDevice"
 # Only used to clean up: OpenTofu deletes a clone it could not finish, and
 # KubeSight's Destroy deletes the VMs. Without it those are left for an admin.
@@ -392,8 +397,10 @@ def _template_hardware(devices) -> Dict[str, Any]:
             disks.append({
                 "unit": unit,
                 "controllerType": ctype,
-                # Whole GiB, rounded down — how the provider reads a disk back.
-                "sizeGb": int(size_bytes // (1024 ** 3)),
+                # Whole GiB rounded UP — how the provider reads a disk back
+                # (diskCapacityInGiB: 4294968320 bytes is 5). Rounding down would
+                # plan to "grow" the clone's disk to the next GiB.
+                "sizeGb": int(-(-size_bytes // (1024 ** 3))),
                 "thin": bool(getattr(backing, "thinProvisioned", False)),
                 "eagerlyScrub": bool(getattr(backing, "eagerlyScrub", False)),
                 "diskMode": getattr(backing, "diskMode", None),

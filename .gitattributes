@@ -5,3 +5,7 @@
 # check, and would ship broken bundles into any image built from that
 # checkout. Keep them byte-for-byte as committed: no line-ending conversion.
 backend/api/data/** -text
+
+# The vSphere provider patch is applied with `git apply` inside a Linux image
+# build; a CRLF checkout would make it fail to apply. Keep it byte-for-byte.
+backend/tofu/*.patch -text

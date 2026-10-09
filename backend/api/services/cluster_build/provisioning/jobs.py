@@ -817,8 +817,7 @@ def _hardware_checks(build: ClusterBuild, template: Dict[str, Any],
         checks.append(_check(
             "warn", "Network card",
             f"{template['name']}'s card is on {net_names.get(first, first)}; this build moves it to "
-            f"{spec.get('networkName')}, an edit that needs \"Modify device settings\". "
-            f"Choose {net_names.get(first, first)} to leave the card as it is.",
+            f"{spec.get('networkName')}. Choose {net_names.get(first, first)} to keep the card on its network.",
         ))
     odd_cdroms = [c for c in template.get("cdroms") or [] if c.get("changes")]
     if odd_cdroms:
@@ -838,7 +837,7 @@ def _hardware_checks(build: ClusterBuild, template: Dict[str, Any],
         checks.append(_check(
             "ok", "Clone",
             f"left exactly as {template['name']} is ({', '.join(kept)}, its settings and size); "
-            "only the hostname and address are set",
+            "only the hostname and address are set (vCenter gives the card its own MAC)",
         ))
     elif spec.get("sizeMode") != "template":
         checks.append(_check(

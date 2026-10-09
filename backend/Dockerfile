@@ -1,3 +1,20 @@
+# The vSphere provider OpenTofu uses, built from its source with KubeSight's
+# patches (tofu/vsphere-provider-*.patch). Unpatched, v2.7.0 through at least
+# v2.17.1 remove every clone's network card right after cloning and add a new
+# one ("Add or remove device" in vCenter, and a new MAC), so a least-privilege
+# provisioning account can never finish a clone. The build keeps the upstream
+# version number, so the generated configuration (= 2.17.1) is unchanged.
+ARG VSPHERE_PROVIDER_VERSION=2.17.1
+FROM golang:1.26-bookworm AS vsphere-provider
+ARG VSPHERE_PROVIDER_VERSION
+WORKDIR /src
+COPY tofu/vsphere-provider-*.patch /patches/
+RUN git clone --depth 1 --branch "v${VSPHERE_PROVIDER_VERSION}" \
+        https://github.com/vmware/terraform-provider-vsphere.git . \
+    && git apply --verbose /patches/*.patch \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" \
+        -o "/out/terraform-provider-vsphere_v${VSPHERE_PROVIDER_VERSION}" .
+
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -15,13 +32,13 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # OpenTofu creates the Cluster Builder's VMware VMs. The binary is checked
-# against the release's SHA256SUMS, and the vSphere provider is mirrored into
-# the image (`tofu providers mirror` verifies its checksums) so provisioning
-# never downloads anything at runtime — the generated CLI config installs that
-# provider from this mirror only. Keep VSPHERE_PROVIDER_VERSION in step with
+# against the release's SHA256SUMS, and the patched vSphere provider built above
+# is placed in a local mirror (unpacked layout) so provisioning never downloads
+# anything at runtime — the generated CLI config installs that provider from
+# this mirror only. Keep VSPHERE_PROVIDER_VERSION in step with
 # tofu_config.PROVIDER_VERSION.
 ARG TOFU_VERSION=1.13.1
-ARG VSPHERE_PROVIDER_VERSION=2.17.1
+ARG VSPHERE_PROVIDER_VERSION
 ENV KUBESIGHT_TOFU_PROVIDER_MIRROR=/opt/kubesight/tofu/providers \
     KUBESIGHT_TOFU_VSPHERE_PROVIDER_VERSION=${VSPHERE_PROVIDER_VERSION} \
     CHECKPOINT_DISABLE=1
@@ -33,12 +50,13 @@ RUN apt-get update \
     && grep " tofu_${TOFU_VERSION}_linux_amd64.zip$" "tofu_${TOFU_VERSION}_SHA256SUMS" | sha256sum -c - \
     && unzip -o "tofu_${TOFU_VERSION}_linux_amd64.zip" tofu -d /usr/local/bin \
     && chmod +x /usr/local/bin/tofu \
-    && mkdir -p /tmp/tofu-mirror "${KUBESIGHT_TOFU_PROVIDER_MIRROR}" \
-    && printf 'terraform {\n  required_providers {\n    vsphere = {\n      source  = "vmware/vsphere"\n      version = "= %s"\n    }\n  }\n}\n' "${VSPHERE_PROVIDER_VERSION}" > /tmp/tofu-mirror/main.tf \
-    && (cd /tmp/tofu-mirror && tofu providers mirror -platform=linux_amd64 "${KUBESIGHT_TOFU_PROVIDER_MIRROR}") \
-    && rm -rf /tmp/tofu-mirror /tmp/tofu_* \
+    && mkdir -p "${KUBESIGHT_TOFU_PROVIDER_MIRROR}" \
+    && rm -rf /tmp/tofu_* \
     && apt-get purge -y unzip && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=vsphere-provider /out/ \
+     /opt/kubesight/tofu/providers/registry.opentofu.org/vmware/vsphere/${VSPHERE_PROVIDER_VERSION}/linux_amd64/
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

@@ -577,10 +577,19 @@ Destroy (destroy plan → a second person with cluster_builds:execute approves).
 
 ### Deploying it
 
-- `backend/Dockerfile` installs OpenTofu (checked against SHA256SUMS) and mirrors
-  `vmware/vsphere` into `/opt/kubesight/tofu/providers`; the generated CLI config installs the
-  provider from that mirror only. Bump `TOFU_VERSION` / `VSPHERE_PROVIDER_VERSION` together with
-  `tofu_config.PROVIDER_VERSION`.
+- `backend/Dockerfile` installs OpenTofu (checked against SHA256SUMS) and **builds**
+  `vmware/vsphere` from its tagged source with `backend/tofu/vsphere-provider-*.patch` applied
+  (a `golang` build stage), into `/opt/kubesight/tofu/providers` (unpacked mirror layout, same
+  version number); the generated CLI config installs the provider from that mirror only. Bump
+  `TOFU_VERSION` / `VSPHERE_PROVIDER_VERSION` together with `tofu_config.PROVIDER_VERSION`, and
+  check the patch still applies (and is still needed) on the new version.
+- **Why a patched provider:** from v2.7.0 to at least v2.17.1 (and `main` on 2026-10-09),
+  `NetworkInterfacePostCloneOperation` starts its list of existing cards as
+  `make([]interface{}, maxNetworkInterfaceCount)` and *appends* to it, so the clone's card sits
+  in slot 10 and every configured card looks new: the provider adds a card and removes the
+  template's one after every clone ("Add or remove device" in vCenter, new MAC). The patch makes
+  the list start empty, as v2.6.0 effectively did. Found on a real vCenter whose provisioning
+  account was rightly refused that privilege.
 - `requirements.txt` gains `pyvmomi`.
 - Env: `KUBESIGHT_INTERNAL_URL` (default `http://127.0.0.1:5000`, where `tofu` reaches the state
   backend), `KUBESIGHT_TOFU_WORKDIR` (scratch dir for job working copies),
