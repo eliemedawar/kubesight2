@@ -590,6 +590,13 @@ Destroy (destroy plan → a second person with cluster_builds:execute approves).
   template's one after every clone ("Add or remove device" in vCenter, new MAC). The patch makes
   the list start empty, as v2.6.0 effectively did. Found on a real vCenter whose provisioning
   account was rightly refused that privilege.
+- **Second patch, same file:** the provider never sets a card's connection flags, so a kept card
+  keeps the template's — and a template's card is often *not* set to connect at power on. The
+  clone then boots disconnected and "timeout waiting for an available IP address" follows. The
+  patch sets connect-at-power-on and guest control on every card the provider edits (the edit it
+  already makes, so no extra privilege). The plan says when the template's card has it off, and
+  the apply-time vCenter watcher (`vm_watch`) reports each card's state and, once, connects a
+  running VM's disconnected card (needs "Connect devices" / "Modify device settings").
 - `requirements.txt` gains `pyvmomi`.
 - Env: `KUBESIGHT_INTERNAL_URL` (default `http://127.0.0.1:5000`, where `tofu` reaches the state
   backend), `KUBESIGHT_TOFU_WORKDIR` (scratch dir for job working copies),

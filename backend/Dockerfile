@@ -2,7 +2,9 @@
 # patches (tofu/vsphere-provider-*.patch). Unpatched, v2.7.0 through at least
 # v2.17.1 remove every clone's network card right after cloning and add a new
 # one ("Add or remove device" in vCenter, and a new MAC), so a least-privilege
-# provisioning account can never finish a clone. The build keeps the upstream
+# provisioning account can never finish a clone. Kept cards are also set to
+# connect at power on (a template card often is not, and the clone then never
+# gets its address). The build keeps the upstream
 # version number, so the generated configuration (= 2.17.1) is unchanged.
 ARG VSPHERE_PROVIDER_VERSION=2.17.1
 FROM golang:1.26-bookworm AS vsphere-provider

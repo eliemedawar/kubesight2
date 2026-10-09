@@ -832,6 +832,12 @@ def _hardware_checks(build: ClusterBuild, template: Dict[str, Any],
             f"{template['name']}'s card is on {net_names.get(first, first)}; this build moves it to "
             f"{spec.get('networkName')}. Choose {net_names.get(first, first)} to keep the card on its network.",
         ))
+    if nics and nics[0].get("startConnected") is False:
+        checks.append(_check(
+            "info", "Network card",
+            f"{template['name']}'s card is set not to connect at power on; every clone's card is "
+            "set to connect, so the VM boots on the network and customization can reach it",
+        ))
     odd_cdroms = [c for c in template.get("cdroms") or [] if c.get("changes")]
     if odd_cdroms:
         edits = True

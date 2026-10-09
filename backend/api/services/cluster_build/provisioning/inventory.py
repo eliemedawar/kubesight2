@@ -419,7 +419,13 @@ def _template_hardware(devices) -> Dict[str, Any]:
                 network = _moid(backing.network)
             elif getattr(backing, "opaqueNetworkId", None):
                 network = backing.opaqueNetworkId
-            nics.append({"type": _NIC_TYPES[kind], "networkId": network})
+            connectable = getattr(device, "connectable", None)
+            nics.append({
+                "type": _NIC_TYPES[kind], "networkId": network,
+                # Many templates have this off; KubeSight's provider turns it on
+                # for every clone (backend/tofu/vsphere-provider-*.patch).
+                "startConnected": bool(getattr(connectable, "startConnected", True)),
+            })
         elif kind == "VirtualCdrom":
             backing = getattr(device, "backing", None)
             bkind = _kind(backing) if backing is not None else ""

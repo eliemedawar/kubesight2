@@ -618,7 +618,7 @@ class TestCloneMirrorsTemplate:
             "ioLimit": -1, "ioReservation": 0, "ioShareLevel": "normal", "ioShareCount": 1000,
         }]
         assert hardware["cdroms"] == [{"clientDevice": True}]
-        assert hardware["nics"] == [{"type": "vmxnet3", "networkId": "dvportgroup-41"}]
+        assert hardware["nics"] == [{"type": "vmxnet3", "networkId": "dvportgroup-41", "startConnected": True}]
         assert hardware["vtpm"] is True
 
     def test_settings_are_read_under_the_providers_names(self):
@@ -689,6 +689,15 @@ class TestCloneMirrorsTemplate:
         said = {c["label"]: c for c in job["summary"]["checks"]}
         assert said["Clone"]["status"] == "ok" and "left exactly as" in said["Clone"]["detail"]
         assert "Network card" not in said
+
+    def test_a_template_card_that_does_not_connect_is_said(self, client, admin_token, ssh_profile, vcenter, engine):
+        self.with_template(nics=[{"type": "vmxnet3", "networkId": "dvportgroup-41", "startConnected": False}])
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-10",
+                                  sizeMode="template", folderMode="existing")
+        job = plan(client, admin_token, build["id"])["provisioning"]["job"]
+        assert job["status"] == "planned", job.get("error")
+        card = next(c for c in job["summary"]["checks"] if c["label"] == "Network card")
+        assert card["status"] == "info" and "set to connect" in card["detail"]
 
     def test_the_network_card_edit_needs_edit_device(self, client, admin_token, ssh_profile, vcenter, engine):
         # The provider re-applies the clone's card once (vCenter gave it a MAC

@@ -118,3 +118,54 @@ def test_an_event_query_that_fails_does_not_stop_the_watch(monkeypatch):
         said.append(sink.get())
     assert "vCenter · vm-a: guest hostname is vm-a" in said
     assert not any("stopped watching" in line for line in said)
+
+
+def test_a_running_vm_with_its_card_disconnected_gets_it_connected(monkeypatch):
+    card = vim.vm.device.VirtualVmxnet3(
+        key=4000,
+        deviceInfo=vim.Description(label="Network adapter 1", summary="VM-Net"),
+        connectable=vim.vm.device.VirtualDevice.ConnectInfo(
+            connected=False, startConnected=False, allowGuestControl=False),
+    )
+    sent = []
+
+    def reconfigure(spec):
+        sent.append(spec)
+        card.connectable.connected = True  # what vCenter does with the edit
+        return SimpleNamespace(info=SimpleNamespace(state="success"))
+
+    vm = SimpleNamespace(
+        runtime=SimpleNamespace(powerState="poweredOn"),
+        guest=SimpleNamespace(toolsRunningStatus="guestToolsRunning", ipAddress=None, hostName=None),
+        config=SimpleNamespace(hardware=SimpleNamespace(device=[card])),
+        ReconfigVM_Task=reconfigure,
+        _moId="vm-1201",
+    )
+    content = SimpleNamespace(eventManager=SimpleNamespace())
+    monkeypatch.setattr(inventory, "_connect", lambda cfg: SimpleNamespace(RetrieveContent=lambda: content))
+    monkeypatch.setattr(inventory, "_disconnect", lambda si: None)
+    monkeypatch.setattr(inventory, "_collect", lambda content, kind, paths: [(vm, {"name": "test-vm-1"})])
+    sink: "queue.Queue[str]" = queue.Queue()
+    cfg = VSphereConfig(base_url="https://vc.example.test", username="u", password="p")
+    watcher = vm_watch.VmWatcher(cfg, ["test-vm-1"], sink, interval=0.05).start()
+    time.sleep(0.3)
+    watcher.stop()
+    said = []
+    while not sink.empty():
+        said.append(sink.get())
+    assert "vCenter · test-vm-1: network card Network adapter 1 NOT connected" in said
+    assert "vCenter · test-vm-1: the network card was not connected — KubeSight connected it" in said
+    assert "vCenter · test-vm-1: network card Network adapter 1 connected" in said
+    assert len(sent) == 1  # once, not on every poll
+    change = sent[0].deviceChange[0]
+    assert change.operation == "edit"
+    assert change.device.connectable.connected and change.device.connectable.startConnected
+
+
+def test_the_template_cards_connect_setting_is_read():
+    off = vim.vm.device.VirtualVmxnet3(
+        key=4000, connectable=vim.vm.device.VirtualDevice.ConnectInfo(startConnected=False),
+        backing=vim.vm.device.VirtualEthernetCard.NetworkBackingInfo(network=vim.Network("network-14763")),
+    )
+    nics = inventory._template_hardware([off])["nics"]
+    assert nics == [{"type": "vmxnet3", "networkId": "network-14763", "startConnected": False}]

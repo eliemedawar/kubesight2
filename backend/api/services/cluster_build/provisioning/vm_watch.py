@@ -19,8 +19,9 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ...vsphere_client import VSphereConfig
 
@@ -49,7 +50,29 @@ def describe_changes(name: str, before: Dict[str, Any], now: Dict[str, Any]) -> 
         lines.append(f"{PREFIX} {name}: guest hostname is {now['hostname']}")
     if now.get("ip") != before.get("ip") and now.get("ip"):
         lines.append(f"{PREFIX} {name}: guest reports address {now['ip']}")
+    if now.get("nics") != before.get("nics") and now.get("nics"):
+        state = ", ".join(
+            f"{label} {'connected' if connected else 'NOT connected'}"
+            for label, connected in now["nics"]
+        )
+        lines.append(f"{PREFIX} {name}: network card {state}")
     return lines
+
+
+def ethernet_cards(devices) -> List[Any]:
+    from . import inventory
+
+    return [d for d in devices or [] if type(d).__name__.split(".")[-1] in inventory._NIC_TYPES]
+
+
+def nic_states(devices) -> List[Tuple[str, bool]]:
+    """(label, connected) for each network card, as vCenter reports it."""
+    out = []
+    for card in ethernet_cards(devices):
+        info = getattr(card, "deviceInfo", None)
+        label = getattr(info, "label", None) or "card"
+        out.append((label, bool(getattr(getattr(card, "connectable", None), "connected", False))))
+    return out
 
 
 def describe_event(name: str, event: Any) -> str:
@@ -113,6 +136,7 @@ class VmWatcher:
         found: Dict[str, Any] = {}
         facts: Dict[str, Dict[str, Any]] = {}
         seen_events: Dict[str, set] = {}
+        tried_connect: set = set()
         self._say(f"{PREFIX} watching {', '.join(self.names)} (power, VMware Tools, address, events)")
         while not self._stop.is_set():
             if len(found) < len(self.names):
@@ -132,9 +156,20 @@ class VmWatcher:
                     }
                 except Exception:  # noqa: BLE001 — the VM may be mid-destroy
                     continue
+                try:  # read on its own: no device list must not hide the rest
+                    devices = list(vm.config.hardware.device or [])
+                except Exception:  # noqa: BLE001
+                    devices = []
+                now["nics"] = nic_states(devices)
                 for line in describe_changes(name, facts.get(name, {}), now):
                     self._say(line)
                 facts[name] = now
+                # A running VM whose card is not connected never gets its
+                # address: connect it (once) instead of waiting for the timeout.
+                if (now["power"] == "poweredOn" and name not in tried_connect
+                        and any(not connected for _, connected in now["nics"])):
+                    tried_connect.add(name)
+                    self._say(self._connect_cards(name, vm, devices))
                 for event in self._events(content, vm):
                     key = getattr(event, "key", None)
                     if key in seen_events.setdefault(name, set()):
@@ -142,6 +177,36 @@ class VmWatcher:
                     seen_events[name].add(key)
                     self._say(describe_event(name, event))
             self._stop.wait(self.interval)
+
+    def _connect_cards(self, name: str, vm, devices) -> str:
+        """Connect every disconnected card of a running VM (and set it to connect
+        at power on). Needs "Connect devices" / "Modify device settings"."""
+        from pyVmomi import vim
+
+        changes = []
+        for card in ethernet_cards(devices):
+            connectable = getattr(card, "connectable", None)
+            if connectable is None:
+                connectable = card.connectable = vim.vm.device.VirtualDevice.ConnectInfo()
+            if connectable.connected and connectable.startConnected:
+                continue
+            connectable.connected = True
+            connectable.startConnected = True
+            connectable.allowGuestControl = True
+            changes.append(vim.vm.device.VirtualDeviceSpec(operation="edit", device=card))
+        if not changes:
+            return f"{PREFIX} {name}: network card connected"
+        try:
+            task = vm.ReconfigVM_Task(spec=vim.vm.ConfigSpec(deviceChange=changes))
+            deadline = time.monotonic() + 60
+            while getattr(task.info, "state", "success") in ("queued", "running") and time.monotonic() < deadline:
+                time.sleep(1)
+            if getattr(task.info, "state", "success") == "error":
+                reason = getattr(getattr(task.info, "error", None), "msg", None) or task.info.error
+                return f"{PREFIX} {name}: could not connect the network card: {reason}"[:_MESSAGE_CHARS]
+        except Exception as exc:  # noqa: BLE001 — report it; the apply goes on
+            return f"{PREFIX} {name}: could not connect the network card: {exc}"[:_MESSAGE_CHARS]
+        return f"{PREFIX} {name}: the network card was not connected — KubeSight connected it"
 
     def _events(self, content, vm) -> List[Any]:
         from pyVmomi import vim
