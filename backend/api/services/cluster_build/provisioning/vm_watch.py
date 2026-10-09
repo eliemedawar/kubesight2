@@ -86,6 +86,27 @@ def nic_states(devices) -> List[Tuple[str, bool]]:
     return out
 
 
+def describe_failed_task(info: Any) -> str:
+    """A failed vCenter task on one of the VMs, with the privilege vCenter
+    refused when that was the reason — what OpenTofu's error leaves out."""
+    entity = getattr(info, "entityName", None) or "VM"
+    what = getattr(info, "descriptionId", None) or getattr(info, "name", None) or "task"
+    error = getattr(info, "error", None)
+    message = str(getattr(error, "msg", None) or getattr(error, "localizedMessage", None) or error or "failed")
+    line = f"{PREFIX} {entity}: vCenter task {what} FAILED: {message.strip()}"
+    privilege = getattr(error, "privilegeId", None)
+    missing = [
+        availability.privId
+        for entity_privilege in getattr(error, "missingPrivileges", None) or []
+        for availability in getattr(entity_privilege, "privAvailability", None) or []
+        if not getattr(availability, "isGranted", True)
+    ]
+    wanted = sorted({p for p in [privilege, *missing] if p})
+    if wanted:
+        line += f" — missing privilege {', '.join(wanted)}"
+    return line[:_MESSAGE_CHARS]
+
+
 def describe_event(name: str, event: Any) -> str:
     """vCenter's own sentence for an event on the VM, e.g. why customization failed."""
     kind = type(event).__name__.split(".")[-1]
@@ -147,6 +168,7 @@ class VmWatcher:
         found: Dict[str, Any] = {}
         facts: Dict[str, Dict[str, Any]] = {}
         seen_events: Dict[str, set] = {}
+        seen_tasks: set = set()
         tried_connect: set = set()
         self._say(f"{PREFIX} watching {', '.join(self.names)} (power, VMware Tools, address, events)")
         while not self._stop.is_set():
@@ -188,7 +210,42 @@ class VmWatcher:
                         continue
                     seen_events[name].add(key)
                     self._say(describe_event(name, event))
+            self._report_failed_tasks(content, seen_tasks)
             self._stop.wait(self.interval)
+        # Once more at the end: a refused reconfigure is followed within
+        # seconds by OpenTofu deleting the VM, often between two polls, but the
+        # failed task (and the privilege it lacked) stays in vCenter's history.
+        self._report_failed_tasks(content, seen_tasks)
+
+    def _report_failed_tasks(self, content, seen: set) -> None:
+        from pyVmomi import vim
+
+        try:
+            spec = vim.TaskFilterSpec(
+                time=vim.TaskFilterSpec.ByTime(timeType="startedTime", beginTime=self._started),
+                state=["error"],
+            )
+            collector = content.taskManager.CreateCollectorForTasks(spec)
+        except Exception:  # noqa: BLE001 — task history is optional detail
+            return
+        try:
+            for _ in range(10):
+                page = collector.ReadNextTasks(100) or []
+                if not page:
+                    break
+                for info in page:
+                    key = getattr(info, "key", None)
+                    if key in seen or getattr(info, "entityName", None) not in self.names:
+                        continue
+                    seen.add(key)
+                    self._say(describe_failed_task(info))
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            try:
+                collector.DestroyCollector()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _connect_cards(self, name: str, vm, devices) -> str:
         """Connect every disconnected card of a running VM (and set it to connect
@@ -202,7 +259,6 @@ class VmWatcher:
                 connectable = card.connectable = vim.vm.device.VirtualDevice.ConnectInfo()
             connectable.connected = True
             connectable.startConnected = True
-            connectable.allowGuestControl = True
             changes.append(vim.vm.device.VirtualDeviceSpec(operation="edit", device=card))
         if not changes:
             return f"{PREFIX} {name}: network card connected and set to connect at power on"

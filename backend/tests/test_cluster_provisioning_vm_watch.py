@@ -179,3 +179,57 @@ def test_a_connected_card_not_set_to_connect_at_power_on_is_fixed_too():
         key=4001, connectable=vim.vm.device.VirtualDevice.ConnectInfo(connected=True, startConnected=True))
     assert vm_watch.cards_needing_connect([card, fine]) == [card]
     assert vm_watch.cards_needing_connect([fine]) == []
+
+
+def test_a_refused_task_names_the_missing_privilege():
+    info = SimpleNamespace(
+        key="task-901", entityName="test-vm-1", descriptionId="VirtualMachine.reconfigure",
+        error=vim.fault.NoPermission(
+            msg="Permission to perform this operation was denied.",
+            privilegeId="VirtualMachine.Interact.DeviceConnection"),
+    )
+    assert vm_watch.describe_failed_task(info) == (
+        "vCenter · test-vm-1: vCenter task VirtualMachine.reconfigure FAILED: Permission to perform "
+        "this operation was denied. — missing privilege VirtualMachine.Interact.DeviceConnection"
+    )
+
+
+def test_failed_tasks_are_reported_even_after_the_vm_is_gone(monkeypatch):
+    infos = []
+    destroyed = []
+
+    class Collector:
+        def __init__(self):
+            self.pages = [list(infos)]
+
+        def ReadNextTasks(self, n):
+            return self.pages.pop(0) if self.pages else []
+
+        def DestroyCollector(self):
+            destroyed.append(True)
+
+    content = SimpleNamespace(
+        eventManager=SimpleNamespace(),
+        taskManager=SimpleNamespace(CreateCollectorForTasks=lambda spec: Collector()),
+    )
+    monkeypatch.setattr(inventory, "_connect", lambda cfg: SimpleNamespace(RetrieveContent=lambda: content))
+    monkeypatch.setattr(inventory, "_disconnect", lambda si: None)
+    monkeypatch.setattr(inventory, "_collect", lambda content, kind, paths: [])  # rolled back already
+    sink: "queue.Queue[str]" = queue.Queue()
+    cfg = VSphereConfig(base_url="https://vc.example.test", username="u", password="p")
+    watcher = vm_watch.VmWatcher(cfg, ["test-vm-1"], sink, interval=0.05).start()
+    time.sleep(0.12)
+    infos.append(SimpleNamespace(
+        key="task-901", entityName="test-vm-1", descriptionId="VirtualMachine.reconfigure",
+        error=vim.fault.NoPermission(msg="Permission denied.", privilegeId="VirtualMachine.Config.EditDevice"),
+    ))
+    infos.append(SimpleNamespace(key="task-1", entityName="someone-elses-vm", descriptionId="x",
+                                 error=vim.fault.NoPermission(msg="no", privilegeId="X")))
+    watcher.stop()
+    said = []
+    while not sink.empty():
+        said.append(sink.get())
+    failed = [line for line in said if "FAILED" in line]
+    assert failed == ["vCenter · test-vm-1: vCenter task VirtualMachine.reconfigure FAILED: Permission denied. "
+                      "— missing privilege VirtualMachine.Config.EditDevice"]
+    assert destroyed  # collectors are cleaned up

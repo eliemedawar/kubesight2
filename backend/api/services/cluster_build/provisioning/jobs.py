@@ -1199,6 +1199,12 @@ def _do_apply(job: ClusterProvisionJob, engine) -> bool:
                 "The plan is out of date: the VMs' state changed after it was made. "
                 "Make a new plan.\n" + summary
             )
+        # What vCenter itself said failed (the watcher read the task), e.g.
+        # "missing privilege VirtualMachine.Interact.DeviceConnection" — the
+        # part OpenTofu's "Permission to perform this operation was denied" omits.
+        vcenter_said = [line for line in output.lines if "vCenter task" in line and "FAILED" in line]
+        if vcenter_said:
+            summary = (summary + "\n\n" if summary else "") + "\n".join(vcenter_said[:5])
         left = _left_behind(output.text())
         if left:
             summary = (

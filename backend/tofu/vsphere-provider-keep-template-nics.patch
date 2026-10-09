@@ -1,5 +1,5 @@
 diff --git a/vsphere/internal/virtualdevice/virtual_machine_network_interface_subresource.go b/vsphere/internal/virtualdevice/virtual_machine_network_interface_subresource.go
-index fb76d09..d2985ad 100644
+index fb76d09..ac7c8a5 100644
 --- a/vsphere/internal/virtualdevice/virtual_machine_network_interface_subresource.go
 +++ b/vsphere/internal/virtualdevice/virtual_machine_network_interface_subresource.go
 @@ -525,7 +525,11 @@ func NetworkInterfacePostCloneOperation(d *schema.ResourceData, c *govmomi.Clien
@@ -24,12 +24,12 @@ index fb76d09..d2985ad 100644
 +	// template's card is often set not to connect at power on. The VM then boots
 +	// disconnected: customization cannot make it reachable and VMware Tools never
 +	// reports an address. A card the provider creates is connected (govmomi's
-+	// default), so make a kept one match: connect at power on, guest may control.
++	// default), so make a kept one connect at power on. Only that flag: every
++	// connection setting KubeSight changes is one more privilege vCenter checks.
 +	if card.Connectable == nil {
 +		card.Connectable = &types.VirtualDeviceConnectInfo{}
 +	}
 +	card.Connectable.StartConnected = true
-+	card.Connectable.AllowGuestControl = true
 +	// And connected right now when the VM is already running; a powered-off
 +	// VM's card connects at power on through StartConnected above.
 +	if state, ok := r.rdd.Get("power_state").(string); ok && state == "on" {
