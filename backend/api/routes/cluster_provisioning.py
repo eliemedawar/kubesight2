@@ -1,7 +1,8 @@
 """OpenTofu provisioning for the Cluster Builder.
 
   /api/cluster-templates                     the shapes the wizard starts from
-  /api/cluster-builds/<id>/provision/...     plan, apply, grow, destroy, approve
+  /api/cluster-builds/<id>/provision/...     plan, apply, grow, destroy, approve,
+                                             install Kubernetes on a VMs-only build
   /api/vsphere-connections/<id>/placement    where VMs can go, what to clone
   /api/vsphere-connections/<id>/networks     address ranges per vCenter network
   /api/cluster-provisioning                  engine status, states and locks
@@ -295,6 +296,27 @@ def retry_connect(build_id: int, job_id: int):
     except ValueError as exc:
         return error_response(str(exc), 400)
     _audit_job("cluster_build_vm_connect_retried", user, build, job)
+    return _build_response(build)
+
+
+@cluster_provisioning_bp.route(
+    "/api/cluster-builds/<int:build_id>/provision/install-kubernetes", methods=["POST"]
+)
+@require_permission("cluster_builds:execute")
+def install_kubernetes(build_id: int):
+    """A VMs-only build whose VMs are ready: put Kubernetes on them."""
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    user, actor = _actor()
+    try:
+        note = provisioning.install_kubernetes(build, actor=actor, user=user)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    except PermissionError as exc:
+        return error_response(str(exc), 403)
+    log_audit("cluster_build_kubernetes_requested", actor=user, target_type="cluster_build",
+              target_id=str(build.id), details={"name": build.name, "started": note is None})
     return _build_response(build)
 
 

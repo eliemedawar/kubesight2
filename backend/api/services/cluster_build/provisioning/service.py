@@ -409,7 +409,7 @@ def request_grow_plan(build: ClusterBuild, payload: Dict[str, Any], *, actor: st
 def request_destroy(build: ClusterBuild, payload: Dict[str, Any], *, actor: str = "", user=None) -> ClusterProvisionJob:
     _require_vmware(build)
     if build.status in _BUSY_BUILD_STATUSES or build.status == "destroyed":
-        raise ValueError(f"The cluster cannot be destroyed while the build is '{build.status}'.")
+        raise ValueError(f"The VMs cannot be destroyed while the build is '{build.status}'.")
     if not state_store.has_resources(build.id):
         raise ValueError("OpenTofu's state lists nothing to destroy for this build.")
     if str(payload.get("confirmName") or "").strip() != build.name:
@@ -533,6 +533,42 @@ def retry_connect(build: ClusterBuild, job: ClusterProvisionJob) -> ClusterProvi
     jobs.start_worker(job.id, "connect")
     db.session.refresh(job)
     return job
+
+
+def install_kubernetes(build: ClusterBuild, *, actor: str = "", user=None) -> Optional[str]:
+    """Turn a VMs-only build into a cluster build on the VMs it already has.
+
+    The same hand-off a normal VMware build takes once its VMs answer:
+    preflight, then the build starts on its own when preflight is clean (or
+    only repeats a placement the plan chose). Returns what a person still has
+    to look at, or None when the build started.
+    """
+    _require_vmware(build)
+    if not build.vms_only or build.status != "vms_ready":
+        raise ValueError("Kubernetes can be installed only on a VMs-only build whose VMs are ready.")
+    _require_no_open_job(build)
+    created = next(
+        (j for j in jobs.jobs_for(build.id) if j.operation == "create" and j.status == "succeeded"),
+        None,
+    )
+    if created is None or not state_store.has_resources(build.id):
+        raise ValueError("OpenTofu's state lists no VMs for this build.")
+    build.vms_only = False
+    build.status = "draft"
+    build.finished_at = None
+    build.error = None
+    db.session.commit()
+    note = jobs.start_kubernetes(build, created, user=user, actor=actor)
+    db.session.rollback()
+    job = db.session.get(ClusterProvisionJob, created.id)
+    progress = dict(job.progress_json or {})
+    if note:
+        progress["handoffNote"] = note[:1000]
+    else:
+        progress.pop("handoffNote", None)
+    job.progress_json = progress
+    db.session.commit()
+    return note
 
 
 # ---------------------------------------------------------------------------

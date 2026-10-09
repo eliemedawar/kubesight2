@@ -260,7 +260,8 @@ export function provisionRail(build) {
     { key: "plan", label: "Plan" },
     { key: "create", label: job?.operation === "grow" ? "Create workers" : "Create VMs" },
     { key: "ssh", label: "Reach over SSH" },
-    { key: "kubernetes", label: "Kubernetes" },
+    // A VMs-only build ends once the VMs answer; Kubernetes is not part of it.
+    ...(build?.vmsOnly ? [] : [{ key: "kubernetes", label: "Kubernetes" }]),
   ];
   const reached = {
     planning: 0, planned: 0, plan_failed: 0,

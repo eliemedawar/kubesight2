@@ -80,6 +80,8 @@ function LibraryRow({ build, catalog, now, onOpen }) {
     middle = build.nodeCounts?.controlPlane ? shapeSummary(build) : "No machines assigned yet";
   } else if (build.status === "preflight_passed") {
     middle = "Preflight passed — not launched";
+  } else if (build.status === "vms_ready") {
+    middle = "VMs answer SSH — no Kubernetes";
   } else if ((build.addons || []).length) {
     middle = <AddonChips addons={build.addons} catalog={catalog} />;
   } else {
@@ -92,7 +94,9 @@ function LibraryRow({ build, catalog, now, onOpen }) {
       <span className="sg-cb-librow-id">
         <span className="nm">{build.name}</span>
         <span className="sub">
-          v{build.k8sVersion} · {build.topologyType === "stacked_ha" ? "HA" : "single CP"}
+          {build.vmsOnly
+            ? `VMs only · ${(build.nodeShape || []).length} VM${(build.nodeShape || []).length === 1 ? "" : "s"}`
+            : <>v{build.k8sVersion} · {build.topologyType === "stacked_ha" ? "HA" : "single CP"}</>}
           {build.vipAddress ? <> · VIP <span className="sg-cb-mono">{build.vipAddress}</span></> : null}
         </span>
       </span>

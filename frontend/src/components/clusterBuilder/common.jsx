@@ -13,6 +13,7 @@ const STATUS_PILLS = {
   cancelled: ["Cancelled", "is-muted"],
   provisioning: ["Creating VMs…", "is-live"],
   provision_failed: ["VM creation failed", "is-bad"],
+  vms_ready: ["VMs ready", "is-ok"],
   destroying: ["Destroying…", "is-live"],
   destroyed: ["Destroyed", "is-muted"],
   pending: ["Pending", "is-muted"],

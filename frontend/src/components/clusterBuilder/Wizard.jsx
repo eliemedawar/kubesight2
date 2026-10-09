@@ -1,5 +1,6 @@
 /** The new-build wizard: Template → Machines → Add-ons → Workloads → Verify
- *  (or, when KubeSight creates the VMs with OpenTofu, Plan & create).
+ *  (or, when KubeSight creates the VMs with OpenTofu, Plan & create; and when
+ *  it creates VMs only, without Kubernetes, just Template → Machines → Plan).
  *
  *  The old step 1 held eleven fields plus the whole add-on catalog in one grid,
  *  mixing what the cluster *is* with the infrastructure plumbing a build
@@ -63,10 +64,16 @@ import {
   updateClusterBuild,
 } from "../../api/clusterBuildsApi.js";
 
-function stepLabels(machineSource) {
+/** The steps this build walks, as [step, label]. A VMs-only build has no
+    cluster to put add-ons or workloads on, so it skips those two. */
+function wizardSteps(machineSource, vmsOnly) {
+  if (machineSource === "vmware" && vmsOnly) {
+    return [[STEP_SHAPE, "Template"], [STEP_MACHINES, "Machines"], [STEP_VERIFY, "Plan & create"]];
+  }
   return [
-    "Template", "Machines", "Add-ons", "Workloads",
-    machineSource === "vmware" ? "Plan & create" : "Verify & build",
+    [STEP_SHAPE, "Template"], [STEP_MACHINES, "Machines"], [STEP_ADDONS, "Add-ons"],
+    [STEP_WORKLOADS, "Workloads"],
+    [STEP_VERIFY, machineSource === "vmware" ? "Plan & create" : "Verify & build"],
   ];
 }
 
@@ -105,6 +112,7 @@ const EMPTY_BASICS = {
   counts: DEFAULT_COUNTS,
   sizes: DEFAULT_SIZES,
   machineSource: "existing",
+  vmsOnly: false,
   vm: EMPTY_VM_PLACEMENT,
   topologyType: "single_cp",
   endpointMode: "managed_haproxy",
@@ -130,6 +138,7 @@ function basicsFromBuild(build) {
     ...EMPTY_BASICS,
     templateId: build.templateId || "custom",
     machineSource: vmware ? "vmware" : "existing",
+    vmsOnly: vmware && Boolean(build.vmsOnly),
     counts: spec?.counts || {
       loadbalancer: nodeCounts.loadbalancer || 0,
       controlPlane: nodeCounts.controlPlane || 1,
@@ -187,21 +196,21 @@ const ROLE_KEYS = [
   ["worker", "W"],
 ];
 
-function StepRail({ current, onGoBack, labels }) {
+function StepRail({ current, onGoBack, steps }) {
   return (
     <nav className="sg-cb-steps" aria-label="Build steps">
-      {labels.map((label, index) => {
-        const state = index === current ? "is-on" : index < current ? "is-done" : "";
-        const reachable = index < current;
+      {steps.map(([step, label], index) => {
+        const state = step === current ? "is-on" : step < current ? "is-done" : "";
+        const reachable = step < current;
         return (
           <span className="sg-cb-steps-cell" key={label}>
             {index > 0 ? <span className="sg-cb-steps-arrow" aria-hidden="true">→</span> : null}
             {reachable ? (
-              <button type="button" className={`sg-cb-step ${state}`} onClick={() => onGoBack(index)}>
+              <button type="button" className={`sg-cb-step ${state}`} onClick={() => onGoBack(step)}>
                 <i>✓</i>{label}
               </button>
             ) : (
-              <span className={`sg-cb-step ${state}`} aria-current={index === current ? "step" : undefined}>
+              <span className={`sg-cb-step ${state}`} aria-current={step === current ? "step" : undefined}>
                 <i>{index + 1}</i>{label}
               </span>
             )}
@@ -372,7 +381,9 @@ function EndpointFields({ basics, setBasic, primaryAddress }) {
   );
 }
 
+/** ``value`` is "vmware" (VMs + Kubernetes), "vms" (VMs only) or "existing". */
 function SourceChoice({ value, onChange, canVmware }) {
+  const needsVcenter = "Needs a vCenter with a provisioning account — an administrator adds one under Sources.";
   return (
     <div className="card sg-cb-card">
       <div className="sg-cb-sect"><h2>Where the machines come from</h2></div>
@@ -383,7 +394,16 @@ function SourceChoice({ value, onChange, canVmware }) {
           <span className="cd">
             {canVmware
               ? "KubeSight clones a VM template, sets sizes and addresses, then installs Kubernetes on them."
-              : "Needs a vCenter with a provisioning account — an administrator adds one under Sources."}
+              : needsVcenter}
+          </span>
+        </button>
+        <button type="button" className="sg-cb-choice" aria-pressed={value === "vms"}
+                disabled={!canVmware} onClick={() => onChange("vms")}>
+          <span className="ct">Create VMs only <span className="sg-cb-pill is-brand">OpenTofu</span></span>
+          <span className="cd">
+            {canVmware
+              ? "The same VMs, without Kubernetes: KubeSight stops once every VM answers SSH. Install Kubernetes on them later, or destroy them."
+              : needsVcenter}
           </span>
         </button>
         <button type="button" className="sg-cb-choice" aria-pressed={value === "existing"}
@@ -1080,7 +1100,8 @@ export default function Wizard({
     () => (infra.vsphere || []).filter((row) => row.provisioningConfigured),
     [infra.vsphere]
   );
-  const labels = stepLabels(basics.machineSource);
+  const vmsOnly = vmware && basics.vmsOnly;
+  const steps = wizardSteps(basics.machineSource, basics.vmsOnly);
 
   // Resolve the plumbing once, from whatever is already healthy. This is what
   // lets the Sources row be a statement rather than three questions.
@@ -1319,14 +1340,17 @@ export default function Wizard({
       k8sVersion: basics.k8sVersion,
       templateId: basics.templateId,
       machineSource: basics.machineSource,
+      vmsOnly,
       cniPlugin: basics.cniPlugin,
       podCidr: basics.podCidr,
       serviceCidr: basics.serviceCidr,
       diskCheckPath: basics.diskCheckPath,
-      addons: basics.addons,
+      // A VMs-only build skips those steps; Install Kubernetes later builds a
+      // bare cluster, and plugins can be added to it on day two.
+      addons: vmsOnly ? [] : basics.addons,
       buildProfileId: basics.buildProfileId || undefined,
       connectionProfileId: basics.connectionProfileId || undefined,
-      workloads: basics.workloads.items.length ? basics.workloads : null,
+      workloads: !vmsOnly && basics.workloads.items.length ? basics.workloads : null,
     };
     if (vmware) {
       return {
@@ -1550,7 +1574,9 @@ export default function Wizard({
           facts={vmwareFacts}
           note={{
             tone: "plain",
-            text: "Creating the VMs takes a few minutes. Kubernetes starts on them right after, as a normal Cluster Builder build.",
+            text: vmsOnly
+              ? "Creating the VMs takes a few minutes. KubeSight stops once every VM answers SSH — Kubernetes is not installed."
+              : "Creating the VMs takes a few minutes. Kubernetes starts on them right after, as a normal Cluster Builder build.",
           }}
         />
       );
@@ -1565,6 +1591,28 @@ export default function Wizard({
         />
       );
     }
+    const planFooter = (
+      <>
+        {!vmsOnly && workloadStorageErrors.length ? (
+          <span className="sg-cb-field-error">{workloadStorageErrors[0]}</span>
+        ) : null}
+        {!canExecute ? (
+          <span className="muted">
+            Save this draft for a reviewer with execute permission to make the plan and create the VMs.
+          </span>
+        ) : null}
+        <button
+          className="primary sg-cb-bp-cta"
+          type="button"
+          disabled={busy || Boolean(vmProblem)
+            || (!vmsOnly && (Boolean(addonError) || workloadStorageErrors.length > 0))}
+          onClick={canExecute ? makePlan : saveDraft}
+        >
+          {canExecute ? (busy ? "Saving…" : "Make the plan") : "Save draft for review"}
+        </button>
+        <small className="muted">Nothing is created until you approve the plan.</small>
+      </>
+    );
     const footer = step === STEP_SHAPE ? (
       <>
         {!shapeReady && shapeProblem ? <span className="sg-cb-field-hint">{shapeProblem}</span> : null}
@@ -1577,7 +1625,7 @@ export default function Wizard({
           Next — machines
         </button>
       </>
-    ) : step === STEP_MACHINES ? (
+    ) : step === STEP_MACHINES && vmsOnly ? planFooter : step === STEP_MACHINES ? (
       <>
         {!machinesReady && machinesProblem && !vmware
           ? <span className="sg-cb-field-hint">{machinesProblem}</span> : null}
@@ -1602,27 +1650,7 @@ export default function Wizard({
           Next — workloads
         </button>
       </>
-    ) : vmware ? (
-      <>
-        {workloadStorageErrors.length ? (
-          <span className="sg-cb-field-error">{workloadStorageErrors[0]}</span>
-        ) : null}
-        {!canExecute ? (
-          <span className="muted">
-            Save this draft for a reviewer with execute permission to make the plan and create the VMs.
-          </span>
-        ) : null}
-        <button
-          className="primary sg-cb-bp-cta"
-          type="button"
-          disabled={busy || Boolean(vmProblem) || Boolean(addonError) || workloadStorageErrors.length > 0}
-          onClick={canExecute ? makePlan : saveDraft}
-        >
-          {canExecute ? (busy ? "Saving…" : "Make the plan") : "Save draft for review"}
-        </button>
-        <small className="muted">Nothing is created until you approve the plan.</small>
-      </>
-    ) : canExecute ? (
+    ) : vmware ? planFooter : canExecute ? (
       <>
         {workloadStorageErrors.length ? (
           <span className="sg-cb-field-error">{workloadStorageErrors[0]}</span>
@@ -1674,7 +1702,9 @@ export default function Wizard({
             : step === STEP_MACHINES
               ? (vmProblem
                 ? { tone: "warn", text: vmProblem }
-                : { tone: "good", text: "Ready to plan. Nothing is created until you approve the plan." })
+                : { tone: "good", text: vmsOnly
+                  ? "Ready to plan. KubeSight creates the VMs and stops once they answer SSH."
+                  : "Ready to plan. Nothing is created until you approve the plan." })
               : {
                 tone: "plain",
                 text: `${shapeLabel(basics.counts)}. Addresses are previews until the plan reserves them.`,
@@ -1706,7 +1736,7 @@ export default function Wizard({
   return (
     <div className="sg-cb-wizard">
       <div className="sg-cb-wizard-top">
-        <StepRail current={step} onGoBack={setStep} labels={labels} />
+        <StepRail current={step} onGoBack={setStep} steps={steps} />
         <button className="btn-ghost" type="button" onClick={onCancel}>Cancel</button>
       </div>
 
@@ -1729,7 +1759,7 @@ export default function Wizard({
                 </div>
                 <p className="muted sg-cb-pv-lede">
                   A template sets the shape, the machine sizes and, for saved ones, the add-ons. Next you choose
-                  whether KubeSight creates the VMs or uses machines you already have.
+                  whether KubeSight creates the VMs (with or without Kubernetes) or uses machines you already have.
                 </p>
                 <TemplateGallery
                   catalog={catalog}
@@ -1753,15 +1783,19 @@ export default function Wizard({
           {step === STEP_MACHINES ? (
             <>
               <SourceChoice
-                value={basics.machineSource}
+                value={vmsOnly ? "vms" : basics.machineSource}
                 canVmware={provisioningConnections.length > 0}
-                onChange={(source) => setBasics((previous) => ({
-                  ...previous,
-                  machineSource: source,
-                  vm: source === "vmware" && !previous.vm.connectionId && provisioningConnections[0]
-                    ? { ...previous.vm, connectionId: String(provisioningConnections[0].id) }
-                    : previous.vm,
-                }))}
+                onChange={(choice) => {
+                  const source = choice === "existing" ? "existing" : "vmware";
+                  setBasics((previous) => ({
+                    ...previous,
+                    machineSource: source,
+                    vmsOnly: choice === "vms",
+                    vm: source === "vmware" && !previous.vm.connectionId && provisioningConnections[0]
+                      ? { ...previous.vm, connectionId: String(provisioningConnections[0].id) }
+                      : previous.vm,
+                  }));
+                }}
               />
               {vmware ? (
                 <VmwareMachines

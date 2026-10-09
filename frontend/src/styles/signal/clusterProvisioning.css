@@ -214,6 +214,9 @@
 .sg-cb-pv-wait { flex-direction: row; align-items: center; gap: 16px; }
 .sg-cb-pv-wait > div { flex: 1; min-width: 0; }
 .sg-cb-pv-wait p { margin: 3px 0 0; font-size: 12.5px; }
+.sg-cb-pv-vmsonly { flex-wrap: wrap; }
+.sg-cb-pv-vmsonly > div:first-child { min-width: min(100%, 320px); }
+.sg-cb-pv-vmsonly .sg-cb-pv-vmsonly-acts { flex: 0 0 auto; display: flex; gap: 8px; }
 .sg-cb-pv-status { margin: -4px 0 0; font-size: 12.5px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
 /* ── Live progress ───────────────────────────────────────────────────── */

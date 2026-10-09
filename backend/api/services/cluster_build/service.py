@@ -147,6 +147,8 @@ def serialize_build(build: ClusterBuild, *, include_detail: bool = False) -> Dic
         "vsphereConnectionId": build.vsphere_connection_id,
         # existing | vmware — whether KubeSight creates the VMs (OpenTofu).
         "machineSource": build.machine_source or "existing",
+        # VMware only: the VMs are the whole job; Kubernetes is not installed.
+        "vmsOnly": bool(build.vms_only),
         "templateId": build.template_id,
         "provisionStatus": build.provision_status,
         "buildProfileId": build.build_profile_id,
@@ -556,6 +558,17 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
     ):
         raise ValueError("KubeSight already created VMs for this build; it stays a VMware build.")
     build.machine_source = machine_source
+    vms_only = bool(payload.get("vmsOnly", build.vms_only)) and machine_source == "vmware"
+    if (
+        build.id
+        and vms_only != bool(build.vms_only)
+        and provisioning_state.has_resources(build.id)
+    ):
+        raise ValueError(
+            "This build's VMs already exist. Use Install Kubernetes to put a "
+            "cluster on them, or destroy them and start again."
+        )
+    build.vms_only = vms_only
     if "templateId" in payload:
         template_id = str(payload.get("templateId") or "").strip() or None
         if template_id and not cluster_templates.is_known_template_id(template_id):
@@ -970,10 +983,19 @@ def delete_build(build_id: int) -> None:
 # Lifecycle
 # ---------------------------------------------------------------------------
 
+def _require_kubernetes_wanted(build: ClusterBuild) -> None:
+    if build.vms_only:
+        raise ValueError(
+            "This build creates VMs only. Use Install Kubernetes on its page "
+            "once the VMs are ready."
+        )
+
+
 def run_preflight(build_id: int, user=None) -> Dict[str, Any]:
     build = get_build(build_id)
     if build.status in ("building", "preflighting"):
         raise ValueError("Build is already running.")
+    _require_kubernetes_wanted(build)
     if not build.nodes:
         raise ValueError("Add nodes before running preflight.")
     _require_machines_exist(build)
@@ -1086,6 +1108,7 @@ def start_build(build_id: int, *, ack_warnings: Optional[List[str]] = None,
     build = get_build(build_id)
     if build.status == "building":
         raise ValueError("Build is already running.")
+    _require_kubernetes_wanted(build)
     _require_machines_exist(build)
     if build.status not in ("preflight_passed",):
         raise ValueError(

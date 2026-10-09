@@ -27,6 +27,7 @@ import {
   approveClusterDestroy,
   createClusterTemplate,
   discardProvisionJob,
+  installKubernetesOnVms,
   planClusterVms,
   planMoreWorkers,
   rejectClusterDestroy,
@@ -214,6 +215,7 @@ export function ProvisionProgress({ build, now, compact = false }) {
         <h2>
           {destroy ? "Deleting the VMs"
             : job?.status === "connecting" ? "Waiting for the new VMs to answer"
+              : build.status === "vms_ready" ? "VMs ready"
               : job?.status === "succeeded" ? "VMs created"
                 : job?.operation === "grow" ? "Creating workers in vCenter" : "Creating VMs in vCenter"}
         </h2>
@@ -498,6 +500,34 @@ export function ProvisionCard({
             OpenTofu&apos;s state was saved and its lock released. A new plan creates only what is missing.
           </span>
         </Failure>
+        <ProvisionProgress build={build} now={now} />
+      </>
+    );
+  }
+  if (job.status === "succeeded" && build.status === "vms_ready") {
+    const count = build.provisioning?.state?.vmCount || 0;
+    return (
+      <>
+        <div className="card sg-cb-card sg-cb-pv-wait sg-cb-pv-vmsonly">
+          <div>
+            <b>{count} VM{count === 1 ? "" : "s"} running · Kubernetes not installed</b>
+            <p className="muted">
+              This build creates VMs only, and stopped once every VM answered SSH. Log in with the
+              build&apos;s SSH route to test them. Install Kubernetes runs preflight on these same VMs,
+              then builds the cluster{build.k8sVersion ? ` (v${build.k8sVersion})` : ""} — nothing is
+              cloned again. When you are done, Destroy VMs frees them and their addresses.
+            </p>
+          </div>
+          <div className="sg-cb-pv-vmsonly-acts">
+            {canExecute ? (
+              <button className="primary" type="button" disabled={busy}
+                      onClick={() => act(() => installKubernetesOnVms(build.id))}>
+                {busy ? "Starting…" : "Install Kubernetes"}
+              </button>
+            ) : null}
+          </div>
+        </div>
+        {refusalNote}
         <ProvisionProgress build={build} now={now} />
       </>
     );

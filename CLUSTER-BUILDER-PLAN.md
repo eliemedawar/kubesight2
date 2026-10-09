@@ -589,6 +589,20 @@ Destroy (destroy plan → a second person with cluster_builds:execute approves).
 - The VM template must contain open-vm-tools plus cloud-init or perl (guest customization), and
   must accept the build's SSH credential.
 
+### VMs only (built 2026-10-09)
+
+The wizard's Machines step offers **Create VMs only** next to "Create new VMs" and "Use machines
+you already have". The build carries `ClusterBuild.vms_only` (`vmsOnly`), skips the Add-ons and
+Workloads steps, and runs plan → apply → SSH exactly as above. At the hand-off
+(`jobs._handoff`) it stops instead: status `vms_ready`, audit `cluster_build_vms_ready`.
+Preflight and start are refused while `vms_only` is set.
+
+From `vms_ready`: **Install Kubernetes** (`POST /provision/install-kubernetes`, `cluster_builds:execute`)
+clears the flag and runs the same hand-off a normal VMware build takes
+(`jobs.start_kubernetes`: preflight, start when clean or only the plan's placement warned, else a
+note); the VMs are not cloned again. **Destroy** works as for any VMware build (second person).
+The flag cannot be flipped by editing once VMs exist.
+
 ### Not covered yet
 
 Content Library templates, standalone ESXi hosts (clusters only), stopping an apply part-way,

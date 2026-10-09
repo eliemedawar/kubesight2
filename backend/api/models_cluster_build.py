@@ -275,8 +275,11 @@ class ClusterBuild(db.Model):
     runs first:
         draft -> provisioning -> preflighting -> ...   (as above)
         provisioning -> provision_failed
+    A VMs-only build (``vms_only``) stops once every VM answers SSH:
+        draft -> provisioning -> vms_ready
+        vms_ready -> draft -> preflighting -> ...   ("Install Kubernetes")
     and a cluster whose VMs KubeSight created can be taken down again:
-        completed | failed | provision_failed -> destroying -> destroyed
+        completed | failed | provision_failed | vms_ready -> destroying -> destroyed
     ``provision_status`` says what OpenTofu is doing inside those states.
     """
 
@@ -378,6 +381,10 @@ class ClusterBuild(db.Model):
     # existing | vmware. "vmware" means KubeSight creates the machines itself
     # with OpenTofu before the phase machine below ever runs.
     machine_source = db.Column(db.String(16), nullable=False, default="existing")
+    # VMware only: create the VMs and stop once they answer SSH, without
+    # installing Kubernetes — for testing the VM side on its own. Cleared when
+    # someone asks for Kubernetes on those VMs later.
+    vms_only = db.Column(db.Boolean, nullable=False, default=False)
     # The template the wizard started from: a built-in id ("lab", "small",
     # "standard-ha"), "custom:<id>" for a saved one, or "custom".
     template_id = db.Column(db.String(64), nullable=True)

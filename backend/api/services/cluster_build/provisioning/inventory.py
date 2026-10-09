@@ -15,6 +15,7 @@ local walk-throughs (opt-in through KUBESIGHT_PROVISIONING_SIMULATE).
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import ssl
@@ -24,6 +25,8 @@ from urllib.parse import urlsplit
 
 from ...vsphere_client import VSphereConfig, VSphereError
 from ....ttl_cache import TTLCache
+
+logger = logging.getLogger(__name__)
 
 _PLACEMENT_TTL_SECONDS = 120
 _placement_cache = TTLCache("vsphere-placement")
@@ -525,13 +528,31 @@ def _check_privileges(cfg: VSphereConfig, entity_ids: Dict[str, str]) -> List[Di
 # Public entry points
 # ---------------------------------------------------------------------------
 
+def _as_vsphere_error(what: str, exc: Exception) -> VSphereError:
+    """Anything a vCenter read raises after login — a SOAP fault such as
+    NoPermission on one object, a dropped session, or an object shaped in a way
+    this code did not expect — as a message a person can act on, instead of a
+    bare 500. The traceback goes to the log."""
+    logger.exception("vCenter %s failed", what)
+    name = type(exc).__name__
+    detail = str(getattr(exc, "msg", "") or exc).strip()
+    return VSphereError(f"vCenter {what} failed ({name}){': ' + detail[:500] if detail else ''}")
+
+
 def placement(cfg: VSphereConfig, *, cache_key: str, force_refresh: bool = False) -> Dict[str, Any]:
     fetch = _placement_fetcher or (demo_placement if simulation_enabled() else _fetch_placement)
     if force_refresh:
         _placement_cache.invalidate(cache_key)
-    return _placement_cache.get_or_compute(
-        cache_key, _PLACEMENT_TTL_SECONDS, lambda: fetch(cfg)
-    )
+
+    def read() -> Dict[str, Any]:
+        try:
+            return fetch(cfg)
+        except VSphereError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — see _as_vsphere_error
+            raise _as_vsphere_error("inventory read", exc) from exc
+
+    return _placement_cache.get_or_compute(cache_key, _PLACEMENT_TTL_SECONDS, read)
 
 
 def invalidate(cache_key: Optional[str] = None) -> None:
@@ -550,7 +571,12 @@ def check_privileges(cfg: VSphereConfig, entity_ids: Dict[str, str]) -> List[Dic
              "granted": True}
             for p, purpose, scope in REQUIRED_PRIVILEGES
         ]
-    return _check_privileges(cfg, entity_ids)
+    try:
+        return _check_privileges(cfg, entity_ids)
+    except VSphereError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — see _as_vsphere_error
+        raise _as_vsphere_error("privilege check", exc) from exc
 
 
 def find_datacenter(inventory: Dict[str, Any], datacenter_id: str) -> Optional[Dict[str, Any]]:

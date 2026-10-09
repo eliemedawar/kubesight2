@@ -171,6 +171,14 @@ describe("plans and progress", () => {
     expect(at("succeeded", "completed")).toEqual(["done", "done", "done", "done"]);
   });
 
+  it("ends a VMs-only rail at SSH", () => {
+    const rail = (status, buildStatus) => provisionRail({
+      status: buildStatus, vmsOnly: true, provisioning: { job: { operation: "create", status } },
+    });
+    expect(rail("applying", "provisioning").map((cell) => cell.key)).toEqual(["plan", "create", "ssh"]);
+    expect(rail("succeeded", "vms_ready").map((cell) => cell.state)).toEqual(["done", "done", "done"]);
+  });
+
   it("reads per-VM state from the job's progress", () => {
     const rows = vmRows({
       provisioning: {

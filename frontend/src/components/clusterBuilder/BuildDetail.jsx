@@ -531,7 +531,7 @@ export default function BuildDetail({
     if (
       build.machineSource === "vmware"
       && machines.length
-      && ["draft", "provisioning", "provision_failed", "destroying"].includes(build.status)
+      && ["draft", "provisioning", "provision_failed", "vms_ready", "destroying"].includes(build.status)
     ) {
       const rows = Object.fromEntries(vmRows(build).map((row) => [row.name, row]));
       return machinesBlueprint({
@@ -644,8 +644,12 @@ export default function BuildDetail({
               : isGrowthRun ? "Adding machines" : "Building"} />
           : <StatusPill status={build.status} />}
         <span className="muted sg-cb-mono sg-cb-detail-meta">
-          v{build.k8sVersion} · {build.topologyType === "stacked_ha" ? "HA" : "single CP"}
-          {" "}· {build.controlPlaneEndpoint} · {build.cniPlugin}
+          {build.vmsOnly
+            ? `VMs only · ${(build.nodes || []).length} VM${(build.nodes || []).length === 1 ? "" : "s"} · no Kubernetes`
+            : <>
+              v{build.k8sVersion} · {build.topologyType === "stacked_ha" ? "HA" : "single CP"}
+              {" "}· {build.controlPlaneEndpoint} · {build.cniPlugin}
+            </>}
         </span>
         <span className="sg-cb-detail-actions">
           {isRunning && elapsed !== null ? (
@@ -746,7 +750,7 @@ export default function BuildDetail({
         <DestroyPanel build={build} notify={notify} onChanged={load} onClose={() => setDestroyOpen(false)} />
       ) : null}
 
-      {progress?.timeline?.length && !destroyed ? (
+      {progress?.timeline?.length && !destroyed && !build.vmsOnly ? (
         <div className="card sg-cb-railcard">
           <PhaseRail
             timeline={progress.timeline}
@@ -974,7 +978,12 @@ export default function BuildDetail({
 
         {destroyed ? null : <Blueprint
           plan={plan}
-          facts={[
+          facts={build.vmsOnly ? [
+            { label: "Kubernetes", value: "not installed — VMs only" },
+            { label: "Clone of", value: build.provisioning?.spec?.template?.name || "—" },
+            { label: "Datastore", value: build.provisioning?.spec?.datastoreName || "—" },
+            { label: "Network", value: build.provisioning?.spec?.networkName || "—" },
+          ] : [
             {
               label: "Add-ons",
               value: (build.addons || []).length

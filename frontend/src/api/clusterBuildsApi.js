@@ -212,6 +212,10 @@ export const rejectClusterDestroy = (id, jobId, note = "") => jobAction(id, jobI
 export const discardProvisionJob = (id, jobId) => jobAction(id, jobId, "discard");
 export const retryProvisionConnect = (id, jobId) => jobAction(id, jobId, "retry-connect");
 
+/** A VMs-only build whose VMs are ready: preflight them and build Kubernetes. */
+export const installKubernetesOnVms = (id) =>
+  request(`/api/cluster-builds/${id}/provision/install-kubernetes`, { method: "POST" });
+
 export const getProvisioningOverview = () => request("/api/cluster-provisioning");
 
 export const releaseProvisionLock = (buildId) =>

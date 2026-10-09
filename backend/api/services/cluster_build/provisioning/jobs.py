@@ -6,7 +6,8 @@ process, a heartbeat on ``updated_at`` guards the fleet). What each phase does:
   plan     vCenter checks → address probes → main.tf.json → init → plan → show
   apply    init → apply the saved plan (streamed, per-VM progress) → record VMs
   connect  wait until every new VM answers SSH, then hand the machines to the
-           Cluster Builder phase machine (preflight, then build or grow)
+           Cluster Builder phase machine (preflight, then build or grow) — or,
+           for a VMs-only build, stop there with the build ``vms_ready``
 
 Recovery (``advance_provision_jobs``, ticked by the scheduler): a job whose
 worker died is picked up again. Planning and connecting simply rerun. An
@@ -1134,22 +1135,47 @@ def _handoff(job: ClusterProvisionJob) -> None:
                        f"({result.get('status')}). Open Add machines to review it.")
         return
 
+    if build.vms_only:
+        # The VMs were the whole request. They stay as they are until someone
+        # asks for Kubernetes on them or destroys them.
+        build.status = "vms_ready"
+        build.finished_at = _utcnow()
+        db.session.commit()
+        log_audit(
+            "cluster_build_vms_ready",
+            actor_user_id=job.applied_by_user_id,
+            target_type="cluster_build",
+            target_id=str(build.id),
+            details={"name": build.name, "jobId": job.id, "vms": len(build.nodes)},
+        )
+        return
+
     build.status = "draft"
     db.session.commit()
+    note = start_kubernetes(build, job, user=user, actor=actor)
+    if note:
+        _note(job, note)
+
+
+def start_kubernetes(build: ClusterBuild, job: ClusterProvisionJob, *, user=None,
+                     actor: str = "") -> Optional[str]:
+    """Preflight the machines OpenTofu created and start the build when it is
+    clean. Returns what a person has to look at, or None when it started."""
+    from .. import service as build_service
+
     try:
         result = build_service.run_preflight(build.id, user=user)
     except Exception as exc:  # noqa: BLE001
-        _note(job, f"Preflight could not run: {scrub(str(exc))}")
-        return
+        return f"Preflight could not run: {scrub(str(exc))}"
     ack = _plan_acknowledges(result, job)
     if result.get("status") == "pass" or ack:
         try:
             build_service.start_build(build.id, ack_warnings=ack, actor=actor, user=user)
         except Exception as exc:  # noqa: BLE001
-            _note(job, f"The Kubernetes build did not start: {scrub(str(exc))}")
-    else:
-        _note(job, "Preflight found something to look at before Kubernetes is installed "
-                   f"({result.get('status')}). Review it on this page, then start the build.")
+            return f"The Kubernetes build did not start: {scrub(str(exc))}"
+        return None
+    return ("Preflight found something to look at before Kubernetes is installed "
+            f"({result.get('status')}). Review it on this page, then start the build.")
 
 
 def _note(job: ClusterProvisionJob, message: str) -> None:

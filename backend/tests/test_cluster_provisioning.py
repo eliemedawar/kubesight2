@@ -466,6 +466,82 @@ class TestPartialFailure:
         assert "can no longer change" in recount.get_json()["error"]
 
 
+class TestVmsOnly:
+    """Create the VMs and stop: the VM side tested on its own, Kubernetes later or never."""
+
+    @pytest.fixture()
+    def ready(self, client, admin_token, ssh_profile, vcenter, engine):
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter)
+        response = client.put(
+            f"/api/cluster-builds/{build['id']}", json={"vmsOnly": True},
+            headers=auth_headers(admin_token),
+        )
+        assert response.status_code == 200 and response.get_json()["data"]["vmsOnly"] is True
+        job = plan(client, admin_token, build["id"])["provisioning"]["job"]
+        assert job["status"] == "planned", job.get("error")
+        # No SSH transport is installed: anything past "the VMs answer" would fail.
+        done = apply(client, admin_token, build["id"], job["id"])
+        return done
+
+    def test_stops_once_the_vms_answer(self, client, admin_token, ready):
+        assert ready["status"] == "vms_ready", (ready.get("error"), ready["provisioning"]["job"])
+        assert ready["provisionStatus"] == "ready"
+        assert ready["provisioning"]["job"]["status"] == "succeeded"
+        assert not ready["resultClusterId"] and not ready["steps"]
+        assert len(state_store.vm_instances(ready["id"])) == 4
+        assert {v["state"] for v in ready["provisioning"]["job"]["progress"]["vms"].values()} == {"ready"}
+        assert ready["canDestroy"] is True
+
+        for path in ("preflight", "start"):
+            refused = client.post(f"/api/cluster-builds/{ready['id']}/{path}", headers=auth_headers(admin_token))
+            assert refused.status_code == 400 and "VMs only" in refused.get_json()["error"], path
+        deleted = client.delete(f"/api/cluster-builds/{ready['id']}", headers=auth_headers(admin_token))
+        assert deleted.status_code == 400
+
+    def test_install_kubernetes_later(self, client, admin_token, ready, fake_ssh):
+        set_transport_factory(lambda: build_default_fake(SMALL_HOSTS))
+        response = client.post(
+            f"/api/cluster-builds/{ready['id']}/provision/install-kubernetes",
+            headers=auth_headers(admin_token),
+        )
+        assert response.status_code == 200, response.get_json()
+        built = response.get_json()["data"]
+        assert built["vmsOnly"] is False
+        assert built["status"] == "completed", (built.get("error"), built["provisioning"]["job"])
+        assert built["resultClusterId"]
+        assert all(n["status"] == "joined" for n in built["nodes"] if n["role"] != "loadbalancer")
+        assert len(state_store.vm_instances(ready["id"])) == 4  # the same VMs, none created
+
+        again = client.post(
+            f"/api/cluster-builds/{ready['id']}/provision/install-kubernetes",
+            headers=auth_headers(admin_token),
+        )
+        assert again.status_code == 400
+
+    def test_destroy_takes_a_second_person_too(self, client, app, admin_token, ready):
+        job = client.post(
+            f"/api/cluster-builds/{ready['id']}/provision/destroy",
+            json={"confirmName": "uat-02"}, headers=auth_headers(admin_token),
+        ).get_json()["data"]["provisioning"]["job"]
+        assert job["status"] == "awaiting_approval"
+        approved = client.post(
+            f"/api/cluster-builds/{ready['id']}/provision/jobs/{job['id']}/approve",
+            headers=auth_headers(second_admin_token(client, app)),
+        )
+        assert approved.status_code == 200, approved.get_json()
+        assert approved.get_json()["data"]["status"] == "destroyed"
+        assert state_store.vm_instances(ready["id"]) == {}
+
+    def test_only_for_vms_kubesight_creates(self, client, admin_token, ssh_profile):
+        response = client.post("/api/cluster-builds", json={
+            "name": "lab-1", "k8sVersion": "1.32.4", "machineSource": "existing", "vmsOnly": True,
+            "endpointMode": "manual_endpoint", "controlPlaneEndpoint": "10.0.0.10:6443",
+            "connectionProfileId": ssh_profile["id"],
+        }, headers=auth_headers(admin_token))
+        assert response.status_code == 201, response.get_json()
+        assert response.get_json()["data"]["vmsOnly"] is False
+
+
 class TestGrowAndDestroy:
     @pytest.fixture()
     def built(self, client, admin_token, ssh_profile, vcenter, engine, fake_ssh):
@@ -671,6 +747,34 @@ class TestVCenterAccounts:
         row = data["items"][0] if isinstance(data, dict) else data[0]
         assert row["provisioningConfigured"] is True
         assert "prov-pass" not in json.dumps(data)
+
+    def test_a_vcenter_fault_after_login_is_a_message_not_a_500(self, client, admin_token, vcenter, monkeypatch):
+        class NoPermission(Exception):
+            msg = "Permission to perform this operation was denied."
+
+        def denied(cfg):
+            raise NoPermission()
+
+        inventory.set_placement_fetcher(denied)
+        url = f"/api/vsphere-connections/{vcenter['connection'].id}"
+        checked = client.post(f"{url}/test-provisioning", headers=auth_headers(admin_token))
+        assert checked.status_code == 200, checked.get_json()
+        result = checked.get_json()["data"]
+        assert result["status"] == "failed"
+        assert "NoPermission" in result["error"] and "denied" in result["error"]
+        placed = client.get(f"{url}/placement?refresh=1", headers=auth_headers(admin_token))
+        assert placed.status_code == 502 and "NoPermission" in placed.get_json()["error"]
+
+        inventory.set_placement_fetcher(lambda cfg: inventory.demo_placement(cfg))
+        inventory.set_privilege_checker(None)
+
+        def boom(cfg, ids):
+            raise AttributeError("'NoneType' object has no attribute 'privAvailability'")
+
+        monkeypatch.setattr(inventory, "_check_privileges", boom)
+        checked = client.post(f"{url}/test-provisioning", headers=auth_headers(admin_token))
+        assert checked.status_code == 200
+        assert "privilege check failed (AttributeError)" in checked.get_json()["data"]["error"]
 
     def test_placement_lists_templates_with_verdicts(self, client, admin_token, vcenter):
         data = client.get(
