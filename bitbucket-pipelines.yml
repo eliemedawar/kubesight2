@@ -52,7 +52,14 @@ definitions:
         script:
           - export IMAGE_TAG="${BITBUCKET_TAG:-$BITBUCKET_BUILD_NUMBER}"
           - echo "$DOCKER_PASSWORD" | docker login "$DOCKER_REGISTRY" -u "$DOCKER_USERNAME" --password-stdin
-          - docker build -t "$DOCKER_REGISTRY/kubesight-backend:$IMAGE_TAG" backend
+          - export DOCKER_BUILDKIT=1
+          # The patched vSphere provider is compiled once per (version, patch) and
+          # kept in the registry; every other build just pulls it (seconds, not minutes).
+          - export VSPHERE_PROVIDER_VERSION="$(grep -m1 '^ARG VSPHERE_PROVIDER_VERSION=' backend/Dockerfile | cut -d= -f2 | tr -d '\r')"
+          - export VSPHERE_PATCH_HASH="$({ cat backend/tofu/vsphere-provider-*.patch; sed -n '/^FROM golang/,/^FROM scratch/p' backend/Dockerfile | tr -d '\r'; } | sha256sum | cut -c1-12)"
+          - export VSPHERE_PROVIDER_IMAGE="$DOCKER_REGISTRY/kubesight-vsphere-provider:${VSPHERE_PROVIDER_VERSION}-${VSPHERE_PATCH_HASH}"
+          - docker pull "$VSPHERE_PROVIDER_IMAGE" || (docker build --target vsphere-provider-image -t "$VSPHERE_PROVIDER_IMAGE" backend && docker push "$VSPHERE_PROVIDER_IMAGE")
+          - docker build --build-arg VSPHERE_PROVIDER_IMAGE="$VSPHERE_PROVIDER_IMAGE" -t "$DOCKER_REGISTRY/kubesight-backend:$IMAGE_TAG" backend
           - docker build -t "$DOCKER_REGISTRY/kubesight-frontend:$IMAGE_TAG" frontend
           - docker push "$DOCKER_REGISTRY/kubesight-backend:$IMAGE_TAG"
           - docker push "$DOCKER_REGISTRY/kubesight-frontend:$IMAGE_TAG"

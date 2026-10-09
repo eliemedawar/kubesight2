@@ -4,18 +4,37 @@
 # one ("Add or remove device" in vCenter, and a new MAC), so a least-privilege
 # provisioning account can never finish a clone. Kept cards are also set to
 # connect at power on (a template card often is not, and the clone then never
-# gets its address). The build keeps the upstream
-# version number, so the generated configuration (= 2.17.1) is unchanged.
+# gets its address). The build keeps the upstream version number, so the
+# generated configuration (= 2.17.1) is unchanged.
+#
+# Compiling it takes minutes, and CI builds start with an empty Docker cache,
+# so CI builds it ONCE per (version, patch) as its own small image
+# (`--target vsphere-provider-image`, pushed as kubesight-vsphere-provider:
+# <version>-<patch hash>) and passes that image here as VSPHERE_PROVIDER_IMAGE.
+# Without the build argument (a local build) it is compiled from source below.
 ARG VSPHERE_PROVIDER_VERSION=2.17.1
-FROM golang:1.26-bookworm AS vsphere-provider
+ARG VSPHERE_PROVIDER_IMAGE=vsphere-provider-image
+
+FROM golang:1.26-bookworm AS vsphere-provider-source
 ARG VSPHERE_PROVIDER_VERSION
 WORKDIR /src
-COPY tofu/vsphere-provider-*.patch /patches/
+# Clone and download dependencies before the patch is copied in, so a change to
+# the patch alone reuses these (slow) layers wherever a cache exists.
 RUN git clone --depth 1 --branch "v${VSPHERE_PROVIDER_VERSION}" \
         https://github.com/vmware/terraform-provider-vsphere.git . \
-    && git apply --verbose /patches/*.patch \
+    && go mod download
+COPY tofu/vsphere-provider-*.patch /patches/
+RUN git apply --verbose /patches/*.patch \
     && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" \
         -o "/out/terraform-provider-vsphere_v${VSPHERE_PROVIDER_VERSION}" .
+
+# Just the binary: what CI pushes, and what the backend copies from.
+FROM scratch AS vsphere-provider-image
+COPY --from=vsphere-provider-source /out/ /out/
+
+# The prebuilt image when CI passes one, else the stage above. With BuildKit an
+# unused stage is never built, so a CI backend build compiles nothing.
+FROM ${VSPHERE_PROVIDER_IMAGE} AS vsphere-provider
 
 FROM python:3.12-slim
 
