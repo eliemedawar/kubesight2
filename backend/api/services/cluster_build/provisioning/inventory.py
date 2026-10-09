@@ -65,7 +65,6 @@ REQUIRED_PRIVILEGES: List[Tuple[str, str, str]] = [
     ("VirtualMachine.Inventory.Delete", "Delete virtual machines", "folder"),
     ("VirtualMachine.Provisioning.DeployTemplate", "Deploy the VM template", "template"),
     ("VirtualMachine.Provisioning.Customize", "Set hostname and address in the guest", "template"),
-    ("VirtualMachine.Provisioning.ReadCustSpecs", "Read customization specifications", "datacenter"),
     ("VirtualMachine.Config.CPUCount", "Set the CPU count", "folder"),
     ("VirtualMachine.Config.Memory", "Set memory", "folder"),
     ("VirtualMachine.Config.Settings", "Change VM settings", "folder"),
@@ -82,6 +81,42 @@ REQUIRED_PRIVILEGES: List[Tuple[str, str, str]] = [
     ("Network.Assign", "Connect VMs to the network", "network"),
     ("Host.Inventory.EditCluster", "Create keep-apart (DRS) rules", "cluster"),
 ]
+
+
+# How much each privilege matters when VMs are created:
+#   required  without it vCenter cannot clone the template at all
+#   adapts    KubeSight works around it (keeps the template's size, uses the
+#             chosen folder as it is, skips keep-apart rules)
+#   destroy   only deleting the VMs later needs it
+#   other     the vSphere provider may use it; vCenter decides at apply time
+REQUIRED_TO_CLONE = {
+    "VirtualMachine.Inventory.CreateFromExisting",
+    "VirtualMachine.Provisioning.DeployTemplate",
+    "VirtualMachine.Provisioning.Customize",
+    "Resource.AssignVMToPool",
+    "Datastore.AllocateSpace",
+    "Network.Assign",
+    "VirtualMachine.Interact.PowerOn",
+}
+RESIZE_PRIVILEGES = {
+    "VirtualMachine.Config.CPUCount", "VirtualMachine.Config.Memory",
+    "VirtualMachine.Config.DiskExtend",
+}
+FOLDER_CREATE = "Folder.Create"
+RULES_PRIVILEGE = "Host.Inventory.EditCluster"
+DESTROY_ONLY = {
+    "VirtualMachine.Inventory.Delete", "VirtualMachine.Interact.PowerOff", "Folder.Delete",
+}
+
+
+def privilege_need(privilege: str) -> str:
+    if privilege in REQUIRED_TO_CLONE:
+        return "required"
+    if privilege in RESIZE_PRIVILEGES or privilege in (FOLDER_CREATE, RULES_PRIVILEGE):
+        return "adapts"
+    if privilege in DESTROY_ONLY:
+        return "destroy"
+    return "other"
 
 
 # ---------------------------------------------------------------------------

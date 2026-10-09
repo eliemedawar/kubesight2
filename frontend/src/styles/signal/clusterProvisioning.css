@@ -316,6 +316,7 @@
 .sg-cb-pv-privs li i { font-style: normal; font-weight: 800; }
 .sg-cb-pv-privs li.is-ok i { color: var(--ok); }
 .sg-cb-pv-privs li.is-bad i, .sg-cb-pv-privs li.is-bad b { color: var(--danger); }
+.sg-cb-pv-privs li.is-warn i { color: var(--warn); }
 .sg-cb-pv-ranges { display: flex; flex-direction: column; gap: 8px; }
 .sg-cb-pv-ranges + .sg-cb-pv-ranges { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-soft); }
 .sg-cb-pv-ranges-head { display: flex; align-items: center; gap: 10px; }

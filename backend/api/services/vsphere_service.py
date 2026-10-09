@@ -233,16 +233,27 @@ def test_provisioning(connection_id: int) -> Dict[str, Any]:
         row.provisioning_last_test_message = str(exc)[:1000]
         db.session.commit()
         return {"status": "failed", "error": str(exc)}
-    missing = [p for p in privileges if not p.get("granted")]
     for item in privileges:
         item["entityName"] = dc["name"]
+        item["need"] = inventory.privilege_need(item["privilege"])
+    missing = [p for p in privileges if not p.get("granted")]
+    blocking = [p for p in missing if p["need"] == "required"]
     row.provisioning_last_test_at = now
-    row.provisioning_last_test_status = "ok" if not missing else "warn"
-    row.provisioning_last_test_message = (
-        f"All {len(privileges)} privileges granted on {dc['name']}." if not missing else
-        f"{len(missing)} of {len(privileges)} privileges not granted on {dc['name']}: "
-        + ", ".join(p["privilege"] for p in missing[:6])
-    )
+    row.provisioning_last_test_status = "warn" if blocking else "ok"
+    if not missing:
+        row.provisioning_last_test_message = f"All {len(privileges)} privileges granted on {dc['name']}."
+    elif blocking:
+        row.provisioning_last_test_message = (
+            f"Cannot clone VMs on {dc['name']} without: "
+            + ", ".join(p["privilege"] for p in blocking)
+            + ". A role granted only on a folder can read as missing here; each plan checks the exact objects."
+        )
+    else:
+        row.provisioning_last_test_message = (
+            f"Can create VMs on {dc['name']}. {len(missing)} optional privilege"
+            f"{'' if len(missing) == 1 else 's'} missing; KubeSight adapts (template size, existing folder, "
+            "no keep-apart rules) or vCenter decides when the plan is applied."
+        )
     row.provisioning_privileges_json = privileges
     db.session.commit()
     return {

@@ -620,9 +620,20 @@ For a provisioning account a vSphere admin scoped to one folder:
   memory (exact MB) and disk, and `VirtualMachine.Config.CPUCount` / `Memory` / `DiskExtend` are not
   required. The wizard starts in `template` when the vCenter's last privilege check says the
   account may not change CPU or memory.
-- The plan only requires privileges it uses (`jobs._privileges_not_needed`; also
-  `Host.Inventory.EditCluster` when no keep-apart rule is created), and a refusal names the
-  option that avoids the missing ones.
+- **The plan fits itself to the account** (`jobs._fit_to_account`), from the privileges checked on
+  the exact folder, template, pool, datastore, network and cluster. Each privilege has a need
+  (`inventory.privilege_need`):
+  - `required` — clone from template, deploy template, customize, assign to pool, allocate space,
+    assign network, power on. Missing → the plan stops, listing every missing privilege per object.
+  - `adapts` — resize (→ every new VM keeps the template's size), `Folder.Create` (→ the VMs go
+    straight into the chosen folder), `Host.Inventory.EditCluster` (→ no keep-apart rules). The plan
+    changes the spec and says so in a warning check.
+  - `destroy` — delete VM, power off, delete folder: not asked for when creating.
+  - `other` — settings / add disk / edit device / advanced config / datastore browse: a warning
+    only; vCenter has the last word at apply.
+  `ReadCustSpecs` is no longer checked: the customization is sent inline, never read from vCenter.
+  Sources → Check privileges labels each missing one with its need and only `required` ones make
+  it a warning.
 
 Untested against a real vCenter: whether a clone whose CPU/memory equal the template's still asks
 vCenter for the resize privileges.

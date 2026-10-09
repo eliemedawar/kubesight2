@@ -694,23 +694,10 @@ def _vcenter_checks(build: ClusterBuild, job: ClusterProvisionJob, connection, c
     except Exception as exc:  # noqa: BLE001 — some vCenters refuse the query itself
         checks.append(_check("warn", "Account privileges", f"could not be checked: {scrub(str(exc))[:200]}"))
     else:
-        unneeded = _privileges_not_needed(spec, machines)
-        privileges = [p for p in privileges if p["privilege"] not in unneeded]
-        missing = [p["privilege"] for p in privileges if not p["granted"]]
-        if missing:
-            hints = []
-            if set(missing) & _RESIZE_PRIVILEGES:
-                hints.append("choose \"Keep the VM template's size\" if the account may not change CPU or memory")
-            if set(missing) & _FOLDER_PRIVILEGES:
-                hints.append("choose \"Put the VMs straight into this folder\" to use a folder made for you")
-            raise JobFailed(
-                "The provisioning account is missing vCenter privileges: "
-                f"{', '.join(missing[:8])}{' …' if len(missing) > 8 else ''}."
-                + (f" Or {'; or '.join(hints)}." if hints else "")
-            )
-        checks.append(_check("ok", "Account privileges", f"all {len(privileges)} needed are granted"))
-    if spec.get("sizeMode") == "template":
-        size = (machines or [{}])[0]
+        checks += _fit_to_account(build, job, privileges, datacenter, template)
+    spec = build.provisioning_json or {}
+    if spec.get("sizeMode") == "template" and not any(c["label"] == "Machine sizes" for c in checks):
+        size = (_machines_in_scope(build, job) or [{}])[0]
         checks.append(_check(
             "ok", "Machine sizes",
             f"kept from the template: {size.get('cpu')} vCPU · {size.get('memoryGb')} GB · "
@@ -719,25 +706,148 @@ def _vcenter_checks(build: ClusterBuild, job: ClusterProvisionJob, connection, c
     return checks
 
 
-_FOLDER_PRIVILEGES = {"Folder.Create", "Folder.Delete"}
-_RESIZE_PRIVILEGES = {
-    "VirtualMachine.Config.CPUCount", "VirtualMachine.Config.Memory",
-    "VirtualMachine.Config.DiskExtend",
-}
+def _missing_privileges_message(missing: List[Dict[str, Any]], spec: Dict[str, Any],
+                                datacenter: Dict[str, Any], template: Dict[str, Any]) -> str:
+    """Every privilege that stops the clone, grouped by the vCenter object it was
+    checked on — what a vSphere admin needs to fix the account's role, in one read."""
+    names = {
+        datacenter["id"]: f"datacenter {datacenter['name']}",
+        template["id"]: f"VM template {template.get('path') or template['name']}",
+    }
+    if spec.get("folderParentId"):
+        names[spec["folderParentId"]] = f"folder {spec.get('folderParent') or spec['folderParentId']}"
+    for key, label, name_key in (
+        ("resourcePoolId", "resource pool", "resourcePoolName"),
+        ("datastoreId", "datastore", "datastoreName"),
+        ("networkId", "network", "networkName"),
+        ("clusterId", "cluster", "clusterName"),
+    ):
+        if spec.get(key):
+            names.setdefault(spec[key], f"{label} {spec.get(name_key) or spec[key]}")
+    by_entity: Dict[str, List[str]] = {}
+    for item in missing:
+        by_entity.setdefault(item.get("entity") or "", []).append(item["privilege"])
+    lines = [
+        f"- on {names.get(entity, entity or 'the datacenter')}: {', '.join(privileges)}"
+        for entity, privileges in by_entity.items()
+    ]
+    folder_hint = (
+        "\nIt may not create a folder there either: in VM folder, choose the folder made for "
+        "this account and \"Put the VMs straight in\"."
+        if any(item["privilege"] == inventory.FOLDER_CREATE for item in missing) else ""
+    )
+    return (
+        "The provisioning account cannot clone VMs here. Ask the vSphere admin to add these "
+        "privileges to its role (with Propagate on the folder):\n" + "\n".join(lines) + folder_hint
+    )
 
 
-def _privileges_not_needed(spec: Dict[str, Any], machines: List[Dict[str, Any]]) -> set:
-    """Privileges this plan never uses, so an account without them is not refused."""
-    unneeded: set = set()
-    if spec.get("folderMode") == "existing":
-        unneeded |= _FOLDER_PRIVILEGES
-    if spec.get("sizeMode") == "template":
-        unneeded |= _RESIZE_PRIVILEGES
+def _keep_template_size(build: ClusterBuild, job: ClusterProvisionJob, size: Dict[str, int]) -> None:
+    """Every VM not created yet gets the template's own size."""
+    created = set(state_store.vm_instances(build.id))
+    fields = {key: size[key] for key in ("cpu", "memoryGb", "memoryMb", "diskGb")}
+    if job.operation == "grow":
+        config = dict(job.config_json or {})
+        config["newMachines"] = [{**m, **fields} for m in config.get("newMachines") or []]
+        job.config_json = config
+        return
+    spec = dict(build.provisioning_json or {})
+    spec["machines"] = [
+        m if m["name"] in created else {**m, **fields} for m in spec.get("machines") or []
+    ]
+    spec["sizeMode"] = "template"
+    build.provisioning_json = spec
+    for node in build.nodes:
+        if (node.vsphere_vm_name or node.hostname) not in created:
+            node.vsphere_cpu = size["cpu"]
+            node.vsphere_memory_mb = size["memoryMb"]
+
+
+def _rules_wanted(spec: Dict[str, Any]) -> bool:
     counts = spec.get("counts") or {}
-    if not (spec.get("antiAffinity", True) and spec.get("clusterId")
-            and (counts.get("controlPlane", 0) > 1 or counts.get("loadbalancer", 0) > 1)):
-        unneeded.add("Host.Inventory.EditCluster")  # no keep-apart rule to create
-    return unneeded
+    return bool(spec.get("antiAffinity", True) and spec.get("clusterId")
+                and (counts.get("controlPlane", 0) > 1 or counts.get("loadbalancer", 0) > 1))
+
+
+def _fit_to_account(build: ClusterBuild, job: ClusterProvisionJob, privileges: List[Dict[str, Any]],
+                    datacenter: Dict[str, Any], template: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Shape the plan around what the provisioning account may do on the exact
+    folder, template, pool, datastore and network.
+
+    Only a privilege the clone cannot happen without stops the plan. One that
+    KubeSight can work around changes the plan instead — the template's own
+    size, the chosen folder as it is, no keep-apart rules — and says so.
+    Privileges only a later destroy uses are not asked for now; the rest may be
+    used by the vSphere provider, and vCenter has the last word when applying.
+    """
+    checks: List[Dict[str, str]] = []
+    spec = dict(build.provisioning_json or {})
+    fresh = not state_store.has_resources(build.id)
+    missing = [p for p in privileges
+               if not p["granted"] and p["privilege"] not in inventory.DESTROY_ONLY]
+    names = {p["privilege"] for p in missing}
+
+    if spec.get("sizeMode") != "template" and names & inventory.RESIZE_PRIVILEGES:
+        try:
+            size = templates.template_size(template)
+        except ValueError as exc:
+            raise JobFailed(
+                "The provisioning account may not change CPU, memory or disk here, and "
+                f"vCenter did not report {template['name']}'s own size to keep instead."
+            ) from exc
+        _keep_template_size(build, job, size)
+        spec = dict(build.provisioning_json or {})
+        spec["template"] = {**(spec.get("template") or {}), "cpu": size["cpu"], "memoryMb": size["memoryMb"]}
+        checks.append(_check(
+            "warn", "Machine sizes",
+            f"the account may not change CPU, memory or disk here, so every new VM keeps "
+            f"{template['name']}'s own size: {size['cpu']} vCPU · {size['memoryGb']} GB · {size['diskGb']} GB",
+        ))
+    if spec.get("sizeMode") == "template" or job.operation == "grow" and names & inventory.RESIZE_PRIVILEGES:
+        names -= inventory.RESIZE_PRIVILEGES
+
+    if inventory.FOLDER_CREATE in names and spec.get("folderMode", "create") == "create":
+        if not fresh:
+            names.discard(inventory.FOLDER_CREATE)  # the build's folder already exists
+        elif spec.get("folderParentId"):
+            spec["folderMode"] = "existing"
+            names.discard(inventory.FOLDER_CREATE)
+            checks.append(_check(
+                "warn", "VM folder",
+                f"the account may not create folders in {spec.get('folderParent')}, so the VMs go "
+                "straight into it",
+            ))
+    if spec.get("folderMode") == "existing":
+        names.discard(inventory.FOLDER_CREATE)
+
+    if inventory.RULES_PRIVILEGE in names:
+        if _rules_wanted(spec) and fresh:
+            spec["antiAffinity"] = False
+            checks.append(_check(
+                "warn", "Keep-apart rules",
+                "the account may not create DRS rules on this cluster, so none are made; "
+                "preflight still checks that the HA tiers sit on different hosts",
+            ))
+        if not _rules_wanted(spec) or not fresh:
+            names.discard(inventory.RULES_PRIVILEGE)
+    build.provisioning_json = spec
+
+    blocking = [p for p in missing if p["privilege"] in names
+                and (p["privilege"] in inventory.REQUIRED_TO_CLONE
+                     or p["privilege"] in (inventory.FOLDER_CREATE, inventory.RULES_PRIVILEGE)
+                     or p["privilege"] in inventory.RESIZE_PRIVILEGES)]
+    if blocking:
+        raise JobFailed(_missing_privileges_message(blocking, spec, datacenter, template))
+    optional = sorted({p["privilege"] for p in missing if p["privilege"] in names} - {p["privilege"] for p in blocking})
+    if optional:
+        checks.append(_check(
+            "warn", "Account privileges",
+            "can clone. Not granted, and maybe used by the vSphere provider (vCenter decides when "
+            f"the plan is applied): {', '.join(optional)}",
+        ))
+    else:
+        checks.append(_check("ok", "Account privileges", "everything this plan needs is granted"))
+    return checks
 
 
 def _machines_in_scope(build: ClusterBuild, job: ClusterProvisionJob) -> List[Dict[str, Any]]:

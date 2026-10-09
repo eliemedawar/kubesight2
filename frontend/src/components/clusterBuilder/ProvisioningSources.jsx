@@ -18,6 +18,13 @@ import {
   updateVSphereNetwork,
 } from "../../api/clusterBuildsApi.js";
 
+// What a missing privilege means for creating VMs.
+const NEED_TEXT = {
+  adapts: "not needed: KubeSight adapts the plan",
+  destroy: "only needed to destroy the VMs later",
+  other: "optional: vCenter decides when the plan is applied",
+};
+
 /** The second, VM-creating account on one vCenter, and what it may do. */
 export function ProvisioningAccount({ row, notify, reloadInfra }) {
   const [editing, setEditing] = useState(false);
@@ -26,6 +33,8 @@ export function ProvisioningAccount({ row, notify, reloadInfra }) {
   const [showPrivileges, setShowPrivileges] = useState(false);
   const privileges = row.provisioningPrivileges || [];
   const missing = privileges.filter((item) => !item.granted);
+  // Only these stop KubeSight cloning a VM; the rest it works around.
+  const blocking = missing.filter((item) => (item.need || "required") === "required");
 
   const save = async () => {
     setBusy(true);
@@ -72,7 +81,7 @@ export function ProvisioningAccount({ row, notify, reloadInfra }) {
                 {row.provisioningLastTestStatus === "ok"
                   ? `${privileges.length} of ${privileges.length} privileges`
                   : row.provisioningLastTestStatus === "warn"
-                    ? `${missing.length} privilege${missing.length === 1 ? "" : "s"} missing`
+                    ? `${blocking.length || missing.length} needed privilege${(blocking.length || missing.length) === 1 ? "" : "s"} missing`
                     : "check failed"}
               </span>
             ) : <span className="sg-cb-fresh is-stale">privileges never checked</span>}
@@ -92,7 +101,7 @@ export function ProvisioningAccount({ row, notify, reloadInfra }) {
           </button>
         </span>
       </div>
-      {row.provisioningLastTestMessage && row.provisioningLastTestStatus !== "ok" ? (
+      {row.provisioningLastTestMessage && (row.provisioningLastTestStatus !== "ok" || missing.length) ? (
         <p className="muted sg-cb-pv-acct-msg">{row.provisioningLastTestMessage}</p>
       ) : null}
       {editing ? (
@@ -119,9 +128,13 @@ export function ProvisioningAccount({ row, notify, reloadInfra }) {
       {privileges.length && (showPrivileges || missing.length) ? (
         <ul className="sg-cb-pv-privs">
           {privileges.map((item) => (
-            <li key={`${item.privilege}-${item.entity}`} className={item.granted ? "is-ok" : "is-bad"}>
-              <i aria-hidden="true">{item.granted ? "✓" : "✕"}</i>
-              <span><b className="sg-cb-mono">{item.privilege}</b> <span className="muted">{item.purpose}</span></span>
+            <li key={`${item.privilege}-${item.entity}`}
+                className={item.granted ? "is-ok" : (item.need || "required") === "required" ? "is-bad" : "is-warn"}>
+              <i aria-hidden="true">{item.granted ? "✓" : (item.need || "required") === "required" ? "✕" : "!"}</i>
+              <span>
+                <b className="sg-cb-mono">{item.privilege}</b> <span className="muted">{item.purpose}</span>
+                {!item.granted && NEED_TEXT[item.need] ? <span className="muted"> — {NEED_TEXT[item.need]}</span> : null}
+              </span>
             </li>
           ))}
         </ul>

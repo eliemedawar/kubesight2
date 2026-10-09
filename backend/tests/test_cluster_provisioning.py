@@ -392,12 +392,13 @@ class TestCreateCluster:
 
     def test_missing_privileges_fail_the_plan(self, client, admin_token, ssh_profile, vcenter, engine):
         inventory.set_privilege_checker(lambda cfg, ids: [
-            {"privilege": "Folder.Create", "purpose": "", "entity": "x", "granted": False},
+            {"privilege": "VirtualMachine.Inventory.CreateFromExisting", "purpose": "", "entity": "x",
+             "granted": False},
         ])
         build = make_vmware_build(client, admin_token, ssh_profile, vcenter)
         job = plan(client, admin_token, build["id"])["provisioning"]["job"]
         assert job["status"] == "plan_failed"
-        assert "Folder.Create" in job["error"]
+        assert "CreateFromExisting" in job["error"]
 
     def test_incompatible_template_fails_the_plan(self, client, admin_token, ssh_profile, vcenter, engine):
         windows = inventory.demo_placement()["datacenters"][0]["templates"][4]
@@ -603,25 +604,76 @@ class TestFolderAndSizeModes:
         # The demo template: 2 vCPU, 4096 MB, a 40 GB disk — on every role.
         assert {(v["cpu"], v["memory_mb"], v["disk_gb"]) for v in for_each.values()} == {(2, 4096, 40)}
 
-    def test_privileges_a_plan_does_not_use_are_not_required(
+    @staticmethod
+    def account_without(not_granted):
+        inventory.set_privilege_checker(lambda cfg, ids: [
+            {"privilege": p, "purpose": purpose, "entity": ids.get(scope) or ids.get("datacenter"),
+             "granted": p not in not_granted}
+            for p, purpose, scope in inventory.REQUIRED_PRIVILEGES
+        ])
+
+    def test_the_plan_fits_itself_to_the_account(self, client, admin_token, ssh_profile, vcenter, engine):
+        # A role a vSphere admin granted on one folder: no folders, no resizing,
+        # no DRS rules, no deleting — and a few settings privileges missing too.
+        self.account_without({
+            "Folder.Create", "Folder.Delete", "VirtualMachine.Config.CPUCount",
+            "VirtualMachine.Config.Memory", "VirtualMachine.Config.DiskExtend",
+            "Host.Inventory.EditCluster", "VirtualMachine.Inventory.Delete",
+            "VirtualMachine.Interact.PowerOff", "VirtualMachine.Config.Settings",
+            "VirtualMachine.Config.AddNewDisk", "VirtualMachine.Config.AdvancedConfig",
+        })
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-03")
+        planned = plan(client, admin_token, build["id"])
+        job = planned["provisioning"]["job"]
+        assert job["status"] == "planned", job.get("error")
+        spec = planned["provisioning"]["spec"]
+        assert spec["folderMode"] == "existing" and spec["sizeMode"] == "template"
+        tofu = ClusterProvisionJob.query.get(job["id"]).config_json["tofu"]
+        assert "vsphere_folder" not in tofu["resource"]
+        for_each = tofu["resource"]["vsphere_virtual_machine"]["node"]["for_each"]
+        assert {(v["cpu"], v["memory_mb"], v["disk_gb"]) for v in for_each.values()} == {(2, 4096, 40)}
+        said = {c["label"]: c for c in job["summary"]["checks"]}
+        assert said["Machine sizes"]["status"] == "warn" and "keeps" in said["Machine sizes"]["detail"]
+        assert said["VM folder"]["status"] == "warn"
+        assert said["Account privileges"]["status"] == "warn"
+        assert "VirtualMachine.Config.Settings" in said["Account privileges"]["detail"]
+        assert "Inventory.Delete" not in said["Account privileges"]["detail"]  # only a destroy needs it
+
+    def test_ha_without_drs_rights_skips_the_rules(self, client, admin_token, ssh_profile, vcenter, engine):
+        self.account_without({"Host.Inventory.EditCluster"})
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-05",
+                                  counts={"loadbalancer": 2, "controlPlane": 3, "worker": 2})
+        job = plan(client, admin_token, build["id"])["provisioning"]["job"]
+        assert job["status"] == "planned", job.get("error")
+        tofu = ClusterProvisionJob.query.get(job["id"]).config_json["tofu"]
+        assert "vsphere_compute_cluster_vm_anti_affinity_rule" not in tofu["resource"]
+        assert any(c["label"] == "Keep-apart rules" and c["status"] == "warn" for c in job["summary"]["checks"])
+
+    def test_only_what_the_clone_cannot_do_without_stops_it(
         self, client, admin_token, ssh_profile, vcenter, engine
     ):
-        not_granted = {"Folder.Create", "Folder.Delete", "VirtualMachine.Config.CPUCount",
-                       "VirtualMachine.Config.Memory", "VirtualMachine.Config.DiskExtend",
-                       "Host.Inventory.EditCluster"}
-        inventory.set_privilege_checker(lambda cfg, ids: [
-            {"privilege": p, "purpose": purpose, "entity": "x", "granted": p not in not_granted}
-            for p, purpose, _ in inventory.REQUIRED_PRIVILEGES
-        ])
-        build = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-03")
+        self.account_without({
+            "VirtualMachine.Provisioning.DeployTemplate", "VirtualMachine.Provisioning.Customize",
+            "Network.Assign", "VirtualMachine.Config.Settings",
+        })
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-04")
         job = plan(client, admin_token, build["id"])["provisioning"]["job"]
         assert job["status"] == "plan_failed"
-        assert "Keep the VM template's size" in job["error"] and "straight into this folder" in job["error"]
+        error = job["error"]
+        assert "cannot clone VMs here" in error
+        # Grouped by the object, nothing cut off, and only the blocking ones.
+        assert "on VM template" in error and "DeployTemplate, VirtualMachine.Provisioning.Customize" in error
+        assert "on network VM-Net-K8S-30: Network.Assign" in error
+        assert "Config.Settings" not in error
 
-        fitted = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-04",
-                                   folderMode="existing", sizeMode="template")
-        job = plan(client, admin_token, fitted["id"])["provisioning"]["job"]
-        assert job["status"] == "planned", job.get("error")
+    def test_sources_check_says_what_blocks(self, client, admin_token, vcenter):
+        self.account_without({"Folder.Create", "VirtualMachine.Config.CPUCount"})
+        result = client.post(f"/api/vsphere-connections/{vcenter['connection'].id}/test-provisioning",
+                             headers=auth_headers(admin_token)).get_json()["data"]
+        assert result["status"] == "ok" and "Can create VMs" in result["message"]
+        needs = {p["privilege"]: p["need"] for p in result["privileges"]}
+        assert needs["Folder.Create"] == "adapts" and needs["Network.Assign"] == "required"
+        assert needs["VirtualMachine.Inventory.Delete"] == "destroy"
 
 
 class TestGrowAndDestroy:
