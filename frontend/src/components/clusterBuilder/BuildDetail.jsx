@@ -19,6 +19,7 @@ import {
   SaveTemplatePanel,
 } from "./ProvisionPanels.jsx";
 import { AddonChips, LiveBadge, StatusPill } from "./common.jsx";
+import { confirmAndDelete } from "./BuildsFloor.jsx";
 import ErrorBanner from "../common/ErrorBanner.jsx";
 import { parseApiTime } from "../../lib/apiTime";
 import {
@@ -28,6 +29,7 @@ import {
   buildBlueprint,
   buildDuration,
   buildProgress,
+  deletePolicy,
   failurePoint,
   formatClock,
   isGrowing,
@@ -44,7 +46,6 @@ import {
 } from "../../utils/clusterProvisioning.js";
 import {
   cancelClusterBuild,
-  deleteClusterBuild,
   getClusterBuild,
   getClusterBuildKubeconfig,
   getClusterBuildLogs,
@@ -629,9 +630,12 @@ export default function BuildDetail({
     ));
   };
 
-  const deleteDraft = () => {
-    if (!window.confirm(`Delete build "${build.name}"? This cannot be undone.`)) return;
-    act(() => deleteClusterBuild(build.id), onDeleted);
+  const deletion = deletePolicy(build);
+  const deleteBuild = async () => {
+    setBusy(true);
+    const deleted = await confirmAndDelete(build, notify);
+    setBusy(false);
+    if (deleted && onDeleted) onDeleted();
   };
 
   return (
@@ -708,15 +712,16 @@ export default function BuildDetail({
               Destroy VMs…
             </button>
           ) : null}
-          {canCreate && !["building", "preflighting", "completed", "provisioning", "destroying", "destroyed"]
-            .includes(build.status) && !(isVmware && vmCount > 0) ? (
+          {canCreate && deletion.allowed && !(isVmware && vmCount > 0) ? (
             <button
-              className="btn-danger"
+              // A build that made a cluster is history: deleting it is quieter.
+              className={deletion.needsName ? "btn-outline" : "btn-danger"}
               type="button"
               disabled={busy}
-              onClick={deleteDraft}
+              onClick={deleteBuild}
+              title={deletion.needsName ? "Deletes this build's record; the cluster stays in Clusters" : undefined}
             >
-              Delete
+              {deletion.needsName ? "Delete record…" : "Delete"}
             </button>
           ) : null}
         </span>

@@ -317,6 +317,13 @@ textarea.sg-cb-input { line-height: 1.6; resize: vertical; }
 .sg-cb-librow-when { font-size: 11.5px; color: var(--text-muted); }
 .sg-cb-librow-go { color: var(--text-muted); font-size: 16px; text-align: right; }
 .sg-cb-librow:hover .sg-cb-librow-go { color: var(--accent-strong); }
+/* A row is the open button plus its own Delete — never a button inside a button. */
+.sg-cb-librow-wrap { display: flex; align-items: center; border-top: 1px solid var(--border-soft); }
+.sg-cb-lib-head + .sg-cb-librow-wrap { border-top: 0; }
+.sg-cb-librow-wrap .sg-cb-librow { flex: 1; min-width: 0; border-top: 0; }
+.sg-cb-librow-wrap .sg-cb-librow-del { flex: 0 0 auto; margin-right: 12px; color: var(--text-muted); }
+.sg-cb-librow-wrap .sg-cb-librow-del:not(:disabled):hover { color: var(--danger); }
+.sg-cb-flight-acts { display: inline-flex; gap: 8px; align-items: center; margin-left: auto; }
 
 .sg-cb-newcard {
   border-style: dashed; display: flex; flex-direction: column; align-items: center;

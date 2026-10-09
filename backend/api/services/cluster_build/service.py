@@ -962,7 +962,14 @@ def update_build(build_id: int, payload: Dict[str, Any], user=None) -> Dict[str,
     return serialize_build(build, include_detail=True)
 
 
-def delete_build(build_id: int) -> None:
+def delete_build(build_id: int, *, confirm_name: Optional[str] = None) -> Dict[str, Any]:
+    """Delete a build's record. Returns what it was, for the audit entry.
+
+    A build that produced a cluster (completed, registered or destroyed) is
+    history someone may look for, so deleting it takes the build's name typed
+    back. Deleting only removes the record: a registered cluster stays in
+    Clusters, and VMs KubeSight created must be destroyed first.
+    """
     build = get_build(build_id)
     if build.status in ("building", "preflighting", "provisioning", "destroying"):
         raise ValueError("Cancel the build before deleting it.")
@@ -971,14 +978,29 @@ def delete_build(build_id: int) -> None:
             "KubeSight created VMs for this build and they still exist. Destroy "
             "the cluster first, so nothing is left running in vCenter."
         )
-    if build.status == "destroyed":
-        raise ValueError("A destroyed cluster's history is retained for audit.")
-    if build.status == "completed" or build.result_cluster_id:
-        raise ValueError(
-            "Completed build history is retained for audit and cannot be deleted."
-        )
+    if build.status in ("completed", "destroyed") or build.result_cluster_id:
+        if (confirm_name or "").strip() != build.name:
+            raise ValueError(
+                f"This build made a cluster. Type its name, {build.name}, to delete "
+                "the build's record (the cluster itself is not touched)."
+            )
+    summary = {
+        "name": build.name,
+        "status": build.status,
+        "k8sVersion": build.k8s_version,
+        "resultClusterId": build.result_cluster_id,
+        "machineSource": build.machine_source,
+        "createdBy": build.created_by,
+        "startedAt": _iso(build.started_at),
+        "finishedAt": _iso(build.finished_at),
+        "nodes": [
+            {"hostname": n.hostname, "address": n.address, "role": n.role, "status": n.status}
+            for n in build.nodes
+        ],
+    }
     db.session.delete(build)
     db.session.commit()
+    return summary
 
 
 # ---------------------------------------------------------------------------

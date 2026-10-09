@@ -14,8 +14,12 @@ export const createClusterBuild = (payload) =>
 export const updateClusterBuild = (id, payload) =>
   request(`/api/cluster-builds/${id}`, { method: "PUT", body: payload });
 
-export const deleteClusterBuild = (id) =>
-  request(`/api/cluster-builds/${id}`, { method: "DELETE" });
+/** ``confirmName`` (the build's name) is required for a build that made a cluster. */
+export const deleteClusterBuild = (id, confirmName) =>
+  request(`/api/cluster-builds/${id}`, {
+    method: "DELETE",
+    ...(confirmName ? { body: { confirmName } } : {}),
+  });
 
 export const preflightClusterBuild = (id) =>
   request(`/api/cluster-builds/${id}/preflight`, { method: "POST" });

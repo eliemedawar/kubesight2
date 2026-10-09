@@ -925,6 +925,23 @@ export function deriveReadiness({
 // Builds list
 // ---------------------------------------------------------------------------
 
+const RUNNING_STATUSES = new Set(["building", "preflighting", "provisioning", "destroying"]);
+
+/** Whether a build's record can be deleted now, and if not, why. A build that
+    made a cluster asks for its name; one with KubeSight-created VMs must be
+    destroyed first; a running one cancelled first. Mirrors service.delete_build. */
+export function deletePolicy(build) {
+  if (!build) return { allowed: false, reason: "" };
+  if (RUNNING_STATUSES.has(build.status)) {
+    return { allowed: false, reason: "Cancel the build first." };
+  }
+  if (build.machineSource === "vmware" && build.canDestroy) {
+    return { allowed: false, reason: "Its VMs still exist — destroy them first." };
+  }
+  const madeCluster = ["completed", "destroyed"].includes(build.status) || Boolean(build.resultClusterId);
+  return { allowed: true, reason: "", needsName: madeCluster };
+}
+
 const IN_FLIGHT_STATUSES = new Set(["building", "preflighting", "provisioning", "destroying"]);
 /** Statuses that are waiting on a person: a failure to look at, a draft to
     finish, a preflight that passed and never got launched. */

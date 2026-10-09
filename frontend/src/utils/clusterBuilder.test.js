@@ -45,6 +45,7 @@ import {
   storageNeeds,
   storageRows,
   storageSummary,
+  deletePolicy,
 } from "./clusterBuilder.js";
 
 const NOW = Date.parse("2026-07-27T12:00:00Z");
@@ -1108,5 +1109,20 @@ describe("buildBlueprint on a cluster that is growing", () => {
     expect(cps.target).toBe(3);
     expect(lbs.slots.map((slot) => slot.state)).toEqual(["joined", "waiting"]);
     expect(cps.slots.map((slot) => slot.state)).toEqual(["joined", "waiting", "waiting"]);
+  });
+});
+
+describe("deletePolicy", () => {
+  it("asks for the name of a build that made a cluster", () => {
+    expect(deletePolicy({ status: "completed", resultClusterId: "custom-3" }))
+      .toEqual({ allowed: true, reason: "", needsName: true });
+    expect(deletePolicy({ status: "destroyed" }).needsName).toBe(true);
+    expect(deletePolicy({ status: "failed" })).toEqual({ allowed: true, reason: "", needsName: false });
+  });
+
+  it("refuses a running build and one whose VMs still exist", () => {
+    expect(deletePolicy({ status: "building" })).toEqual({ allowed: false, reason: "Cancel the build first." });
+    expect(deletePolicy({ status: "vms_ready", machineSource: "vmware", canDestroy: true }).allowed).toBe(false);
+    expect(deletePolicy({ status: "provision_failed", machineSource: "vmware", canDestroy: false }).allowed).toBe(true);
   });
 });

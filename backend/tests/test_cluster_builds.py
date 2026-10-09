@@ -524,9 +524,11 @@ class TestBuildValidation:
         assert response.status_code == 400
         assert "ipv4" in response.get_json()["error"].lower()
 
-    def test_completed_build_history_cannot_be_deleted(
+    def test_completed_build_is_deleted_only_with_its_name(
         self, client, admin_token, ssh_profile
     ):
+        from api.models import AuditLog
+
         build = create_build(
             client, admin_token, ssh_profile,
             make_build_payload(nodes=SINGLE_CP_NODES),
@@ -534,13 +536,32 @@ class TestBuildValidation:
         row = db.session.get(ClusterBuild, build["id"])
         row.status = "completed"
         db.session.commit()
-        response = client.delete(
-            f"/api/cluster-builds/{build['id']}",
-            headers=auth_headers(admin_token),
-        )
+        url = f"/api/cluster-builds/{build['id']}"
+        response = client.delete(url, headers=auth_headers(admin_token))
         assert response.status_code == 400
-        assert "retained for audit" in response.get_json()["error"]
+        assert "Type its name" in response.get_json()["error"]
         assert db.session.get(ClusterBuild, build["id"]) is not None
+        wrong = client.delete(url, json={"confirmName": "nope"}, headers=auth_headers(admin_token))
+        assert wrong.status_code == 400
+        deleted = client.delete(url, json={"confirmName": build["name"]}, headers=auth_headers(admin_token))
+        assert deleted.status_code == 200, deleted.get_json()
+        assert db.session.get(ClusterBuild, build["id"]) is None
+        entry = AuditLog.query.filter_by(action="cluster_build_deleted", target_id=str(build["id"])).first()
+        assert entry is not None and build["name"] in str(entry.details)
+
+    def test_running_build_is_cancelled_before_deleting(self, client, admin_token, ssh_profile):
+        build = create_build(
+            client, admin_token, ssh_profile,
+            make_build_payload(nodes=SINGLE_CP_NODES),
+        )
+        row = db.session.get(ClusterBuild, build["id"])
+        row.status = "building"
+        db.session.commit()
+        url = f"/api/cluster-builds/{build['id']}"
+        refused = client.delete(url, headers=auth_headers(admin_token))
+        assert refused.status_code == 400 and "Cancel" in refused.get_json()["error"]
+        assert client.post(f"{url}/cancel", headers=auth_headers(admin_token)).status_code == 200
+        assert client.delete(url, headers=auth_headers(admin_token)).status_code == 200
 
     def test_two_control_planes_rejected(self, client, admin_token, ssh_profile):
         nodes = [

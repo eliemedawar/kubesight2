@@ -226,6 +226,9 @@ export default function ClusterBuilderPage({
             readiness={readiness}
             catalog={options?.addons || []}
             canCreate={canCreate}
+            canExecute={canExecute}
+            notify={notify}
+            onChanged={reloadBuilds}
             now={now}
             onOpenBuild={openBuild}
             onNewBuild={() => setTab("new")}

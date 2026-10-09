@@ -10,11 +10,14 @@ import EmptyState from "../common/EmptyState.jsx";
 import PhaseRail from "./PhaseRail.jsx";
 import ReadinessBar from "./ReadinessBar.jsx";
 import { AddonChips, LiveBadge, SectionHead, ShapeGlyph, StatusPill } from "./common.jsx";
+import { useState } from "react";
 import { parseApiTime } from "../../lib/apiTime";
+import { cancelClusterBuild, deleteClusterBuild } from "../../api/clusterBuildsApi.js";
 import {
   PHASE_LABELS,
   PHASE_NOTES,
   buildDuration,
+  deletePolicy,
   groupBuilds,
   formatClock,
   isGrowing,
@@ -32,7 +35,53 @@ function shapeSummary(build) {
   ].filter(Boolean).join(" · ");
 }
 
-function InFlightStrip({ build, now, onOpen }) {
+/** Delete a build's record after the right confirmation. Returns true when deleted. */
+export async function confirmAndDelete(build, notify) {
+  const policy = deletePolicy(build);
+  if (!policy.allowed) {
+    notify(policy.reason, true);
+    return false;
+  }
+  let confirmName;
+  if (policy.needsName) {
+    confirmName = window.prompt(
+      `${build.name} made a cluster. Deleting removes this build's record only — the cluster `
+      + "stays in Clusters, and the audit log keeps what the build was.\n\n"
+      + `Type ${build.name} to delete it:`
+    );
+    if (confirmName === null) return false;
+    if (confirmName.trim() !== build.name) {
+      notify("The name did not match; nothing was deleted.", true);
+      return false;
+    }
+  } else if (!window.confirm(`Delete build "${build.name}"? This cannot be undone.`)) {
+    return false;
+  }
+  try {
+    await deleteClusterBuild(build.id, confirmName);
+    notify(`Build ${build.name} deleted.`);
+    return true;
+  } catch (error) {
+    notify(error.message || String(error), true);
+    return false;
+  }
+}
+
+function InFlightStrip({ build, now, onOpen, canExecute, notify, onChanged }) {
+  const [busy, setBusy] = useState(false);
+  const cancel = async () => {
+    if (!window.confirm(`Cancel the build "${build.name}"? You can delete or retry it afterwards.`)) return;
+    setBusy(true);
+    try {
+      await cancelClusterBuild(build.id);
+      notify(`Build ${build.name} cancelled.`);
+      if (onChanged) onChanged();
+    } catch (error) {
+      notify(error.message || String(error), true);
+    } finally {
+      setBusy(false);
+    }
+  };
   const rail = railFromCurrentPhase(build);
   const started = parseApiTime(runStartedAt(build));
   const elapsed = Number.isFinite(started) ? now - started : null;
@@ -62,15 +111,30 @@ function InFlightStrip({ build, now, onOpen }) {
           ? <span className="muted">{PHASE_NOTES[build.currentPhase]}</span>
           : null}
         <span className="muted sg-cb-mono">{shapeSummary(build)}</span>
-        <button className="btn-outline sg-cb-flight-cta" type="button" onClick={() => onOpen(build.id)}>
-          Watch
-        </button>
+        <span className="sg-cb-flight-acts">
+          {canExecute && ["building", "preflighting"].includes(build.status) ? (
+            <button className="btn-ghost" type="button" disabled={busy} onClick={cancel}>
+              {busy ? "Cancelling…" : "Cancel"}
+            </button>
+          ) : null}
+          <button className="btn-outline sg-cb-flight-cta" type="button" onClick={() => onOpen(build.id)}>
+            Watch
+          </button>
+        </span>
       </div>
     </div>
   );
 }
 
-function LibraryRow({ build, catalog, now, onOpen }) {
+function LibraryRow({ build, catalog, now, onOpen, canCreate, notify, onChanged }) {
+  const [busy, setBusy] = useState(false);
+  const policy = deletePolicy(build);
+  const remove = async () => {
+    setBusy(true);
+    const deleted = await confirmAndDelete(build, notify);
+    setBusy(false);
+    if (deleted && onChanged) onChanged();
+  };
   const duration = buildDuration(build);
   const age = timeAgo(build.finishedAt || build.createdAt, now);
   let middle = null;
@@ -89,6 +153,7 @@ function LibraryRow({ build, catalog, now, onOpen }) {
   }
 
   return (
+    <div className="sg-cb-librow-wrap">
     <button className="sg-cb-librow" type="button" onClick={() => onOpen(build.id)}>
       <ShapeGlyph shape={build.nodeShape} buildStatus={build.status} />
       <span className="sg-cb-librow-id">
@@ -107,6 +172,19 @@ function LibraryRow({ build, catalog, now, onOpen }) {
       </span>
       <span className="sg-cb-librow-go" aria-hidden="true">›</span>
     </button>
+    {canCreate ? (
+      <button
+        className="btn-ghost btn-sm sg-cb-librow-del"
+        type="button"
+        disabled={busy || !policy.allowed}
+        title={policy.allowed ? `Delete ${build.name}` : policy.reason}
+        aria-label={`Delete ${build.name}`}
+        onClick={remove}
+      >
+        Delete
+      </button>
+    ) : null}
+    </div>
   );
 }
 
@@ -115,10 +193,13 @@ export default function BuildsFloor({
   readiness,
   catalog,
   canCreate,
+  canExecute = false,
   now,
   onOpenBuild,
   onNewBuild,
   onOpenSources,
+  notify = () => {},
+  onChanged = null,
 }) {
   const groups = groupBuilds(builds);
   const hasLibrary = groups.attention.length > 0 || groups.done.length > 0;
@@ -128,7 +209,8 @@ export default function BuildsFloor({
       <ReadinessBar readiness={readiness} onOpenSources={onOpenSources} />
 
       {groups.inFlight.map((build) => (
-        <InFlightStrip key={build.id} build={build} now={now} onOpen={onOpenBuild} />
+        <InFlightStrip key={build.id} build={build} now={now} onOpen={onOpenBuild}
+                       canExecute={canExecute} notify={notify} onChanged={onChanged} />
       ))}
 
       {hasLibrary ? (
@@ -146,6 +228,7 @@ export default function BuildsFloor({
             {groups.attention.map((build) => (
               <LibraryRow
                 key={build.id} build={build} catalog={catalog} now={now} onOpen={onOpenBuild}
+                canCreate={canCreate} notify={notify} onChanged={onChanged}
               />
             ))}
             {groups.done.length ? (
@@ -154,6 +237,7 @@ export default function BuildsFloor({
             {groups.done.map((build) => (
               <LibraryRow
                 key={build.id} build={build} catalog={catalog} now={now} onOpen={onOpenBuild}
+                canCreate={canCreate} notify={notify} onChanged={onChanged}
               />
             ))}
           </div>

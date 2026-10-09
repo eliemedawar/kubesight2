@@ -142,17 +142,21 @@ def update_build(build_id: int):
 @cluster_builds_bp.route("/<int:build_id>", methods=["DELETE"])
 @require_permission("cluster_builds:create")
 def delete_build(build_id: int):
+    payload = request.get_json(silent=True) or {}
+    confirm = payload.get("confirmName") or request.args.get("confirmName")
     try:
-        svc.delete_build(build_id)
+        summary = svc.delete_build(build_id, confirm_name=confirm)
     except LookupError:
         return error_response("Cluster build not found.", 404)
     except ValueError as exc:
         return error_response(str(exc), 400)
+    # The record is gone; what it was stays in the audit trail.
     log_audit(
         "cluster_build_deleted",
         actor=get_current_user(),
         target_type="cluster_build",
         target_id=str(build_id),
+        details=summary,
     )
     return success_response({"deleted": True})
 
