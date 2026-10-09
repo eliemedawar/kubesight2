@@ -25,6 +25,7 @@ import hmac
 import json
 import logging
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -49,7 +50,7 @@ from ....models import (
 from ....secret_encryption import decrypt_secret, encrypt_secret
 from ...vsphere_client import VSphereError
 from ..scrub import scrub
-from . import inventory, ip_pool, state_store, templates, tofu_config, tofu_runner
+from . import inventory, ip_pool, state_store, templates, tofu_config, tofu_runner, vm_watch
 
 logger = logging.getLogger(__name__)
 
@@ -340,6 +341,16 @@ class _Output:
         self._last_flush = 0.0
         self._last_error: Optional[str] = None
         self.errors: List[str] = []
+        # Lines other threads want in the log (the vCenter watcher). Only this
+        # worker thread writes the job row, so they wait here until it drains.
+        self.side: "queue.Queue[str]" = queue.Queue()
+
+    def _drain(self) -> None:
+        while True:
+            try:
+                self.lines.append(self._clean(self.side.get_nowait()))
+            except queue.Empty:
+                return
 
     def _clean(self, line: str) -> str:
         for secret in self.hide:
@@ -347,6 +358,7 @@ class _Output:
         return scrub(line)
 
     def on_line(self, line: str) -> None:
+        self._drain()
         line = self._clean(line)
         self.lines.append(line)
         if line.startswith("Error:") or line.startswith("│ Error:"):
@@ -395,6 +407,7 @@ class _Output:
         return "\n".join(self.lines)
 
     def flush(self) -> None:
+        self._drain()
         try:
             joined = (self.base + "\n" if self.base else "") + self.text()
             self.job.log_tail = joined[-_LOG_TAIL_CHARS:]
@@ -1152,11 +1165,23 @@ def _do_apply(job: ClusterProvisionJob, engine) -> bool:
             handle.write(base64.b64decode(decrypt_secret(job.plan_cipher)))
         if _run_tofu(engine, workdir, ["init", "-input=false", "-no-color"], env, output, _PLAN_TIMEOUT_S):
             raise JobFailed("OpenTofu could not initialise.\n" + output.error_summary())
-        code = _run_tofu(
-            engine, workdir,
-            ["apply", "-input=false", "-no-color", "-lock-timeout=60s", "job.tfplan"],
-            env, output, _APPLY_TIMEOUT_S,
+        # OpenTofu says only "Still creating..." while the provider waits on a
+        # clone, guest customization or the VM's address; vCenter says why.
+        watched = [name for name, action in planned.items() if action in ("create", "replace", "delete")]
+        watcher = (
+            vm_watch.VmWatcher(cfg, watched, output.side).start()
+            if getattr(engine, "mode", "") == "real" and watched else None
         )
+        try:
+            code = _run_tofu(
+                engine, workdir,
+                ["apply", "-input=false", "-no-color", "-lock-timeout=60s", "job.tfplan"],
+                env, output, _APPLY_TIMEOUT_S,
+            )
+        finally:
+            if watcher is not None:
+                watcher.stop()
+                output.flush()
     finally:
         _cleanup(workdir)
     db.session.expire_all()
