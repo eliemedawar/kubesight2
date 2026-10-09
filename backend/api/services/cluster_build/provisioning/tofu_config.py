@@ -51,6 +51,49 @@ def creates_folder(spec: Dict[str, Any]) -> bool:
     return spec.get("folderMode") != "existing"
 
 
+def _disk_block(index: int, disk: Dict[str, Any], size: Any) -> Dict[str, Any]:
+    """One template disk, repeated as the provider reads it back, so the clone's
+    disk is left as it is (only ``size`` may grow disk0 when sizes are set)."""
+    block: Dict[str, Any] = {
+        "label": f"disk{index}",
+        "unit_number": int(disk.get("unit", index) or 0),
+        "size": size,
+        "thin_provisioned": bool(disk.get("thin", True)),
+        "eagerly_scrub": bool(disk.get("eagerlyScrub", False)),
+    }
+    for key, attr in (
+        ("controllerType", "controller_type"), ("diskMode", "disk_mode"),
+        ("sharing", "disk_sharing"), ("ioLimit", "io_limit"),
+        ("ioReservation", "io_reservation"), ("ioShareLevel", "io_share_level"),
+    ):
+        if disk.get(key) is not None:
+            block[attr] = disk[key]
+    if "writeThrough" in disk:
+        block["write_through"] = bool(disk["writeThrough"])
+    if disk.get("ioShareLevel") == "custom" and disk.get("ioShareCount") is not None:
+        block["io_share_count"] = disk["ioShareCount"]
+    return block
+
+
+# Template settings repeated as-is in every VM. Sizes are only repeated when the
+# build keeps the template's size: cores per socket must divide a CPU count
+# someone typed in, and a set memory is the person's choice.
+_SIZE_SETTINGS = ("num_cores_per_socket",)
+
+
+def template_settings(template: Dict[str, Any], keep_size: bool) -> Dict[str, Any]:
+    settings = dict(template.get("settings") or {})
+    if not keep_size:
+        for key in _SIZE_SETTINGS:
+            settings.pop(key, None)
+    for key in ("cpu", "memory"):
+        # A share count only means something for a custom share level; for the
+        # named levels vCenter derives it and the provider leaves it alone.
+        if settings.get(f"{key}_share_level") != "custom":
+            settings.pop(f"{key}_share_count", None)
+    return settings
+
+
 def render(
     *,
     cluster_name: str,
@@ -83,26 +126,31 @@ def render(
         for node in nodes
     }
 
-    disk_blocks = [{
-        "label": "disk0",
-        "unit_number": int(disks[0].get("unit", 0) or 0),
-        "size": "${each.value.disk_gb}",
-        "thin_provisioned": bool(disks[0].get("thin", True)),
-        "eagerly_scrub": bool(disks[0].get("eagerlyScrub", False)),
+    disk_blocks = [_disk_block(0, disks[0], "${each.value.disk_gb}")]
+    disk_blocks += [
+        _disk_block(index, disk, int(disk.get("sizeGb") or 1))
+        for index, disk in enumerate(disks[1:], start=1)
+    ]
+
+    # Every network card the template has, in its order: the first joins the
+    # build's network, the others stay where the template put them. A card
+    # left out would be removed after the clone.
+    template_nics = template.get("nics") or [{}]
+    nic_blocks = [{
+        "network_id": spec["networkId"],
+        "adapter_type": template.get("nicType") or template_nics[0].get("type") or "vmxnet3",
     }]
-    for index, disk in enumerate(disks[1:], start=1):
-        disk_blocks.append({
-            "label": f"disk{index}",
-            "unit_number": int(disk.get("unit", index) or index),
-            "size": int(disk.get("sizeGb") or 1),
-            "thin_provisioned": bool(disk.get("thin", True)),
-            "eagerly_scrub": bool(disk.get("eagerlyScrub", False)),
-        })
+    for nic in template_nics[1:]:
+        if nic.get("networkId"):
+            nic_blocks.append({"network_id": nic["networkId"], "adapter_type": nic.get("type") or "vmxnet3"})
 
     customize: Dict[str, Any] = {
         "timeout": CUSTOMIZE_TIMEOUT_MIN,
         "linux_options": [{"host_name": "${each.key}", "domain": domain}],
-        "network_interface": [{"ipv4_address": "${each.value.ip}", "ipv4_netmask": prefix}],
+        # One entry per card (vCenter requires it): the build's address on the
+        # first, DHCP on any other.
+        "network_interface": [{"ipv4_address": "${each.value.ip}", "ipv4_netmask": prefix}]
+        + [{} for _ in nic_blocks[1:]],
         "ipv4_gateway": network_range["gateway"],
     }
     if dns_servers:
@@ -126,20 +174,40 @@ def render(
             "Managed by OpenTofu: change it from KubeSight, not by hand."
         ),
         "wait_for_guest_net_timeout": GUEST_NET_TIMEOUT_MIN,
-        "network_interface": [{
-            "network_id": spec["networkId"],
-            "adapter_type": template.get("nicType")
-            or ((template.get("nics") or [{}])[0].get("type") or "vmxnet3"),
-        }],
+        "network_interface": nic_blocks,
         "disk": disk_blocks,
         "clone": [{"template_uuid": template["uuid"], "customize": [customize]}],
-        "lifecycle": [{
-            "ignore_changes": [
-                "clone", "annotation", "guest_id", "firmware", "scsi_type",
-                "disk", "network_interface",
-            ],
-        }],
     }
+    # Repeat the template so the provider's post-clone reconfigure changes
+    # nothing: its settings (the note included — KubeSight writes none of its
+    # own then), its controllers, CD drives and vTPM.
+    keep_size = spec.get("sizeMode") == "template"
+    settings = template_settings(template, keep_size)
+    if settings:
+        vm.update(settings)
+    controllers = template.get("controllers") or {}
+    for kind in ("scsi", "sata", "ide", "nvme"):
+        if kind in controllers:
+            vm[f"{kind}_controller_count"] = int(controllers[kind])
+    cdroms = []
+    for cdrom in template.get("cdroms") or []:
+        if cdrom.get("datastoreId") and cdrom.get("path"):
+            cdroms.append({"datastore_id": cdrom["datastoreId"], "path": cdrom["path"]})
+        else:
+            cdroms.append({"client_device": True})
+    if cdroms:
+        vm["cdrom"] = cdroms
+    if template.get("vtpm"):
+        vm["vtpm"] = [{"version": "2.0"}]
+    vm["lifecycle"] = [{
+        # KubeSight only creates and deletes these VMs; nothing it repeated
+        # from the template should ever plan a change to a running one.
+        "ignore_changes": sorted({
+            "clone", "annotation", "guest_id", "firmware", "scsi_type",
+            "disk", "network_interface", "cdrom", "vtpm", *settings,
+            *(f"{kind}_controller_count" for kind in controllers),
+        }),
+    }]
 
     resources: Dict[str, Any] = {}
     if creates_folder(spec):

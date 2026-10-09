@@ -1266,14 +1266,15 @@ export default function Wizard({
 
   // --- VMware placement -----------------------------------------------------
   const placementState = useVmwarePlacement(vmware ? basics.vm.connectionId : "", notify);
-  // When the last privilege check says this account may not change CPU or
-  // memory, start from "keep the template's size". Once; the user can switch.
-  const sizeModeTouched = useRef(Boolean(initialBuild));
+  // An account the last privilege check says may not change CPU or memory
+  // starts on "keep the template's size" — the clone then changes nothing.
+  // Once; the user can switch back.
+  const sizeModeSeeded = useRef(Boolean(initialBuild));
   useEffect(() => {
-    if (!vmware || sizeModeTouched.current) return;
+    if (!vmware || sizeModeSeeded.current) return;
     const connection = provisioningConnections.find((row) => String(row.id) === String(basics.vm.connectionId));
     if (!cannotResize(connection)) return;
-    sizeModeTouched.current = true;
+    sizeModeSeeded.current = true;
     setBasics((previous) => ({ ...previous, vm: { ...previous.vm, sizeMode: "template" } }));
   }, [vmware, basics.vm.connectionId, provisioningConnections]);
   const ranges = placementState.data?.networks || [];
@@ -1900,10 +1901,7 @@ export default function Wizard({
                   placementState={placementState}
                   ranges={ranges}
                   vm={basics.vm}
-                  setVm={(vm) => {
-                    if (vm.sizeMode !== basics.vm.sizeMode) sizeModeTouched.current = true;
-                    setBasic("vm", vm);
-                  }}
+                  setVm={(vm) => setBasic("vm", vm)}
                   counts={shapeCounts}
                   sizes={basics.sizes}
                   setSizes={(sizes) => setBasic("sizes", sizes)}

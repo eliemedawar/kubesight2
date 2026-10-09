@@ -68,6 +68,7 @@ REQUIRED_PRIVILEGES: List[Tuple[str, str, str]] = [
     ("VirtualMachine.Config.CPUCount", "Set the CPU count", "folder"),
     ("VirtualMachine.Config.Memory", "Set memory", "folder"),
     ("VirtualMachine.Config.Settings", "Change VM settings", "folder"),
+    ("VirtualMachine.Config.Annotation", "Write the note saying KubeSight manages the VM", "folder"),
     ("VirtualMachine.Config.DiskExtend", "Grow the cloned disk", "folder"),
     ("VirtualMachine.Config.AddNewDisk", "Add disks", "folder"),
     ("VirtualMachine.Config.EditDevice", "Change the network card", "folder"),
@@ -89,6 +90,12 @@ REQUIRED_PRIVILEGES: List[Tuple[str, str, str]] = [
 #             chosen folder as it is, skips keep-apart rules)
 #   destroy   only deleting the VMs later needs it
 #   other     the vSphere provider may use it; vCenter decides at apply time
+# Right after a clone the vSphere provider sends one reconfigure that repeats the
+# VM's settings and devices as its config describes them. KubeSight writes that
+# config from the template itself (inventory._template_hardware /
+# _template_settings), so with the template's size kept the reconfigure changes
+# nothing and vCenter asks for none of the Config privileges. What a clone always
+# needs is below; the rest only when something really changes.
 REQUIRED_TO_CLONE = {
     "VirtualMachine.Inventory.CreateFromExisting",
     "VirtualMachine.Provisioning.DeployTemplate",
@@ -98,20 +105,26 @@ REQUIRED_TO_CLONE = {
     "Network.Assign",
     "VirtualMachine.Interact.PowerOn",
 }
+# Changing CPU, memory or disk size; a VM that keeps the template's size never does.
 RESIZE_PRIVILEGES = {
     "VirtualMachine.Config.CPUCount", "VirtualMachine.Config.Memory",
     "VirtualMachine.Config.DiskExtend",
 }
+# Moving the template's network card to another network is an edit to the card.
+EDIT_DEVICE = "VirtualMachine.Config.EditDevice"
+# Only used to clean up: OpenTofu deletes a clone it could not finish, and
+# KubeSight's Destroy deletes the VMs. Without it those are left for an admin.
+CLEANUP = "VirtualMachine.Inventory.Delete"
 FOLDER_CREATE = "Folder.Create"
 RULES_PRIVILEGE = "Host.Inventory.EditCluster"
-DESTROY_ONLY = {
-    "VirtualMachine.Inventory.Delete", "VirtualMachine.Interact.PowerOff", "Folder.Delete",
-}
+DESTROY_ONLY = {"VirtualMachine.Interact.PowerOff", "Folder.Delete"}
 
 
 def privilege_need(privilege: str) -> str:
     if privilege in REQUIRED_TO_CLONE:
         return "required"
+    if privilege == CLEANUP:
+        return "cleanup"
     if privilege in RESIZE_PRIVILEGES or privilege in (FOLDER_CREATE, RULES_PRIVILEGE):
         return "adapts"
     if privilege in DESTROY_ONLY:
@@ -311,24 +324,187 @@ _NIC_TYPES = {
 }
 
 
+_SATA_CONTROLLERS = ("VirtualAHCIController", "VirtualSATAController")
+
+
+def _kind(device) -> str:
+    return type(device).__name__.split(".")[-1]
+
+
+def _shares(info) -> Dict[str, Any]:
+    shares = getattr(info, "shares", None)
+    return {
+        "limit": getattr(info, "limit", None),
+        "reservation": getattr(info, "reservation", None),
+        "shareLevel": str(getattr(shares, "level", "") or "") or None,
+        "shareCount": getattr(shares, "shares", None),
+    }
+
+
 def _template_hardware(devices) -> Dict[str, Any]:
-    disks, nics, scsi = [], [], None
-    for device in devices or []:
-        kind = type(device).__name__.split(".")[-1]
+    """Every device the vSphere provider compares with its config right after a
+    clone, read exactly as the provider reads it. Whatever the config does not
+    repeat, the provider changes: a CD drive or vTPM it does not declare is
+    removed, a SCSI controller of another type is swapped, a disk on a
+    controller it does not count is "added" — each one a reconfigure the
+    account needs privileges for. So the config repeats all of it."""
+    devices = list(devices or [])
+    by_key = {getattr(device, "key", None): device for device in devices}
+    controllers = {"scsi": 0, "sata": 0, "ide": 0, "nvme": 0}
+    scsi = None
+    for device in devices:
+        kind = _kind(device)
+        if kind in _SCSI_TYPES:
+            controllers["scsi"] += 1
+            if scsi is None or getattr(device, "busNumber", 1) == 0:
+                scsi = _SCSI_TYPES[kind]
+        elif kind in _SATA_CONTROLLERS:
+            controllers["sata"] += 1
+        elif kind == "VirtualIDEController":
+            controllers["ide"] += 1
+        elif kind == "VirtualNVMEController":
+            controllers["nvme"] += 1
+
+    disks, nics, cdroms, vtpm = [], [], [], False
+    for device in devices:
+        kind = _kind(device)
         if kind == "VirtualDisk":
             backing = getattr(device, "backing", None)
+            ctlr = by_key.get(getattr(device, "controllerKey", None))
+            ckind = _kind(ctlr) if ctlr is not None else ""
+            bus = int(getattr(ctlr, "busNumber", 0) or 0)
+            unit = int(getattr(device, "unitNumber", 0) or 0)
+            if ckind in _SCSI_TYPES:
+                ctype = "scsi"
+                if unit > int(getattr(ctlr, "scsiCtlrUnitNumber", 7) or 7):
+                    unit -= 1
+                unit += 15 * bus
+            elif ckind in _SATA_CONTROLLERS:
+                ctype, unit = "sata", unit + 30 * bus
+            elif ckind == "VirtualIDEController":
+                ctype, unit = "ide", unit + 2 * bus
+            elif ckind == "VirtualNVMEController":
+                ctype, unit = "nvme", unit + 64 * bus
+            else:
+                ctype = "scsi"
+            size_bytes = getattr(device, "capacityInBytes", 0) or (getattr(device, "capacityInKB", 0) or 0) * 1024
+            io = _shares(getattr(device, "storageIOAllocation", None))
             disks.append({
-                "unit": getattr(device, "unitNumber", len(disks)),
-                "sizeGb": round((getattr(device, "capacityInKB", 0) or 0) / 1024 / 1024),
+                "unit": unit,
+                "controllerType": ctype,
+                # Whole GiB, rounded down — how the provider reads a disk back.
+                "sizeGb": int(size_bytes // (1024 ** 3)),
                 "thin": bool(getattr(backing, "thinProvisioned", False)),
                 "eagerlyScrub": bool(getattr(backing, "eagerlyScrub", False)),
+                "diskMode": getattr(backing, "diskMode", None),
+                "sharing": getattr(backing, "sharing", None) or None,
+                "writeThrough": bool(getattr(backing, "writeThrough", False)),
+                "ioLimit": io["limit"], "ioReservation": io["reservation"],
+                "ioShareLevel": io["shareLevel"], "ioShareCount": io["shareCount"],
             })
         elif kind in _NIC_TYPES:
-            nics.append({"type": _NIC_TYPES[kind]})
-        elif kind in _SCSI_TYPES and scsi is None:
-            scsi = _SCSI_TYPES[kind]
-    disks.sort(key=lambda d: d["unit"])
-    return {"disks": disks, "nics": nics, "scsiType": scsi or "pvscsi"}
+            backing = getattr(device, "backing", None)
+            network = None
+            port = getattr(backing, "port", None)
+            if port is not None and getattr(port, "portgroupKey", None):
+                network = port.portgroupKey
+            elif getattr(backing, "network", None) is not None:
+                network = _moid(backing.network)
+            elif getattr(backing, "opaqueNetworkId", None):
+                network = backing.opaqueNetworkId
+            nics.append({"type": _NIC_TYPES[kind], "networkId": network})
+        elif kind == "VirtualCdrom":
+            backing = getattr(device, "backing", None)
+            bkind = _kind(backing) if backing is not None else ""
+            # pyVmomi names these vim.vm.device.VirtualCdrom.RemoteAtapiBackingInfo
+            # (the API's VirtualCdromRemoteAtapiBackingInfo): match the ending.
+            if bkind.endswith("RemoteAtapiBackingInfo"):
+                cdroms.append({"clientDevice": True})
+            elif bkind.endswith("IsoBackingInfo") and getattr(backing, "datastore", None) is not None:
+                file_name = str(getattr(backing, "fileName", "") or "")
+                path = file_name.split("] ", 1)[1] if "] " in file_name else file_name
+                cdroms.append({"datastoreId": _moid(backing.datastore), "path": path})
+            else:
+                # Passthrough or empty: no config value repeats it, so the
+                # provider maps it to the client device (an edit, never a removal).
+                cdroms.append({"clientDevice": True, "changes": True, "backing": bkind or "none"})
+        elif kind == "VirtualTPM":
+            vtpm = True
+    disks.sort(key=lambda d: (d["controllerType"] != "scsi", d["unit"]))
+    return {
+        "disks": disks, "nics": nics, "scsiType": scsi or "pvscsi",
+        "cdroms": cdroms, "vtpm": vtpm, "controllers": controllers,
+    }
+
+
+def _template_settings(config) -> Dict[str, Any]:
+    """The VM settings the vSphere provider sends right after a clone, as the
+    template has them, under the provider's own argument names — so what it
+    sends is what the VM already has."""
+    if config is None:
+        return {}
+    hardware = getattr(config, "hardware", None)
+    tools = getattr(config, "tools", None)
+    flags = getattr(config, "flags", None)
+    boot = getattr(config, "bootOptions", None)
+    out: Dict[str, Any] = {
+        "annotation": getattr(config, "annotation", None) or "",
+        "alternate_guest_name": getattr(config, "alternateGuestName", None) or "",
+        "cpu_hot_add_enabled": getattr(config, "cpuHotAddEnabled", None),
+        "cpu_hot_remove_enabled": getattr(config, "cpuHotRemoveEnabled", None),
+        "memory_hot_add_enabled": getattr(config, "memoryHotAddEnabled", None),
+        "nested_hv_enabled": getattr(config, "nestedHVEnabled", None),
+        "cpu_performance_counters_enabled": getattr(config, "vPMCEnabled", None),
+        "memory_reservation_locked_to_max": getattr(config, "memoryReservationLockedToMax", None),
+        "swap_placement_policy": getattr(config, "swapPlacement", None),
+        "latency_sensitivity": getattr(getattr(config, "latencySensitivity", None), "level", None),
+    }
+    if hardware is not None:
+        if getattr(hardware, "autoCoresPerSocket", None):
+            out["num_cores_per_socket"] = 0
+        elif getattr(hardware, "numCoresPerSocket", None):
+            out["num_cores_per_socket"] = int(hardware.numCoresPerSocket)
+    if tools is not None:
+        allowed = getattr(tools, "syncTimeWithHostAllowed", None)
+        if allowed is not None:  # vSphere 7.0.1+: two separate switches
+            out["sync_time_with_host"] = bool(allowed)
+            out["sync_time_with_host_periodically"] = bool(getattr(tools, "syncTimeWithHost", False))
+        else:
+            out["sync_time_with_host"] = getattr(tools, "syncTimeWithHost", None)
+        out.update({
+            "tools_upgrade_policy": getattr(tools, "toolsUpgradePolicy", None),
+            "run_tools_scripts_after_power_on": getattr(tools, "afterPowerOn", None),
+            "run_tools_scripts_after_resume": getattr(tools, "afterResume", None),
+            "run_tools_scripts_before_guest_standby": getattr(tools, "beforeGuestStandby", None),
+            "run_tools_scripts_before_guest_shutdown": getattr(tools, "beforeGuestShutdown", None),
+            "run_tools_scripts_before_guest_reboot": getattr(tools, "beforeGuestReboot", None),
+        })
+    if flags is not None:
+        out.update({
+            "enable_disk_uuid": getattr(flags, "diskUuidEnabled", None),
+            "hv_mode": getattr(flags, "virtualExecUsage", None),
+            "ept_rvi_mode": getattr(flags, "virtualMmuUsage", None),
+            "enable_logging": getattr(flags, "enableLogging", None),
+            "vbs_enabled": getattr(flags, "vbsEnabled", None),
+            "vvtd_enabled": getattr(flags, "vvtdEnabled", None),
+        })
+    if boot is not None:
+        out.update({
+            "boot_delay": getattr(boot, "bootDelay", None),
+            "efi_secure_boot_enabled": getattr(boot, "efiSecureBootEnabled", None),
+            "boot_retry_enabled": getattr(boot, "bootRetryEnabled", None),
+            "boot_retry_delay": getattr(boot, "bootRetryDelay", None),
+        })
+    for key, attr in (("cpu", "cpuAllocation"), ("memory", "memoryAllocation")):
+        allocation = _shares(getattr(config, attr, None))
+        out.update({
+            f"{key}_limit": allocation["limit"],
+            f"{key}_reservation": allocation["reservation"],
+            f"{key}_share_level": allocation["shareLevel"],
+            f"{key}_share_count": allocation["shareCount"],
+        })
+    return {key: value for key, value in out.items() if value is not None and value != ""
+            or key in ("annotation", "alternate_guest_name")}
 
 
 def _fetch_placement(cfg: VSphereConfig) -> Dict[str, Any]:
@@ -387,12 +563,9 @@ def _fetch_placement(cfg: VSphereConfig) -> Dict[str, Any]:
                 objectSet=[pc.ObjectSpec(obj=obj, skip=False) for obj, _ in templates_raw],
                 propSet=[pc.PropertySpec(
                     type=vim.VirtualMachine,
-                    pathSet=[
-                        "config.uuid", "config.guestId", "config.guestFullName",
-                        "config.firmware", "config.tools.toolsVersion",
-                        "config.hardware.numCPU", "config.hardware.memoryMB",
-                        "config.hardware.device", "guest.guestFullName",
-                    ],
+                    # The whole config: the provider compares nearly all of it
+                    # with its own config right after a clone (see _template_settings).
+                    pathSet=["config", "guest.guestFullName"],
                     all=False,
                 )],
             )
@@ -481,19 +654,22 @@ def _fetch_placement(cfg: VSphereConfig) -> Dict[str, Any]:
                 if not props.get("config.template"):
                     continue
                 info = details.get(vm_id, {})
-                hardware = _template_hardware(info.get("config.hardware.device"))
+                config = info.get("config")
+                vm_hardware = getattr(config, "hardware", None)
+                hardware = _template_hardware(getattr(vm_hardware, "device", None))
                 template = {
                     "id": vm_id,
                     "name": props.get("name", ""),
                     "path": path_below(vm_id, vm_folder),
-                    "uuid": info.get("config.uuid"),
-                    "guestId": info.get("config.guestId"),
-                    "guestFullName": info.get("config.guestFullName"),
+                    "uuid": getattr(config, "uuid", None),
+                    "guestId": getattr(config, "guestId", None),
+                    "guestFullName": getattr(config, "guestFullName", None),
                     "guestDetail": info.get("guest.guestFullName"),
-                    "firmware": info.get("config.firmware") or "bios",
-                    "toolsVersion": info.get("config.tools.toolsVersion") or 0,
-                    "cpu": info.get("config.hardware.numCPU"),
-                    "memoryMb": info.get("config.hardware.memoryMB"),
+                    "firmware": getattr(config, "firmware", None) or "bios",
+                    "toolsVersion": getattr(getattr(config, "tools", None), "toolsVersion", None) or 0,
+                    "cpu": getattr(vm_hardware, "numCPU", None),
+                    "memoryMb": getattr(vm_hardware, "memoryMB", None),
+                    "settings": _template_settings(config),
                     **hardware,
                 }
                 template["compatibility"] = assess_template(template)
@@ -608,6 +784,10 @@ def _check_privileges(cfg: VSphereConfig, entity_ids: Dict[str, str]) -> List[Di
                 results.append({
                     "privilege": privilege, "purpose": purpose,
                     "entity": moid, "granted": granted.get(privilege, False),
+                    # "vcenter": vCenter's own answer. "roles": worked out from the
+                    # roles KubeSight can see on the object, which can miss a
+                    # permission that reaches the account through a group.
+                    "source": "roles" if denied is not None else "vcenter",
                 })
         return results
     finally:

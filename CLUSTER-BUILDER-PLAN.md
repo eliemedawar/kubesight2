@@ -624,13 +624,35 @@ For a provisioning account a vSphere admin scoped to one folder:
   the exact folder, template, pool, datastore, network and cluster. Each privilege has a need
   (`inventory.privilege_need`):
   - `required` — clone from template, deploy template, customize, assign to pool, allocate space,
-    assign network, power on. Missing → the plan stops, listing every missing privilege per object.
-  - `adapts` — resize (→ every new VM keeps the template's size), `Folder.Create` (→ the VMs go
-    straight into the chosen folder), `Host.Inventory.EditCluster` (→ no keep-apart rules). The plan
-    changes the spec and says so in a warning check.
-  - `destroy` — delete VM, power off, delete folder: not asked for when creating.
-  - `other` — settings / add disk / edit device / advanced config / datastore browse: a warning
-    only; vCenter has the last word at apply.
+    assign network, power on. Missing → the plan stops, listing every missing privilege per object —
+    when vCenter itself answered. When KubeSight only inferred it from the roles it can see (vCenter
+    refused `HasPrivilegeOnEntities`), it is a "Privileges not confirmed" warning instead: that
+    inference once said DeployTemplate was missing on an account that could deploy.
+  - `adapts` — CPU count / memory / disk extend (→ every new VM keeps the template's size),
+    `Folder.Create` (→ the VMs go straight into the chosen folder), `Host.Inventory.EditCluster`
+    (→ no keep-apart rules). The plan changes the spec and says so in a warning check.
+  - `cleanup` — delete VM: OpenTofu deletes a clone it could not finish, and Destroy deletes the
+    VMs. Missing → a warning that an admin cleans up by hand.
+  - `destroy` — power off, delete folder: not asked for when creating.
+  - `other` — settings, annotation, add disk, advanced config, datastore browse: a warning only.
+    Edit device becomes required when a device really is edited (below).
+
+  **Why the Config privileges are not needed: the clone mirrors the template.** The vSphere
+  provider (v2.17.1, `resourceVSphereVirtualMachinePostDeployChanges`) always sends a reconfigure
+  right after the clone with its config's settings and the device changes needed to match that
+  config: a CD drive or vTPM the config does not declare is *removed*, a SCSI controller of another
+  type is *swapped*, a disk on a controller it does not count is *added*, a missing card is removed
+  (all "Add or remove device"). So each plan re-reads the template from vCenter
+  (`inventory._template_hardware` / `_template_settings`, `jobs._refresh_template`) and the config
+  repeats it: every disk (controller, unit, size floored to GiB, mode, sharing, IO allocation), every
+  network card, the CD drives, the vTPM, the controller counts, and the settings the provider would
+  otherwise reset to its defaults (note, disk UUID, hot-add, time sync, tools policy and scripts,
+  boot options, CPU/memory allocation, latency, swap). KubeSight writes no note of its own then.
+  With "Keep the VM template's size", the reconfigure carries only what the VM already has.
+  The one edit left is moving the template's first card to another network: the plan says so and
+  then requires Edit device ("Network card" check).
+  An apply whose clone vCenter made but OpenTofu could neither finish nor delete names the VM left
+  behind (`jobs._left_behind`) and says to delete it before planning again.
   `ReadCustSpecs` is no longer checked: the customization is sent inline, never read from vCenter.
   Sources → Check privileges labels each missing one with its need and only `required` ones make
   it a warning.

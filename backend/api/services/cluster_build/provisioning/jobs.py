@@ -637,6 +637,9 @@ def _vcenter_checks(build: ClusterBuild, job: ClusterProvisionJob, connection, c
         "warn" if verdict["status"] == "warn" else "ok", "VM template",
         f"{template['name']} — {'usable with warnings' if verdict['status'] == 'warn' else 'compatible'}",
     ))
+    _refresh_template(build, job, template)
+    hardware_checks, edits_device = _hardware_checks(build, template, datacenter)
+    checks += hardware_checks
 
     machines = _machines_in_scope(build, job)
     smallest = (template.get("disks") or [{}])[0].get("sizeGb") or 0
@@ -694,7 +697,11 @@ def _vcenter_checks(build: ClusterBuild, job: ClusterProvisionJob, connection, c
     except Exception as exc:  # noqa: BLE001 — some vCenters refuse the query itself
         checks.append(_check("warn", "Account privileges", f"could not be checked: {scrub(str(exc))[:200]}"))
     else:
-        checks += _fit_to_account(build, job, privileges, datacenter, template)
+        checks += _fit_to_account(build, job, privileges, datacenter, template, edits_device)
+        if any(c["label"] == "Machine sizes" and c["status"] == "warn" for c in checks):
+            # The plan switched to the template's size itself; the earlier
+            # "sets the CPU and memory you chose" no longer holds.
+            checks = [c for c in checks if not (c["label"] == "Clone" and c["status"] == "warn")]
     spec = build.provisioning_json or {}
     if spec.get("sizeMode") == "template" and not any(c["label"] == "Machine sizes" for c in checks):
         size = (_machines_in_scope(build, job) or [{}])[0]
@@ -716,6 +723,9 @@ def _missing_privileges_message(missing: List[Dict[str, Any]], spec: Dict[str, A
     }
     if spec.get("folderParentId"):
         names[spec["folderParentId"]] = f"folder {spec.get('folderParent') or spec['folderParentId']}"
+    if spec.get("resourcePoolId") and not spec.get("resourcePoolName"):
+        # "The cluster itself" in the wizard: the cluster's own root pool.
+        names[spec["resourcePoolId"]] = f"cluster {spec.get('clusterName') or spec.get('clusterId')} (its own resource pool)"
     for key, label, name_key in (
         ("resourcePoolId", "resource pool", "resourcePoolName"),
         ("datastoreId", "datastore", "datastoreName"),
@@ -769,8 +779,79 @@ def _rules_wanted(spec: Dict[str, Any]) -> bool:
                 and (counts.get("controlPlane", 0) > 1 or counts.get("loadbalancer", 0) > 1))
 
 
+_MIRRORED = ("disks", "nics", "scsiType", "cdroms", "vtpm", "controllers", "settings",
+             "cpu", "memoryMb", "firmware", "guestId")
+
+
+def _refresh_template(build: ClusterBuild, job: ClusterProvisionJob, live: Dict[str, Any]) -> None:
+    """Take the template's devices and settings from vCenter as it is now — the
+    config repeats them so the clone is left exactly as the template made it."""
+    spec = dict(build.provisioning_json or {})
+    stored = dict(spec.get("template") or {})
+    for key in _MIRRORED:
+        if key in live:
+            stored[key] = live[key]
+    if live.get("nics"):
+        stored["nicType"] = live["nics"][0].get("type") or stored.get("nicType")
+    spec["template"] = stored
+    build.provisioning_json = spec
+    if spec.get("sizeMode") == "template":
+        try:
+            _keep_template_size(build, job, templates.template_size(stored))
+        except ValueError:
+            pass  # reported by the size checks
+
+
+def _hardware_checks(build: ClusterBuild, template: Dict[str, Any],
+                     datacenter: Dict[str, Any]) -> Tuple[List[Dict[str, str]], bool]:
+    """What the clone keeps from the template and what (if anything) it changes.
+    Returns the checks and whether a device is edited (needs EditDevice)."""
+    spec = build.provisioning_json or {}
+    checks: List[Dict[str, str]] = []
+    net_names = {n["id"]: n["name"] for n in datacenter.get("networks") or []}
+    nics = template.get("nics") or []
+    edits = False
+    first = (nics[0].get("networkId") if nics else None)
+    if first and first != spec.get("networkId"):
+        edits = True
+        checks.append(_check(
+            "warn", "Network card",
+            f"{template['name']}'s card is on {net_names.get(first, first)}; this build moves it to "
+            f"{spec.get('networkName')}, an edit that needs \"Modify device settings\". "
+            f"Choose {net_names.get(first, first)} to leave the card as it is.",
+        ))
+    odd_cdroms = [c for c in template.get("cdroms") or [] if c.get("changes")]
+    if odd_cdroms:
+        edits = True
+        checks.append(_check(
+            "warn", "CD drive",
+            "the template's CD drive has a backing OpenTofu cannot repeat "
+            f"({odd_cdroms[0].get('backing')}); it is switched to the client device, an edit that needs "
+            "\"Modify device settings\"",
+        ))
+    kept = [f"{len(template.get('disks') or [])} disk(s)", f"{len(nics) or 1} network card(s)"]
+    if template.get("cdroms"):
+        kept.append("CD drive")
+    if template.get("vtpm"):
+        kept.append("vTPM")
+    if spec.get("sizeMode") == "template" and not edits:
+        checks.append(_check(
+            "ok", "Clone",
+            f"left exactly as {template['name']} is ({', '.join(kept)}, its settings and size); "
+            "only the hostname and address are set",
+        ))
+    elif spec.get("sizeMode") != "template":
+        checks.append(_check(
+            "warn", "Clone",
+            "keeps the template's devices and settings, but sets the CPU, memory and disk you chose — "
+            "that needs Change CPU count / Change memory. Choose \"Keep the VM template's size\" to change nothing",
+        ))
+    return checks, edits
+
+
 def _fit_to_account(build: ClusterBuild, job: ClusterProvisionJob, privileges: List[Dict[str, Any]],
-                    datacenter: Dict[str, Any], template: Dict[str, Any]) -> List[Dict[str, str]]:
+                    datacenter: Dict[str, Any], template: Dict[str, Any],
+                    edits_device: bool = False) -> List[Dict[str, str]]:
     """Shape the plan around what the provisioning account may do on the exact
     folder, template, pool, datastore and network.
 
@@ -832,12 +913,35 @@ def _fit_to_account(build: ClusterBuild, job: ClusterProvisionJob, privileges: L
             names.discard(inventory.RULES_PRIVILEGE)
     build.provisioning_json = spec
 
-    blocking = [p for p in missing if p["privilege"] in names
-                and (p["privilege"] in inventory.REQUIRED_TO_CLONE
-                     or p["privilege"] in (inventory.FOLDER_CREATE, inventory.RULES_PRIVILEGE)
-                     or p["privilege"] in inventory.RESIZE_PRIVILEGES)]
-    if blocking:
-        raise JobFailed(_missing_privileges_message(blocking, spec, datacenter, template))
+    needed = set(inventory.REQUIRED_TO_CLONE) | {inventory.FOLDER_CREATE, inventory.RULES_PRIVILEGE}
+    needed |= inventory.RESIZE_PRIVILEGES
+    if edits_device:
+        needed.add(inventory.EDIT_DEVICE)
+    blocking = [p for p in missing if p["privilege"] in names and p["privilege"] in needed]
+    if inventory.CLEANUP in names:
+        checks.append(_check(
+            "warn", "Clean-up",
+            "the account may not delete VMs: if a step after a clone fails, the half-made VM stays in "
+            "vCenter, and Destroy cannot remove these VMs — an admin deletes them by hand",
+        ))
+        names.discard(inventory.CLEANUP)
+    # vCenter's own "no" stops the plan. A "no" KubeSight only worked out from
+    # the roles it can see may be wrong (a group, a parent object), so it warns
+    # and lets vCenter decide: a clone it refuses fails before anything exists.
+    certain = [p for p in blocking if p.get("source") != "roles"]
+    inferred = [p for p in blocking if p.get("source") == "roles"]
+    if certain:
+        raise JobFailed(_missing_privileges_message(certain, spec, datacenter, template))
+    if inferred:
+        lines = _missing_privileges_message(inferred, spec, datacenter, template).split("\n")[1:]
+        lines = [line for line in lines if line.startswith("- ")]
+        checks.append(_check(
+            "warn", "Privileges not confirmed",
+            "vCenter would not say which privileges the account holds, and the roles KubeSight can "
+            "see do not grant these. If they reach the account another way (a group, a parent "
+            "object), applying works; if not, vCenter refuses the clone and nothing is created. "
+            + " ".join(lines),
+        ))
     optional = sorted({p["privilege"] for p in missing if p["privilege"] in names} - {p["privilege"] for p in blocking})
     if optional:
         checks.append(_check(
@@ -1065,8 +1169,26 @@ def _do_apply(job: ClusterProvisionJob, engine) -> bool:
                 "The plan is out of date: the VMs' state changed after it was made. "
                 "Make a new plan.\n" + summary
             )
+        left = _left_behind(output.text())
+        if left:
+            summary = (
+                f"vCenter cloned {', '.join(left)}, then refused a later step, and OpenTofu was not "
+                "allowed to delete the half-made VM. It is still in vCenter but KubeSight does not "
+                "track it: delete it in vCenter (or ask the vSphere admin to), then plan again.\n\n"
+                + summary
+            )
         raise JobFailed(summary or "OpenTofu apply failed.")
     return True
+
+
+_CLONED_VM_RE = re.compile(r'post-clone changes to virtual machine "([^"]+)"')
+
+
+def _left_behind(log: str) -> List[str]:
+    """VMs the vSphere provider cloned but could neither finish nor remove."""
+    if "error removing the cloned virtual machine" not in log:
+        return []
+    return sorted(set(_CLONED_VM_RE.findall(log)))
 
 
 def _record_created_vms(build: ClusterBuild, job: ClusterProvisionJob) -> List[ClusterBuildNode]:

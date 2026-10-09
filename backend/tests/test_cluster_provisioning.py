@@ -572,6 +572,138 @@ class TestVmsOnly:
         assert response.get_json()["data"]["vmsOnly"] is False
 
 
+class TestCloneMirrorsTemplate:
+    """The provider reconfigures every clone to match its config; KubeSight writes
+    that config from the template, so nothing on the clone is added, removed or
+    changed except the hostname and address."""
+
+    def test_devices_are_read_like_the_provider_reads_them(self):
+        from pyVmomi import vim
+
+        disk_backing = vim.vm.device.VirtualDisk.FlatVer2BackingInfo(
+            thinProvisioned=True, eagerlyScrub=False, diskMode="persistent",
+            sharing="sharingNone", writeThrough=False,
+        )
+        devices = [
+            vim.vm.device.ParaVirtualSCSIController(key=1000, busNumber=0, scsiCtlrUnitNumber=7),
+            vim.vm.device.VirtualIDEController(key=200, busNumber=0),
+            vim.vm.device.VirtualIDEController(key=201, busNumber=1),
+            vim.vm.device.VirtualAHCIController(key=15000, busNumber=0),
+            vim.vm.device.VirtualDisk(
+                key=2000, controllerKey=1000, unitNumber=0,
+                capacityInBytes=40 * 1024 ** 3 + 5, capacityInKB=40 * 1024 ** 2, backing=disk_backing,
+                storageIOAllocation=vim.StorageResourceManager.IOAllocationInfo(
+                    limit=-1, reservation=0, shares=vim.SharesInfo(level="normal", shares=1000)),
+            ),
+            vim.vm.device.VirtualCdrom(
+                key=16000, controllerKey=15000, unitNumber=0,
+                backing=vim.vm.device.VirtualCdrom.RemoteAtapiBackingInfo(deviceName=""),
+            ),
+            vim.vm.device.VirtualVmxnet3(
+                key=4000,
+                backing=vim.vm.device.VirtualEthernetCard.DistributedVirtualPortBackingInfo(
+                    port=vim.dvs.PortConnection(portgroupKey="dvportgroup-41", switchUuid="dvs")),
+            ),
+            vim.vm.device.VirtualTPM(key=11000),
+        ]
+        hardware = inventory._template_hardware(devices)
+        assert hardware["controllers"] == {"scsi": 1, "sata": 1, "ide": 2, "nvme": 0}
+        assert hardware["scsiType"] == "pvscsi"
+        assert hardware["disks"] == [{
+            "unit": 0, "controllerType": "scsi", "sizeGb": 40, "thin": True, "eagerlyScrub": False,
+            "diskMode": "persistent", "sharing": "sharingNone", "writeThrough": False,
+            "ioLimit": -1, "ioReservation": 0, "ioShareLevel": "normal", "ioShareCount": 1000,
+        }]
+        assert hardware["cdroms"] == [{"clientDevice": True}]
+        assert hardware["nics"] == [{"type": "vmxnet3", "networkId": "dvportgroup-41"}]
+        assert hardware["vtpm"] is True
+
+    def test_settings_are_read_under_the_providers_names(self):
+        from pyVmomi import vim
+
+        config = vim.vm.ConfigInfo(
+            annotation="Golden image 2026-09", cpuHotAddEnabled=True, memoryHotAddEnabled=False,
+            swapPlacement="inherit",
+            hardware=vim.vm.VirtualHardware(numCPU=4, numCoresPerSocket=2, memoryMB=8192),
+            tools=vim.vm.ToolsConfigInfo(
+                syncTimeWithHostAllowed=True, syncTimeWithHost=False, toolsUpgradePolicy="manual",
+                afterPowerOn=True, afterResume=True, beforeGuestStandby=True,
+                beforeGuestShutdown=True, beforeGuestReboot=True),
+            flags=vim.vm.FlagInfo(diskUuidEnabled=True, virtualExecUsage="hvAuto",
+                                  virtualMmuUsage="automatic", enableLogging=True),
+            bootOptions=vim.vm.BootOptions(bootDelay=0, efiSecureBootEnabled=True,
+                                           bootRetryEnabled=False, bootRetryDelay=10000),
+            cpuAllocation=vim.ResourceAllocationInfo(
+                limit=-1, reservation=0, shares=vim.SharesInfo(level="normal", shares=4000)),
+            latencySensitivity=vim.LatencySensitivity(level="normal"),
+        )
+        settings = inventory._template_settings(config)
+        assert settings["annotation"] == "Golden image 2026-09"
+        assert settings["enable_disk_uuid"] is True and settings["efi_secure_boot_enabled"] is True
+        assert settings["sync_time_with_host"] is True and settings["sync_time_with_host_periodically"] is False
+        assert settings["num_cores_per_socket"] == 2 and settings["cpu_hot_add_enabled"] is True
+        assert settings["cpu_share_level"] == "normal" and settings["cpu_limit"] == -1
+
+    @staticmethod
+    def with_template(**fields):
+        def placement(cfg):
+            data = inventory.demo_placement(cfg)
+            data["datacenters"][0]["templates"][0].update(fields)
+            return data
+        inventory.set_placement_fetcher(placement)
+        inventory.invalidate()
+
+    def test_the_config_repeats_the_template(self, client, admin_token, ssh_profile, vcenter, engine):
+        self.with_template(
+            settings={"annotation": "Golden image", "enable_disk_uuid": True,
+                      "num_cores_per_socket": 2, "cpu_share_level": "normal", "cpu_share_count": 4000},
+            cdroms=[{"clientDevice": True}], vtpm=True,
+            controllers={"scsi": 1, "sata": 1, "ide": 2, "nvme": 0},
+            nics=[{"type": "vmxnet3", "networkId": "dvportgroup-41"},
+                  {"type": "vmxnet3", "networkId": "dvportgroup-42"}],
+        )
+        # An account that may only clone: none of the Config privileges.
+        inventory.set_privilege_checker(lambda cfg, ids: [
+            {"privilege": p, "purpose": purpose, "entity": ids.get(scope) or ids.get("datacenter"),
+             "granted": p in inventory.REQUIRED_TO_CLONE}
+            for p, purpose, scope in inventory.REQUIRED_PRIVILEGES
+        ])
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-07",
+                                  sizeMode="template", folderMode="existing")
+        job = plan(client, admin_token, build["id"])["provisioning"]["job"]
+        assert job["status"] == "planned", job.get("error")
+        vm = ClusterProvisionJob.query.get(job["id"]).config_json["tofu"]["resource"][
+            "vsphere_virtual_machine"]["node"]
+        assert vm["annotation"] == "Golden image"  # the template's note, not KubeSight's
+        assert vm["enable_disk_uuid"] is True and vm["num_cores_per_socket"] == 2
+        assert "cpu_share_count" not in vm  # derived by vCenter for a named level
+        assert vm["cdrom"] == [{"client_device": True}] and vm["vtpm"] == [{"version": "2.0"}]
+        assert vm["sata_controller_count"] == 1 and vm["ide_controller_count"] == 2
+        assert [n["network_id"] for n in vm["network_interface"]] == ["dvportgroup-41", "dvportgroup-42"]
+        customize = vm["clone"][0]["customize"][0]
+        assert customize["network_interface"][1] == {}  # DHCP on the template's second card
+        assert {"cdrom", "vtpm", "enable_disk_uuid"} <= set(vm["lifecycle"][0]["ignore_changes"])
+        said = {c["label"]: c for c in job["summary"]["checks"]}
+        assert said["Clone"]["status"] == "ok" and "left exactly as" in said["Clone"]["detail"]
+        assert "Network card" not in said
+
+    def test_moving_the_card_to_another_network_needs_edit_device(
+        self, client, admin_token, ssh_profile, vcenter, engine
+    ):
+        self.with_template(nics=[{"type": "vmxnet3", "networkId": "dvportgroup-42"}])
+        inventory.set_privilege_checker(lambda cfg, ids: [
+            {"privilege": p, "purpose": purpose, "entity": ids.get(scope) or ids.get("datacenter"),
+             "granted": p in inventory.REQUIRED_TO_CLONE}
+            for p, purpose, scope in inventory.REQUIRED_PRIVILEGES
+        ])
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-08",
+                                  sizeMode="template", folderMode="existing")
+        job = plan(client, admin_token, build["id"])["provisioning"]["job"]
+        assert job["status"] == "plan_failed"
+        assert "VirtualMachine.Config.EditDevice" in job["error"]
+
+
+
 class TestFolderAndSizeModes:
     """An admin-made folder the account works in, and an account that may not resize VMs."""
 
@@ -616,10 +748,8 @@ class TestFolderAndSizeModes:
         # A role a vSphere admin granted on one folder: no folders, no resizing,
         # no DRS rules, no deleting — and a few settings privileges missing too.
         self.account_without({
-            "Folder.Create", "Folder.Delete", "VirtualMachine.Config.CPUCount",
-            "VirtualMachine.Config.Memory", "VirtualMachine.Config.DiskExtend",
-            "Host.Inventory.EditCluster", "VirtualMachine.Inventory.Delete",
-            "VirtualMachine.Interact.PowerOff", "VirtualMachine.Config.Settings",
+            "Folder.Create", "Folder.Delete", "VirtualMachine.Config.DiskExtend",
+            "Host.Inventory.EditCluster", "VirtualMachine.Interact.PowerOff",
             "VirtualMachine.Config.AddNewDisk", "VirtualMachine.Config.AdvancedConfig",
         })
         build = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-03")
@@ -636,8 +766,8 @@ class TestFolderAndSizeModes:
         assert said["Machine sizes"]["status"] == "warn" and "keeps" in said["Machine sizes"]["detail"]
         assert said["VM folder"]["status"] == "warn"
         assert said["Account privileges"]["status"] == "warn"
-        assert "VirtualMachine.Config.Settings" in said["Account privileges"]["detail"]
-        assert "Inventory.Delete" not in said["Account privileges"]["detail"]  # only a destroy needs it
+        assert "VirtualMachine.Config.AdvancedConfig" in said["Account privileges"]["detail"]
+        assert "PowerOff" not in said["Account privileges"]["detail"]  # only a destroy needs it
 
     def test_ha_without_drs_rights_skips_the_rules(self, client, admin_token, ssh_profile, vcenter, engine):
         self.account_without({"Host.Inventory.EditCluster"})
@@ -649,12 +779,28 @@ class TestFolderAndSizeModes:
         assert "vsphere_compute_cluster_vm_anti_affinity_rule" not in tofu["resource"]
         assert any(c["label"] == "Keep-apart rules" and c["status"] == "warn" for c in job["summary"]["checks"])
 
+    def test_a_guess_from_roles_warns_instead_of_blocking(self, client, admin_token, ssh_profile, vcenter, engine):
+        # vCenter refused to say; KubeSight read the account's roles and they do
+        # not show these. A group could still grant them, so vCenter decides.
+        inventory.set_privilege_checker(lambda cfg, ids: [
+            {"privilege": p, "purpose": purpose, "entity": ids.get(scope) or ids.get("datacenter"),
+             "granted": p not in {"VirtualMachine.Provisioning.DeployTemplate", "Resource.AssignVMToPool"},
+             "source": "roles"}
+            for p, purpose, scope in inventory.REQUIRED_PRIVILEGES
+        ])
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-06")
+        job = plan(client, admin_token, build["id"])["provisioning"]["job"]
+        assert job["status"] == "planned", job.get("error")
+        note = next(c for c in job["summary"]["checks"] if c["label"] == "Privileges not confirmed")
+        assert note["status"] == "warn"
+        assert "DeployTemplate" in note["detail"] and "Resource.AssignVMToPool" in note["detail"]
+
     def test_only_what_the_clone_cannot_do_without_stops_it(
         self, client, admin_token, ssh_profile, vcenter, engine
     ):
         self.account_without({
             "VirtualMachine.Provisioning.DeployTemplate", "VirtualMachine.Provisioning.Customize",
-            "Network.Assign", "VirtualMachine.Config.Settings",
+            "Network.Assign", "VirtualMachine.Config.AdvancedConfig",
         })
         build = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-04")
         job = plan(client, admin_token, build["id"])["provisioning"]["job"]
@@ -664,16 +810,32 @@ class TestFolderAndSizeModes:
         # Grouped by the object, nothing cut off, and only the blocking ones.
         assert "on VM template" in error and "DeployTemplate, VirtualMachine.Provisioning.Customize" in error
         assert "on network VM-Net-K8S-30: Network.Assign" in error
-        assert "Config.Settings" not in error
+        assert "AdvancedConfig" not in error
 
     def test_sources_check_says_what_blocks(self, client, admin_token, vcenter):
-        self.account_without({"Folder.Create", "VirtualMachine.Config.CPUCount"})
+        self.account_without({"Folder.Create", "VirtualMachine.Config.DiskExtend"})
         result = client.post(f"/api/vsphere-connections/{vcenter['connection'].id}/test-provisioning",
                              headers=auth_headers(admin_token)).get_json()["data"]
         assert result["status"] == "ok" and "Can create VMs" in result["message"]
         needs = {p["privilege"]: p["need"] for p in result["privileges"]}
         assert needs["Folder.Create"] == "adapts" and needs["Network.Assign"] == "required"
-        assert needs["VirtualMachine.Inventory.Delete"] == "destroy"
+        assert needs["VirtualMachine.Interact.PowerOff"] == "destroy"
+        # The clone repeats the template, so CPU/memory are only needed to resize;
+        # delete only cleans up a failed clone or a destroyed build.
+        assert needs["VirtualMachine.Config.CPUCount"] == "adapts"
+        assert needs["VirtualMachine.Inventory.Delete"] == "cleanup"
+        assert needs["VirtualMachine.Config.Settings"] == "other"
+
+    def test_a_half_made_vm_left_in_vcenter_is_named(self):
+        log = (
+            "Error: warning:\nThere was an error performing post-clone changes to virtual machine "
+            '"/AreebaDR/vm/Kubesight-VMs/test-vm-1": error reconfiguring virtual machine: '
+            "ServerFaultCode: Permission to perform this operation was denied..\n"
+            "Additionally, there was an error removing the cloned virtual machine: error destroying "
+            "virtual machine: ServerFaultCode: Permission to perform this operation was denied.."
+        )
+        assert jobs._left_behind(log) == ["/AreebaDR/vm/Kubesight-VMs/test-vm-1"]
+        assert jobs._left_behind("Error: something else") == []
 
 
 class TestGrowAndDestroy:
