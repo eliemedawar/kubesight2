@@ -3,6 +3,8 @@ import BrandMark from "../BrandMark.jsx";
 import { pageHref } from "../../routes/RouterContext.jsx";
 import { buildNavGroups, sidebarKeyFor } from "../../lib/navigation.js";
 import { navIcon } from "./navIcons.jsx";
+import { getApprovalsCount } from "../../api/approvalsApi.js";
+import { setVisibleInterval } from "../../lib/visibleInterval";
 
 // Which groups a user folded away. Per browser, like the theme: a convenience,
 // never state anything else depends on.
@@ -51,6 +53,23 @@ const SearchGlyph = () => (
   </svg>
 );
 
+/** How many approvals wait on this person — the Approvals link's badge. */
+function useApprovalsWaiting(enabled) {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    if (!enabled) return undefined;
+    let alive = true;
+    const load = () =>
+      getApprovalsCount()
+        .then((data) => { if (alive) setCount(Number(data?.waitingOnMe) || 0); })
+        .catch(() => {});
+    load();
+    const stop = setVisibleInterval(load, 60000);
+    return () => { alive = false; stop(); };
+  }, [enabled]);
+  return count;
+}
+
 const isMac =
   typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || "");
 
@@ -70,6 +89,9 @@ export default function Sidebar({
   const groups = useMemo(() => buildNavGroups(pages), [pages]);
   const activeItemKey = sidebarKeyFor(activePage);
   const [collapsed, setCollapsed] = useState(readCollapsed);
+  const approvalsWaiting = useApprovalsWaiting(
+    (pages || []).some((page) => (page?.key || page) === "deploymentRequests")
+  );
 
   const activeGroupId = groups.find((group) =>
     group.items.some((item) => item.key === activeItemKey)
@@ -112,6 +134,9 @@ export default function Sidebar({
     >
       {iconKey ? <span className="nav-link-icon">{navIcon(iconKey)}</span> : null}
       <span className="nav-link-label">{label}</span>
+      {pageKey === "deploymentRequests" && approvalsWaiting ? (
+        <span className="nav-link-badge" title={`${approvalsWaiting} waiting on you`}>{approvalsWaiting}</span>
+      ) : null}
     </a>
   );
 

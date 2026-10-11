@@ -85,7 +85,7 @@ const ClusterBuilderPage = lazy(() => import("./pages/ClusterBuilderPage.jsx"));
 const UserManagementPage = lazy(() => import("./pages/UserManagementPage.jsx"));
 const AuditLogsPage = lazy(() => import("./pages/AuditLogsPage.jsx"));
 const ApiTokensPage = lazy(() => import("./pages/ApiTokensPage.jsx"));
-const DeploymentRequestsPage = lazy(() => import("./pages/DeploymentRequestsPage.jsx"));
+const ApprovalsPage = lazy(() => import("./pages/ApprovalsPage.jsx"));
 const MyRequestsPage = lazy(() => import("./pages/MyRequestsPage.jsx"));
 const ChangeBundlesPage = lazy(() => import("./pages/ChangeBundlesPage.jsx"));
 const IntegrationsHub = lazy(() => import("./pages/settings/IntegrationsHub.jsx"));
@@ -1935,7 +1935,7 @@ export default function App() {
       case "apiTokens":
         return <ApiTokensPage />;
       case "deploymentRequests":
-        return <DeploymentRequestsPage />;
+        return <ApprovalsPage />;
       case "myRequests":
         return <MyRequestsPage />;
       case "promotions":

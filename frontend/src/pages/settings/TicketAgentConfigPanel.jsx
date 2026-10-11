@@ -42,33 +42,23 @@ const BUILD_ENGINES = [
 
 const EMPTY = {
   enabled: false,
-  minConfidence: "High",
   buildEngine: "auto",
   publicComments: true,
   troubleshootingEnabled: true,
-  approvalTimeoutHours: 24,
   telegramEnabled: false,
   telegramBotToken: "",
   telegramChatId: "",
-  telegramApprovers: "",
-  vmRequestsEnabled: false,
-  vmApprovers: "",
 };
 
 function formFrom(settings) {
   return {
     enabled: Boolean(settings?.enabled),
-    minConfidence: settings?.minConfidence || "High",
     buildEngine: settings?.buildEngine || "auto",
     publicComments: settings?.publicComments !== false,
     troubleshootingEnabled: settings?.troubleshootingEnabled !== false,
-    approvalTimeoutHours: settings?.approvalTimeoutHours ?? 24,
     telegramEnabled: Boolean(settings?.telegramEnabled),
     telegramBotToken: "",
     telegramChatId: settings?.telegramChatId || "",
-    telegramApprovers: settings?.telegramApprovers || "",
-    vmRequestsEnabled: Boolean(settings?.vmRequestsEnabled),
-    vmApprovers: settings?.vmApprovers || "",
   };
 }
 
@@ -121,7 +111,7 @@ export default function TicketAgentConfigPanel({ canManage = false, onChanged })
     setError("");
     setNotice("");
     try {
-      const payload = { ...form, approvalTimeoutHours: Number(form.approvalTimeoutHours) };
+      const payload = { ...form };
       if (!payload.telegramBotToken) delete payload.telegramBotToken;
       const data = await updateTicketAgentSettings(payload);
       setSettings(data);
@@ -194,33 +184,13 @@ export default function TicketAgentConfigPanel({ canManage = false, onChanged })
               />
               Hand every inbound ticket to Hermes
             </label>
-            <div className="sg-zh-jrow4">
-              <label title="The execute tool refuses anything under this — Hermes has to ask for approval instead">
-                Runs on its own at
-                <select
-                  value={form.minConfidence}
-                  onChange={(e) => set("minConfidence", e.target.value)}
-                  disabled={ro}
-                >
-                  <option value="High">High confidence only</option>
-                  <option value="Medium">Medium or High</option>
-                </select>
-                <span className="field-hint">
-                  Below this, or when Hermes disagrees with the ticket's dropdowns, it asks on Telegram.
-                </span>
-              </label>
-              <label>
-                Approval expires after (hours)
-                <input
-                  type="number"
-                  min={1}
-                  max={168}
-                  value={form.approvalTimeoutHours}
-                  onChange={(e) => set("approvalTimeoutHours", e.target.value)}
-                  disabled={ro}
-                />
-              </label>
-            </div>
+            <p className="sg-ap-moved">
+              <span>
+                Runs on its own at <b>{settings?.minConfidence === "Medium" ? "Medium or High" : "High"}</b> confidence;
+                an unanswered approval expires after <b>{settings?.approvalTimeoutHours ?? 24} h</b>.
+              </span>
+              <a href="#/approvals/rules">Change in Approvals → Rules</a>
+            </p>
             <label className="checkbox-label">
               <input
                 type="checkbox"
@@ -335,18 +305,13 @@ export default function TicketAgentConfigPanel({ canManage = false, onChanged })
                 <span className="field-hint">The group (or person) approval requests go to.</span>
               </label>
             </div>
-            <label>
-              Who may approve
-              <input
-                value={form.telegramApprovers}
-                onChange={(e) => set("telegramApprovers", e.target.value)}
-                placeholder="@devops_lead, 123456789"
-                disabled={ro}
-              />
-              <span className="field-hint">
-                Telegram @usernames or user ids, comma-separated. Empty means anyone in the chat.
+            <p className="sg-ap-moved">
+              <span>
+                Deploy approvers: <b>{settings?.telegramApprovers || "anyone in the chat"}</b> · VM approvers:{" "}
+                <b>{settings?.vmApprovers || "nobody on Telegram"}</b>
               </span>
-            </label>
+              <a href="#/approvals/rules">Change in Approvals → Rules</a>
+            </p>
           </div>
           {settings?.lastTestMessage ? (
             <p className={settings.lastTestStatus === "ok" ? "muted" : "sg-zh-inline-error"}>
@@ -371,8 +336,8 @@ export default function TicketAgentConfigPanel({ canManage = false, onChanged })
         <section className="card sg-zh-setsec">
           <div className="card-header-row">
             <h3>New VMs from tickets</h3>
-            <span className={`status-pill ${form.vmRequestsEnabled ? "ok" : "muted"}`}>
-              {form.vmRequestsEnabled ? "On" : "Off"}
+            <span className={`status-pill ${settings?.vmRequestsEnabled ? "ok" : "muted"}`}>
+              {settings?.vmRequestsEnabled ? "On" : "Off"}
             </span>
           </div>
           <p className="muted">
@@ -382,31 +347,13 @@ export default function TicketAgentConfigPanel({ canManage = false, onChanged })
             created until a VM approver approves that plan, whatever Hermes&apos; confidence. Approvers
             see the VM names, the addresses the plan reserved, the sizes and vCenter&apos;s warnings.
           </p>
-          <div className="settings-form sg-zh-setform">
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={form.vmRequestsEnabled}
-                onChange={(e) => set("vmRequestsEnabled", e.target.checked)}
-                disabled={ro}
-              />
-              Let Hermes ask for new VMs
-            </label>
-            <label>
-              VM approvers on Telegram
-              <input
-                value={form.vmApprovers}
-                onChange={(e) => set("vmApprovers", e.target.value)}
-                placeholder="@infra_lead, 123456789"
-                disabled={ro}
-              />
-              <span className="field-hint">
-                A separate list from the deploy approvers, using the same bot and chat. Empty means
-                nobody on Telegram: VM requests are then approved only in KubeSight, by people
-                allowed to run cluster builds.
-              </span>
-            </label>
-          </div>
+          <p className="sg-ap-moved">
+            <span>
+              VM requests are <b>{settings?.vmRequestsEnabled ? "on" : "off"}</b>; VM approvers on Telegram:{" "}
+              <b>{settings?.vmApprovers || "nobody (approve in KubeSight)"}</b>.
+            </span>
+            <a href="#/approvals/rules">Change in Approvals → Rules</a>
+          </p>
           <div className="sg-zh-vmprofiles">
             <div className="sg-zh-vmprofiles-head">
               <b>VM request profiles</b>

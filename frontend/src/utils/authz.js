@@ -180,7 +180,7 @@ export const NAV_PAGES = [
   },
   {
     key: "deploymentRequests",
-    label: "Deployment Requests",
+    label: "Approvals",
     permission: "deployment_requests:view",
     section: "Administration",
   },
@@ -1092,7 +1092,15 @@ export function pageAllowed(user, pageKey) {
     case "auditLogs":
       return hasPermission(user, "audit:view");
     case "deploymentRequests":
-      return hasPermission(user, "deployment_requests:view");
+      // The Approvals inbox: anyone who can see something that gets approved.
+      return [
+        "deployment_requests:view",
+        "deployment_requests:manage",
+        "change_bundles:manage",
+        "ticketing:manage",
+        "ci_builds:approve",
+        "cluster_builds:execute",
+      ].some((key) => hasPermission(user, key));
     case "myRequests":
       return hasPermission(user, "deployment_requests:request");
     case "changeBundles":

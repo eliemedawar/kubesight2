@@ -29,6 +29,7 @@ import "./styles/signal/clusterBuilder.css";
 import "./styles/signal/clusterProvisioning.css";
 import "./styles/signal/settings.css";
 import "./styles/signal/mcpTools.css";
+import "./styles/signal/approvals.css";
 import "./styles/signal/login.css";
 import "./styles/signal/coachmarks.css";
 

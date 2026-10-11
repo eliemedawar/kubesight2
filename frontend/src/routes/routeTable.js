@@ -85,8 +85,10 @@ export const TAB_VALUES = {
   inventory: ["templates", "helm"],
   // pages/UserManagementPage.jsx:122
   userManagement: ["users", "roles"],
-  // pages/MyRequestsPage.jsx:9 and pages/DeploymentRequestsPage.jsx:21
+  // pages/MyRequestsPage.jsx:9 (and old #/deployment-requests links)
   requests: ["active", "history"],
+  // pages/ApprovalsPage.jsx — the inbox, everything pending, history, rules
+  approvals: ["waiting", "pending", "history", "rules"],
   // pages/ChangeBundlesPage.jsx:243 — the visible set is RBAC-filtered, the
   // page falls back when a tab is not available to this user
   changeBundles: ["mine", "pending", "all"],
@@ -236,7 +238,16 @@ export const ROUTES = [
   { key: "apiTokens", path: "/api-tokens" },
   {
     key: "deploymentRequests",
+    path: "/approvals/:tab?",
+    params: { tab: { values: TAB_VALUES.approvals } },
+    defaults: { tab: "waiting" },
+  },
+  // Before the unified inbox the page lived here; old links and emails keep
+  // working and the page moves them to their new tab.
+  {
+    key: "deploymentRequestsLegacy",
     path: "/deployment-requests/:tab?",
+    pageKey: "deploymentRequests",
     params: { tab: { values: TAB_VALUES.requests } },
     defaults: { tab: "active" },
   },

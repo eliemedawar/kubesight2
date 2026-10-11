@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import AccessScopeView from "../components/common/AccessScopeView.jsx";
 import RequestDeploymentModal from "../components/clusters/RequestDeploymentModal.jsx";
-import ConfigureRecipientsModal from "../components/clusters/ConfigureRecipientsModal.jsx";
 import { useAuth } from "../context/AuthContext";
 import { createDeploymentRequest } from "../api";
 import { EMPTY_MESSAGES } from "../utils/authz.js";
@@ -128,7 +127,6 @@ export default function ClustersPage({
   const requesterName = user?.fullName || user?.username || "";
 
   const [activeCluster, setActiveCluster] = useState(null);
-  const [configureOpen, setConfigureOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [modalError, setModalError] = useState("");
   const [notice, setNotice] = useState("");
@@ -193,10 +191,11 @@ export default function ClustersPage({
       </div>
       {contentReady && canManageRecipients ? (
         <div className="sg-ph-actions">
-          <button type="button" className="primary" onClick={() => setConfigureOpen(true)}>
+          {/* Who approves and how many each cluster needs: Approvals → Rules. */}
+          <a className="btn-outline" href="#/approvals/rules">
             <MailIcon />
-            Configure recipients
-          </button>
+            Approval rules
+          </a>
         </div>
       ) : null}
     </div>
@@ -282,11 +281,6 @@ export default function ClustersPage({
         error={modalError}
         onClose={closeRequest}
         onSubmit={submitRequest}
-      />
-      <ConfigureRecipientsModal
-        open={configureOpen}
-        onClose={() => setConfigureOpen(false)}
-        clusters={data?.clusters || []}
       />
     </AccessScopeView>
   );

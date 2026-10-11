@@ -11,7 +11,7 @@ import {
 import DiffBlock from "../components/changes/DiffBlock.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import { usePermission } from "../hooks/usePermission.js";
-import { useRouteParam } from "../routes/RouterContext.jsx";
+import { useRouteParam, useRouter } from "../routes/RouterContext.jsx";
 import { useChangeBundle } from "../context/ChangeBundleContext";
 import { setVisibleInterval } from "../lib/visibleInterval";
 
@@ -245,7 +245,8 @@ export default function ChangeBundlesPage() {
   const tabs = useMemo(() => {
     const list = [];
     if (canCreate) list.push({ key: "mine", label: "My Bundles" });
-    if (canManage) list.push({ key: "pending", label: "Pending Approval" });
+    // Bundles waiting for approval live in the Approvals inbox now, with
+    // every other kind of approval (old #/change-bundles/pending links go there).
     if (canManage) list.push({ key: "all", label: "All Bundles" });
     return list.length ? list : [{ key: "mine", label: "My Bundles" }];
   }, [canCreate, canManage]);
@@ -255,11 +256,16 @@ export default function ChangeBundlesPage() {
   // The visible set is RBAC-filtered, so an address can name a tab this user
   // cannot open. Correct it in place rather than leaving it in history.
   const [, replaceTab] = useRouteParam("tab", "mine", { replace: true });
+  const { navigate } = useRouter();
   useEffect(() => {
+    if (activeTab === "pending") {
+      navigate({ key: "deploymentRequests", params: { tab: canManage ? "waiting" : "pending" } }, { replace: true });
+      return;
+    }
     if (tabs.length && !tabs.some((entry) => entry.key === activeTab)) {
       replaceTab(tabs[0].key);
     }
-  }, [tabs, activeTab, replaceTab]);
+  }, [tabs, activeTab, replaceTab, navigate, canManage]);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");

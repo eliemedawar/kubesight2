@@ -469,21 +469,13 @@ const PAGE_TOURS = {
   deploymentRequests: [
     {
       target: ".sg-ph",
-      title: "Deployment Requests",
-      body: "Requests submitted by users who need an approval before deploying.",
+      title: "Approvals",
+      body: "Everything that waits on a person — deploy requests, change bundles, Hermes tickets, CI approval stages and Cluster Builder destroys — in one inbox.",
     },
     {
       target: ".tab-bar",
-      title: "Queue views",
-      body: "Active holds requests awaiting a decision; History keeps past decisions, with search and status filters.",
-    },
-    {
-      target: ".sg-rq-list",
-      title: (ctx) => (ctx.hasPermission("deployment_requests:manage") ? "Approve or deny" : "Request queue"),
-      body: (ctx) =>
-        ctx.hasPermission("deployment_requests:manage")
-          ? "Review each request and approve or deny it — the requester is notified either way."
-          : "Track the queue of requests and their outcomes.",
+      title: "Inbox, history, rules",
+      body: "Waiting on me is what you can decide now. All pending shows what waits on others, History what was decided, and Rules who approves what.",
     },
   ],
 
