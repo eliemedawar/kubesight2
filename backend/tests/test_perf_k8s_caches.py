@@ -25,3 +25,24 @@ def test_cluster_list_filter_does_not_mutate_shared_payload(client, viewer_token
     # The cache entry other readers get is untouched.
     assert shared["count"] == 2
     assert [i["id"] for i in shared["items"]] == ["a", "b"]
+
+
+def test_rollout_reads_do_not_invalidate_caches(app):
+    from api.cluster_access import ClusterAccess
+    from api.services import deployment_service
+
+    access = ClusterAccess("c1", "ctx", None, "c1", False)
+    with patch.object(deployment_service, "resolve_cluster_access", return_value=access), patch(
+        "api.k8s_provider._run_for_access", return_value="ok"
+    ), patch("api.k8s_provider.invalidate_namespace_resources_cache") as inv:
+        deployment_service._run_kubectl_for_cluster(
+            "c1", ["rollout", "history", "deployment/x", "-n", "ns"]
+        )
+        deployment_service._run_kubectl_for_cluster(
+            "c1", ["rollout", "status", "deployment/x", "-n", "ns"]
+        )
+        assert inv.call_count == 0
+        deployment_service._run_kubectl_for_cluster(
+            "c1", ["rollout", "restart", "deployment/x", "-n", "ns"]
+        )
+        assert inv.call_count == 1

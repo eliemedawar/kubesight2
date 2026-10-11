@@ -115,6 +115,15 @@ _MUTATING_KUBECTL_VERBS = {
 }
 
 
+# Subcommands of a mutating verb that only read: `rollout history` / `rollout
+# status` are polled while a rollout runs and must not wipe every cache.
+_READ_ONLY_SUBCOMMANDS = {("rollout", "history"), ("rollout", "status")}
+
+
+def _is_read_only_subcommand(args: List[str]) -> bool:
+    return len(args) > 1 and (args[0], args[1]) in _READ_ONLY_SUBCOMMANDS
+
+
 def _namespace_from_kubectl_args(args: List[str]) -> Optional[str]:
     for index, token in enumerate(args):
         if token in ("-n", "--namespace") and index + 1 < len(args):
@@ -132,7 +141,12 @@ def _run_kubectl_for_cluster(cluster_id: str, args: List[str]) -> str:
         raise K8sCommandError(f"Cluster not found: {cluster_id}")
     output = _run_for_access(access, args)
     verb = args[0] if args else ""
-    if verb in _MUTATING_KUBECTL_VERBS and "--dry-run=server" not in args and "--dry-run=client" not in args:
+    if (
+        verb in _MUTATING_KUBECTL_VERBS
+        and not _is_read_only_subcommand(args)
+        and "--dry-run=server" not in args
+        and "--dry-run=client" not in args
+    ):
         invalidate_namespace_resources_cache(cluster_id, _namespace_from_kubectl_args(args))
         from .inventory_service import invalidate_inventory_discovery_cache
 
