@@ -274,6 +274,78 @@ def _ticket_answer(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
     return {"changed": f"answered ticket record {arguments.get('ticketRecordId')} and {then}", **result}
 
 
+_SIZE_PROPS = {
+    "cpu": {"type": "integer", "description": "vCPUs per VM."},
+    "memoryGb": {"type": "integer", "description": "Memory per VM, in GB."},
+    "diskGb": {"type": "integer", "description": "Disk per VM, in GB."},
+}
+
+
+@tool(
+    "kubesight_ticket_request_vms",
+    permission="ticketing:agent",
+    description=(
+        "Ask for new VMs a ticket requests — plain VMs, or a Kubernetes cluster on new VMs. Copy "
+        "`profile` exactly from vmProfiles (where the VMs go, their OS, and the most a ticket may "
+        "ask for); give `name` (lowercase letters, digits, hyphens — the VMs are <name>-vm-1, "
+        "<name>-vm-2 …; use what the ticket says or the ticket number, e.g. tm-12345), `count`, and "
+        "`size` only when the ticket states one. For a cluster, add `kubernetes` with a `shape` "
+        "(lab = 2 VMs, small = 4, standard-ha = 8) or `counts`; count then follows the shape. "
+        "Nothing is created by this call: KubeSight makes the OpenTofu plan and a VM approver "
+        "approves it first, ALWAYS, whatever your confidence. `comment` is posted now; "
+        "`commentOnApprove` when it is approved. You get ONE follow-up when the VMs are ready "
+        "(names and addresses), or rejected, expired or failed."
+    ),
+    approval="Never creates anything itself: a VM approver approves the OpenTofu plan first.",
+    write=True,
+    schema={
+        "type": "object",
+        "properties": {
+            "ticketRecordId": _RECORD,
+            "profile": {"type": "string", "description": "Copied exactly from vmProfiles."},
+            "name": {"type": "string", "description": "Base name of the VMs (and the cluster)."},
+            "count": {"type": "integer", "description": "How many VMs (at most the profile's maxVms)."},
+            "size": {
+                "type": "object",
+                "description": "Per VM, only what the ticket states; the rest is the profile's default.",
+                "properties": _SIZE_PROPS,
+            },
+            "kubernetes": {
+                "type": "object",
+                "description": "Only when the ticket asks for a Kubernetes cluster and the profile allows it.",
+                "properties": {
+                    "shape": {"type": "string", "enum": ["lab", "small", "standard-ha"]},
+                    "counts": {
+                        "type": "object",
+                        "properties": {
+                            "controlPlanes": {"type": "integer"},
+                            "workers": {"type": "integer"},
+                            "loadBalancers": {"type": "integer"},
+                        },
+                    },
+                    "version": {"type": "string", "description": "e.g. 1.32 — only if the ticket names one."},
+                },
+            },
+            "confidence": {"type": "string", "enum": ["High", "Medium", "Low"]},
+            "understanding": {"type": "string", "description": "One or two sentences, for the approver, on what the ticket asks."},
+            "concerns": {"type": "array", "items": {"type": "string"}, "description": "Anything the approver should know."},
+            "reasons": {"type": "array", "items": {"type": "string"}},
+            "comment": {"type": "string", "description": "Posted now: what you understood, and that it waits for DevOps approval."},
+            "commentOnApprove": {"type": "string", "description": "Posted when it is approved and the VMs are being created."},
+        },
+        "required": ["ticketRecordId", "profile", "name", "confidence", "understanding", "comment",
+                     "commentOnApprove"],
+    },
+)
+def _ticket_request_vms(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
+    from ...services.ticket_agent import vm_requests
+
+    result = _call(vm_requests.request, arguments.get("ticketRecordId"), arguments, user=user)
+    return {"changed": f"asked for {len(result.get('vmNames') or [])} VM(s) on ticket record "
+                       f"{arguments.get('ticketRecordId')} — planned, waiting for a VM approver; "
+                       "nothing created yet", **result}
+
+
 @tool(
     "kubesight_ticket_comment",
     permission="ticketing:agent",

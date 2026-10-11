@@ -14,6 +14,7 @@ import { useState } from "react";
 import { Field, StatusPill } from "./common.jsx";
 import HostKeysPanel from "./HostKeysPanel.jsx";
 import { NetworkRanges, OpenTofuStatus, ProvisioningAccount } from "./ProvisioningSources.jsx";
+import VmRequestProfiles from "./VmRequestProfiles.jsx";
 import {
   bundleCoverage,
   freshness,
@@ -524,6 +525,15 @@ export default function SourcesTab({
           description="VMs KubeSight creates get static addresses from these ranges, never DHCP. A plan reserves its addresses first, so two builds can never be handed the same one, and skips any that already answer on the network."
         >
           <NetworkRanges connections={vsphere} notify={notify} />
+        </Group>
+      ) : null}
+
+      {canManageVSphere ? (
+        <Group
+          title="VMs from tickets"
+          description="Where VMs a ticket asks for go. Hermes picks one of these profiles by name and fills in only how many and how big, within its limits. Nothing is created until a VM approver approves the OpenTofu plan."
+        >
+          <VmRequestProfiles vsphere={vsphere} sshProfiles={profiles} notify={notify} />
         </Group>
       ) : null}
 

@@ -150,6 +150,42 @@ class ClusterTemplate(db.Model):
     )
 
 
+class VmRequestProfile(db.Model):
+    """Where VMs asked for on a ticket go — the one thing Hermes may not decide.
+
+    A ticket says "two VMs, 4 vCPU, 8 GB, in DR"; Hermes picks the profile by
+    name and fills in how many and how big, within the limits here. Everything
+    vCenter-shaped — datacenter, cluster, pool, folder, datastore, network, VM
+    template — and the SSH route the new VMs are reached by come from the
+    profile, which an administrator set up with the same pickers as the wizard.
+
+    ``placement_json`` is a ``provisioning`` spec as ``normalize_spec`` reads
+    it, minus counts, sizes and machines.
+    """
+
+    __tablename__ = "vm_request_profiles"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False, unique=True)
+    # What Hermes reads to choose: "DR site, RHEL 8, for test VMs".
+    description = db.Column(db.Text, nullable=True)
+    enabled = db.Column(db.Boolean, nullable=False, default=True)
+    placement_json = db.Column(db.JSON, nullable=False, default=dict)
+    connection_profile_id = db.Column(db.Integer, nullable=True)
+    # {"cpu", "memoryGb", "diskGb"}: what a VM gets when the ticket names no size.
+    default_size_json = db.Column(db.JSON, nullable=True)
+    # The most one ticket may ask for: VMs, and per VM.
+    max_vms = db.Column(db.Integer, nullable=False, default=3)
+    max_size_json = db.Column(db.JSON, nullable=True)
+    # Whether a ticket may ask for Kubernetes on the VMs (a cluster).
+    allow_kubernetes = db.Column(db.Boolean, nullable=False, default=False)
+    created_by = db.Column(db.String(120), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
 class SshCredential(db.Model):
     """A reusable SSH identity (who we log in as and how we escalate)."""
 

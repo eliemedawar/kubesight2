@@ -13,6 +13,23 @@ const TASK_PILL = {
   done: ["ok", "Done"],
   error: ["danger", "Agent error"],
   superseded: ["muted", "Superseded"],
+  vm_planning: ["info", "Planning VMs"],
+};
+
+// A VM request reads by how far its VMs got, not by the task's status.
+const VM_PILL = {
+  planning: ["info", "Planning VMs"],
+  awaiting_approval: ["warn", "VMs need approval"],
+  creating: ["info", "Creating VMs"],
+  installing: ["info", "Installing Kubernetes"],
+  ready: ["ok", "VMs ready"],
+  cluster_ready: ["ok", "Cluster ready"],
+  needs_attention: ["warn", "Needs DevOps"],
+  failed: ["danger", "VMs failed"],
+  plan_failed: ["danger", "Plan failed"],
+  rejected: ["muted", "Rejected"],
+  expired: ["muted", "Expired"],
+  withdrawn: ["muted", "Withdrawn"],
 };
 
 const EVENT_LABEL = {
@@ -20,7 +37,85 @@ const EVENT_LABEL = {
   runs_finished: "All runs finished",
   approval_rejected: "Approval rejected",
   approval_expired: "Approval expired",
+  vm_request_finished: "VM request finished",
+  vm_request_failed: "VM plan failed",
 };
+
+const vmSize = (m) => `${m.cpu} vCPU · ${m.memoryGb} GB · ${m.diskGb} GB`;
+const ROLE_NAME = { vm: "VM", loadbalancer: "Load balancer", controlPlane: "Control plane", worker: "Worker" };
+
+function VmTable({ vms, label }) {
+  if (!vms?.length) return null;
+  return (
+    <div className="table-wrap">
+      <table className="sg-zh-vmtable" aria-label={label}>
+        <thead>
+          <tr><th>VM</th><th>Address</th><th>Size</th><th>Role</th></tr>
+        </thead>
+        <tbody>
+          {vms.map((m) => (
+            <tr key={m.name}>
+              <td className="mono">{m.name}</td>
+              <td className="mono">{m.address || "—"}</td>
+              <td>{vmSize(m)}</td>
+              <td>{ROLE_NAME[m.role] || m.role || "VM"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** What a VM request asks for, how far it got, and the VMs themselves. */
+function VmRequestBody({ vm }) {
+  const k8s = vm.kubernetes;
+  const counts = k8s?.counts || {};
+  const showBuild = vm.buildId && !vm.draftDeleted;
+  return (
+    <div className="sg-zh-vmreq">
+      <p className="sg-zh-agent-line">
+        <span className="muted">Profile:</span> {vm.profile}
+        {vm.where ? <span className="muted"> — {vm.where}</span> : null}
+      </p>
+      <p className="sg-zh-agent-line">
+        <span className="muted">Asks for:</span> {vm.count} VM{vm.count === 1 ? "" : "s"}
+        {vm.size ? ` of ${vmSize(vm.size)}` : ""}
+        {vm.os ? ` from ${vm.os}` : ""}
+        {k8s
+          ? `, then Kubernetes ${k8s.version} (${counts.controlPlane || 0} control plane, ${counts.worker || 0} worker${counts.loadbalancer ? `, ${counts.loadbalancer} load balancer` : ""})`
+          : ""}
+      </p>
+      <VmTable vms={vm.machines} label="The VMs" />
+      {vm.plan && vm.phase === "awaiting_approval" ? (
+        <p className="sg-zh-fhint">
+          OpenTofu plan #{vm.jobId}: {vm.plan.add || 0} to add, {vm.plan.change || 0} to change,{" "}
+          {vm.plan.destroy || 0} to destroy. Approving applies exactly this plan.
+        </p>
+      ) : null}
+      {vm.warnings?.length ? (
+        <ul className="sg-zh-agent-reasons" aria-label="vCenter warnings">
+          {vm.warnings.map((w) => <li key={w}>{w}</li>)}
+        </ul>
+      ) : null}
+      {vm.clusterId ? (
+        <p className="sg-zh-agent-line">
+          <span className="muted">Cluster:</span> <span className="mono">{vm.clusterId}</span>
+        </p>
+      ) : null}
+      {vm.note ? <p className="sg-zh-fhint">{vm.note}</p> : null}
+      {vm.error ? <p className="sg-zh-inline-error">{vm.error}</p> : null}
+      {showBuild ? (
+        <p className="sg-zh-fhint">
+          <a href={`#/cluster-builder/builds/${vm.buildId}`}>Open the build in Cluster Builder</a>
+          {vm.draftKept ? ` — kept: ${vm.draftKept}` : ""}
+        </p>
+      ) : vm.draftDeleted ? (
+        <p className="sg-zh-fhint">Nothing was created; the draft and its addresses were released.</p>
+      ) : null}
+    </div>
+  );
+}
 
 // A troubleshooting answer reads as an answer, not as a change that was done.
 const ANSWERED_PILL = {
@@ -32,6 +127,7 @@ export function AgentTaskPill({ task }) {
   if (!task) return <span className="muted">—</span>;
   const [tone, label] =
     (task.route === "answered" && ANSWERED_PILL[task.status]) ||
+    (task.vmRequest && task.status !== "error" && task.status !== "superseded" && VM_PILL[task.vmRequest.phase]) ||
     TASK_PILL[task.status] || ["muted", task.status];
   return (
     <span className={`status-pill ${tone}`} title={task.understanding || task.error || ""}>
@@ -62,6 +158,8 @@ export default function AgentTaskCard({ task, canManage, deciding, onApprove, on
   const finishedRuns = task.event?.type === "runs_finished" ? task.event.runs || [] : [];
   const replied = task.event?.type === "requester_replied";
   const trouble = task.troubleshooting || null;
+  const vm = task.vmRequest || null;
+  const finishedVms = task.event?.type === "vm_request_finished" ? task.event.vms || [] : [];
   const title =
     task.kind === "followup"
       ? `Follow-up · ${EVENT_LABEL[task.event?.type] || "event"}`
@@ -69,6 +167,8 @@ export default function AgentTaskCard({ task, canManage, deciding, onApprove, on
       ? "Requester replied — Hermes continued"
       : trouble
       ? "Hermes investigated the problem"
+      : vm
+      ? "Hermes asked for new VMs"
       : "Hermes read the ticket";
   return (
     <div className="sg-zh-run sg-zh-agent">
@@ -133,6 +233,16 @@ export default function AgentTaskCard({ task, canManage, deciding, onApprove, on
           ))}
         </ul>
       ) : null}
+      {vm ? <VmRequestBody vm={vm} /> : null}
+      {finishedVms.length ? (
+        <>
+          <p className="sg-zh-agent-line">
+            <span className="muted">Result:</span> {task.event.result?.replace(/_/g, " ")}
+            {task.event.clusterId ? <> · cluster <span className="mono">{task.event.clusterId}</span></> : null}
+          </p>
+          <VmTable vms={finishedVms} label="The VMs, as they ended" />
+        </>
+      ) : null}
       {finishedRuns.length ? (
         <ul className="sg-zh-agent-changes" aria-label="How each run ended">
           {finishedRuns.map((r) => (
@@ -178,7 +288,7 @@ export default function AgentTaskCard({ task, canManage, deciding, onApprove, on
       {task.status === "awaiting_approval" && canManage ? (
         <div className="sg-zh-agent-actions">
           <button type="button" className="primary" disabled={deciding} onClick={() => onApprove(task)}>
-            Approve and run
+            {vm ? "Approve and create VMs" : "Approve and run"}
           </button>
           <button type="button" className="secondary" disabled={deciding} onClick={() => onReject(task)}>
             Reject

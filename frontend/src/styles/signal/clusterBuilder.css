@@ -1178,3 +1178,13 @@ button.sg-cb-step:hover { border-color: var(--accent); color: var(--accent-stron
   .sg-cb-wl-claim { grid-template-columns: minmax(0, 1fr) 170px; }
   .sg-cb-wl-claim-target, .sg-cb-wl-ro { display: none; }
 }
+
+/* VM request profiles (Sources → VMs from tickets). */
+.sg-cb-vmprofiles { display: grid; gap: 10px; }
+.sg-cb-entry.is-off { opacity: 0.65; }
+.sg-cb-vmprofiles .sg-cb-entry-id .en { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.sg-cb-vmprofile-edit {
+  display: grid; gap: 10px; padding: 14px;
+  border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-panel);
+}
+.sg-cb-vmprofile-h { margin: 6px 0 0; font-size: 12px; font-weight: 700; color: var(--text-strong); }

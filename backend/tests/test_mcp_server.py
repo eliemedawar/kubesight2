@@ -262,6 +262,9 @@ def test_every_tool_declares_honestly_whether_it_writes(client, admin_token):
         "kubesight_ticket_set_status",
         "kubesight_ticket_comment",
         "kubesight_ticket_answer",
+        # New VMs a ticket asks for: only ever a PLAN — a VM approver applies
+        # it. Nothing an agent calls creates, grows or destroys a VM itself.
+        "kubesight_ticket_request_vms",
     }
 
 

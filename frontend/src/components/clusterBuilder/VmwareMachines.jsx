@@ -49,7 +49,7 @@ export function useVmwarePlacement(connectionId, notify) {
 const VERDICT_TEXT = { ok: "Compatible", warn: "Usable, with warnings", bad: "Cannot be used" };
 const CHECK_GLYPH = { ok: "✓", warn: "!", bad: "✕", info: "i" };
 
-function TemplatePicker({ templates, value, onChange }) {
+export function TemplatePicker({ templates, value, onChange }) {
   const selected = templates.find((t) => t.id === value);
   return (
     <>
@@ -179,50 +179,14 @@ function SizesTable({ counts, sizes, setSizes, template, minimums }) {
   );
 }
 
-export default function VmwareMachines({
-  connections, placementState, ranges, vm, setVm, counts, sizes, setSizes,
-  minimums, resolved, preview, previewError,
-}) {
-  const { data, loading, error, refresh } = placementState;
-  const datacenters = data?.datacenters || [];
-  const { dc, cluster, datastore, network, template, range } = resolved;
-  const keepTemplate = vm.sizeMode === "template";
+/** vCenter → datacenter → cluster → pool → folder → datastore → network, read
+ *  with the provisioning account. Shared by the wizard and VM request profiles. */
+export function PlacementFields({ connections, placementState, ranges, vm, setVm, resolved, fit = null }) {
+  const datacenters = placementState.data?.datacenters || [];
+  const { dc, cluster, datastore, network, range } = resolved;
   const existingFolder = vm.folderMode === "existing";
-  const connection = connections.find((row) => String(row.id) === String(vm.connectionId));
-  const sum = totals(counts, effectiveSizes(counts, sizes, vm.sizeMode, template));
-  const fit = datastoreFit(datastore, sum.diskGb);
   const set = (key, value) => setVm({ ...vm, [key]: value });
-
-  if (!connections.length) {
-    return (
-      <div className="card sg-cb-card">
-        <p className="muted">
-          No vCenter here has a provisioning account yet, so KubeSight cannot create VMs. An administrator
-          adds one under Sources → vCenter. Until then, use machines you already have.
-        </p>
-      </div>
-    );
-  }
-
   return (
-    <>
-      <div className="card sg-cb-card">
-        <div className="sg-cb-sect">
-          <h2>Where in vCenter</h2>
-          <span className="sg-cb-sect-right">
-            {loading ? "Reading vCenter…" : data?.fetchedAt
-              ? <>read {timeAgo(new Date(data.fetchedAt * 1000).toISOString())}{data.demo ? " · demo inventory" : ""}</>
-              : null}
-            <button className="btn-ghost btn-sm" type="button" onClick={refresh} disabled={loading}>Refresh</button>
-          </span>
-        </div>
-        <p className="muted sg-cb-pv-lede">
-          Read with the provisioning account.{" "}
-          {existingFolder
-            ? "The VMs go straight into the folder you choose; KubeSight never creates or deletes that folder."
-            : "OpenTofu creates a folder for this build inside the one you choose, and removes it with the VMs."}
-        </p>
-        {error ? <p className="sg-cb-field-error">{error}</p> : null}
         <div className="sg-cb-qgrid">
           <Field label="vCenter" htmlFor="vm-vc">
             <select id="vm-vc" className="sg-cb-input" value={vm.connectionId}
@@ -281,7 +245,7 @@ export default function VmwareMachines({
                 </option>
               ))}
             </select>
-            {datastore ? (
+            {datastore && fit ? (
               <div className="sg-cb-cap">
                 <div className="sg-cb-cap-bar">
                   <span className="used" style={{ width: `${fit.usedPct}%` }} />
@@ -310,6 +274,56 @@ export default function VmwareMachines({
             </select>
           </Field>
         </div>
+  );
+}
+
+export default function VmwareMachines({
+  connections, placementState, ranges, vm, setVm, counts, sizes, setSizes,
+  minimums, resolved, preview, previewError,
+}) {
+  const { data, loading, error, refresh } = placementState;
+  const { dc, datastore, template, range } = resolved;
+  const keepTemplate = vm.sizeMode === "template";
+  const existingFolder = vm.folderMode === "existing";
+  const connection = connections.find((row) => String(row.id) === String(vm.connectionId));
+  const sum = totals(counts, effectiveSizes(counts, sizes, vm.sizeMode, template));
+  const fit = datastoreFit(datastore, sum.diskGb);
+  const set = (key, value) => setVm({ ...vm, [key]: value });
+
+  if (!connections.length) {
+    return (
+      <div className="card sg-cb-card">
+        <p className="muted">
+          No vCenter here has a provisioning account yet, so KubeSight cannot create VMs. An administrator
+          adds one under Sources → vCenter. Until then, use machines you already have.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="card sg-cb-card">
+        <div className="sg-cb-sect">
+          <h2>Where in vCenter</h2>
+          <span className="sg-cb-sect-right">
+            {loading ? "Reading vCenter…" : data?.fetchedAt
+              ? <>read {timeAgo(new Date(data.fetchedAt * 1000).toISOString())}{data.demo ? " · demo inventory" : ""}</>
+              : null}
+            <button className="btn-ghost btn-sm" type="button" onClick={refresh} disabled={loading}>Refresh</button>
+          </span>
+        </div>
+        <p className="muted sg-cb-pv-lede">
+          Read with the provisioning account.{" "}
+          {existingFolder
+            ? "The VMs go straight into the folder you choose; KubeSight never creates or deletes that folder."
+            : "OpenTofu creates a folder for this build inside the one you choose, and removes it with the VMs."}
+        </p>
+        {error ? <p className="sg-cb-field-error">{error}</p> : null}
+        <PlacementFields
+          connections={connections} placementState={placementState} ranges={ranges}
+          vm={vm} setVm={setVm} resolved={resolved} fit={fit}
+        />
         {(counts.controlPlane > 1 || counts.loadbalancer > 1) ? (
           <label className="sg-cb-inlinecheck">
             <input type="checkbox" checked={vm.antiAffinity !== false}

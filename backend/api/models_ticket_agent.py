@@ -48,6 +48,14 @@ class TicketAgentSettings(db.Model):
     # recommendation (kubesight_ticket_answer). A fix it proposes still goes
     # through approval — troubleshooting never changes anything on its own.
     troubleshooting_enabled = db.Column(db.Boolean, nullable=False, default=True)
+    # Tickets asking for new VMs (and optionally Kubernetes on them): Hermes
+    # picks a VM request profile, KubeSight makes the OpenTofu plan, and a VM
+    # approver approves that plan before anything is created. Off by default.
+    vm_requests_enabled = db.Column(db.Boolean, nullable=False, default=False)
+    # Who may approve a VM request on Telegram — its own list, separate from
+    # the deploy approvers (comma-separated user ids and/or @usernames). Empty
+    # = nobody on Telegram; VM requests are then approved only in KubeSight.
+    vm_approvers = db.Column(db.Text, nullable=True)
 
     # --- Telegram approvals ---
     telegram_enabled = db.Column(db.Boolean, nullable=False, default=False)

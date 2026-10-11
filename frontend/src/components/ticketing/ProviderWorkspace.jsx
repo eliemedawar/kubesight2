@@ -178,7 +178,11 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
   };
 
   const approveTask = async (task) => {
-    if (!window.confirm(`Approve and run what Hermes proposed for ${task.ticketNumber || "this ticket"}?`)) {
+    const vm = task.vmRequest;
+    const question = vm
+      ? `Approve OpenTofu plan #${vm.jobId} for ${task.ticketNumber || "this ticket"}? It creates ${(vm.machines || []).length || vm.count} VM(s) in vCenter.`
+      : `Approve and run what Hermes proposed for ${task.ticketNumber || "this ticket"}?`;
+    if (!window.confirm(question)) {
       return;
     }
     setError("");
@@ -186,7 +190,7 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
     setDecidingTaskId(task.id);
     try {
       const done = await approveAgentTask(task.id);
-      setNotice(`Approved — run #${done.runId} started.`);
+      setNotice(vm ? "Approved — OpenTofu is creating the VMs." : `Approved — run #${done.runId} started.`);
       await Promise.all([refreshTickets(), refreshRuns()]);
     } catch (err) {
       setError(err.message || "Failed to approve.");

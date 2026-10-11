@@ -6,6 +6,7 @@ import {
   testTicketAgentTelegram,
   updateTicketAgentSettings,
 } from "../../api/ticketAgentApi.js";
+import { listVmRequestProfiles } from "../../api/clusterBuildsApi.js";
 
 /**
  * Hermes ticket agent — the Configuration tab of its integrations card.
@@ -50,6 +51,8 @@ const EMPTY = {
   telegramBotToken: "",
   telegramChatId: "",
   telegramApprovers: "",
+  vmRequestsEnabled: false,
+  vmApprovers: "",
 };
 
 function formFrom(settings) {
@@ -64,8 +67,12 @@ function formFrom(settings) {
     telegramBotToken: "",
     telegramChatId: settings?.telegramChatId || "",
     telegramApprovers: settings?.telegramApprovers || "",
+    vmRequestsEnabled: Boolean(settings?.vmRequestsEnabled),
+    vmApprovers: settings?.vmApprovers || "",
   };
 }
+
+const sizeText = (s) => (s ? `${s.cpu} vCPU · ${s.memoryGb} GB · ${s.diskGb} GB` : "—");
 
 export default function TicketAgentConfigPanel({ canManage = false, onChanged }) {
   const [settings, setSettings] = useState(null);
@@ -75,6 +82,8 @@ export default function TicketAgentConfigPanel({ canManage = false, onChanged })
   const [testing, setTesting] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  // null = not readable by this user (needs cluster_builds:view).
+  const [vmProfiles, setVmProfiles] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -87,6 +96,11 @@ export default function TicketAgentConfigPanel({ canManage = false, onChanged })
       setError(err.message || "Failed to load the ticket agent settings.");
     } finally {
       setLoading(false);
+    }
+    try {
+      setVmProfiles((await listVmRequestProfiles()).items || []);
+    } catch {
+      setVmProfiles(null);
     }
   }, []);
 
@@ -352,6 +366,79 @@ export default function TicketAgentConfigPanel({ canManage = false, onChanged })
               </button>
             </div>
           ) : null}
+        </section>
+
+        <section className="card sg-zh-setsec">
+          <div className="card-header-row">
+            <h3>New VMs from tickets</h3>
+            <span className={`status-pill ${form.vmRequestsEnabled ? "ok" : "muted"}`}>
+              {form.vmRequestsEnabled ? "On" : "Off"}
+            </span>
+          </div>
+          <p className="muted">
+            A ticket can ask for new VMs, or for a Kubernetes cluster on new VMs. Hermes chooses one of
+            the VM request profiles below. A profile sets where the VMs go, the OS they are cloned from,
+            and the most one ticket may ask for. KubeSight then makes the OpenTofu plan. Nothing is
+            created until a VM approver approves that plan, whatever Hermes&apos; confidence. Approvers
+            see the VM names, the addresses the plan reserved, the sizes and vCenter&apos;s warnings.
+          </p>
+          <div className="settings-form sg-zh-setform">
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={form.vmRequestsEnabled}
+                onChange={(e) => set("vmRequestsEnabled", e.target.checked)}
+                disabled={ro}
+              />
+              Let Hermes ask for new VMs
+            </label>
+            <label>
+              VM approvers on Telegram
+              <input
+                value={form.vmApprovers}
+                onChange={(e) => set("vmApprovers", e.target.value)}
+                placeholder="@infra_lead, 123456789"
+                disabled={ro}
+              />
+              <span className="field-hint">
+                A separate list from the deploy approvers, using the same bot and chat. Empty means
+                nobody on Telegram: VM requests are then approved only in KubeSight, by people
+                allowed to run cluster builds.
+              </span>
+            </label>
+          </div>
+          <div className="sg-zh-vmprofiles">
+            <div className="sg-zh-vmprofiles-head">
+              <b>VM request profiles</b>
+              <a className="btn-outline btn-sm" href="#/cluster-builder/sources">
+                Manage in Cluster Builder → Sources
+              </a>
+            </div>
+            {vmProfiles === null ? (
+              <p className="field-hint">You cannot see Cluster Builder, so the profiles are not listed here.</p>
+            ) : vmProfiles.length ? (
+              <ul className="sg-zh-vmprofile-list">
+                {vmProfiles.map((p) => (
+                  <li key={p.id} className={p.enabled ? "" : "is-off"}>
+                    <span className="sg-zh-vmprofile-name">
+                      {p.name}
+                      {!p.enabled ? <span className="status-pill muted">off</span> : null}
+                      {p.allowKubernetes ? <span className="sg-tag">Kubernetes allowed</span> : null}
+                    </span>
+                    <span className="field-hint">{p.where}</span>
+                    <span className="field-hint">
+                      {p.os || p.templateName} · up to {p.maxVms} VM{p.maxVms === 1 ? "" : "s"} ·{" "}
+                      {p.sizeMode === "template" ? `fixed ${sizeText(p.defaultSize)}` : `max ${sizeText(p.maxSize)}`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="field-hint">
+                No profiles yet. Until there is one, Hermes parks VM tickets as Impediment.
+              </p>
+            )}
+          </div>
         </section>
 
         {dirty && canManage ? (

@@ -1772,3 +1772,31 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* VMs a ticket asked for: the request in the task card, and the profiles in
+   the Hermes configuration card. */
+.sg-zh-vmreq { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.35rem; margin: 0 0 0.5rem; }
+/* The tickets table cell is nowrap; the request reads as prose. */
+.sg-zh-vmreq, .sg-zh-vmtable { white-space: normal; }
+.sg-zh-vmreq li { overflow-wrap: anywhere; }
+.sg-zh-vmtable { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
+.sg-zh-vmtable th {
+  text-align: left; font-size: 0.7rem; font-weight: 600; color: var(--text-muted);
+  padding: 0.25rem 0.5rem; border-bottom: 1px solid var(--border);
+}
+.sg-zh-vmtable td {
+  padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+.sg-zh-vmtable tr:last-child td { border-bottom: 0; }
+.sg-zh-vmprofiles { margin-top: 0.75rem; display: grid; gap: 0.5rem; }
+.sg-zh-vmprofiles-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap;
+}
+.sg-zh-vmprofile-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 0.4rem; }
+.sg-zh-vmprofile-list li {
+  display: grid; gap: 0.1rem; padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+}
+.sg-zh-vmprofile-list li.is-off { opacity: 0.65; }
+.sg-zh-vmprofile-name { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; font-weight: 600; }

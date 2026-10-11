@@ -9,11 +9,14 @@ agent that proposed an action can't also approve it.
 
 from flask import Blueprint, request
 
+from ..access_engine import user_has_permission
 from ..audit import log_audit
 from ..auth_utils import get_current_user
+from ..db import db
 from ..decorators import require_permission
+from ..models import TicketInterpretation
 from ..response import error_response, success_response
-from ..services.ticket_agent import engine, settings as agent_settings
+from ..services.ticket_agent import engine, settings as agent_settings, vm_requests
 from ..services.ticket_agent.engine import AgentError
 
 ticket_agent_bp = Blueprint("ticket_agent", __name__, url_prefix="/api/ticket-agent")
@@ -43,7 +46,8 @@ def update_settings():
         target_type="ticket_agent_settings",
         target_id="1",
         details={k: data.get(k) for k in ("enabled", "minConfidence", "publicComments",
-                                           "approvalTimeoutHours", "telegramEnabled")},
+                                           "approvalTimeoutHours", "telegramEnabled",
+                                           "vmRequestsEnabled", "vmApprovers")},
     )
     return success_response(data)
 
@@ -58,6 +62,15 @@ def test_telegram():
 @require_permission("ticketing:manage")
 def approve(task_id: int):
     user = get_current_user()
+    task = db.session.get(TicketInterpretation, task_id)
+    if task is not None and task.route == vm_requests.ROUTE and not user_has_permission(
+        user, "cluster_builds:execute"
+    ):
+        # Approving applies an OpenTofu plan: the permission that applies plans
+        # in Cluster Builder, not just the one that runs tickets.
+        return error_response(
+            "Approving new VMs needs permission to run cluster builds (cluster_builds:execute).", 403
+        )
     try:
         return success_response(engine.approve(task_id, _who(user), user=user))
     except AgentError as exc:

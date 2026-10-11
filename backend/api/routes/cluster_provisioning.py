@@ -116,6 +116,71 @@ def delete_cluster_template(template_id: int):
 
 
 # ---------------------------------------------------------------------------
+# VM request profiles — where VMs asked for on a ticket go
+# ---------------------------------------------------------------------------
+
+def _vm_profiles():
+    from ..services.ticket_agent import vm_requests
+
+    return vm_requests
+
+
+@cluster_provisioning_bp.route("/api/vm-request-profiles", methods=["GET"])
+@require_permission("cluster_builds:view")
+def list_vm_request_profiles():
+    from ..services.ticket_agent import settings as agent_settings
+
+    return success_response({
+        "items": _vm_profiles().list_profiles(),
+        "vmRequestsEnabled": agent_settings.vm_requests_enabled(),
+    })
+
+
+@cluster_provisioning_bp.route("/api/vm-request-profiles", methods=["POST"])
+@require_permission("vsphere:manage")
+def create_vm_request_profile():
+    user, actor = _actor()
+    try:
+        data = _vm_profiles().create_profile(request.get_json(silent=True) or {}, created_by=actor)
+    except ValueError as exc:
+        db.session.rollback()
+        return error_response(str(exc), 400)
+    log_audit("vm_request_profile_created", actor=user, target_type="vm_request_profile",
+              target_id=str(data["id"]), details={"name": data["name"], "where": data["where"],
+                                                  "maxVms": data["maxVms"]})
+    return success_response(data, 201)
+
+
+@cluster_provisioning_bp.route("/api/vm-request-profiles/<int:profile_id>", methods=["PUT"])
+@require_permission("vsphere:manage")
+def update_vm_request_profile(profile_id: int):
+    user, _ = _actor()
+    try:
+        data = _vm_profiles().update_profile(profile_id, request.get_json(silent=True) or {})
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    log_audit("vm_request_profile_updated", actor=user, target_type="vm_request_profile",
+              target_id=str(profile_id), details={"name": data["name"], "enabled": data["enabled"],
+                                                  "maxVms": data["maxVms"], "maxSize": data["maxSize"]})
+    return success_response(data)
+
+
+@cluster_provisioning_bp.route("/api/vm-request-profiles/<int:profile_id>", methods=["DELETE"])
+@require_permission("vsphere:manage")
+def delete_vm_request_profile(profile_id: int):
+    user, _ = _actor()
+    try:
+        summary = _vm_profiles().delete_profile(profile_id)
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    log_audit("vm_request_profile_deleted", actor=user, target_type="vm_request_profile",
+              target_id=str(profile_id), details=summary)
+    return success_response({"deleted": True})
+
+
+# ---------------------------------------------------------------------------
 # A build's VMs
 # ---------------------------------------------------------------------------
 

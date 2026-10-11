@@ -192,6 +192,20 @@ export const updateClusterTemplate = (dbId, payload) =>
 export const deleteClusterTemplate = (dbId) =>
   request(`/api/cluster-templates/${dbId}`, { method: "DELETE" });
 
+// --- VM request profiles (where VMs asked for on a ticket go) ---------------
+
+/** {items, vmRequestsEnabled} */
+export const listVmRequestProfiles = () => request("/api/vm-request-profiles");
+
+export const createVmRequestProfile = (payload) =>
+  request("/api/vm-request-profiles", { method: "POST", body: payload });
+
+export const updateVmRequestProfile = (id, payload) =>
+  request(`/api/vm-request-profiles/${id}`, { method: "PUT", body: payload });
+
+export const deleteVmRequestProfile = (id) =>
+  request(`/api/vm-request-profiles/${id}`, { method: "DELETE" });
+
 // --- OpenTofu provisioning --------------------------------------------------
 
 /** Ask OpenTofu for a plan for this build's VMs. Returns the build (202); poll it. */

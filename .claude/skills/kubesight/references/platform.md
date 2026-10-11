@@ -79,6 +79,10 @@ kubesight_ticket_answer            {ticketRecordId, comment, diagnosis,
                                     findings: [{finding, evidence}], checked,
                                     recommendation, confidence, status: on_hold|done,
                                     proposedFix?: {…same as request_approval…}}
+kubesight_ticket_request_vms       {ticketRecordId, profile, name, count, size?: {cpu,
+                                    memoryGb, diskGb}, kubernetes?: {shape | counts,
+                                    version?}, confidence, understanding, comment,
+                                    commentOnApprove}
 ```
 
 **One ticket can name several applications** — "deploy issuing-ms 1.4.2 and
@@ -108,6 +112,24 @@ or act (their reply comes back to you), `done` when nothing is left. A fix that
 is one of KubeSight's three actions goes in `proposedFix` — it is sent for
 approval, never run. Change nothing while troubleshooting. When the task says
 `"troubleshooting": false`, set such tickets to `impediment` instead.
+
+**A ticket asking for new VMs goes to `kubesight_ticket_request_vms`.** "Two
+RHEL VMs, 4 vCPU / 8 GB, in DR", or "a small Kubernetes cluster for team X".
+Pick the `profile` from `vmProfiles` in the task (or `kubesight_ticket_get`) —
+copied exactly; each says where the VMs go, their OS, the default and largest
+size, how many one ticket may ask for, and whether Kubernetes is allowed. Give a
+`name` (lowercase, hyphens; the ticket's own name or its number, e.g.
+`tm-12345`), `count`, and `size` only for what the ticket states. For a cluster
+add `kubernetes: {shape: lab|small|standard-ha}` (2, 4 or 8 VMs) or `counts`.
+Nothing is created by the call: KubeSight makes the OpenTofu plan and a VM
+approver ALWAYS approves it first — no confidence skips that. If no profile
+fits, the ask is over a profile's limits, or `vmProfiles` is empty, set the
+ticket to `impediment` and say why (the limit, or that DevOps will do it). You
+get ONE `vm_request_finished` follow-up with every VM's name and address (and
+the cluster id): `done` when `result` is `ready` or `cluster_ready`, `on_hold`
+for `needs_attention` (VMs exist, Kubernetes waits for DevOps), `failed` for
+`failed`. A `vm_request_failed` follow-up (the plan could not be made) is an
+`impediment`. Never reach for a Cluster Builder or OpenTofu tool to do this.
 
 **Call exactly one of the settling tools per new ticket.**
 `kubesight_ticket_execute` when you understand it exactly and are confident: it

@@ -114,6 +114,11 @@ def _migrate_ticket_agent_columns() -> None:
         _add_column_if_missing(
             "ticket_agent_settings", "troubleshooting_enabled", "BOOLEAN DEFAULT true"
         )
+        # VM requests from tickets: off until an administrator turns them on.
+        _add_column_if_missing(
+            "ticket_agent_settings", "vm_requests_enabled", "BOOLEAN DEFAULT false"
+        )
+        _add_column_if_missing("ticket_agent_settings", "vm_approvers", "TEXT")
 
 
 def _purge_orphan_provisioning_rows() -> None:

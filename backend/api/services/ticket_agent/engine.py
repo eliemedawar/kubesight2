@@ -42,12 +42,17 @@ from ...models import (
     TicketInterpretation,
     ZohoInboundTicket,
 )
-from . import catalog, hermes, schema, settings as agent_settings, telegram, validator
+from . import catalog, hermes, schema, settings as agent_settings, telegram, validator, vm_requests
 
 logger = logging.getLogger(__name__)
 
 PENDING, RUNNING = "pending", "running"
-OPEN_STATUSES = (PENDING, RUNNING, "awaiting_approval")
+# vm_planning: Hermes asked for VMs and KubeSight is making the OpenTofu plan
+# the approvers will see (see vm_requests).
+VM_PLANNING = "vm_planning"
+OPEN_STATUSES = (PENDING, RUNNING, "awaiting_approval", VM_PLANNING)
+# Waiting on something other than Hermes: superseded when the ticket moves on.
+WAITING_STATUSES = ("awaiting_approval", VM_PLANNING)
 # A run started by Hermes carries this in ``triggered_by`` (possibly with the
 # approver appended) — how deploy automation knows to wake Hermes on the outcome.
 TRIGGER = "hermes"
@@ -183,8 +188,9 @@ def reinterpret(record_id: int, user=None) -> TicketInterpretation:
     ).first()
     if run:
         raise AgentError(f"Run #{run.id} is still going for this ticket — cancel it first.", 409)
-    for waiting in TicketInterpretation.query.filter_by(
-        ticket_record_id=ticket.id, status="awaiting_approval"
+    for waiting in TicketInterpretation.query.filter(
+        TicketInterpretation.ticket_record_id == ticket.id,
+        TicketInterpretation.status.in_(WAITING_STATUSES),
     ).all():
         _close_approval(waiting, "superseded", "Superseded — Hermes was asked to read the ticket again.")
     who = getattr(user, "username", None)
@@ -342,6 +348,7 @@ def _task_message(task: TicketInterpretation, ticket: ZohoInboundTicket) -> Dict
             "conversation": _conversation(ticket, before=task.id),
             "newComments": event.get("comments") or [],
             "catalog": catalog.catalog_entries(targets),
+            "vmProfiles": vm_requests.catalog(),
         }
     return {
         **base,
@@ -349,6 +356,9 @@ def _task_message(task: TicketInterpretation, ticket: ZohoInboundTicket) -> Dict
         "instruction": (
             "A new DevOps ticket arrived. Handle it with the kubesight_ticket_* tools. A request "
             "for a change: execute it, request approval, or set it to impediment with a comment. "
+            "A request for new VMs (or a new Kubernetes cluster on new VMs): "
+            "kubesight_ticket_request_vms with a profile from vmProfiles — if vmProfiles is empty, "
+            "set it to impediment. "
             "A question or a problem report (something is wrong, failing, slow, not working): "
             "investigate with your read-only KubeSight tools and answer it with "
             "kubesight_ticket_answer — unless troubleshooting is false below."
@@ -356,6 +366,7 @@ def _task_message(task: TicketInterpretation, ticket: ZohoInboundTicket) -> Dict
         "troubleshooting": agent_settings.troubleshooting_enabled(),
         "ticket": catalog.ticket_context(ticket),
         "catalog": catalog.catalog_entries(targets),
+        "vmProfiles": vm_requests.catalog(),
     }
 
 
@@ -373,7 +384,7 @@ def process(task_id: int) -> None:
     except Exception as exc:  # noqa: BLE001
         _fail(task, f"Could not prepare the task for Hermes: {exc}")
         return
-    if task.kind == "handle" and not message.get("catalog"):
+    if task.kind == "handle" and not message.get("catalog") and not message.get("vmProfiles"):
         _fail(task, "No deploy targets are published for this provider — pick a source cluster and "
                     "namespaces in its Field sync first.")
         return
@@ -513,6 +524,9 @@ def brief(record_id: Any) -> Dict[str, Any]:
         "provider": ticket.provider or "zoho",
         "ticket": catalog.ticket_context(ticket),
         "catalog": catalog.catalog_entries(targets),
+        # Where new VMs may go (kubesight_ticket_request_vms); empty when VM
+        # requests are switched off.
+        "vmProfiles": vm_requests.catalog(),
         "confidenceBar": agent_settings.get_or_create().min_confidence or "High",
         "runs": [
             {"id": r.id, "status": r.status, "changeType": r.change_type, "deployment": r.deployment_name,
@@ -797,13 +811,23 @@ def set_status(record_id: Any, status: str, comment_text: Any, user=None) -> Dic
             "finishes. Do not close the ticket before that.",
             409,
         )
+    vm_open = vm_requests.open_request(ticket)
+    if status == "done" and vm_open is not None:
+        raise AgentError(
+            f"The VM request (task #{vm_open.id}) is still "
+            f"{(vm_open.decision or {}).get('vmRequest', {}).get('phase', 'open').replace('_', ' ')} — "
+            "you will get a follow-up when the VMs are ready. Do not close the ticket before that.",
+            409,
+        )
 
     task = _current_task(ticket, user)
     for waiting in TicketInterpretation.query.filter(
         TicketInterpretation.ticket_record_id == ticket.id,
-        TicketInterpretation.status == "awaiting_approval",
+        TicketInterpretation.status.in_(WAITING_STATUSES),
         TicketInterpretation.id != task.id,
     ).all():
+        if status == "in_progress" and waiting.route == vm_requests.ROUTE:
+            continue  # saying it is being worked on does not withdraw the VM request
         _close_approval(waiting, "superseded", f"Superseded — Hermes set the ticket to {status}.")
 
     _remember(ticket, text)
@@ -892,7 +916,7 @@ def answer(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[str, An
     task = _current_task(ticket, user)
     for waiting in TicketInterpretation.query.filter(
         TicketInterpretation.ticket_record_id == ticket.id,
-        TicketInterpretation.status == "awaiting_approval",
+        TicketInterpretation.status.in_(WAITING_STATUSES),
         TicketInterpretation.id != task.id,
     ).all():
         _close_approval(waiting, "superseded", "Superseded — Hermes answered the ticket instead.")
@@ -982,6 +1006,8 @@ def _planned_of(task: TicketInterpretation) -> List[Dict[str, Any]]:
 
 
 def _describe_change(task: TicketInterpretation) -> str:
+    if task.route == vm_requests.ROUTE:
+        return vm_requests.describe(task)
     return "; ".join(_describe_one(item) for item in _planned_of(task)) or "nothing"
 
 
@@ -1012,7 +1038,10 @@ def _edit_telegram(task: TicketInterpretation, suffix: str) -> None:
     row = agent_settings.get_or_create()
     ticket = db.session.get(ZohoInboundTicket, task.ticket_record_id) if task.ticket_record_id else None
     try:
-        body = _approval_text(task, ticket) if ticket else (task.ticket_number or "Ticket")
+        if task.route == vm_requests.ROUTE:
+            body = vm_requests.approval_text(task, ticket)
+        else:
+            body = _approval_text(task, ticket) if ticket else (task.ticket_number or "Ticket")
         body = body.rsplit("\n\nExpires in", 1)[0]
         telegram.edit_message(agent_settings.bot_token(row), task.telegram_chat_id,
                               task.telegram_message_id, f"{body}\n\n{suffix}")
@@ -1025,6 +1054,8 @@ def _close_approval(task: TicketInterpretation, status: str, note: str) -> None:
     task.decision_note = note
     task.finished_at = _now()
     db.session.commit()
+    # A VM request that will never be approved gives back its draft and addresses.
+    vm_requests.release(task, "withdrawn", note)
     _edit_telegram(task, note)
 
 
@@ -1045,8 +1076,55 @@ def _claim_approval(task_id: int, nonce: Optional[str]) -> TicketInterpretation:
     return task
 
 
+def _approve_vms(task: TicketInterpretation, by: str, user=None) -> Dict[str, Any]:
+    """Approving a VM request applies the OpenTofu plan the approver was shown."""
+    ticket = db.session.get(ZohoInboundTicket, task.ticket_record_id) if task.ticket_record_id else None
+    task.decided_by, task.decided_at = by, _now()
+    try:
+        if ticket is None:
+            raise AgentError("The ticket is no longer in the inbound log.", 404)
+        vm_requests.approve(task, by, user=user)
+    except (AgentError, vm_requests.VmRequestError) as exc:
+        db.session.rollback()
+        task = db.session.get(TicketInterpretation, task.id)
+        vm = dict((task.decision or {}).get("vmRequest") or {})
+        vm.update(phase="failed", finished=True, error=f"Approved, but could not start: {exc}")
+        task.decision = {**(task.decision or {}), "vmRequest": vm}
+        task.decided_by, task.decided_at = by, _now()
+        task.status, task.error, task.finished_at = "error", f"Approved, but could not start: {exc}", _now()
+        db.session.commit()
+        _edit_telegram(task, f"⚠️ Approved by {by}, but it could not start: {exc}")
+        raise AgentError(str(exc), getattr(exc, "status", 409))
+    task = db.session.get(TicketInterpretation, task.id)
+    task.status, task.finished_at, task.error = "executed", _now(), None
+    task.decided_by, task.decided_at = by, _now()
+    db.session.commit()
+    on_approve = (task.decision or {}).get("commentOnApprove")
+    if on_approve:
+        _post(ticket, on_approve)
+    vm = (task.decision or {}).get("vmRequest") or {}
+    log_audit(
+        "ticket_agent_vms_approved",
+        actor=user,
+        target_type="ticket_interpretation",
+        target_id=str(task.id),
+        details={"ticket": task.ticket_number, "by": by, "buildId": vm.get("buildId"),
+                 "jobId": vm.get("jobId"), "vms": [m.get("name") for m in vm.get("machines") or []]},
+    )
+    _edit_telegram(task, f"✅ Approved by {by} — OpenTofu is creating the VMs.")
+    return serialize(task)
+
+
 def approve(task_id: int, by: str, *, nonce: Optional[str] = None, user=None) -> Dict[str, Any]:
+    pending = db.session.get(TicketInterpretation, int(task_id))
+    if pending is not None and pending.route == vm_requests.ROUTE:
+        try:
+            vm_requests.check_approver(pending, user)
+        except vm_requests.VmRequestError as exc:
+            raise AgentError(str(exc), exc.status)
     task = _claim_approval(task_id, nonce)
+    if task.route == vm_requests.ROUTE:
+        return _approve_vms(task, by, user=user)
     ticket = db.session.get(ZohoInboundTicket, task.ticket_record_id) if task.ticket_record_id else None
     task.decided_by, task.decided_at = by, _now()
     try:
@@ -1086,6 +1164,7 @@ def reject(task_id: int, by: str, *, note: str = "", nonce: Optional[str] = None
     task.status, task.decided_by, task.decided_at = "impediment", by, _now()
     task.decision_note, task.finished_at = note or None, _now()
     db.session.commit()
+    vm_requests.release(task, "rejected", f"Rejected by {by}" + (f": {note}" if note else "."))
     log_audit(
         "ticket_agent_rejected",
         actor=user,
@@ -1125,6 +1204,7 @@ def expire_approvals() -> int:
             continue
         db.session.refresh(task)
         expired += 1
+        vm_requests.release(task, "expired", "Nobody approved it in time.")
         _edit_telegram(task, "⌛ Expired — nobody approved it in time.")
         queue_followup(task.ticket_record_id, {
             "type": "approval_expired",
@@ -1174,24 +1254,34 @@ def poll_telegram() -> int:
             _, task_id, verb, nonce = data.split(":", 3)
             if row.telegram_chat_id and not row.telegram_chat_id.startswith("@") and chat != row.telegram_chat_id:
                 raise AgentError("Wrong chat.", 403)
+            pressed = db.session.get(TicketInterpretation, int(task_id))
+            vm_press = pressed is not None and pressed.route == vm_requests.ROUTE
+            if vm_press:
+                # VMs have their own approvers, and no list means nobody here:
+                # unlike a deploy, an empty list never falls back to "anyone".
+                vm_allow = agent_settings.vm_approvers(row)
+                if not vm_allow:
+                    raise AgentError("VM requests are approved in KubeSight: no VM approvers are set.", 403)
+                if not _allowed(sender, vm_allow):
+                    raise AgentError("You are not on the VM approver list.", 403)
             # An @handle cannot be matched against the numeric chat id Telegram
             # reports, so the chat check above is skipped for it. With no
             # approver list either, anyone who can see the button (a public
             # channel's subscribers) could approve a deploy — fail closed.
-            if (row.telegram_chat_id or "").startswith("@") and not allow:
+            if (row.telegram_chat_id or "").startswith("@") and not vm_press and not allow:
                 raise AgentError(
                     "Approvals are refused: the chat is set by @name, so KubeSight cannot "
                     "check where this press came from. Add an approver list, or use the "
                     "numeric chat id.",
                     403,
                 )
-            if not _allowed(sender, allow):
+            if not vm_press and not _allowed(sender, allow):
                 raise AgentError("You are not on the approver list.", 403)
             who = f"@{sender['username']}" if sender.get("username") else (sender.get("first_name") or "Telegram user")
             who = f"{who} (Telegram)"
             if verb == "a":
                 approve(int(task_id), who, nonce=nonce)
-                reply = "Approved — the run is starting."
+                reply = "Approved — the VMs are being created." if vm_press else "Approved — the run is starting."
             elif verb == "r":
                 reject(int(task_id), who, nonce=nonce)
                 reply = "Rejected."
@@ -1377,7 +1467,7 @@ def _parked_task(ticket: ZohoInboundTicket) -> Optional[TicketInterpretation]:
     ):
         if task.status == "superseded":
             continue
-        if task.status in (PENDING, RUNNING, "awaiting_approval", "deciding"):
+        if task.status in (PENDING, RUNNING, "awaiting_approval", "deciding", VM_PLANNING):
             return None
         if task.route in schema.PARKED_STATUSES:
             return task
@@ -1595,7 +1685,7 @@ def reap_stale() -> int:
 
 def tick() -> None:
     """Every scheduler tick: reap, expire, collect button presses, dispatch."""
-    for step in (reap_stale, expire_approvals, poll_telegram, kick):
+    for step in (reap_stale, expire_approvals, poll_telegram, vm_requests.advance, kick):
         try:
             step()
         except Exception:  # noqa: BLE001 — one step must not starve the others
@@ -1645,6 +1735,8 @@ def serialize(task: TicketInterpretation, brief: bool = False) -> Dict[str, Any]
         "finalMessage": task.final_message,
         # A troubleshooting ticket: diagnosis, evidence, recommendation.
         "troubleshooting": decision.get("troubleshooting"),
+        # New VMs asked for on the ticket: profile, plan, phase, names and addresses.
+        "vmRequest": decision.get("vmRequest"),
         "createdAt": _iso(task.created_at),
         "finishedAt": _iso(task.finished_at),
     }

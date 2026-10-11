@@ -2968,6 +2968,7 @@ from .models_cluster_build import (  # noqa: E402,F401
     VSphereConnection,
     VSphereIpReservation,
     VSphereNetworkRange,
+    VmRequestProfile,
 )
 
 # Application Intelligence has its own bounded domain model but remains part of

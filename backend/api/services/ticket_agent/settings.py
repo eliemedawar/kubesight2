@@ -60,6 +60,18 @@ def approvers(row: Optional[TicketAgentSettings] = None) -> List[str]:
     return [p.strip().lstrip("@").casefold() for p in raw.replace("\n", ",").split(",") if p.strip()]
 
 
+def vm_requests_enabled() -> bool:
+    row = db.session.get(TicketAgentSettings, 1)
+    return bool(row and row.vm_requests_enabled)
+
+
+def vm_approvers(row: Optional[TicketAgentSettings] = None) -> List[str]:
+    """Who may approve a VM request on Telegram. Empty = nobody there."""
+    row = row or get_or_create()
+    raw = row.vm_approvers or ""
+    return [p.strip().lstrip("@").casefold() for p in raw.replace("\n", ",").split(",") if p.strip()]
+
+
 def _iso(dt):
     return dt.isoformat() if dt else None
 
@@ -79,6 +91,8 @@ def serialize(row: Optional[TicketAgentSettings] = None) -> Dict[str, Any]:
         "publicComments": bool(row.public_comments),
         # NULL on a row migrated before the column existed reads as on.
         "troubleshootingEnabled": row.troubleshooting_enabled is not False,
+        "vmRequestsEnabled": bool(row.vm_requests_enabled),
+        "vmApprovers": row.vm_approvers or "",
         "approvalTimeoutHours": int(row.approval_timeout_hours or 24),
         "telegramEnabled": bool(row.telegram_enabled),
         "telegramBotTokenConfigured": bool(row.telegram_bot_token_encrypted),
@@ -105,7 +119,8 @@ def update(payload: Dict[str, Any]) -> Dict[str, Any]:
     errors: List[str] = []
     for key, attr in (("enabled", "enabled"), ("publicComments", "public_comments"),
                       ("telegramEnabled", "telegram_enabled"),
-                      ("troubleshootingEnabled", "troubleshooting_enabled")):
+                      ("troubleshootingEnabled", "troubleshooting_enabled"),
+                      ("vmRequestsEnabled", "vm_requests_enabled")):
         if key in payload:
             setattr(row, attr, bool(payload.get(key)))
     if "minConfidence" in payload:
@@ -130,6 +145,8 @@ def update(payload: Dict[str, Any]) -> Dict[str, Any]:
             row.telegram_chat_id = chat or None
     if "telegramApprovers" in payload:
         row.telegram_approvers = str(payload.get("telegramApprovers") or "").strip() or None
+    if "vmApprovers" in payload:
+        row.vm_approvers = str(payload.get("vmApprovers") or "").strip()[:2000] or None
     token = payload.get("telegramBotToken")
     if token:
         token = str(token).strip()
