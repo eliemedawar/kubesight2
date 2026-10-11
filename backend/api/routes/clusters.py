@@ -173,8 +173,11 @@ def list_clusters():
         return payload
     user = get_current_user()
     if user and payload.get("items"):
-        payload["items"] = filter_clusters_for_user(user, payload["items"])
-        payload["count"] = len(payload["items"])
+        # The payload is the cluster-list cache entry every caller shares
+        # (inventory, alerts, the warmer, MCP): build a new dict, never filter
+        # it in place, or the next reader sees this user's view of it.
+        items = filter_clusters_for_user(user, payload["items"])
+        payload = {**payload, "items": items, "count": len(items)}
 
     # The cluster list is the first call after login — use it to warm the
     # namespace/inventory/service-health caches in the background (throttled)
