@@ -599,11 +599,14 @@ def test_a_literal_image_tag_is_still_sanitised(app, client, admin_token, servic
 def test_every_stage_script_sources_the_shared_build_env():
     from api.services.ci.runners import kubernetes
 
-    script = kubernetes._wrap_stage_script("make", continue_on_failure=False)
+    # A command no wrapper line contains: "make" alone also matches words in the
+    # wrapper's own preamble.
+    command = "run-the-stage-own-command"
+    script = kubernetes._wrap_stage_script(command, continue_on_failure=False)
     assert "export KUBESIGHT_ENV=/workspace/.kubesight/build.env" in script
     # Sourced before the stage's own commands, so a stage can override an
     # inherited value simply by assigning it.
-    assert script.index("KUBESIGHT_ENV") < script.index("make")
+    assert script.rindex("KUBESIGHT_ENV") < script.index(command)
 
 
 def test_a_templated_tag_is_resolved_in_the_build_pod():
