@@ -562,6 +562,11 @@ class CiBuild(db.Model):
         db.UniqueConstraint("service_id", "number", name="uq_ci_build_service_number"),
         db.Index("ix_ci_build_status_queued", "status", "queued_at"),
         db.Index("ix_ci_build_service_id_desc", "service_id", "id"),
+        # Foreign keys with ON DELETE SET NULL: without these, deleting a
+        # pipeline, a runner or an old build scans every build to null them.
+        db.Index("ix_ci_build_pipeline", "pipeline_id"),
+        db.Index("ix_ci_build_runner", "runner_id"),
+        db.Index("ix_ci_build_retry_of", "retry_of_build_id"),
     )
 
     id = db.Column(db.Integer, primary_key=True)
@@ -662,6 +667,15 @@ class CiBuildStage(db.Model):
     __tablename__ = "ci_build_stages"
     __table_args__ = (
         db.Index("ix_ci_build_stage_build_pos", "build_id", "position"),
+        # Read by kind every engine pass and on every approvals page: pending
+        # post actions (post, pending|running), the approvals inbox (approval,
+        # running), the approvals history (approval, newest finished first) and
+        # a change bundle's owning Deploy stage (deploy, started around then).
+        db.Index("ix_ci_build_stage_type_status", "stage_type", "status"),
+        db.Index("ix_ci_build_stage_type_started", "stage_type", "started_at"),
+        db.Index("ix_ci_build_stage_type_finished", "stage_type", "finished_at"),
+        # SET NULL foreign key: deleting a pipeline stage must not scan them all.
+        db.Index("ix_ci_build_stage_pipeline_stage", "pipeline_stage_id"),
     )
 
     id = db.Column(db.Integer, primary_key=True)
@@ -719,8 +733,12 @@ class CiLogChunk(db.Model):
 
     __tablename__ = "ci_log_chunks"
     __table_args__ = (
+        # The unique constraint's index serves every read (by stage, in seq
+        # order, newest first for a tail). A second, plain index on the same
+        # columns (ix_ci_log_chunk_stage_seq) only doubled the write cost of
+        # every log line; databases created before may still have it, and it is
+        # safe to drop.
         db.UniqueConstraint("build_stage_id", "seq", name="uq_ci_log_chunk_stage_seq"),
-        db.Index("ix_ci_log_chunk_stage_seq", "build_stage_id", "seq"),
     )
 
     id = db.Column(db.Integer, primary_key=True)
@@ -801,6 +819,9 @@ class CiAgentTask(db.Model):
     __tablename__ = "ci_agent_tasks"
     __table_args__ = (
         db.Index("ix_ci_agent_task_runner_state", "runner_id", "state"),
+        # CASCADE foreign keys: deleting a build or a stage finds its tasks.
+        db.Index("ix_ci_agent_task_build", "build_id"),
+        db.Index("ix_ci_agent_task_build_stage", "build_stage_id"),
     )
 
     # queued  -> the agent has not picked it up yet
@@ -849,6 +870,8 @@ class CiArtifact(db.Model):
     __table_args__ = (
         db.Index("ix_ci_artifact_service_created", "service_id", "created_at"),
         db.Index("ix_ci_artifact_build", "build_id"),
+        # SET NULL foreign key on stage deletion.
+        db.Index("ix_ci_artifact_build_stage", "build_stage_id"),
     )
 
     id = db.Column(db.Integer, primary_key=True)

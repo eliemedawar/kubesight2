@@ -124,17 +124,20 @@ class BitbucketSourceProvider:
         except ValueError as exc:
             raise SourceError(str(exc)) from exc
 
-    def list_tree(self, ref: RepositoryRef, credential, revision: str) -> TreeListing:
+    def list_tree(
+        self, ref: RepositoryRef, credential, revision: str, path: str = ""
+    ) -> TreeListing:
         """Every file path at one revision, in one paginated API walk.
 
         This is what lets repository analysis see the SHAPE of a project — a
         Gradle wrapper, an ``app/`` module, three ``pom.xml`` files — without a
-        clone, a workspace, or a Kubernetes Job.
+        clone, a workspace, or a Kubernetes Job. ``path`` walks one directory
+        only (paths still come back from the repository root).
         """
         token, credential_type, principal = self._credential_parts(credential)
         try:
             payload = list_tree(
-                ref.full_name, token, revision, credential_type, principal
+                ref.full_name, token, revision, credential_type, principal, path=path
             )
         except BitbucketMetadataError as exc:
             raise SourceError(str(exc)) from exc

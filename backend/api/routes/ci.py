@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import io
 
-from flask import Blueprint, g, request, send_file
+from flask import Blueprint, Response, g, request, send_file, stream_with_context
 
 from ..audit import log_audit
 from ..auth_utils import create_download_ticket, get_current_user
@@ -904,9 +904,9 @@ def get_build_workspace(build_id: int):
 def get_stage_logs(build_id: int, stage_id: int):
     build = engine_service.get_build(build_id)
     stage = engine_service.get_build_stage(build, stage_id)
-    # Fetch what the pod has printed since the last drain, so a viewer sees
-    # output at its own polling rate rather than the scheduler's tick.
-    engine_service.pump_stage_logs(build, stage)
+    # A read only. The CI ticker drains running stages every second, so the
+    # viewer is at most a beat behind the pod; draining here as well raced the
+    # ticker for the same sequence numbers and held a request thread on kubectl.
     payload = logs_service.read(
         stage.id, after_seq=_int_arg("after", 0), limit=_int_arg("limit", 1000)
     )
@@ -940,13 +940,21 @@ def create_stage_log_download_ticket(build_id: int, stage_id: int):
 def download_stage_logs(build_id: int, stage_id: int):
     build = engine_service.get_build(build_id)
     stage = engine_service.get_build_stage(build, stage_id)
-    text = logs_service.download_text(stage.id)
-    return send_file(
-        io.BytesIO(text.encode("utf-8")),
-        mimetype="text/plain",
-        as_attachment=True,
-        download_name=f"build-{build.number}-{stage.position + 1}-{stage.name}.log",
-    )
+    # Streamed a batch of lines at a time: a 20,000-line stage is never built
+    # up in memory as one string.
+    name = f"build-{build.number}-{stage.position + 1}-{stage.name}.log"
+    chunks = (piece.encode("utf-8") for piece in logs_service.iter_download(stage.id))
+    response = Response(stream_with_context(chunks), mimetype="text/plain")
+    try:
+        name.encode("ascii")
+        response.headers.set("Content-Disposition", "attachment", filename=name)
+    except UnicodeEncodeError:
+        from urllib.parse import quote
+
+        response.headers["Content-Disposition"] = (
+            f"attachment; filename*=UTF-8''{quote(name, safe='')}"
+        )
+    return response
 
 
 # ---------------------------------------------------------------------------

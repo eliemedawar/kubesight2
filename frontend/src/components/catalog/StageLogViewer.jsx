@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { whenVisible } from "../../lib/visibleInterval";
 import { getCiStageLogs } from "../../api/ciApi.js";
 import { formatDuration } from "./ciShared.jsx";
 import { downloadCiStageLog } from "../../api/ciApi.js";
@@ -80,6 +81,8 @@ export default function StageLogViewer({ buildId, stage }) {
     let cancelled = false;
 
     const tick = async () => {
+      await whenVisible(); // A hidden tab stops polling until it is looked at.
+      if (cancelled) return;
       const done = await poll();
       if (cancelled || done) return;
       timerRef.current = window.setTimeout(tick, POLL_MS);

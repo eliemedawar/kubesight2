@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import base64
+import copy
+import hashlib
 import json
+import os
+import re
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -28,6 +32,65 @@ MAX_TREE_ITEMS = 5_000
 # recently — so if a budget has to bite, it should bite the stale end rather
 # than everything after "f" in the alphabet.
 _REF_SORT = "-target.date"
+
+
+# ---------------------------------------------------------------------------
+# A short cache in front of the reads
+#
+# The Run Build dialog, the branch pickers, repository analysis and an agent
+# browsing a repository all ask the same questions of Bitbucket within seconds
+# of each other. One answer is shared per key while it is fresh, and callers
+# asking at the same moment wait for the one request in flight (TTLCache's
+# single-flight). Keyed by a hash of the credential's secret, so a rotated or
+# different credential never sees another one's answer; failures are never
+# cached. Off outside an app context and under TESTING, where callers swap the
+# HTTP layer out between calls.
+# ---------------------------------------------------------------------------
+
+_REFS_TTL_SECONDS = float(os.getenv("BITBUCKET_REFS_CACHE_SECONDS", "60"))
+# A commit SHA names content that can never change; a branch or tag can move.
+_PINNED_TTL_SECONDS = float(os.getenv("BITBUCKET_PINNED_CACHE_SECONDS", "3600"))
+_MOVING_TTL_SECONDS = float(os.getenv("BITBUCKET_SOURCE_CACHE_SECONDS", "120"))
+_FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+_source_cache = None
+
+
+def _cache():
+    global _source_cache
+    if _source_cache is None:
+        from ..ttl_cache import TTLCache
+
+        _source_cache = TTLCache("bitbucket-source")
+    return _source_cache
+
+
+def _cache_enabled() -> bool:
+    try:
+        from flask import current_app, has_app_context
+
+        return has_app_context() and not current_app.config.get("TESTING")
+    except Exception:
+        return False
+
+
+def _credential_key(token: str, credential_type: str, principal: str) -> str:
+    raw = f"{credential_type}\x00{principal}\x00{token}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:24]
+
+
+def _revision_ttl(revision: str) -> float:
+    return _PINNED_TTL_SECONDS if _FULL_SHA.match(str(revision or "").lower()) else _MOVING_TTL_SECONDS
+
+
+def _cached(key, ttl: float, compute):
+    if not _cache_enabled() or ttl <= 0:
+        return compute()
+    return copy.deepcopy(_cache().get_or_compute(key, ttl, compute))
+
+
+def clear_cache() -> None:
+    if _source_cache is not None:
+        _source_cache.invalidate()
 
 
 class BitbucketMetadataError(RuntimeError):
@@ -228,6 +291,27 @@ def list_revisions(
     principal: str = "",
     kinds: tuple = ("branch", "tag", "commit"),
 ) -> dict:
+    """:func:`_list_revisions`, shared for a minute (see the cache above)."""
+    key = (
+        "revisions",
+        repository_ref,
+        _credential_key(token, credential_type, principal),
+        tuple(sorted(set(kinds or ()))),
+    )
+    return _cached(
+        key,
+        _REFS_TTL_SECONDS,
+        lambda: _list_revisions(repository_ref, token, credential_type, principal, kinds),
+    )
+
+
+def _list_revisions(
+    repository_ref: str,
+    token: str,
+    credential_type: str = "oauth",
+    principal: str = "",
+    kinds: tuple = ("branch", "tag", "commit"),
+) -> dict:
     """Branches, tags and recent commits — or only the kinds asked for.
 
     ``kinds`` exists because the callers genuinely differ: Run Build offers all
@@ -334,8 +418,43 @@ def list_tree(
     principal: str = "",
     *,
     max_depth: int = 8,
+    path: str = "",
+) -> dict:
+    """:func:`_list_tree`, cached per (repository, revision, path): an hour for
+    a commit SHA, two minutes for a branch or tag."""
+    key = (
+        "tree",
+        repository_ref,
+        _credential_key(token, credential_type, principal),
+        str(revision or ""),
+        str(path or ""),
+        int(max_depth or 8),
+    )
+    return _cached(
+        key,
+        _revision_ttl(revision),
+        lambda: _list_tree(
+            repository_ref, token, revision, credential_type, principal,
+            max_depth=max_depth, path=path,
+        ),
+    )
+
+
+def _list_tree(
+    repository_ref: str,
+    token: str,
+    revision: str,
+    credential_type: str = "oauth",
+    principal: str = "",
+    *,
+    max_depth: int = 8,
+    path: str = "",
 ) -> dict:
     """Every file path in the repository at one revision.
+
+    ``path`` limits the walk to one directory (paths still come back from the
+    repository root): asking about ``src/main`` should not page through the
+    whole repository to throw most of it away.
 
     One paginated walk of ``/src/<rev>/`` — the same call Dockerfile discovery
     has always made, lifted out so anything that needs to know the SHAPE of a
@@ -352,8 +471,12 @@ def list_tree(
     depth = max(1, min(int(max_depth or 8), 20))
     encoded_revision = quote(clean_revision, safe="")
     base = f"{API_ORIGIN}/2.0/repositories/{repository_ref}"
+    directory = str(path or "").strip().replace("\\", "/").strip("/")
+    if directory and (".." in directory.split("/") or "\x00" in directory):
+        raise ValueError("A repository-relative directory is required.")
+    location = f"{quote(directory, safe='/')}/" if directory else ""
     tree = _collect(
-        f"{base}/src/{encoded_revision}/?"
+        f"{base}/src/{encoded_revision}/{location}?"
         f"{urlencode({'pagelen': 100, 'max_depth': depth})}",
         token,
         repository_ref,
@@ -411,6 +534,29 @@ MAX_FILE_BYTES = 512 * 1024
 
 
 def fetch_file(
+    repository_ref: str,
+    token: str,
+    revision: str,
+    path: str,
+    credential_type: str = "oauth",
+    principal: str = "",
+) -> str:
+    """:func:`_fetch_file`, cached per (repository, revision, path)."""
+    key = (
+        "file",
+        repository_ref,
+        _credential_key(token, credential_type, principal),
+        str(revision or ""),
+        str(path or ""),
+    )
+    return _cached(
+        key,
+        _revision_ttl(revision),
+        lambda: _fetch_file(repository_ref, token, revision, path, credential_type, principal),
+    )
+
+
+def _fetch_file(
     repository_ref: str,
     token: str,
     revision: str,

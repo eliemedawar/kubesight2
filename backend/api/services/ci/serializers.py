@@ -59,6 +59,7 @@ def service_to_dict(
     latest_artifact: Optional[CiArtifact] = None,
     recent_statuses: Optional[List[str]] = None,
     include_counts: bool = False,
+    used_by_count: Optional[int] = None,
 ) -> Dict[str, Any]:
     from . import default_pipelines
 
@@ -127,10 +128,13 @@ def service_to_dict(
         "sharedPipeline": _shared_pipeline_of(pipeline) if linked else None,
         "deploymentLinkCount": len(row.deployment_links) if not is_home else 0,
         # Pipelines page: how many services build with this one.
+        # (Counted by the caller for a whole list at once when it can.)
         "usedByCount": (
-            CiPipeline.query.filter_by(linked_pipeline_id=pipeline.id).count()
-            if is_home and pipeline is not None
-            else 0
+            0
+            if not is_home or pipeline is None
+            else used_by_count
+            if used_by_count is not None
+            else CiPipeline.query.filter_by(linked_pipeline_id=pipeline.id).count()
         ),
         "createdAt": _iso(row.created_at),
         "updatedAt": _iso(row.updated_at),

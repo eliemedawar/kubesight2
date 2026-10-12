@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from flask import has_request_context, request
 
@@ -269,10 +271,15 @@ def _give_up(check: CiMergeCheck, message: str) -> Dict[str, Any]:
 
 
 def due_checks(limit: int = 20) -> List[CiMergeCheck]:
-    """Verdicts waiting to be told to the host, oldest first."""
+    """Verdicts waiting to be told to the host, oldest first.
+
+    Includes a claim whose sender never recorded an outcome (the process died
+    mid-send) once its claim has expired: posting the same build status again
+    only overwrites it, so a lost send is simply sent again.
+    """
     now = _now()
     rows = (
-        CiMergeCheck.query.filter(CiMergeCheck.delivery_state == "pending")
+        CiMergeCheck.query.filter(CiMergeCheck.delivery_state.in_(("pending", SENDING)))
         .filter(CiMergeCheck.verdict.isnot(None))
         .order_by(CiMergeCheck.id.asc())
         .limit(max(1, int(limit)) * 4)
@@ -280,6 +287,10 @@ def due_checks(limit: int = 20) -> List[CiMergeCheck]:
     )
     due: List[CiMergeCheck] = []
     for row in rows:
+        if row.delivery_state == SENDING:
+            with _in_flight_lock:
+                if row.id in _in_flight:
+                    continue
         scheduled = row.next_delivery_at
         if scheduled is not None and scheduled.tzinfo is None:
             scheduled = scheduled.replace(tzinfo=timezone.utc)
@@ -288,6 +299,142 @@ def due_checks(limit: int = 20) -> List[CiMergeCheck]:
         if len(due) >= limit:
             break
     return due
+
+
+# ---------------------------------------------------------------------------
+# Off the engine's thread
+#
+# A verdict is CLAIMED on the CI engine's pass (a conditional UPDATE, committed)
+# and SENT by a small worker pool, like post-action notifications and build
+# statuses. Sending inside the pass held the engine - and every build waiting
+# on it - for as long as Bitbucket took to answer, up to its 20 s timeout per
+# call, twice per verdict.
+# ---------------------------------------------------------------------------
+
+# A claimed delivery with no outcome after this long died with its process.
+SENDING = "sending"
+_CLAIM_SECONDS = 300
+_executor: Optional[ThreadPoolExecutor] = None
+_executor_lock = threading.Lock()
+_in_flight: set = set()
+_in_flight_lock = threading.Lock()
+_runner: Optional[Callable[[int], None]] = None
+
+
+def set_delivery_runner(fn: Optional[Callable[[int], None]]) -> None:
+    """Test hook: ``fn(check_id)`` receives each claimed delivery instead of
+    the worker pool. ``None`` restores the default."""
+    global _runner
+    _runner = fn
+
+
+def _pool() -> ThreadPoolExecutor:
+    global _executor
+    with _executor_lock:
+        if _executor is None:
+            _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ci-merge-checks")
+        return _executor
+
+
+def dispatch_due(limit: int = 20) -> int:
+    """Claim the verdicts that are due and hand them to the senders.
+
+    Returns how many were claimed. The claim is committed before anything is
+    sent, so two passes (or two processes) never send the same check at once.
+    """
+    claimed = 0
+    for check in due_checks(limit):
+        previous = check.delivery_state
+        updated = (
+            db.session.query(CiMergeCheck)
+            .filter(CiMergeCheck.id == check.id, CiMergeCheck.delivery_state == previous)
+            .update(
+                {
+                    CiMergeCheck.delivery_state: SENDING,
+                    CiMergeCheck.next_delivery_at: _now() + timedelta(seconds=_CLAIM_SECONDS),
+                },
+                synchronize_session=False,
+            )
+        )
+        db.session.commit()
+        if updated != 1:
+            continue
+        claimed += 1
+        _submit(check.id)
+    return claimed
+
+
+def _submit(check_id: int) -> None:
+    if _runner is not None:
+        _runner(check_id)
+        return
+    from flask import current_app
+
+    app = current_app._get_current_object()
+    if app.config.get("TESTING"):
+        # No worker threads against a test database: deliver inline.
+        deliver_claimed(check_id)
+        return
+    with _in_flight_lock:
+        _in_flight.add(check_id)
+    try:
+        _pool().submit(_deliver_in_app, app, check_id)
+    except Exception:
+        with _in_flight_lock:
+            _in_flight.discard(check_id)
+        raise
+
+
+def _deliver_in_app(app, check_id: int) -> None:
+    try:
+        with app.app_context():
+            try:
+                deliver_claimed(check_id)
+            except Exception:
+                logger.exception("Delivering merge check %s failed", check_id)
+                db.session.rollback()
+            finally:
+                db.session.remove()
+    finally:
+        with _in_flight_lock:
+            _in_flight.discard(check_id)
+
+
+def deliver_claimed(check_id: int) -> Optional[Dict[str, Any]]:
+    """Send one claimed verdict (see :func:`deliver`)."""
+    check = db.session.get(CiMergeCheck, int(check_id))
+    if check is None or check.delivery_state != SENDING:
+        return None
+    return deliver(check)
+
+
+def mark_running_later(check: CiMergeCheck) -> None:
+    """:func:`mark_running`, without holding up the webhook request that
+    started the check: Bitbucket waits on that request, and the in-progress
+    status is optimistic anyway."""
+    from flask import current_app
+
+    app = current_app._get_current_object()
+    if app.config.get("TESTING"):
+        mark_running(check)
+        return
+    check_id = check.id
+
+    def job() -> None:
+        with app.app_context():
+            try:
+                row = db.session.get(CiMergeCheck, check_id)
+                if row is not None:
+                    mark_running(row)
+            except Exception:
+                logger.exception("Merge check %s: in-progress status failed", check_id)
+            finally:
+                db.session.remove()
+
+    try:
+        _pool().submit(job)
+    except Exception:
+        logger.exception("Could not queue the in-progress status for merge check %s", check_id)
 
 
 def pending_count() -> int:

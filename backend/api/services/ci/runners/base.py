@@ -211,6 +211,10 @@ class RunnerAdapter(Protocol):
       agent must not have its timeout clock running while it waits.
     * ``poll_many(handles) -> {external_ref: status}`` — one observation for a
       whole group, so a runner that reads one pod per build reads it once.
+    * ``observe(handles) -> observation`` — one read of the runner's state for
+      a pass. When present, the engine passes the result as ``observation=``
+      to ``drain_logs``, ``poll`` and ``poll_many``, so the drain and the poll
+      of one pass share it instead of each reading the cluster.
     """
 
     runner_type: str

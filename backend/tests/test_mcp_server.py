@@ -491,7 +491,7 @@ def sourced(app, service, monkeypatch):
     provider = source_port.get_provider("bitbucket")
     monkeypatch.setattr(
         provider, "list_tree",
-        lambda ref, cred, revision: TreeListing(
+        lambda ref, cred, revision, path="": TreeListing(
             revision=revision,
             paths=["build.gradle", "settings.gradle", "src/main/App.java", "src/test/AppTest.java"],
         ),
@@ -1574,6 +1574,43 @@ def test_build_failure_explains_in_one_call_and_says_so_when_nothing_failed(
     assert [stage["name"] for stage in found["failedStages"]] == ["Build"]
     # The whole point: the reason arrives without a second call for a stage id.
     assert "cannot find symbol" in "\n".join(found["failedStages"][0]["tail"])
+
+
+def test_a_long_stage_shows_its_end_not_its_middle(app, client, admin_token, service):
+    """Logs were read from the start (1,600 lines) and the tail sliced from
+    that, so a longer stage showed lines from its middle and never the error
+    at its end."""
+    from api.db import db
+    from api.models_ci import CiBuild, CiBuildStage
+    from api.services.ci import logs as logs_service
+
+    with app.app_context():
+        build = CiBuild(
+            service_id=service.id, number=8, status="failed", branch="master",
+            pipeline_snapshot={"stages": []},
+        )
+        db.session.add(build)
+        db.session.flush()
+        stage = CiBuildStage(build_id=build.id, position=0, name="Build", status="failed")
+        db.session.add(stage)
+        db.session.commit()
+        lines = [(n, f"line {n}", "stdout") for n in range(1, 2500)]
+        lines.append((2500, "BUILD FAILED: the real reason", "stdout"))
+        logs_service.append(stage, lines)
+        build_id, stage_id = build.id, stage.id
+
+    logs = call_tool(
+        client, admin_token, "kubesight_build_logs",
+        {"buildId": build_id, "stageId": stage_id, "tail": 50},
+    )["structuredContent"]
+    assert logs["lines"][-1] == "BUILD FAILED: the real reason"
+    assert logs["lines"][0] == "line 2451"
+    assert logs["truncated"] is True
+
+    failure = call_tool(
+        client, admin_token, "kubesight_build_failure", {"buildId": build_id, "tail": 10}
+    )["structuredContent"]
+    assert failure["failedStages"][0]["tail"][-1] == "BUILD FAILED: the real reason"
 
 
 # ---------------------------------------------------------------------------

@@ -437,7 +437,6 @@ def append_logs(task: CiAgentTask, lines: List[Dict[str, Any]]) -> int:
     if stage is None or build is None:
         return 0
 
-    mask = logs_service.build_masker(engine_service._mask_values(build))
     chunks = []
     seq = int(task.log_seq or 0)
     for line in lines[:5000]:
@@ -446,7 +445,9 @@ def append_logs(task: CiAgentTask, lines: List[Dict[str, Any]]) -> int:
         seq += 1
         chunks.append((seq, str(line.get("content") or ""), str(line.get("stream") or "stdout")))
     if chunks:
-        logs_service.append(stage, chunks, mask=mask)
+        # Built only when there is output, and cached briefly per stage: an
+        # agent posts every second or so, and each masker decrypts every secret.
+        logs_service.append(stage, chunks, mask=engine_service.log_masker(build, stage.id))
         task.log_seq = seq
         task.last_heartbeat_at = _now()
         db.session.add(task)

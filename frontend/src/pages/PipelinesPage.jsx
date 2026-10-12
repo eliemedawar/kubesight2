@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { whenVisible } from "../lib/visibleInterval";
 import "../styles/signal/sharedPipelines.css";
 import { createSharedPipeline, listCiServices, listSharedPipelines } from "../api/ciApi.js";
 import { useAuth } from "../context/AuthContext";
@@ -116,6 +117,8 @@ export default function PipelinesPage() {
     let cancelled = false;
     failuresRef.current = 0;
     const tick = async (background) => {
+      await whenVisible(); // A hidden tab stops polling until it is looked at.
+      if (cancelled) return;
       const { ok, active } = await load({ background });
       if (cancelled) return;
       if (!ok) {

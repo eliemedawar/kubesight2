@@ -215,13 +215,38 @@ def trigger_to_dict(row: CiWebhookTrigger) -> Dict[str, Any]:
 
 
 def list_triggers(service: CiService) -> List[Dict[str, Any]]:
-    rows = service.webhook_triggers.order_by(CiWebhookTrigger.name).all()
+    from sqlalchemy.orm import selectinload
+
+    from ...models import user_display_loader
+
+    rows = (
+        service.webhook_triggers.options(
+            selectinload(CiWebhookTrigger.last_build),
+            user_display_loader(CiWebhookTrigger.created_by),
+            user_display_loader(CiWebhookTrigger.updated_by),
+        )
+        .order_by(CiWebhookTrigger.name)
+        .all()
+    )
     return [trigger_to_dict(row) for row in rows]
 
 
-def delivery_to_dict(row: CiWebhookDelivery) -> Dict[str, Any]:
-    ids = [int(item) for item in (row.build_ids or []) if str(item).isdigit()]
-    builds = {build.id: build for build in CiBuild.query.filter(CiBuild.id.in_(ids)).all()} if ids else {}
+def _delivery_build_ids(row: CiWebhookDelivery) -> List[int]:
+    return [int(item) for item in (row.build_ids or []) if str(item).isdigit()]
+
+
+def delivery_to_dict(
+    row: CiWebhookDelivery, builds: Optional[Dict[int, CiBuild]] = None
+) -> Dict[str, Any]:
+    """One delivery. ``builds`` is what a list already loaded for all of its
+    deliveries at once; without it, this loads its own."""
+    ids = _delivery_build_ids(row)
+    if builds is None:
+        builds = (
+            {build.id: build for build in CiBuild.query.filter(CiBuild.id.in_(ids)).all()}
+            if ids
+            else {}
+        )
     return {
         "id": row.id,
         "receivedAt": _iso(row.received_at),
@@ -237,12 +262,22 @@ def delivery_to_dict(row: CiWebhookDelivery) -> Dict[str, Any]:
 
 
 def list_deliveries(row: CiWebhookTrigger, *, limit: int = 25) -> List[Dict[str, Any]]:
+    from ...models import user_display_loader
+
     items = (
-        row.deliveries.order_by(CiWebhookDelivery.received_at.desc(), CiWebhookDelivery.id.desc())
+        row.deliveries.options(user_display_loader(CiWebhookDelivery.tested_by))
+        .order_by(CiWebhookDelivery.received_at.desc(), CiWebhookDelivery.id.desc())
         .limit(max(1, min(int(limit or 25), DELIVERIES_KEPT)))
         .all()
     )
-    return [delivery_to_dict(item) for item in items]
+    # Every delivery's builds in one query, not one per delivery.
+    ids = sorted({build_id for item in items for build_id in _delivery_build_ids(item)})
+    builds = (
+        {build.id: build for build in CiBuild.query.filter(CiBuild.id.in_(ids)).all()}
+        if ids
+        else {}
+    )
+    return [delivery_to_dict(item, builds) for item in items]
 
 
 # ---------------------------------------------------------------------------

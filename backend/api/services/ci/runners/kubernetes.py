@@ -242,10 +242,32 @@ def _kubectl(args: List[str], input_text: Optional[str] = None, timeout: int = 3
     if kubeconfig:
         command.extend(["--kubeconfig", kubeconfig])
     command.extend(args)
-    completed = subprocess.run(
-        command, input=input_text, text=True, capture_output=True, check=False, timeout=timeout
-    )
+    if _takes_a_slot(args):
+        # The process-wide kubectl bound (k8s_provider): CI reads are short
+        # kubectl processes like any other, and a busy CI pass must not be the
+        # thing that starves the rest of the app's cluster reads of CPU.
+        from ....k8s_provider import _KUBECTL_SLOTS
+
+        with _KUBECTL_SLOTS:
+            completed = subprocess.run(
+                command, input=input_text, text=True, capture_output=True, check=False, timeout=timeout
+            )
+    else:
+        completed = subprocess.run(
+            command, input=input_text, text=True, capture_output=True, check=False, timeout=timeout
+        )
     return completed.returncode, completed.stdout, completed.stderr
+
+
+# Interactive or long-lived commands keep out of the shared slots, as in
+# k8s_provider: holding one for the length of an exec would starve short reads.
+_SLOTLESS_COMMANDS = frozenset({"exec", "cp", "attach", "port-forward", "wait"})
+
+
+def _takes_a_slot(args: List[str]) -> bool:
+    if not args or args[0] in _SLOTLESS_COMMANDS:
+        return False
+    return not ("-f" in args and args[0] == "logs") and "--follow" not in args
 
 
 # ---------------------------------------------------------------------------
@@ -2863,23 +2885,51 @@ class KubernetesJobRunnerAdapter:
         entries.sort(key=lambda item: (item["type"] != "dir", item["name"].lower()))
         return entries
 
-    def poll(self, handle: RunnerHandle) -> str:
-        job_name, container = _split_ref(handle.external_ref)
-        job, pod = self._read_job_and_pod(job_name)
-        return self._status_of(job, pod, job_name, container, {})
+    def observe(self, handles: List[RunnerHandle]) -> "Observation":
+        """Read each build's Job and pod once, for one engine pass.
 
-    def poll_many(self, handles: List[RunnerHandle]) -> Dict[str, str]:
+        The engine hands the result to ``drain_logs`` and then ``poll``, so a
+        running stage costs one Job read and one pod read per pass instead of
+        one pair for the drain and another for the poll. Read BEFORE the logs
+        on purpose: a container this snapshot shows terminated has written
+        everything it ever will, so the log read that follows is complete.
+        """
+        observation = Observation()
+        for handle in handles:
+            job_name, _ = _split_ref(handle.external_ref)
+            if job_name not in observation.reads:
+                observation.reads[job_name] = self._read_job_and_pod(job_name)
+        return observation
+
+    def _observed(
+        self, job_name: str, observation: Optional["Observation"]
+    ) -> Tuple[Optional[dict], Optional[dict]]:
+        if observation is None:
+            return self._read_job_and_pod(job_name)
+        if job_name not in observation.reads:
+            observation.reads[job_name] = self._read_job_and_pod(job_name)
+        return observation.reads[job_name]
+
+    def poll(self, handle: RunnerHandle, observation: Optional["Observation"] = None) -> str:
+        job_name, container = _split_ref(handle.external_ref)
+        job, pod = self._observed(job_name, observation)
+        tails = observation.tails if observation is not None else {}
+        return self._status_of(job, pod, job_name, container, {}, tails)
+
+    def poll_many(
+        self, handles: List[RunnerHandle], observation: Optional["Observation"] = None
+    ) -> Dict[str, str]:
         """A parallel group's members in one observation: the Job and its pod
         are read once per build, a barrier's verdicts once per group."""
         statuses: Dict[str, str] = {}
-        reads: Dict[str, Tuple[Optional[dict], Optional[dict]]] = {}
+        observation = observation if observation is not None else Observation()
         verdicts: Dict[str, Dict[int, str]] = {}
         for handle in handles:
             job_name, container = _split_ref(handle.external_ref)
-            if job_name not in reads:
-                reads[job_name] = self._read_job_and_pod(job_name)
-            job, pod = reads[job_name]
-            statuses[handle.external_ref] = self._status_of(job, pod, job_name, container, verdicts)
+            job, pod = self._observed(job_name, observation)
+            statuses[handle.external_ref] = self._status_of(
+                job, pod, job_name, container, verdicts, observation.tails
+            )
         return statuses
 
     def _status_of(
@@ -2889,7 +2939,9 @@ class KubernetesJobRunnerAdapter:
         job_name: str,
         container: str,
         verdicts: Dict[str, Dict[int, str]],
+        tails: Optional[Dict[str, List[str]]] = None,
     ) -> str:
+        tail = (tails or {}).get(f"{job_name}#{container}")
         if job is None:
             if job_name in _abandoned_jobs:
                 return SKIPPED  # An earlier stage could not start; see its log.
@@ -2909,7 +2961,9 @@ class KubernetesJobRunnerAdapter:
             return QUEUED  # Pod not scheduled yet.
 
         if self._runs_as_sidecar(pod, container):
-            return self._member_status(job_name, container, pod, job_status, deadline_exceeded, verdicts)
+            return self._member_status(
+                job_name, container, pod, job_status, deadline_exceeded, verdicts, tail
+            )
 
         status = self._container_status(pod, container)
         if status is None:
@@ -2923,7 +2977,7 @@ class KubernetesJobRunnerAdapter:
                 return TIMEOUT if deadline_exceeded else FAILED
             # Exit 0 is now what EVERY stage does, so the real outcome lives in
             # a log marker. Read it before deciding anything.
-            marker = self._exit_marker(job_name, container)
+            marker = self._exit_marker(job_name, container, tail=tail)
             if marker == "skip":
                 return SKIPPED
             if marker == "timeout":
@@ -3089,6 +3143,7 @@ class KubernetesJobRunnerAdapter:
         job_status: dict,
         deadline_exceeded: bool,
         verdicts: Dict[str, Dict[int, str]],
+        tail: Optional[List[str]] = None,
     ) -> str:
         group = self._group_of(pod, container) or []
         position = int(_STAGE_CONTAINER_RE.match(container).group(1))
@@ -3110,7 +3165,7 @@ class KubernetesJobRunnerAdapter:
                 verdicts[barrier] = self._barrier_verdicts(job_name, barrier)
             outcome = verdicts[barrier].get(position)
         if outcome is None and started:
-            outcome = self._exit_marker(job_name, container, default=None)
+            outcome = self._exit_marker(job_name, container, default=None, tail=tail)
 
         if outcome is None:
             if deadline_exceeded:
@@ -3157,7 +3212,9 @@ class KubernetesJobRunnerAdapter:
                 found[int(parts[0])] = parts[1]
         return found
 
-    def _exit_marker(self, job_name: str, container: str, default: Any = "ok") -> Any:
+    def _exit_marker(
+        self, job_name: str, container: str, default: Any = "ok", tail: Optional[List[str]] = None
+    ) -> Any:
         """What a stage's own log says about how it ended.
 
         Every stage exits 0 so the pod reaches the collector, so the container's
@@ -3166,17 +3223,25 @@ class KubernetesJobRunnerAdapter:
         or "ok" — also when no marker is found, which is the pre-wrapper shape
         and means the exit code already told the truth. A group member asks for
         ``default=None`` instead: it is still running when it has no marker.
+
+        ``tail`` is the stage's last lines as this pass's log drain read them -
+        after the pod snapshot the status comes from - so when the drain has
+        them there is no need to ask the cluster a second time.
         """
-        rc, out, _ = _kubectl(
-            [
-                "logs", f"job/{job_name}", "-c", container, "-n", _namespace(),
-                "--tail", "5",
-            ],
-            timeout=20,
-        )
-        if rc != 0:
-            return default
-        for line in out.splitlines():
+        if tail is not None:
+            lines = list(tail)
+        else:
+            rc, out, _ = _kubectl(
+                [
+                    "logs", f"job/{job_name}", "-c", container, "-n", _namespace(),
+                    "--tail", "5",
+                ],
+                timeout=20,
+            )
+            if rc != 0:
+                return default
+            lines = out.splitlines()
+        for line in lines:
             if line.startswith(_SKIP_MARKER):
                 return "skip"
             if line.startswith(_TIMEOUT_MARKER):
@@ -3190,61 +3255,211 @@ class KubernetesJobRunnerAdapter:
     def _job_finished(job_status: dict) -> bool:
         return bool(int(job_status.get("succeeded") or 0) or int(job_status.get("failed") or 0))
 
-    def drain_logs(self, handle: RunnerHandle, after_seq: int) -> Iterator[LogChunk]:
+    def drain_logs(
+        self, handle: RunnerHandle, after_seq: int, observation: Optional["Observation"] = None
+    ) -> Iterator[LogChunk]:
+        """The stage's output past ``after_seq``, read incrementally.
+
+        A line's sequence number is its position from the start of the stage's
+        output (the collector's lines follow the last stage's own), which is
+        what makes the viewer resumable. Reading the whole log every pass to
+        find the few new lines cost a 16 MB ``kubectl logs`` per running stage
+        per second, so the runner keeps a cursor per stage - the second of the
+        last entry it read and the timestamps it already took from that second
+        - and asks only for ``--since-time`` that second. The entries of that
+        second it already has are skipped by count and checked by timestamp:
+        anything that does not line up (a restart, another process drained
+        last, a rotated log) falls back to one full read, which numbers lines
+        exactly as before.
+        """
         job_name, container = _split_ref(handle.external_ref)
+        key = handle.external_ref
         # A stage that never started has no log of its own; the reason poll
         # found is its whole log.
-        note = _start_failure_notes.pop(f"{job_name}#{container}", None)
+        note = _start_failure_notes.pop(key, None)
         if note:
             for index, content in enumerate(note, start=1):
                 if index > after_seq:
                     yield LogChunk(seq=index, content=content)
             return
-        lines = self._container_log_lines(job_name, container)
-        # The collector's output belongs to the last stage's log — it is the
-        # only window into artifact upload problems.
-        if lines is not None:
-            _, pod = self._read_job_and_pod(job_name)
-            if pod is not None and self._is_last_stage(pod, container) and self._stage_container_is_last(pod, container):
-                status = self._container_status(pod, container)
-                # A group member never terminates while the pod runs (it is a
-                # sidecar), so for one the collector having started is the
-                # sign the stage's own output is complete.
-                if status and (
-                    (status.get("state") or {}).get("terminated") or self._collector_started(pod)
-                ):
-                    collector_lines = self._container_log_lines(job_name, "collector") or []
-                    lines = lines + [f"[collector] {line}" for line in collector_lines]
-        for index, content in enumerate(lines or [], start=1):
-            if index > after_seq:
-                yield LogChunk(seq=index, content=content)
+        # The pod first: what it shows finished has finished writing, so the
+        # log reads below are complete for it.
+        observation = observation if observation is not None else self.observe([handle])
+        _, pod = self._observed(job_name, observation)
+
+        cursor = _log_cursors.get(key)
+        lines: Optional[List[str]] = None
+        if (
+            cursor is not None
+            and cursor.seq == after_seq
+            and (cursor.pod is None or cursor.pod == _pod_identity(pod))
+        ):
+            lines = self._read_increment(job_name, container, pod, cursor, observation)
+        if lines is None:
+            _log_cursors.pop(key, None)
+            full, cursor = self._read_from_start(job_name, container, pod, observation)
+            if full is None:
+                return  # Container is still waiting; no logs yet.
+            lines = full[after_seq:]
+            start = after_seq
+        else:
+            start = cursor.seq
+        cursor.seq = start + len(lines)
+        if len(_log_cursors) > 1000:
+            _log_cursors.clear()  # Bounded: a lost cursor costs one full read.
+        _log_cursors[key] = cursor
+        for index, content in enumerate(lines, start=start + 1):
+            yield LogChunk(seq=index, content=content)
+
+    def _collector_follows(self, pod: Optional[dict], container: str) -> bool:
+        """Whether the collector's output is appended to this stage's log now.
+
+        It belongs to the last stage's log - the only window into artifact
+        upload problems - once that stage's own output is complete. A group
+        member never terminates while the pod runs (it is a sidecar), so for
+        one the collector having started is the sign its output is done.
+        """
+        if pod is None:
+            return False
+        if not (self._is_last_stage(pod, container) and self._stage_container_is_last(pod, container)):
+            return False
+        status = self._container_status(pod, container)
+        return bool(status) and bool(
+            (status.get("state") or {}).get("terminated") or self._collector_started(pod)
+        )
+
+    @staticmethod
+    def _collector_finished(pod: Optional[dict]) -> bool:
+        for status in ((pod or {}).get("status") or {}).get("containerStatuses") or []:
+            if status.get("name") == "collector":
+                return "terminated" in (status.get("state") or {})
+        return False
+
+    def _read_from_start(
+        self, job_name: str, container: str, pod: Optional[dict], observation: "Observation"
+    ) -> Tuple[Optional[List[str]], Optional["_LogCursor"]]:
+        """Every line so far, from the start, plus a cursor positioned after it."""
+        read = self._read_log(job_name, container, None)
+        if read is None:
+            return None, None
+        records, capped = read
+        cursor = _LogCursor()
+        cursor.pod = _pod_identity(pod)
+        own = _record_lines(records)
+        cursor.stage.settle(records)
+        cursor.tail = own[-5:]
+        observation.tails[f"{job_name}#{container}"] = list(cursor.tail)
+        lines = list(own)
+        if capped:
+            lines.append(_cap_notice())
+            cursor.stage.done = True
+        if self._collector_follows(pod, container):
+            cursor.stage.done = True
+            cursor.collector = _LogStream()
+            lines.extend(self._advance_collector(job_name, pod, cursor.collector) or [])
+        return lines, cursor
+
+    def _read_increment(
+        self,
+        job_name: str,
+        container: str,
+        pod: Optional[dict],
+        cursor: "_LogCursor",
+        observation: "Observation",
+    ) -> Optional[List[str]]:
+        """New lines since the cursor, or None when it no longer lines up."""
+        lines: List[str] = []
+        stage_read = cursor.stage.done
+        if not cursor.stage.done:
+            got = self._advance_stream(job_name, container, cursor.stage)
+            if got is _MISALIGNED:
+                return None
+            if got is not None:
+                fresh, capped = got
+                stage_read = True
+                lines.extend(fresh)
+                cursor.tail = (cursor.tail + fresh)[-5:]
+                if capped:
+                    lines.append(_cap_notice())
+                    cursor.stage.done = True
+        if stage_read:
+            observation.tails[f"{job_name}#{container}"] = list(cursor.tail)
+        if cursor.collector is None and stage_read and self._collector_follows(pod, container):
+            cursor.stage.done = True
+            cursor.collector = _LogStream()
+        if cursor.collector is not None and not cursor.collector.done:
+            collected = self._advance_collector(job_name, pod, cursor.collector)
+            if collected is None:
+                return None
+            lines.extend(collected)
+        return lines
+
+    def _advance_collector(
+        self, job_name: str, pod: Optional[dict], stream: "_LogStream"
+    ) -> Optional[List[str]]:
+        """New collector lines, prefixed; None when the cursor is misaligned."""
+        got = self._advance_stream(job_name, "collector", stream)
+        if got is _MISALIGNED:
+            return None
+        if got is None:
+            return []  # Not started yet.
+        fresh, capped = got
+        lines = [f"[collector] {line}" for line in fresh]
+        if capped:
+            lines.append(_cap_notice())
+            stream.done = True
+        if self._collector_finished(pod):
+            stream.done = True  # Read after the snapshot that shows it over.
+        return lines
+
+    def _advance_stream(self, job_name: str, container: str, stream: "_LogStream"):
+        """``(new lines, capped)``, None if the container has no log yet, or
+        ``_MISALIGNED`` when what came back does not continue what was read."""
+        read = self._read_log(job_name, container, stream.since)
+        if read is None:
+            return None
+        records, capped = read
+        known = len(stream.window)
+        if [_record_key(record) for record in records[:known]] != stream.window:
+            return _MISALIGNED
+        if stream.since is not None and any(record[1] is None for record in records):
+            return _MISALIGNED
+        fresh = _record_lines(records[known:])
+        stream.settle(records)
+        return fresh, capped
+
+    def _read_log(
+        self, job_name: str, container: str, since: Optional[int]
+    ) -> Optional[Tuple[List[Tuple[Optional[str], Optional[int], List[str]]], bool]]:
+        """One ``kubectl logs --timestamps`` read, from ``since`` (an epoch
+        second) or from the start. ``(records, capped)``, or None when the
+        container has no log yet."""
+        limit = int(_env("CI_LOG_LIMIT_BYTES", "16000000"))
+        args = [
+            "logs", f"job/{job_name}", "-c", container, "-n", _namespace(),
+            "--timestamps", "--limit-bytes", str(limit),
+        ]
+        if since is not None:
+            args += ["--since-time", _since_time(since)]
+        rc, out, _ = _kubectl(args, timeout=30)
+        if rc != 0:
+            return None
+        return _log_records(out), len(out.encode("utf-8", "ignore")) >= limit
 
     def _container_log_lines(self, job_name: str, container: str) -> Optional[List[str]]:
         """The stage's whole output so far, as lines.
 
-        Read in full rather than tailed because a line's sequence number IS its
-        position from the start — that is what makes the reader resumable. The
-        byte cap is the price: ``--limit-bytes`` counts from the beginning, so a
-        stage whose output exceeds it stops appearing to produce anything new
-        rather than losing its oldest lines. Generous by default, configurable,
-        and it says when it bites instead of going quiet.
+        Read in full: a line's sequence number IS its position from the start.
+        The byte cap is the price: ``--limit-bytes`` counts from the beginning,
+        so a read past it says so instead of going quiet.
         """
-        limit = int(_env("CI_LOG_LIMIT_BYTES", "16000000"))
-        rc, out, stderr = _kubectl(
-            [
-                "logs", f"job/{job_name}", "-c", container, "-n", _namespace(),
-                "--limit-bytes", str(limit),
-            ],
-            timeout=30,
-        )
-        if rc != 0:
+        read = self._read_log(job_name, container, None)
+        if read is None:
             return None  # Container is still waiting; no logs yet.
-        lines = out.splitlines()
-        if len(out.encode("utf-8", "ignore")) >= limit:
-            lines.append(
-                f"[kubesight] Output passed {limit} bytes — later lines are not shown. "
-                "Raise CI_LOG_LIMIT_BYTES, or have the stage print less."
-            )
+        records, capped = read
+        lines = _record_lines(records)
+        if capped:
+            lines.append(_cap_notice())
         return lines
 
     def collect_artifacts(self, handle: RunnerHandle) -> List[ArtifactRef]:
@@ -3265,5 +3480,140 @@ class KubernetesJobRunnerAdapter:
     def cleanup(self, handle: RunnerHandle) -> None:
         # Per-stage cleanup must NOT delete the shared Job mid-build. The Job's
         # TTL removes it after completion, and ownerReferences GC the Secret and
-        # NetworkPolicy with it; cancel() handles the explicit path.
+        # NetworkPolicy with it; cancel() handles the explicit path. The stage's
+        # log cursor goes: the engine has drained it for the last time.
+        _log_cursors.pop(handle.external_ref, None)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Incremental log reading
+# ---------------------------------------------------------------------------
+
+
+class Observation:
+    """One pass's reads of the cluster, shared by drain_logs and poll.
+
+    ``reads``: job name -> (Job, pod), read once per build per pass.
+    ``tails``: ``job#container`` -> the stage's last output lines as the drain
+    read them after that snapshot - which is where its exit marker is.
+    """
+
+    def __init__(self) -> None:
+        self.reads: Dict[str, Tuple[Optional[dict], Optional[dict]]] = {}
+        self.tails: Dict[str, List[str]] = {}
+
+
+class _LogStream:
+    """Where one container's log has been read up to.
+
+    ``since`` is the epoch second the next read starts at (None: from the
+    start), and ``window`` the entries already taken that a read from
+    ``since`` returns again (timestamp and content) - skipped by count,
+    checked by value.
+    kubelet filters entries one by one (timestamp >= since), so the entries
+    already taken are always the prefix of the next read.
+    """
+
+    def __init__(self) -> None:
+        self.since: Optional[int] = None
+        self.window: List[Optional[str]] = []
+        self.done = False
+
+    def settle(self, records) -> None:
+        """Every record of the read just made has been taken."""
+        if not records:
+            return
+        seconds = [record[1] for record in records]
+        if any(second is None for second in seconds):
+            # Entries without a timestamp cannot be resumed from a time, so
+            # this stream keeps reading from the start, skipping by count.
+            self.since = None
+            self.window = [_record_key(record) for record in records]
+            return
+        top = max(seconds + ([self.since] if self.since is not None else []))
+        self.since = top
+        self.window = [_record_key(record) for record in records if record[1] >= top]
+
+
+class _LogCursor:
+    def __init__(self) -> None:
+        self.seq = 0
+        # The pod the cursor read. A Job that replaced its pod starts a new
+        # log, which only a full read numbers correctly.
+        self.pod: Optional[str] = None
+        self.stage = _LogStream()
+        self.collector: Optional[_LogStream] = None
+        self.tail: List[str] = []
+
+
+# ``job#container`` -> cursor. Per process and best effort: a cursor that is
+# missing or does not match the stored sequence costs one full read.
+_log_cursors: Dict[str, _LogCursor] = {}
+_MISALIGNED = object()
+
+
+def _cap_notice() -> str:
+    limit = int(_env("CI_LOG_LIMIT_BYTES", "16000000"))
+    return (
+        f"[kubesight] Output passed {limit} bytes — later lines are not shown. "
+        "Raise CI_LOG_LIMIT_BYTES, or have the stage print less."
+    )
+
+
+def _since_time(epoch_second: int) -> str:
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(int(epoch_second), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_timestamp(token: str) -> Optional[int]:
+    """The epoch second of a kubelet log timestamp, or None if it is not one."""
+    import calendar
+    from datetime import datetime
+
+    if len(token) < 20 or not token[:4].isdigit() or token[10:11] != "T":
+        return None
+    try:
+        parsed = datetime.fromisoformat(token)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return calendar.timegm(parsed.utctimetuple())
+
+
+def _log_records(out: str) -> List[Tuple[Optional[str], Optional[int], List[str]]]:
+    """``kubectl logs --timestamps`` output as ``(timestamp, second, lines)``.
+
+    One record per log entry. Its content is split exactly the way the whole
+    output used to be (``str.splitlines``), so line numbers are the ones a
+    read without timestamps produced. A record with no timestamp (an older
+    reader, a test double) keeps all of itself as content.
+    """
+    pieces = out.split("\n")
+    if pieces and pieces[-1] == "":
+        pieces.pop()
+    records = []
+    for piece in pieces:
+        token, separator, rest = piece.partition(" ")
+        second = _parse_timestamp(token) if separator else None
+        if second is not None:
+            content, stamp = rest, token
+        else:
+            content, stamp = piece, None
+        records.append((stamp, second, content.splitlines() or [""]))
+    return records
+
+
+def _record_key(record) -> Tuple[Optional[str], Tuple[str, ...]]:
+    return record[0], tuple(record[2])
+
+
+def _pod_identity(pod: Optional[dict]) -> Optional[str]:
+    meta = (pod or {}).get("metadata") or {}
+    return meta.get("uid") or meta.get("name") or None
+
+
+def _record_lines(records) -> List[str]:
+    return [line for record in records for line in record[2]]

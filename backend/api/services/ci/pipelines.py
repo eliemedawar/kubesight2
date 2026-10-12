@@ -1521,7 +1521,9 @@ def _repository_refs(service: CiService) -> Tuple[List[Dict[str, str]], str]:
 
         handler = source_port.get_provider(service.repository_provider)
         ref = handler.parse_repository_url(service.repository_url)
-        items = handler.list_revisions(ref, service.credential_profile)
+        # Parameters choose among branches and tags only; the recent commits a
+        # full listing also fetches were thrown away here.
+        items = handler.list_revisions(ref, service.credential_profile, kinds=("branch", "tag"))
         return [
             {"value": item.value, "type": item.kind}
             for item in items

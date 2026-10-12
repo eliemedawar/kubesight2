@@ -988,6 +988,7 @@ def test_a_lost_running_build_is_reaped(app, client, admin_token, runnable_servi
             # restart would leave it: nothing has happened since.
             _backdate_progress(build, minutes=engine._STALE_BUILD_MINUTES + 5)
 
+            engine._last_reap = 0.0  # The reaper runs every CI_REAP_SECONDS.
             engine.advance_ci_builds()
             assert db.session.get(CiBuild, build_id).status == "timeout"
     finally:

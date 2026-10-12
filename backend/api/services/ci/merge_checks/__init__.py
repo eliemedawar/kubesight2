@@ -900,7 +900,8 @@ def check_payload(row: CiMergeCheck) -> Dict[str, Any]:
         "buildId": row.build_id,
         "buildNumber": build.number if build else None,
         "buildStatus": build.status if build else None,
-        "deliveryState": row.delivery_state,
+        # A verdict being sent right now is still pending to anyone reading.
+        "deliveryState": "pending" if row.delivery_state == delivery.SENDING else row.delivery_state,
         "deliveryAttempts": row.delivery_attempts,
         "deliveryError": row.delivery_error,
         "deliveredAt": _iso(row.delivered_at),
@@ -1163,8 +1164,9 @@ def ingest(
     db.session.commit()
 
     # Optimistic in-progress status, so the pull request shows the check as
-    # running rather than as absent for the next few minutes.
-    delivery.mark_running(check)
+    # running rather than as absent for the next few minutes. Off this request:
+    # the source host is waiting on our answer to its webhook.
+    delivery.mark_running_later(check)
 
     log_audit(
         "ci_merge_check_started",
@@ -1335,13 +1337,12 @@ def settle() -> int:
             logger.exception("Merge check %s could not be evaluated", check.id)
             db.session.rollback()
 
-    for check in delivery.due_checks(SETTLE_BATCH):
-        try:
-            delivery.deliver(check)
-            touched += 1
-        except Exception:  # noqa: BLE001 - delivery records its own failures
-            logger.exception("Merge check %s could not be delivered", check.id)
-            db.session.rollback()
+    # Claimed here, sent off the engine's thread (delivery.dispatch_due).
+    try:
+        touched += delivery.dispatch_due(SETTLE_BATCH)
+    except Exception:  # noqa: BLE001 - delivery records its own failures
+        logger.exception("Merge check verdicts could not be dispatched")
+        db.session.rollback()
     return touched
 
 

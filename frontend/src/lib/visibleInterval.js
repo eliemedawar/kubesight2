@@ -48,3 +48,26 @@ export function setVisibleInterval(fn, intervalMs) {
     }
   };
 }
+
+/**
+ * A promise that resolves once the tab is visible — at once if it already is.
+ *
+ * For polling loops built from chained setTimeouts rather than an interval:
+ * `await whenVisible()` at the top of each tick, and a hidden tab stops
+ * asking the API until somebody looks at it again, then catches up at once.
+ * (Check your own "cancelled" flag after the await: the component may have
+ * unmounted while the tab was hidden.)
+ */
+export function whenVisible() {
+  if (typeof document === "undefined" || !document.hidden) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const onVisibilityChange = () => {
+      if (document.hidden) return;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      resolve();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+  });
+}

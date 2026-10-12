@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { whenVisible } from "../../lib/visibleInterval";
 import { parseApiTime } from "../../lib/apiTime.js";
 import {
   cancelCiBuild,
@@ -83,6 +84,8 @@ export default function BuildDetailDrawer({
     let artifactsLoaded = false;
 
     const load = async () => {
+      await whenVisible(); // A hidden tab stops polling until it is looked at.
+      if (cancelled) return;
       try {
         const data = await getCiBuild(buildId);
         if (cancelled) return;

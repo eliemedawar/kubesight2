@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { setVisibleInterval } from "./visibleInterval";
+import { setVisibleInterval, whenVisible } from "./visibleInterval";
 
 function fakeDocument() {
   const listeners = new Set();
@@ -68,6 +68,46 @@ describe("setVisibleInterval", () => {
     stop();
     vi.advanceTimersByTime(5000);
     expect(fn).not.toHaveBeenCalled();
+    expect(doc.listenerCount()).toBe(0);
+  });
+});
+
+describe("whenVisible", () => {
+  let doc;
+
+  beforeEach(() => {
+    doc = fakeDocument();
+    vi.stubGlobal("document", doc);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("resolves at once while the tab is visible", async () => {
+    let done = false;
+    whenVisible().then(() => {
+      done = true;
+    });
+    await Promise.resolve();
+    expect(done).toBe(true);
+    expect(doc.listenerCount()).toBe(0);
+  });
+
+  it("waits for the tab to come back, then lets go of its listener", async () => {
+    doc.hidden = true;
+    let done = false;
+    whenVisible().then(() => {
+      done = true;
+    });
+    doc.fire();
+    await Promise.resolve();
+    expect(done).toBe(false);
+
+    doc.hidden = false;
+    doc.fire();
+    await Promise.resolve();
+    expect(done).toBe(true);
     expect(doc.listenerCount()).toBe(0);
   });
 });

@@ -46,6 +46,8 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import Any, Dict, List, Optional, Tuple
 
+from sqlalchemy.orm import selectinload
+
 from ...audit import log_audit
 from ...db import db
 from ...models_ci import SERVER_STAGE_TYPES, TRIGGER_TYPES, CiBuild, CiBuildStage, CiService
@@ -87,6 +89,12 @@ logger = logging.getLogger(__name__)
 # How many queued builds one tick will try to start. Keeps a flood of triggers
 # from monopolising the shared scheduler thread.
 _DISPATCH_PER_TICK = int(os.getenv("CI_DISPATCH_PER_TICK", "5"))
+# How many queued builds one tick may LOOK at to find those starts. A build
+# that cannot start (no runner of its kind is free) no longer ends the search,
+# so a few stuck builds at the head of the queue cannot hold up the rest.
+_DISPATCH_SCAN_PER_TICK = max(
+    _DISPATCH_PER_TICK, int(os.getenv("CI_DISPATCH_SCAN_PER_TICK", "20"))
+)
 # A running build with no PROGRESS for this long is presumed lost. Progress is
 # the latest of: a stage starting or ending, a log line arriving, and — for an
 # external agent — the agent heartbeating. A long build that keeps doing things
@@ -109,6 +117,12 @@ _pass_lock = threading.Lock()
 # it keeps its own slower cadence instead of running on every fast pass.
 _BOOKKEEPING_SECONDS = float(os.getenv("CI_BOOKKEEPING_SECONDS", "5"))
 _last_bookkeeping = 0.0
+# The newest queued build the last bookkeeping ran for (see _run_pass).
+_bookkept_for = None
+# The reaper answers "has this build been silent for an hour?" - a question
+# that does not need asking every second.
+_REAP_SECONDS = float(os.getenv("CI_REAP_SECONDS", "30"))
+_last_reap = 0.0
 
 # What a runner can execute is the RUNNER's statement, not the engine's: each
 # adapter exposes ``supported_stage_types()`` (the Kubernetes adapter adds
@@ -596,12 +610,18 @@ def advance_ci_builds() -> bool:
 
 
 def _run_pass() -> bool:
-    global _last_bookkeeping
+    global _last_bookkeeping, _bookkept_for
     now = time.monotonic()
-    # Always while something is queued: "no runner is online" must never be a
-    # stale answer for a build that is waiting on exactly that.
-    if now - _last_bookkeeping >= _BOOKKEEPING_SECONDS or queue_service.depth():
+    # On its own interval even while builds queue: at one pass a second, a
+    # queue that cannot drain used to rerun all three every second. But a
+    # build that has just been queued gets fresh runner statuses at once:
+    # "no runner is online" must not be the stale answer it starts with.
+    newest = queue_service.newest_queued()
+    if now - _last_bookkeeping >= _BOOKKEEPING_SECONDS or (
+        newest is not None and newest != _bookkept_for
+    ):
         _last_bookkeeping = now
+        _bookkept_for = newest
         try:
             # Runners KubeSight manages in-process have nothing to heartbeat
             # from; their status is derived (enabled + adapter registered).
@@ -616,7 +636,7 @@ def _run_pass() -> bool:
             logger.exception("CI runner bookkeeping failed")
 
     for step in (
-        _reap_stale_builds,
+        _reap_when_due,
         _process_cancellations,
         _advance_running,
         _dispatch_queued,
@@ -628,7 +648,39 @@ def _run_pass() -> bool:
         except Exception:
             logger.exception("CI engine step %s failed", step.__name__)
             db.session.rollback()
-    return True
+    try:
+        return _needs_fast_ticks()
+    except Exception:
+        db.session.rollback()
+        return True
+
+
+def _needs_fast_ticks() -> bool:
+    """Whether the next pass should come in a second rather than at the idle
+    interval: something is queued, or a running build is doing anything other
+    than waiting for a person at an Approval stage. A vote advances its build
+    and wakes the ticker itself (approval_stage.decide), and the idle interval
+    still checks the stage's own timeout - so a build that waits days for an
+    approver no longer keeps the engine at one pass a second."""
+    if queue_service.depth():
+        return True
+    return bool(
+        CiBuild.query.filter(
+            CiBuild.status == "running",
+            ~CiBuild.stages.any(
+                db.and_(CiBuildStage.stage_type == "approval", CiBuildStage.status == "running")
+            ),
+        ).count()
+    )
+
+
+def _reap_when_due() -> None:
+    global _last_reap
+    now = time.monotonic()
+    if now - _last_reap < _REAP_SECONDS:
+        return
+    _last_reap = now
+    _reap_stale_builds()
 
 
 def _fire_due_schedules() -> int:
@@ -712,33 +764,48 @@ def advance_build_now(build_id: int) -> None:
         _pass_lock.release()
 
 
-def _last_progress_at(build: CiBuild) -> Optional[datetime]:
-    """When this build last visibly did something."""
+def _last_progress_at(build: CiBuild, *, recent_enough: Optional[datetime] = None) -> Optional[datetime]:
+    """When this build last visibly did something.
+
+    The timestamps already on the rows come first; the log is asked only when
+    they are older than ``recent_enough`` (the reaper's cutoff), and then only
+    for the newest line of each RUNNING stage - one index lookup each, rather
+    than a MAX over every line the build ever printed. A finished stage's
+    lines are covered by its own ``finished_at``.
+    """
     from ...models_ci import CiLogChunk
 
     moments: List[Optional[datetime]] = [
         _aware(build.started_at),
         _aware(build.queued_at),
     ]
-    stage_ids = []
+    running_ids = []
     for stage in build.stages:
-        stage_ids.append(stage.id)
+        if stage.status == "running":
+            running_ids.append(stage.id)
         moments.append(_aware(stage.started_at))
         moments.append(_aware(stage.finished_at))
-    if stage_ids:
-        latest_log = (
-            db.session.query(db.func.max(CiLogChunk.created_at))
-            .filter(CiLogChunk.build_stage_id.in_(stage_ids))
-            .scalar()
-        )
-        moments.append(_aware(latest_log))
     runner = build.runner
     # Only an external agent's heartbeat says anything about this build: it is
     # the agent executing it. Self-managed runners have no heartbeat at all.
     if runner is not None and runner.runner_type not in ("mock", "kubernetes"):
         moments.append(_aware(runner.last_heartbeat_at))
     present = [moment for moment in moments if moment is not None]
-    return max(present) if present else None
+    latest = max(present) if present else None
+    if recent_enough is not None and latest is not None and latest >= recent_enough:
+        return latest
+    for stage_id in running_ids:
+        newest = (
+            db.session.query(CiLogChunk.created_at)
+            .filter(CiLogChunk.build_stage_id == stage_id)
+            .order_by(CiLogChunk.seq.desc())
+            .limit(1)
+            .scalar()
+        )
+        newest = _aware(newest)
+        if newest is not None and (latest is None or newest > latest):
+            latest = newest
+    return latest
 
 
 def _build_deadline_minutes(build: CiBuild) -> int:
@@ -772,7 +839,12 @@ def _reap_stale_builds() -> None:
     """
     now = _now()
     idle_cutoff = now - timedelta(minutes=_STALE_BUILD_MINUTES)
-    for build in CiBuild.query.filter(CiBuild.status == "running").all():
+    builds = (
+        CiBuild.query.options(selectinload(CiBuild.stages))
+        .filter(CiBuild.status == "running")
+        .all()
+    )
+    for build in builds:
         started = _aware(build.started_at) or _aware(build.queued_at)
         deadline = _build_deadline_minutes(build)
         if started and started < now - timedelta(minutes=deadline):
@@ -784,7 +856,7 @@ def _reap_stale_builds() -> None:
             _finish_build(build, "timeout", message)
             db.session.commit()
             continue
-        last = _last_progress_at(build)
+        last = _last_progress_at(build, recent_enough=idle_cutoff)
         if last and last < idle_cutoff:
             message = (
                 f"No progress for {_STALE_BUILD_MINUTES} minutes: no stage changed, "
@@ -834,7 +906,12 @@ def _process_cancellations() -> None:
 
 
 def _advance_running() -> None:
-    for build in CiBuild.query.filter(CiBuild.status == "running").all():
+    builds = (
+        CiBuild.query.options(selectinload(CiBuild.stages))
+        .filter(CiBuild.status == "running")
+        .all()
+    )
+    for build in builds:
         try:
             _advance_one(build)
         except Exception:
@@ -900,7 +977,10 @@ def _advance_one(build: CiBuild) -> None:
         db.session.commit()
         return
 
-    _pump_logs(build, stage, adapter, handle)
+    # The runner's view of the build, read once and shared by the drain and
+    # the poll below (and the final drain, if the stage ended).
+    observation = _observe(adapter, [handle])
+    _pump_logs(build, stage, adapter, handle, observation)
 
     definition = _definition_for(build, stage)
     timeout = int(definition.get("timeoutSeconds") or 1800)
@@ -913,7 +993,11 @@ def _advance_one(build: CiBuild) -> None:
         status = TIMEOUT
     else:
         try:
-            status = adapter.poll(handle)
+            status = (
+                adapter.poll(handle, observation=observation)
+                if observation is not None
+                else adapter.poll(handle)
+            )
         except RunnerError as exc:
             logger.warning("Runner poll failed for stage %s: %s", stage.id, exc)
             status = FAILED
@@ -921,7 +1005,9 @@ def _advance_one(build: CiBuild) -> None:
     if status not in TERMINAL_STATUSES:
         return
 
-    _close_from_runner(build, stage, status, adapter, handle, definition, timeout)
+    _close_from_runner(
+        build, stage, status, adapter, handle, definition, timeout, observation=observation
+    )
     if _parallel_mode(build)[0] == parallel_groups.SEQUENTIAL and not _runs_whole_build(adapter):
         # A group member run on its own: say so in its log. Appended once the
         # stage is over, never before — a per-stage runner numbers its own
@@ -978,11 +1064,14 @@ def _close_from_runner(
     timeout: int,
     *,
     cancelled_message: Optional[str] = None,
+    observation=None,
 ) -> None:
     """Close a stage the runner reported terminal, and release what it held."""
     # One final drain: output flushed as the container exited would otherwise
     # be lost, because the pump before the poll ran ahead of the terminal state.
-    _pump_logs(build, stage, adapter, handle)
+    # (With an observation the runner knows what it already read completely,
+    # so this costs nothing when there is nothing left.)
+    _pump_logs(build, stage, adapter, handle, observation)
 
     if status == SUCCEEDED:
         _collect_artifacts(build, stage, adapter, handle, definition)
@@ -1135,13 +1224,18 @@ def _advance_group(build: CiBuild, rows: List[CiBuildStage]) -> None:
                 _close_stage(row, "failed", "The runner for this stage is no longer available.")
                 continue
             handles[row.id] = handle
-            _pump_logs(build, row, adapter, handle)
+        observation = _observe(adapter, list(handles.values()))
+        for row in running:
+            handle = handles.get(row.id)
+            if handle is None:
+                continue
+            _pump_logs(build, row, adapter, handle, observation)
             timed_out = _member_timed_out(build, row, adapter, handle, whole_build)
             if timed_out:
                 statuses[row.id] = TIMEOUT
 
         to_poll = [row for row in running if row.id in handles and row.id not in statuses]
-        statuses.update(_poll_members(adapter, to_poll, handles))
+        statuses.update(_poll_members(adapter, to_poll, handles, observation))
 
         # Cancelled members last, so a fail-fast stop can name the member
         # whose failure caused it even when both were seen in this one poll.
@@ -1165,6 +1259,7 @@ def _advance_group(build: CiBuild, rows: List[CiBuildStage]) -> None:
                 definition,
                 int(definition.get("timeoutSeconds") or _DEFAULT_STAGE_TIMEOUT_SECONDS),
                 cancelled_message=message,
+                observation=observation,
             )
         db.session.commit()
 
@@ -1242,14 +1337,17 @@ def _member_timed_out(
     return True
 
 
-def _poll_members(adapter, rows: List[CiBuildStage], handles: Dict[int, RunnerHandle]) -> Dict[int, str]:
+def _poll_members(
+    adapter, rows: List[CiBuildStage], handles: Dict[int, RunnerHandle], observation=None
+) -> Dict[int, str]:
     """Every member's status, in one observation when the runner offers one."""
     if not rows:
         return {}
     many = getattr(adapter, "poll_many", None)
     if callable(many):
         try:
-            by_ref = many([handles[row.id] for row in rows])
+            members = [handles[row.id] for row in rows]
+            by_ref = many(members, observation=observation) if observation is not None else many(members)
             return {row.id: by_ref.get(handles[row.id].external_ref, RUNNING) for row in rows}
         except RunnerError as exc:
             logger.warning("Runner poll failed for a parallel group: %s", exc)
@@ -1338,11 +1436,26 @@ def _advance_server_stage(build: CiBuild, stage: CiBuildStage) -> None:
 
 
 def _dispatch_queued() -> None:
-    claimed = queue_service.claim_next(_DISPATCH_PER_TICK)
+    claimed = queue_service.claim_next(_DISPATCH_SCAN_PER_TICK)
     if not claimed:
         db.session.rollback()
-        return
+    else:
+        _dispatch_claimed(claimed)
+        # Ends the claim's transaction: rows claimed but not reached this pass
+        # are unlocked now, not whenever a later step happens to commit.
+        db.session.commit()
+    try:
+        queue_service.explain_concurrency_waits()
+    except Exception:
+        logger.exception("Could not record why queued builds wait")
+        db.session.rollback()
+
+
+def _dispatch_claimed(claimed: List[int]) -> None:
+    started = 0
     for build_id in claimed:
+        if started >= _DISPATCH_PER_TICK:
+            break
         build = db.session.get(CiBuild, build_id)
         if build is None or build.status != "queued":
             continue
@@ -1384,6 +1497,7 @@ def _dispatch_queued() -> None:
         scheduler_service.acquire_slot(selection.runner)
         db.session.add(build)
         db.session.commit()
+        started += 1
         # INPROGRESS now when the commit is already known; otherwise when the
         # checkout reports it (routes/ci_worker.report_meta).
         build_status_service.report(build)
@@ -2018,39 +2132,44 @@ def _build_plan(build: CiBuild, adapter, callback_token: str) -> List[StageExecu
 
 
 
-# A viewer polls a running stage about once a second, but logs were only
-# ingested on the shared scheduler tick — so output could sit unseen for a whole
-# tick even though the pod had already printed it. Draining on demand closes
-# that gap; the cooldown keeps several viewers of one build from turning into
-# several `kubectl logs` calls a second. Matched to the viewer's own poll so a
-# tailing log is never a whole beat behind the pod.
-_LOG_PUMP_COOLDOWN_SECONDS = float(os.getenv("CI_LOG_PUMP_COOLDOWN_SECONDS", "1"))
-_last_log_pump: Dict[int, float] = {}
+# Building a masker decrypts every secret in scope, so it is built only when
+# there are lines to mask and then kept for a short while. Keyed by STAGE, not
+# build: a secret added mid-build reaches the stages that start after it, and
+# a stage's masker is built after that stage started.
+_MASKER_TTL_SECONDS = float(os.getenv("CI_LOG_MASKER_TTL_SECONDS", "60"))
+_maskers: Dict[Tuple[int, int, str], Tuple[float, Any]] = {}
+_maskers_lock = threading.Lock()
 
 
-def pump_stage_logs(build: CiBuild, stage: CiBuildStage) -> None:
-    """Drain a running stage's newest output now, if it is not too soon."""
-    if stage.status != "running":
-        return
+def log_masker(build: CiBuild, stage_id: int = 0):
+    """The masker for this build's output, from a short per-stage cache."""
+    # queued_at too: ids are reused when a database is recreated (tests), and
+    # a masker must never outlive the build it was made for.
+    key = (int(build.id or 0), int(stage_id or 0), str(build.queued_at))
     now = time.monotonic()
-    if now - _last_log_pump.get(stage.id, 0.0) < _LOG_PUMP_COOLDOWN_SECONDS:
-        return
-    if len(_last_log_pump) > 500:
-        _last_log_pump.clear()  # Bounded: these are only rate-limit timestamps.
-    _last_log_pump[stage.id] = now
+    with _maskers_lock:
+        cached = _maskers.get(key)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+    mask = logs_service.build_masker(_mask_values(build))
+    with _maskers_lock:
+        if len(_maskers) > 500:
+            _maskers.clear()  # Bounded: a dropped masker is only rebuilt.
+        _maskers[key] = (now + _MASKER_TTL_SECONDS, mask)
+    return mask
 
-    adapter = _adapter_for(build)
-    handle = _handle_for(build, stage)
-    if adapter is None or handle is None:
-        return
+
+def _observe(adapter, handles: List[RunnerHandle]):
+    """One read of the runner's view of these stages, when it offers that
+    (see the Kubernetes runner's ``observe``) - or None."""
+    observe = getattr(adapter, "observe", None)
+    if not callable(observe) or not handles:
+        return None
     try:
-        _pump_logs(build, stage, adapter, handle)
-        db.session.commit()
+        return observe(handles)
     except Exception:
-        # Reading logs must never break reading logs: the scheduler tick will
-        # drain the same output shortly.
-        db.session.rollback()
-        logger.exception("On-demand log pump failed for stage %s", stage.id)
+        logger.exception("Observing runner state failed")
+        return None
 
 
 def _mask_values(build: CiBuild) -> List[str]:
@@ -2083,21 +2202,37 @@ def _mask_values(build: CiBuild) -> List[str]:
     return values
 
 
-def _pump_logs(build: CiBuild, stage: CiBuildStage, adapter, handle: RunnerHandle) -> None:
-    """Drain new output into ``ci_log_chunks``, masked on the way in."""
-    mask = logs_service.build_masker(_mask_values(build))
-    after = logs_service.highest_seq(stage.id)
+def _pump_logs(
+    build: CiBuild, stage: CiBuildStage, adapter, handle: RunnerHandle, observation=None
+) -> None:
+    """Drain new output into ``ci_log_chunks``, masked on the way in.
+
+    Never raises: output that could not be read or stored this pass is read
+    again on the next, and a log problem must never be what fails a build.
+    """
+    if stage.log_truncated:
+        return  # At the stage's line cap: nothing more would be stored.
     try:
-        chunks = list(adapter.drain_logs(handle, after))
+        after = logs_service.highest_seq(stage.id)
+        if observation is not None:
+            chunks = list(adapter.drain_logs(handle, after, observation=observation))
+        else:
+            chunks = list(adapter.drain_logs(handle, after))
     except Exception:
         logger.exception("Draining logs for stage %s failed", stage.id)
         return
-    if chunks:
+    if not chunks:
+        return
+    try:
         logs_service.append(
             stage,
             [(chunk.seq, chunk.content, chunk.stream) for chunk in chunks],
-            mask=mask,
+            mask=log_masker(build, stage.id),
+            known_max=after,
         )
+    except Exception:
+        logger.exception("Storing logs for stage %s failed", stage.id)
+        db.session.rollback()
 
 
 def _collect_artifacts(
@@ -2162,7 +2297,20 @@ def list_builds(
     status: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
-) -> Tuple[List[CiBuild], int]:
+    *,
+    with_total: bool = True,
+    with_service: bool = False,
+) -> Tuple[List[CiBuild], Optional[int]]:
+    """A page of builds, newest first, with what ``build_summary`` reads
+    loaded in a fixed number of statements: the stages in one SELECT ... IN,
+    the requesters in another (without their access collections - see
+    ``user_display_loader``), and the services too when ``with_service``.
+
+    ``with_total=False`` skips the COUNT for callers that only want a page
+    (the total comes back as None).
+    """
+    from ...models import user_display_loader
+
     query = CiBuild.query
     if service_id is not None:
         query = query.filter(CiBuild.service_id == service_id)
@@ -2177,9 +2325,13 @@ def list_builds(
         )
     elif status and status != "all":
         query = query.filter(CiBuild.status == status)
-    total = query.count()
+    total = query.order_by(None).count() if with_total else None
+    options = [selectinload(CiBuild.stages), user_display_loader(CiBuild.requested_by)]
+    if with_service:
+        options.append(selectinload(CiBuild.service))
     rows = (
-        query.order_by(CiBuild.id.desc())
+        query.options(*options)
+        .order_by(CiBuild.id.desc())
         .limit(max(1, min(int(limit), 200)))
         .offset(max(0, int(offset)))
         .all()
