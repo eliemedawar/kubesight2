@@ -74,6 +74,17 @@ export default function DashboardPage({
     return <DashboardSkeleton />;
   }
 
+  // No cluster means no summary will ever arrive — say so instead of leaving
+  // the skeleton up forever (a fresh install, or a user with no cluster scope).
+  if (!hasClusters && !accessError) {
+    return (
+      <>
+        <PageTitle title={pageTitle} subtitle={pageSubtitle} />
+        <EmptyState message={EMPTY_MESSAGES.noClusters} />
+      </>
+    );
+  }
+
   if (!summaryReady) {
     if (isAccessDeniedError(accessError)) {
       return (
@@ -110,15 +121,6 @@ export default function DashboardPage({
       <>
         <PageTitle title={pageTitle} subtitle={pageSubtitle} />
         <ErrorBanner message={accessError} suppressAccessDenied={false} />
-      </>
-    );
-  }
-
-  if (!hasClusters) {
-    return (
-      <>
-        <PageTitle title={pageTitle} subtitle={pageSubtitle} />
-        <EmptyState message={EMPTY_MESSAGES.noClusters} />
       </>
     );
   }

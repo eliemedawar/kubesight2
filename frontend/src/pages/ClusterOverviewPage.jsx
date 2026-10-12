@@ -3,7 +3,14 @@ import PageTitle from "../components/common/PageTitle.jsx";
 import StatCard from "../components/common/StatCard.jsx";
 import InfoCard from "../components/common/InfoCard.jsx";
 import { EMPTY_MESSAGES } from "../utils/authz.js";
-import { storageDetail, storageValue, workloadsValue } from "../utils/clusterOverview.js";
+import {
+  cpuValue,
+  memoryValue,
+  statusValue,
+  storageDetail,
+  storageValue,
+  workloadsValue,
+} from "../utils/clusterOverview.js";
 
 export default function ClusterOverviewPage({
   cluster,
@@ -36,7 +43,7 @@ export default function ClusterOverviewPage({
       <section className="stat-grid">
         <StatCard
           title="Status"
-          value={cluster.status || "unknown"}
+          value={statusValue(cluster.status)}
           detail={`Region ${cluster.region || "unknown"}`}
         />
         <StatCard
@@ -46,20 +53,12 @@ export default function ClusterOverviewPage({
         />
         <StatCard
           title="CPU Usage"
-          value={
-            cpu
-              ? `${Number(cpu.usedCores).toFixed(2)}/${Number(cpu.capacityCores).toFixed(2)} cores`
-              : "-"
-          }
+          value={cpuValue(cpu)}
           detail="Live usage from kubectl top"
         />
         <StatCard
           title="Memory Usage"
-          value={
-            memory
-              ? `${Number(memory.usedGiB).toFixed(2)}/${Number(memory.capacityGiB).toFixed(2)} GiB`
-              : "-"
-          }
+          value={memoryValue(memory)}
           detail="Live usage from kubectl top"
         />
         <StatCard

@@ -334,7 +334,8 @@ export default function ResourcesPage({
       const resolvedNamespace = resource.namespace || namespace;
       const resourceName = resource.name;
 
-      if (actionId === "logs") {
+      // For a workload the Logs page opens its first pod (name prefix match).
+      if (actionId === "logs" || actionId === "view-logs") {
         onNavigateToLogs?.({
           clusterId: resolvedCluster,
           namespace: resolvedNamespace,

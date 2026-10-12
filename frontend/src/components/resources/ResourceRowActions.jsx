@@ -54,13 +54,17 @@ function stopRowClick(event) {
   event.stopPropagation();
 }
 
+// Only the keys that would activate a clickable row. Stopping every keydown here
+// also swallowed Escape, so a dialog opened from these buttons (focus still on
+// the button) could not be closed with the keyboard.
+function stopRowKey(event) {
+  if (event.key === "Enter" || event.key === " ") {
+    event.stopPropagation();
+  }
+}
+
 function resolveActionConfig(id) {
-  return (
-    ACTION_CONFIG[id] || {
-      label: id.replace(/-/g, " "),
-      Icon: IconDocument,
-    }
-  );
+  return ACTION_CONFIG[id];
 }
 
 export default function ResourceRowActions({ actions, fallback = null, onAction }) {
@@ -68,10 +72,13 @@ export default function ResourceRowActions({ actions, fallback = null, onAction 
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef(null);
 
-  let ids = parseActions(actions);
+  // Callers append write actions (restart, edit) to what the API sent, so the
+  // same id can arrive twice; ids nothing handles (e.g. "scale") would render
+  // as buttons that do nothing, so only known actions are shown.
+  let ids = [...new Set(parseActions(actions))].filter((id) => ACTION_CONFIG[id]);
 
   if (!ids.length && fallback) {
-    ids = [normalizeActionId(fallback)];
+    ids = [normalizeActionId(fallback)].filter((id) => ACTION_CONFIG[id]);
   }
 
   useEffect(() => {
@@ -83,8 +90,21 @@ export default function ResourceRowActions({ actions, fallback = null, onAction 
         setMenuOpen(false);
       }
     };
+    // Capture phase, and the key is claimed, so the app-wide dialog stack
+    // leaves whatever is open underneath alone.
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMenuOpen(false);
+        menuRef.current?.querySelector(".resource-actions-toggle")?.focus();
+      }
+    };
     document.addEventListener("mousedown", handlePointerDown);
-    return () => document.removeEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown, true);
+    };
   }, [menuOpen]);
 
   if (!ids.length) {
@@ -103,7 +123,7 @@ export default function ResourceRowActions({ actions, fallback = null, onAction 
         className="resource-actions-compact"
         ref={menuRef}
         onClick={stopRowClick}
-        onKeyDown={stopRowClick}
+        onKeyDown={stopRowKey}
         role="presentation"
       >
         <button
@@ -144,7 +164,7 @@ export default function ResourceRowActions({ actions, fallback = null, onAction 
     <div
       className="inventory-actions-cell inventory-actions-cell--icons resource-actions-cell"
       onClick={stopRowClick}
-      onKeyDown={stopRowClick}
+      onKeyDown={stopRowKey}
       role="presentation"
     >
       {ids.map((id) => {

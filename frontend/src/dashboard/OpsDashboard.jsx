@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { formatDashboardTime } from "../utils/dashboardStatus.js";
 import { buildAttentionItems, formatBytes, usageTone } from "./attention.js";
+import { parseApiTime } from "../lib/apiTime.js";
 
 // KubeSight Operations Dashboard — triage first. Top to bottom it answers:
 // is anything broken (Needs attention), how much room is left (vitals), which
@@ -28,8 +29,9 @@ function withUnit(display, unit) {
 }
 
 // Audit timestamps span days, so a bare clock time misleads; say how long ago.
+// They arrive as naive UTC, so parse them as UTC (not local) or the age drifts.
 function ago(iso, fallback) {
-  const t = iso ? new Date(iso).getTime() : NaN;
+  const t = parseApiTime(iso);
   if (!Number.isFinite(t)) return fallback || "";
   const mins = Math.max(0, Math.round((Date.now() - t) / 60000));
   if (mins < 1) return "just now";
@@ -93,7 +95,7 @@ function Attention({ items, summary, canOpen, onNavigate }) {
         <div>
           <h2>Nothing needs attention</h2>
           <p>
-            {nodes.ready}/{nodes.total} nodes ready · {running.toLocaleString()} pods running · no critical alerts
+            {nodes.ready ?? "—"}/{nodes.total ?? "—"} nodes ready · {running.toLocaleString()} pods running · no critical alerts
           </p>
         </div>
       </section>
@@ -391,7 +393,10 @@ function Activity({ events, canOpen, onNavigate }) {
             <li key={`${event.createdAt || event.time}-${i}`} className="db-list-row db-event">
               <span className={`db-dot db-dot--${eventTone(event)}`} />
               <span className="db-event-msg">{event.message}</span>
-              <span className="db-list-meta" title={event.createdAt || undefined}>{ago(event.createdAt, event.time)}</span>
+              <span
+                className="db-list-meta"
+                title={Number.isFinite(parseApiTime(event.createdAt)) ? new Date(parseApiTime(event.createdAt)).toLocaleString() : undefined}
+              >{ago(event.createdAt, event.time)}</span>
             </li>
           ))}
         </ul>

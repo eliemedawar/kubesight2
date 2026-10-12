@@ -192,7 +192,7 @@ export default function ClustersPage({
       {contentReady && canManageRecipients ? (
         <div className="sg-ph-actions">
           {/* Who approves and how many each cluster needs: Approvals → Rules. */}
-          <a className="btn-outline" href="#/approvals/rules">
+          <a className="btn-outline sg-clusters-rules-link" href="#/approvals/rules">
             <MailIcon />
             Approval rules
           </a>

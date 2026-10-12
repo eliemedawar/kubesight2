@@ -84,8 +84,12 @@ export default function LogsPage({
 
         setFilters((prev) => {
           const preferredName = preferredPod || "";
+          // A workload name (Resources → View logs on a deployment) opens its
+          // first pod; a pod that is gone leaves the picker empty, not undefined.
           const resolvedPod = preferredName
-            ? items.find((pod) => pod.name === preferredName)?.name
+            ? items.find((pod) => pod.name === preferredName)?.name ||
+              items.find((pod) => pod.name.startsWith(`${preferredName}-`))?.name ||
+              ""
             : items.find((pod) => pod.name === prev.pod)?.name || items[0]?.name || "";
           return {
             ...prev,
@@ -242,6 +246,7 @@ export default function LogsPage({
               onClear={clearLogs}
               onSearchChange={(value) => updateFilters({ searchText: value })}
               onJumpToLatestRef={jumpRef}
+              downloadName={[filters.pod, filters.container].filter(Boolean).join("-")}
               emptyMessage={
                 hasTarget
                   ? "No logs found for the selected container."

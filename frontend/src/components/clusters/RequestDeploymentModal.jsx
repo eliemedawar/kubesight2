@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import useEscapeKey from "../../hooks/useEscapeKey.js";
 
 /**
  * Modal for requesting a deployment or change in a cluster. The request is
@@ -39,6 +40,8 @@ export default function RequestDeploymentModal({
     }
     return undefined;
   }, [open]);
+
+  useEscapeKey(open, onClose, busy);
 
   if (!open) return null;
 

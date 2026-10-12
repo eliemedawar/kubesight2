@@ -12,7 +12,9 @@ import {
   setClusterRegistries,
 } from "../api/registriesApi.js";
 import { formatAccessError } from "../utils/authz.js";
+import { parseApiTime } from "../lib/apiTime.js";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
+import useEscapeKey from "../hooks/useEscapeKey.js";
 
 // Stable empty selection so the registries modal's reset effect doesn't loop.
 const EMPTY_IDS = [];
@@ -37,15 +39,13 @@ const emptyForm = () => ({
   connectionTimeout: "",
 });
 
+// The API sends naive UTC timestamps; parsed as local time they drift by the UTC offset.
 function formatDate(value) {
   if (!value) {
     return "-";
   }
-  try {
-    return new Date(value).toLocaleString();
-  } catch {
-    return value;
-  }
+  const ms = parseApiTime(value);
+  return Number.isFinite(ms) ? new Date(ms).toLocaleString() : String(value);
 }
 
 function statusLabel(cluster) {
@@ -146,9 +146,18 @@ function buildPayload(form, mode) {
 
 function ClusterModal({ open, mode, initial, onClose, onSave, saving, error }) {
   const [form, setForm] = useState(emptyForm());
+  // Validation speaks up once the user tries to save, not the moment the form opens.
+  const [attempted, setAttempted] = useState(false);
+  const close = useCallback(() => {
+    if (!saving) {
+      onClose();
+    }
+  }, [saving, onClose]);
+  useEscapeKey(open, close, saving);
 
   useEffect(() => {
     if (open) {
+      setAttempted(false);
       setForm({
         ...emptyForm(),
         connectionMethod: initial?.connectionMethod || "kubeconfig",
@@ -187,6 +196,7 @@ function ClusterModal({ open, mode, initial, onClose, onSave, saving, error }) {
 
   const handleSubmit = async (event) => {
     event.preventDefault();
+    setAttempted(true);
     const validationError = validateForm(form, mode);
     if (validationError) {
       return;
@@ -196,13 +206,14 @@ function ClusterModal({ open, mode, initial, onClose, onSave, saving, error }) {
 
   const isKubeconfig = form.connectionMethod === "kubeconfig";
   const isManual = !isKubeconfig;
-  const localError = validateForm(form, mode);
+  const localError = attempted ? validateForm(form, mode) : null;
 
   return (
-    <div className="modal-overlay" role="presentation" onClick={onClose}>
+    <div className="modal-overlay" role="presentation" onClick={close}>
       <section
         className="card modal-panel cluster-modal"
         role="dialog"
+        aria-modal="true"
         aria-labelledby="cluster-modal-title"
         onClick={(event) => event.stopPropagation()}
       >
@@ -214,12 +225,12 @@ function ClusterModal({ open, mode, initial, onClose, onSave, saving, error }) {
               the browser.
             </p>
           </div>
-          <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
-            <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" /></svg>
+          <button type="button" className="modal-close" onClick={close} disabled={saving} aria-label="Close">
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
           </button>
         </header>
 
-        <form className="cluster-form" onSubmit={handleSubmit}>
+        <form className="cluster-form" onSubmit={handleSubmit} noValidate>
           <fieldset className="cluster-connection-method">
             <legend>Connection Method</legend>
             <label className="cluster-radio">
@@ -410,7 +421,7 @@ function ClusterModal({ open, mode, initial, onClose, onSave, saving, error }) {
               ) : null}
 
               {form.authenticationType === "anonymous" ? (
-                <p className="banner-message warn cluster-anonymous-warning">
+                <p className="banner-message warning-banner cluster-anonymous-warning">
                   Anonymous Kubernetes access is rarely enabled in production and may fail.
                 </p>
               ) : null}
@@ -479,14 +490,14 @@ function ClusterModal({ open, mode, initial, onClose, onSave, saving, error }) {
             ) : null}
           </div>
 
-          {localError ? <p className="routing-error">{localError}</p> : null}
-          {error ? <p className="routing-error">{error}</p> : null}
+          {localError ? <p className="routing-error" role="alert">{localError}</p> : null}
+          {error ? <p className="routing-error" role="alert">{error}</p> : null}
           <footer className="modal-actions">
-            <button type="button" onClick={onClose} disabled={saving}>
+            <button type="button" onClick={close} disabled={saving}>
               Cancel
             </button>
-            <button type="submit" disabled={saving || Boolean(localError)}>
-              {saving ? "Saving..." : mode === "create" ? "Add Cluster" : "Save Changes"}
+            <button type="submit" className="primary" disabled={saving}>
+              {saving ? (mode === "create" ? "Saving and testing connection..." : "Saving...") : mode === "create" ? "Add Cluster" : "Save Changes"}
             </button>
           </footer>
         </form>
@@ -503,6 +514,7 @@ function ClusterRegistriesModal({ cluster, registries, selected, onClose, onSave
   useEffect(() => {
     setPicked(selected);
   }, [selected]);
+  useEscapeKey(Boolean(cluster), onClose, saving);
 
   if (!cluster) {
     return null;
@@ -512,10 +524,11 @@ function ClusterRegistriesModal({ cluster, registries, selected, onClose, onSave
     setPicked((prev) => (prev.includes(id) ? prev.filter((r) => r !== id) : [...prev, id]));
 
   return (
-    <div className="modal-overlay" role="presentation" onClick={onClose}>
+    <div className="modal-overlay" role="presentation" onClick={saving ? undefined : onClose}>
       <section
         className="card modal-panel cluster-modal"
         role="dialog"
+        aria-modal="true"
         aria-labelledby="cluster-registries-title"
         onClick={(event) => event.stopPropagation()}
       >
@@ -569,7 +582,7 @@ function ClusterRegistriesModal({ cluster, registries, selected, onClose, onSave
   );
 }
 
-function DataTable({ columns, rows }) {
+function DataTable({ columns, rows, loading = false }) {
   const renderCell = (colKey, value, row) => {
     if (colKey === "actions" || colKey === "registries") {
       return row[colKey];
@@ -611,7 +624,7 @@ function DataTable({ columns, rows }) {
           {!rows.length ? (
             <tr>
               <td colSpan={columns.length} className="muted">
-                No custom clusters configured yet.
+                {loading ? "Loading clusters..." : "No custom clusters configured yet."}
               </td>
             </tr>
           ) : null}
@@ -634,6 +647,12 @@ export default function ClusterManagementPage({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [messageTone, setMessageTone] = useState("");
+  const [removingId, setRemovingId] = useState("");
+  const notify = (text, tone = "") => {
+    setMessage(text);
+    setMessageTone(tone);
+  };
   const [modalOpen, setModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState("create");
   const [editing, setEditing] = useState(null);
@@ -671,7 +690,7 @@ export default function ClusterManagementPage({
     setRegistryError("");
     try {
       await setClusterRegistries(registryCluster.publicId, registryIds);
-      setMessage(`Registries updated for ${registryCluster.name}.`);
+      notify(`Registries updated for ${registryCluster.name}.`);
       setRegistryCluster(null);
       await loadRegistryLinks();
     } catch (saveError) {
@@ -721,13 +740,13 @@ export default function ClusterManagementPage({
         const result = await createCustomCluster(payload);
         const test = result.test || {};
         if (test.success && test.reachable) {
-          setMessage(`Cluster added. Connection OK (${test.serverVersion || "unknown"}).`);
+          notify(`Cluster added. Connection OK (${test.serverVersion || "unknown"}).`);
         } else {
-          setMessage(`Cluster saved but connection test failed: ${test.error || "unknown error"}`);
+          notify(`Cluster saved but connection test failed: ${test.error || "unknown error"}`, "warning-banner");
         }
       } else if (editing) {
         await updateCustomCluster(editing.publicId, payload);
-        setMessage("Cluster updated.");
+        notify("Cluster updated.");
       }
       setModalOpen(false);
       await loadClusters();
@@ -743,19 +762,20 @@ export default function ClusterManagementPage({
 
   const handleTest = async (cluster) => {
     setTestingId(cluster.publicId);
-    setMessage("");
+    notify("");
     setError("");
     try {
       const result = await testCustomCluster(cluster.publicId);
       if (result.success && result.reachable) {
-        setMessage(
+        notify(
           `${result.kubeconfigRestored ? "Kubeconfig recovered from the control plane. " : ""}`
           + `Connection OK for ${cluster.name}: ${result.serverVersion || "unknown"} · ${result.latencyMs ?? "-"} ms`
         );
       } else {
-        setMessage(
+        notify(
           `${result.kubeconfigRestored ? "Kubeconfig recovered, but the API connection still failed. " : ""}`
-          + `Connection failed for ${cluster.name}: ${result.error || "unknown error"}`
+          + `Connection failed for ${cluster.name}: ${result.error || "unknown error"}`,
+          "error"
         );
       }
       await loadClusters();
@@ -770,19 +790,23 @@ export default function ClusterManagementPage({
   };
 
   const handleRemove = async (cluster) => {
-    if (!window.confirm(`Remove cluster "${cluster.name}"?`)) {
+    if (removingId || !window.confirm(`Remove cluster "${cluster.name}"?`)) {
       return;
     }
     setError("");
+    notify("");
+    setRemovingId(cluster.publicId);
     try {
       await deleteCustomCluster(cluster.publicId);
-      setMessage(`Removed ${cluster.name}.`);
+      notify(`Removed ${cluster.name}.`);
       await loadClusters();
       if (onClustersChanged) {
         await onClustersChanged();
       }
     } catch (removeError) {
       setError(removeError.message);
+    } finally {
+      setRemovingId("");
     }
   };
 
@@ -844,8 +868,13 @@ export default function ClusterManagementPage({
           </button>
         ) : null}
         {canRemove ? (
-          <button type="button" className="btn-outline danger-outline" onClick={() => handleRemove(cluster)}>
-            Remove
+          <button
+            type="button"
+            className="btn-outline danger-outline"
+            onClick={() => handleRemove(cluster)}
+            disabled={Boolean(removingId)}
+          >
+            {removingId === cluster.publicId ? "Removing..." : "Remove"}
           </button>
         ) : null}
       </div>
@@ -869,11 +898,14 @@ export default function ClusterManagementPage({
         ) : null}
       </header>
 
-      {loading ? <p className="muted">Loading clusters...</p> : null}
       {formatAccessError(error) ? <p className="banner-message error">{formatAccessError(error)}</p> : null}
-      {message ? <p className="banner-message">{message}</p> : null}
+      {message ? (
+        <p className={`banner-message${messageTone ? ` ${messageTone}` : ""}`} role="status">
+          {message}
+        </p>
+      ) : null}
 
-      <DataTable columns={columns} rows={rows} />
+      <DataTable columns={columns} rows={rows} loading={loading} />
 
       <ClusterModal
         open={modalOpen}

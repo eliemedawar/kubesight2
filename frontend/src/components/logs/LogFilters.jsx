@@ -91,7 +91,9 @@ export default function LogFilters({
             ) : null}
           </SearchableSelect>
         </label>
-        <label>
+        <label
+          title={liveEnabled ? "Live logs follow the newest lines; turn live logs off to pick a time range" : undefined}
+        >
           Time range
           <SearchableSelect
             value={filters.timeRange}

@@ -1,4 +1,5 @@
 import { Fragment } from "react";
+import { parseApiTime } from "../../lib/apiTime.js";
 
 export const STATUS_TONE = {
   pending: "warn",
@@ -6,14 +7,16 @@ export const STATUS_TONE = {
   declined: "danger",
 };
 
+// Request timestamps come back as naive UTC; parseApiTime reads them as UTC so
+// ages and dates do not drift by the viewer's UTC offset.
 export function formatDate(value) {
-  return value ? new Date(value).toLocaleString() : "—";
+  const t = parseApiTime(value);
+  return Number.isFinite(t) ? new Date(t).toLocaleString() : "—";
 }
 
 /* Compact relative age for table rows ("26m", "3h", "2d"). */
 export function timeAgo(value) {
-  if (!value) return "—";
-  const t = new Date(value).getTime();
+  const t = parseApiTime(value);
   if (!Number.isFinite(t)) return "—";
   const s = Math.floor(Math.max(0, Date.now() - t) / 1000);
   if (s < 60) return "now";
@@ -28,8 +31,7 @@ export function timeAgo(value) {
 
 /* Long-form waiting time for decision cards ("26 min", "1 h 12 min"). */
 export function waitingFor(value) {
-  if (!value) return "—";
-  const t = new Date(value).getTime();
+  const t = parseApiTime(value);
   if (!Number.isFinite(t)) return "—";
   const mins = Math.floor(Math.max(0, Date.now() - t) / 60000);
   if (mins < 1) return "<1 min";
@@ -179,8 +181,8 @@ export function derivePipelineStages(row) {
   }
 
   if (row.requestedWindowStart && row.requestedWindowEnd) {
-    const start = new Date(row.requestedWindowStart).getTime();
-    const end = new Date(row.requestedWindowEnd).getTime();
+    const start = parseApiTime(row.requestedWindowStart);
+    const end = parseApiTime(row.requestedWindowEnd);
     const now = Date.now();
     const title = row.requestedWindowLabel || undefined;
     if (row.status !== "approved" || now < start) {

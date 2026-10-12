@@ -30,3 +30,24 @@
   width: 0.8125rem;
   height: 0.8125rem;
 }
+
+/* Header "Approval rules" is a real link (#/approvals/rules) styled as an
+   outline button; base button chrome only targets <button>, so restate it. */
+.sg-clusters-rules-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  min-height: var(--btn-height);
+  padding: 0.4rem 0.875rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  line-height: 1.4;
+  text-decoration: none;
+}
+
+.sg-clusters-rules-link:hover {
+  text-decoration: none;
+}

@@ -6,6 +6,7 @@ import {
   formatLogLinesToLocalTime,
   stripLogTimestamps,
 } from "../../utils/logFormat.js";
+import { useEscapeToClose } from "../../hooks/useEscapeToClose.js";
 
 const SCROLL_THRESHOLD_PX = 48;
 
@@ -53,6 +54,7 @@ export default function LogViewer({
   onClear,
   onSearchChange,
   onJumpToLatestRef,
+  downloadName = "",
 }) {
   const scrollRef = useRef(null);
   const pinnedToBottomRef = useRef(true);
@@ -61,24 +63,24 @@ export default function LogViewer({
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [hasNewLogs, setHasNewLogs] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
+  // "" | "copied" | "failed" — Copy otherwise gives no sign it did anything.
+  const [copyState, setCopyState] = useState("");
+
+  useEffect(() => {
+    if (!copyState) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setCopyState(""), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copyState]);
 
   const toggleMaximized = useCallback(() => {
     setIsMaximized((value) => !value);
   }, []);
 
-  // Allow Esc to exit the maximized view.
-  useEffect(() => {
-    if (!isMaximized) {
-      return undefined;
-    }
-    const handleKeyDown = (event) => {
-      if (event.key === "Escape") {
-        setIsMaximized(false);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isMaximized]);
+  // Allow Esc to exit the maximized view (only that, when the viewer sits in
+  // a dialog).
+  useEscapeToClose(() => setIsMaximized(false), true, isMaximized);
 
   const filteredLines = useMemo(() => {
     let visible = lines;
@@ -192,8 +194,9 @@ export default function LogViewer({
     }
     try {
       await navigator.clipboard.writeText(logText);
+      setCopyState("copied");
     } catch {
-      /* clipboard unavailable */
+      setCopyState("failed");
     }
   };
 
@@ -205,7 +208,8 @@ export default function LogViewer({
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `kubesight-logs-${Date.now()}.txt`;
+    const base = String(downloadName || "kubesight-logs").replace(/[^\w.-]+/g, "_");
+    anchor.download = `${base}-${Date.now()}.txt`;
     anchor.click();
     URL.revokeObjectURL(url);
   };
@@ -225,7 +229,7 @@ export default function LogViewer({
             Clear
           </button>
           <button type="button" className="btn-outline btn-sm" onClick={handleCopy} disabled={!hasLines}>
-            Copy
+            {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy"}
           </button>
           <button type="button" className="btn-outline btn-sm" onClick={handleDownload} disabled={!hasLines}>
             Download

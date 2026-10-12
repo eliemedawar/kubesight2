@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { execInPod } from "../../api/clustersApi.js";
 import { formatAccessError } from "../../utils/authz.js";
+import useEscapeKey from "../../hooks/useEscapeKey.js";
 
 // Pseudo-terminal modal: each submitted command runs as a fresh `kubectl exec
 // -- sh -c <command>` (no persistent shell state between commands). The
@@ -42,6 +43,8 @@ export default function ExecPodModal({ open, clusterId, namespace, pod, containe
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [history, running]);
+
+  useEscapeKey(open, onClose);
 
   if (!open) {
     return null;
@@ -121,6 +124,7 @@ export default function ExecPodModal({ open, clusterId, namespace, pod, containe
       <section
         className="card modal-panel modal-card--wide exec-pod-modal"
         role="dialog"
+        aria-modal="true"
         aria-labelledby="exec-pod-title"
         onClick={(event) => event.stopPropagation()}
       >

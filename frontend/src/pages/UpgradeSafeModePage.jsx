@@ -281,7 +281,12 @@ export default function UpgradeSafeModePage({
       </section>
 
       <section className="content-grid upgrade-middle-grid">
-        <InfoCard title="Precheck Results" actionLabel={canPrecheck ? "Run Precheck" : undefined} onAction={onRunPrecheck}>
+        <InfoCard
+          title="Precheck Results"
+          actionLabel={canPrecheck ? "Run Precheck" : undefined}
+          onAction={onRunPrecheck}
+          actionDisabled={loading}
+        >
           <ul className="check-list upgrade-check-list">
             {checks.length ? (
               checks.map((check) => (

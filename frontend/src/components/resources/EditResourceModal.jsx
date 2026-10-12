@@ -13,6 +13,7 @@ import YamlPreviewPanel from "../inventory/wizard/YamlPreviewPanel.jsx";
 import AddToBundleButton from "../changes/AddToBundleButton.jsx";
 import { approvalNotice, isPendingApproval, pendingApprovalMessage } from "../../utils/pendingApproval.js";
 import { secretValuesHiddenNote } from "../../utils/sensitiveResponses.js";
+import useEscapeKey from "../../hooks/useEscapeKey.js";
 
 // kubectl kind -> human label / YAML Kind casing for the editable resource kinds.
 const KIND_META = {
@@ -58,6 +59,8 @@ export default function EditResourceModal({
   const [step, setStep] = useState("edit");
   const [queuedMessage, setQueuedMessage] = useState("");
   const [yaml, setYaml] = useState("");
+  // What the cluster returned, so closing can tell whether edits would be lost.
+  const [loadedYaml, setLoadedYaml] = useState("");
   const [loading, setLoading] = useState(false);
   const [preview, setPreview] = useState(null);
   /** @type {null | { content: string } | { hint: string }} */
@@ -100,6 +103,7 @@ export default function EditResourceModal({
     if (!open) {
       setStep("edit");
       setYaml("");
+      setLoadedYaml("");
       setValuesNote("");
       setPreview(null);
       setDeployDiff(null);
@@ -124,6 +128,7 @@ export default function EditResourceModal({
       .then((payload) => {
         if (!cancelled) {
           setYaml(payload.yaml || payload.output || "");
+          setLoadedYaml(payload.yaml || payload.output || "");
           const note = secretValuesHiddenNote(payload);
           setValuesNote(
             note
@@ -144,6 +149,18 @@ export default function EditResourceModal({
       cancelled = true;
     };
   }, [open, clusterId, namespace, kind, resourceName]);
+
+  // Overlay click, Escape and the close button all land here: never mid-apply,
+  // and never silently throwing away an edited manifest.
+  const requestClose = () => {
+    if (busy) return;
+    if (step !== "queued" && yaml !== loadedYaml && !window.confirm("Discard your YAML changes?")) {
+      return;
+    }
+    onClose();
+  };
+
+  useEscapeKey(open, requestClose, busy);
 
   if (!open) return null;
 
@@ -209,10 +226,11 @@ export default function EditResourceModal({
   };
 
   return (
-    <div className="modal-overlay" role="presentation" onClick={onClose}>
+    <div className="modal-overlay" role="presentation" onClick={requestClose}>
       <section
         className="card modal-panel modal-card--wide edit-deployment-modal"
         role="dialog"
+        aria-modal="true"
         aria-labelledby="edit-resource-title"
         onClick={(event) => event.stopPropagation()}
       >
@@ -223,8 +241,8 @@ export default function EditResourceModal({
               Edit the {meta.label} YAML and apply it through the deploy pipeline.
             </p>
           </div>
-          <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
-            <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" /></svg>
+          <button type="button" className="modal-close" onClick={requestClose} disabled={busy} aria-label="Close" autoFocus>
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
           </button>
         </header>
 
@@ -260,7 +278,7 @@ export default function EditResourceModal({
                 onChange={(value) => setYaml(value)}
               />
               <div className="modal-actions">
-                <button type="button" className="btn-text" onClick={onClose}>
+                <button type="button" className="btn-text" onClick={requestClose}>
                   Cancel
                 </button>
                 <AddToBundleButton
@@ -302,7 +320,7 @@ export default function EditResourceModal({
               ))}
             </ul>
             {(preview.validation?.warnings || []).length ? (
-              <div className="banner-message warn">
+              <div className="banner-message warning-banner">
                 {(preview.validation.warnings || []).join("; ")}
               </div>
             ) : null}
