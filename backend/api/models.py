@@ -115,27 +115,30 @@ class User(db.Model):
     interactive_login_enabled = db.Column(db.Boolean, nullable=False, default=True)
 
     role = db.relationship("Role", back_populates="users")
-    # Loaded eagerly with every User (RBAC reads them on each request), each in
-    # its own SELECT ... IN. As joined loads the three collections multiplied:
-    # 6 cluster entries x 100 rules came back as 600 rows for every request's
-    # current-user load, half of the API's CPU under load.
+    # Loaded on first touch, not with every User. As joined loads the three
+    # collections multiplied (6 cluster entries x 100 rules = 600 rows per
+    # current-user load); as selectin loads they still cost three SELECTs on
+    # every authenticated request, admins included, who never read them.
+    # access_engine._load_rules fetches the rules once per request for the
+    # non-admins that need them; the legacy two are read only for users with no
+    # rules. Lists that show them (user_service.list_users) ask for selectinload.
     cluster_access_entries = db.relationship(
         "UserClusterAccess",
         back_populates="user",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="select",
     )
     namespace_access_entries = db.relationship(
         "UserNamespaceAccess",
         back_populates="user",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="select",
     )
     access_rules = db.relationship(
         "AccessRule",
         back_populates="user",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="select",
     )
 
 

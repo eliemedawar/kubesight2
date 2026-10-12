@@ -1802,6 +1802,10 @@ def _create_missing_indexes() -> None:
 
 
 def run_migrations() -> None:
+    from .access_engine import invalidate_role_permission_cache
+
+    # Roles may have been rewritten underneath (a fresh schema, raw SQL below).
+    invalidate_role_permission_cache()
     with _cached_schema():
         db.create_all()
         # DDL for columns added to pre-existing tables must run before ANY step that
@@ -1860,3 +1864,4 @@ def run_migrations() -> None:
         _interrupt_orphaned_upgrade_jobs()
         # Last, once every ALTER above has added the columns an index may cover.
         _create_missing_indexes()
+    invalidate_role_permission_cache()
