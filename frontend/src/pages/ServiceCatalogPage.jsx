@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { whenVisible } from "../lib/visibleInterval";
 import { listCiServices } from "../api/ciApi.js";
 import { useAuth } from "../context/AuthContext";
 import { useRouter } from "../routes/RouterContext.jsx";
@@ -127,6 +128,8 @@ export default function ServiceCatalogPage({ clusters = [] }) {
     let cancelled = false;
     failuresRef.current = 0;
     const tick = async (background) => {
+      await whenVisible(); // A hidden tab stops polling until it is looked at.
+      if (cancelled) return;
       const { ok, active } = await load({ background });
       if (cancelled) return;
       // A failed poll must never be read as "nothing is building". That used to

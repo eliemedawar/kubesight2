@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { whenVisible } from "../../lib/visibleInterval";
 import { listCiServiceBuilds } from "../../api/ciApi.js";
 import EmptyState from "../common/EmptyState.jsx";
 import LoadingState from "../common/LoadingState.jsx";
@@ -118,6 +119,8 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
     let cancelled = false;
     failuresRef.current = 0;
     const tick = async () => {
+      await whenVisible(); // A hidden tab stops polling until it is looked at.
+      if (cancelled) return;
       const { ok, active } = await load();
       if (cancelled) return;
       // A failed poll is not "nothing is building": retry with a backoff so a

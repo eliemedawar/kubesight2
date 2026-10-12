@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { whenVisible } from "../../lib/visibleInterval";
 import { getCiStageMatrix } from "../../api/ciApi.js";
 import { parseApiTime } from "../../lib/apiTime.js";
 import EmptyState from "../common/EmptyState.jsx";
@@ -142,6 +143,8 @@ export default function StageMatrix({
     let cancelled = false;
     failuresRef.current = 0;
     const tick = async () => {
+      await whenVisible(); // A hidden tab stops polling until it is looked at.
+      if (cancelled) return;
       const { ok, active } = await load();
       if (cancelled) return;
       // A failed poll is not "nothing is building": retry with a backoff so a
