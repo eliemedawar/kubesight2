@@ -916,8 +916,12 @@ def _handle_comment_webhook(provider_key: str, payload):
     """Shared by both comment webhooks: every comment in the delivery, one result each."""
     from ..services.ticket_agent import engine as ticket_agent
 
+    from ..services.zoho_sync_service import invalidate_ticket_details
+
     results = []
     for comment in ticket_agent.parse_comment_webhook(payload):
+        # The cached description/comments Hermes reads are now out of date.
+        invalidate_ticket_details(str(comment["ticketId"]))
         results.append({
             "ticketId": str(comment["ticketId"]),
             **ticket_agent.on_ticket_comment(
