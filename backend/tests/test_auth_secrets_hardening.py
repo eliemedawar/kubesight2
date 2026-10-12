@@ -631,7 +631,7 @@ class TestSecretRedaction:
             assert "c3VwZXJzZWNyZXQ=" in self._yaml(client, admin_token, name)["yaml"]
             assert len(calls) == 3
             cached = [
-                value for key, (_exp, _stale, value) in _K8S_READ_CACHE._entries.items()
+                entry[2] for key, entry in _K8S_READ_CACHE._entries.items()
                 if name in str(key)
             ]
             assert cached and all("c3VwZXJzZWNyZXQ=" not in str(value) for value in cached)
