@@ -49,13 +49,9 @@ def test_ci_columns_precede_the_first_orm_query():
     from api import migrate_rbac
 
     body = pyinspect.getsource(migrate_rbac.run_migrations)
-    steps = [
-        line.strip().rstrip("()")
-        for line in body.splitlines()
-        if line.strip().startswith("_") and line.strip().endswith("()")
-    ]
-    assert steps.index("_migrate_ci_columns") < steps.index(
-        "_backfill_build_signature_state"
+    # The backfill sits behind a run-once marker check, so find calls by text.
+    assert body.index("_migrate_ci_columns()") < body.index(
+        "_backfill_build_signature_state()"
     )
 
 

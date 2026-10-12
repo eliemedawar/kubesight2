@@ -6,6 +6,8 @@ import logging
 import os
 import re
 import time
+from contextlib import contextmanager
+from typing import Iterator, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import inspect, text
@@ -16,11 +18,59 @@ from .passwords import hash_password
 logger = logging.getLogger(__name__)
 
 
+# Reflection cache for one run_migrations pass. Each _add_column_if_missing
+# used to build a fresh inspector and re-list every table (~350 catalog round
+# trips per boot, all under the startup lock); now the table list is read once
+# and each table's columns at most once, then kept current by the helpers
+# below that ALTER them. None outside run_migrations: helpers called directly
+# (tests, one-off scripts) still reflect live.
+_schema_cache: Optional[dict] = None
+
+
+@contextmanager
+def _cached_schema() -> Iterator[None]:
+    global _schema_cache
+    previous = _schema_cache
+    _schema_cache = {"tables": None, "columns": {}}
+    try:
+        yield
+    finally:
+        _schema_cache = previous
+
+
+def _table_names() -> set:
+    cache = _schema_cache
+    if cache is None:
+        return set(inspect(db.engine).get_table_names())
+    if cache["tables"] is None:
+        cache["tables"] = set(inspect(db.engine).get_table_names())
+    return cache["tables"]
+
+
 def _table_columns(table_name: str) -> set:
-    inspector = inspect(db.engine)
-    if table_name not in inspector.get_table_names():
+    cache = _schema_cache
+    if cache is None:
+        inspector = inspect(db.engine)
+        if table_name not in inspector.get_table_names():
+            return set()
+        return {col["name"] for col in inspector.get_columns(table_name)}
+    if table_name not in _table_names():
         return set()
-    return {col["name"] for col in inspector.get_columns(table_name)}
+    columns = cache["columns"].get(table_name)
+    if columns is None:
+        columns = {col["name"] for col in inspect(db.engine).get_columns(table_name)}
+        cache["columns"][table_name] = columns
+    return set(columns)
+
+
+def _note_column(table_name: str, col: str, present: bool) -> None:
+    cache = _schema_cache
+    if cache is None or table_name not in cache["columns"]:
+        return
+    if present:
+        cache["columns"][table_name].add(col)
+    else:
+        cache["columns"][table_name].discard(col)
 
 
 def _portable_type(sql_type: str) -> str:
@@ -43,6 +93,7 @@ def _add_column_if_missing(table_name: str, col: str, sql_type: str) -> None:
         return
     with db.engine.begin() as conn:
         conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col} {_portable_type(sql_type)}"))
+    _note_column(table_name, col, True)
 
 
 def _retype_json_column(table_name: str, col: str) -> None:
@@ -86,6 +137,7 @@ def _drop_column_if_exists(table_name: str, col: str) -> None:
     try:
         with db.engine.begin() as conn:
             conn.execute(text(f"ALTER TABLE {table_name} DROP COLUMN {col}"))
+        _note_column(table_name, col, False)
     except Exception:
         # Older SQLite builds may not support DROP COLUMN; leave column in place.
         pass
@@ -103,7 +155,7 @@ def _drop_obsolete_user_columns() -> None:
 def _migrate_mcp_access_columns() -> None:
     # Per-cluster MCP rules came a release after the table. NULL reads as "no
     # cluster has a rule", which is what an existing installation had.
-    if "mcp_access_settings" in inspect(db.engine).get_table_names():
+    if "mcp_access_settings" in _table_names():
         _add_column_if_missing("mcp_access_settings", "cluster_rules", "JSON")
         _retype_json_column("mcp_access_settings", "cluster_rules")
 
@@ -111,7 +163,7 @@ def _migrate_mcp_access_columns() -> None:
 def _migrate_ticket_agent_columns() -> None:
     # Troubleshooting tickets came after the settings table; on by default, as
     # for a fresh install.
-    if "ticket_agent_settings" in inspect(db.engine).get_table_names():
+    if "ticket_agent_settings" in _table_names():
         _add_column_if_missing(
             "ticket_agent_settings", "troubleshooting_enabled", "BOOLEAN DEFAULT true"
         )
@@ -126,9 +178,7 @@ def _purge_orphan_provisioning_rows() -> None:
     """Rows a deleted build left behind where foreign keys are not enforced
     (SQLite): reserved addresses (which kept later builds off them), OpenTofu
     state and job records. Idempotent; finds nothing on PostgreSQL."""
-    from sqlalchemy import inspect
-
-    tables = set(inspect(db.engine).get_table_names())
+    tables = set(_table_names())
     if "cluster_builds" not in tables:
         return
     with db.engine.begin() as conn:
@@ -308,7 +358,7 @@ def _migrate_legacy_users() -> None:
 
 
 def _migrate_clusters_table() -> None:
-    if "clusters" not in inspect(db.engine).get_table_names():
+    if "clusters" not in _table_names():
         return
     for col, sql_type in [
         ("connection_method", "VARCHAR(32)"),
@@ -320,7 +370,7 @@ def _migrate_clusters_table() -> None:
 
 
 def _migrate_alert_policy_evaluation_columns() -> None:
-    if "alert_policies" not in inspect(db.engine).get_table_names():
+    if "alert_policies" not in _table_names():
         return
     _add_column_if_missing("alert_policies", "evaluation_interval_seconds", "INTEGER DEFAULT 300")
     _add_column_if_missing("alert_policies", "last_evaluated_at", "DATETIME")
@@ -331,13 +381,13 @@ def _migrate_alert_policy_evaluation_columns() -> None:
 
 
 def _migrate_alert_delivery_log_group_column() -> None:
-    if "alert_delivery_logs" not in inspect(db.engine).get_table_names():
+    if "alert_delivery_logs" not in _table_names():
         return
     _add_column_if_missing("alert_delivery_logs", "group_name", "VARCHAR(120)")
 
 
 def _migrate_app_catalog_helm_columns() -> None:
-    if "app_catalog_entries" not in inspect(db.engine).get_table_names():
+    if "app_catalog_entries" not in _table_names():
         return
     for col, sql_type in [
         ("release_name", "VARCHAR(253)"),
@@ -350,18 +400,18 @@ def _migrate_app_catalog_helm_columns() -> None:
 
 
 def _migrate_service_alert_columns() -> None:
-    if "alert_policies" in inspect(db.engine).get_table_names():
+    if "alert_policies" in _table_names():
         _add_column_if_missing("alert_policies", "service_config", "JSON")
 
 
 def _migrate_log_alert_columns() -> None:
-    if "alert_policies" in inspect(db.engine).get_table_names():
+    if "alert_policies" in _table_names():
         _add_column_if_missing("alert_policies", "alert_type", "VARCHAR(16) DEFAULT 'metric'")
         _add_column_if_missing("alert_policies", "log_config", "JSON")
-    if "alert_history" in inspect(db.engine).get_table_names():
+    if "alert_history" in _table_names():
         _add_column_if_missing("alert_history", "alert_type", "VARCHAR(16) DEFAULT 'metric'")
         _add_column_if_missing("alert_history", "log_snapshot", "JSON")
-    if "alert_delivery_logs" in inspect(db.engine).get_table_names():
+    if "alert_delivery_logs" in _table_names():
         _add_column_if_missing("alert_delivery_logs", "matched_pattern", "VARCHAR(512)")
         _add_column_if_missing("alert_delivery_logs", "pod_name", "VARCHAR(253)")
         _add_column_if_missing("alert_delivery_logs", "log_snippet", "TEXT")
@@ -563,7 +613,7 @@ def _migrate_topology_components() -> None:
     The table itself is created by ``db.create_all()``; this only backfills
     columns added after it first shipped. Idempotent and safe on a fresh DB.
     """
-    if "topology_components" not in inspect(db.engine).get_table_names():
+    if "topology_components" not in _table_names():
         return
     for col, sql_type in [
         ("category", "VARCHAR(80)"),
@@ -590,7 +640,7 @@ def _migrate_app_service_topology_edge_meta() -> None:
 
 
 def _migrate_deployment_request_columns() -> None:
-    table_names = inspect(db.engine).get_table_names()
+    table_names = _table_names()
     if "deployment_requests" in table_names:
         _add_column_if_missing("deployment_requests", "required_approvals", "INTEGER DEFAULT 1")
         _add_column_if_missing("deployment_requests", "total_recipients", "INTEGER DEFAULT 1")
@@ -611,7 +661,7 @@ def _migrate_deployment_request_columns() -> None:
 
 def _migrate_change_bundle_columns() -> None:
     """Forward-compatible column adds for change bundles (tables come from create_all)."""
-    table_names = inspect(db.engine).get_table_names()
+    table_names = _table_names()
     if "change_bundles" in table_names:
         _add_column_if_missing("change_bundles", "stop_on_failure", "INTEGER DEFAULT 1")
         _add_column_if_missing("change_bundles", "execution_started_at", "DATETIME")
@@ -644,7 +694,7 @@ def _migrate_service_catalog_columns() -> None:
     columns added after a table first shipped, mirroring the other migrators.
     Idempotent and safe on a fresh database.
     """
-    table_names = inspect(db.engine).get_table_names()
+    table_names = _table_names()
     if "service_blueprint_components" in table_names:
         for col, sql_type in [
             ("supports_external", "BOOLEAN DEFAULT false"),
@@ -684,7 +734,7 @@ def _migrate_client_service_connections() -> None:
     columns added after it first shipped, mirroring the other migrators.
     Idempotent and safe on a fresh database.
     """
-    if "client_service_connections" not in inspect(db.engine).get_table_names():
+    if "client_service_connections" not in _table_names():
         return
     for col, sql_type in [
         ("source_ip", "VARCHAR(64)"),
@@ -712,7 +762,7 @@ def _migrate_client_service_egress_connections() -> None:
     columns added after it first shipped, mirroring the other migrators.
     Idempotent and safe on a fresh database.
     """
-    if "client_service_egress_connections" not in inspect(db.engine).get_table_names():
+    if "client_service_egress_connections" not in _table_names():
         return
     for col, sql_type in [
         ("node_ref", "VARCHAR(120)"),
@@ -743,7 +793,7 @@ def _seed_builtin_ci_runners() -> None:
     applied (until then its builds FAIL with the runner's error — never pass).
     In mock mode it ships disabled. Existing rows keep whatever the operator set.
     """
-    if "ci_runners" not in inspect(db.engine).get_table_names():
+    if "ci_runners" not in _table_names():
         return
     from .models_ci import CiRunner
     from .k8s_provider import is_real_mode_enabled
@@ -830,7 +880,7 @@ def _migrate_ci_columns() -> None:
     are additions to pre-existing tables, so a deployed database needs them
     backfilled. Idempotent and safe on a fresh database.
     """
-    existing = set(inspect(db.engine).get_table_names())
+    existing = set(_table_names())
     if "bitbucket_credential_profiles" in existing:
         # Shared credential store: CI and Application Intelligence both read it.
         _add_column_if_missing(
@@ -970,7 +1020,7 @@ def _migrate_merge_check_columns() -> None:
     The tables themselves come from ``db.create_all()``; this is only the
     forward-compatible backfill, mirroring every other migrator here.
     """
-    existing = set(inspect(db.engine).get_table_names())
+    existing = set(_table_names())
     if "ci_merge_check_configs" not in existing:
         return
     # Per-tool command overrides. Empty on every configuration that predates
@@ -1012,7 +1062,7 @@ def _migrate_registry_connection_columns() -> None:
     columns added after it first shipped, mirroring the other migrators.
     Idempotent and safe on a fresh database.
     """
-    if "registry_connections" not in inspect(db.engine).get_table_names():
+    if "registry_connections" not in _table_names():
         return
     for col, sql_type in [
         ("registry_type", "VARCHAR(32) DEFAULT 'nexus'"),
@@ -1031,7 +1081,7 @@ def _migrate_registry_connection_columns() -> None:
 
 def _migrate_alert_routing_user_receivers() -> None:
     """Add user/role linkage to receivers and migrate static emails to users."""
-    if "alert_routing_receivers" not in inspect(db.engine).get_table_names():
+    if "alert_routing_receivers" not in _table_names():
         return
     _add_column_if_missing("alert_routing_receivers", "user_id", "INTEGER")
     _add_column_if_missing("alert_routing_receivers", "role_id", "INTEGER")
@@ -1075,7 +1125,7 @@ def _migrate_user_onboarding_columns() -> None:
     Only accounts created after this migration (via the admin create-user flow)
     are provisioned with ``first_login_completed = 0``.
     """
-    if "users" not in inspect(db.engine).get_table_names():
+    if "users" not in _table_names():
         return
     # NB: boolean columns use the SQL boolean literals ``false``/``true`` rather
     # than ``0``/``1``. PostgreSQL rejects an integer default on a BOOLEAN column
@@ -1156,7 +1206,7 @@ def _migrate_application_intelligence_columns() -> None:
     idempotent additions protect deployments that started an earlier build of
     Phase 1 before progress, worker authentication, or warning fields existed.
     """
-    if "application_analyses" not in inspect(db.engine).get_table_names():
+    if "application_analyses" not in _table_names():
         return
     for col, sql_type in [
         ("progress_percent", "INTEGER DEFAULT 0"),
@@ -1172,7 +1222,7 @@ def _migrate_application_intelligence_columns() -> None:
     # Hermes cited, which left findings unverifiable in the UI. Legacy score
     # columns on application_analyses are intentionally left in place and
     # unmapped: they held model-invented numbers that are no longer published.
-    if "application_findings" in inspect(db.engine).get_table_names():
+    if "application_findings" in _table_names():
         _add_column_if_missing("application_findings", "evidence", "TEXT")
 
 
@@ -1183,7 +1233,7 @@ def _migrate_zoho_integration_columns() -> None:
     picklist columns added when the dropdown was split into deployments + namespaces.
     Must not recreate the table — it holds the encrypted OAuth secrets.
     """
-    if "zoho_integration" in inspect(db.engine).get_table_names():
+    if "zoho_integration" in _table_names():
         _add_column_if_missing("zoho_integration", "environment_field_id", "VARCHAR(64)")
         _add_column_if_missing(
             "zoho_integration", "environment_field_api_name", "VARCHAR(120) DEFAULT 'cf_environment'"
@@ -1228,11 +1278,11 @@ def _migrate_zoho_integration_columns() -> None:
         _add_column_if_missing("zoho_integration", "custom_environments", "TEXT")
         # Per-namespace/per-deployment Jenkins job overrides for cluster targets.
         _add_column_if_missing("zoho_integration", "job_overrides", "TEXT")
-    if "zoho_inbound_tickets" in inspect(db.engine).get_table_names():
+    if "zoho_inbound_tickets" in _table_names():
         _add_column_if_missing("zoho_inbound_tickets", "variable_name", "TEXT")
         _add_column_if_missing("zoho_inbound_tickets", "variable_value", "TEXT")
     # Hermes ticket agent (2026-09-25): the impediment status/transition.
-    if "jira_integration" in inspect(db.engine).get_table_names():
+    if "jira_integration" in _table_names():
         _add_column_if_missing(
             "jira_integration", "transition_impediment", "VARCHAR(120) DEFAULT 'Impediment'"
         )
@@ -1262,7 +1312,7 @@ def _migrate_ticketing_tables() -> None:
     readable record of where the values came from, and as the fallback the
     seeder reads on a fresh database.
     """
-    tables = inspect(db.engine).get_table_names()
+    tables = _table_names()
 
     for table in ("zoho_inbound_tickets", "zoho_field_bindings", "zoho_layout_snapshots"):
         if table not in tables:
@@ -1364,7 +1414,7 @@ def _migrate_deploy_automation_columns() -> None:
     The post-deploy pod-health step added a rollout timeout on the Jenkins
     config and a rollout-start anchor on runs; both tables may already exist.
     """
-    tables = inspect(db.engine).get_table_names()
+    tables = _table_names()
     if "jenkins_connection" in tables:
         _add_column_if_missing("jenkins_connection", "rollout_timeout_minutes", "INTEGER DEFAULT 15")
         _add_column_if_missing("jenkins_connection", "auto_run_clusters", "JSON")
@@ -1407,7 +1457,7 @@ def _migrate_mobile_app_columns() -> None:
     ``create_all`` makes the tables themselves; columns added after that first
     release go here so existing databases pick them up.
     """
-    tables = inspect(db.engine).get_table_names()
+    tables = _table_names()
     if "mobile_applications" not in tables:
         return
     if "mobile_app_builds" in tables:
@@ -1423,7 +1473,7 @@ def _migrate_mobile_app_columns() -> None:
     _add_column_if_missing("mobile_applications", "resign_config", "JSON")
 
 
-def _backfill_build_signature_state() -> None:
+def _backfill_build_signature_state() -> bool:
     """Probe binaries that predate the signature check, once.
 
     Without this, every build ingested before the probe existed stays "unknown"
@@ -1432,12 +1482,14 @@ def _backfill_build_signature_state() -> None:
 
     Cheap despite the file sizes: reading a zip's central directory seeks to the
     end of the file rather than scanning it. Rows whose binary is missing or
-    unreadable are left alone and simply stay "unknown".
+    unreadable are left alone and simply stay "unknown". Returns whether the
+    pass completed; run_migrations then records it so later boots skip it
+    (builds ingested since are probed at ingest).
     """
     from .models import MobileAppBuild
 
-    if "mobile_app_builds" not in inspect(db.engine).get_table_names():
-        return
+    if "mobile_app_builds" not in _table_names():
+        return True
     try:
         pending = (
             MobileAppBuild.query.filter(
@@ -1452,9 +1504,9 @@ def _backfill_build_signature_state() -> None:
         # returning without a rollback would fail every later ORM query in this
         # session with InFailedSqlTransaction — far from the real cause.
         db.session.rollback()
-        return
+        return False
     if not pending:
-        return
+        return True
 
     from .services import binary_signature
     from .services.mobile_app_service import binary_path
@@ -1471,6 +1523,7 @@ def _backfill_build_signature_state() -> None:
     if changed:
         db.session.commit()
         logger.info("Backfilled signature_state for %s mobile build(s)", changed)
+    return True
 
 
 def _encrypt_plaintext_kubeconfigs() -> None:
@@ -1504,6 +1557,79 @@ def _interrupt_orphaned_upgrade_jobs() -> None:
         return
     if interrupted:
         logger.warning("Marked %d interrupted upgrade job(s) as failed.", interrupted)
+
+
+# One-time data fix-ups record themselves here so later boots skip them.
+# Created by db.create_all like any model table.
+migration_markers = db.Table(
+    "kubesight_migration_markers",
+    db.Column("name", db.String(120), primary_key=True),
+    db.Column("applied_at", db.DateTime(timezone=True)),
+)
+
+
+def _marker_done(name: str) -> bool:
+    try:
+        return bool(
+            db.session.execute(
+                text("SELECT 1 FROM kubesight_migration_markers WHERE name = :n"), {"n": name}
+            ).first()
+        )
+    except Exception:  # noqa: BLE001 — no marker table: run the step
+        db.session.rollback()
+        return False
+
+
+def _mark_done(name: str) -> None:
+    from datetime import datetime, timezone
+
+    try:
+        if not _marker_done(name):
+            db.session.execute(
+                migration_markers.insert().values(name=name, applied_at=datetime.now(timezone.utc))
+            )
+        db.session.commit()
+    except Exception:  # noqa: BLE001 — the step simply runs again next boot
+        db.session.rollback()
+        logger.debug("Could not record migration marker %s", name, exc_info=True)
+
+
+def _migrate_legacy_access_rules() -> None:
+    """Turn pre-rule cluster/namespace grants into access rules.
+
+    Only users holding a legacy grant and no rule at all can change, so they
+    are found in SQL instead of loading every user (and three collections each)
+    on every boot. Same outcome as ``migrate_all_users_legacy_rules``.
+    """
+    from .access_rules import migrate_legacy_access_to_rules
+    from .models import AccessRule, User, UserClusterAccess, UserNamespaceAccess
+
+    legacy = {
+        uid
+        for (uid,) in db.session.query(UserClusterAccess.user_id)
+        .filter(UserClusterAccess.can_view.is_(True))
+        .distinct()
+    }
+    legacy |= {
+        uid
+        for (uid,) in db.session.query(UserNamespaceAccess.user_id)
+        .filter(UserNamespaceAccess.can_view.is_(True))
+        .distinct()
+    }
+    if not legacy:
+        return
+    with_rules = {
+        uid
+        for (uid,) in db.session.query(AccessRule.user_id)
+        .filter(AccessRule.user_id.in_(legacy))
+        .distinct()
+    }
+    pending = sorted(legacy - with_rules)
+    if not pending:
+        return
+    for user in User.query.filter(User.id.in_(pending)).all():
+        migrate_legacy_access_to_rules(user)
+    db.session.commit()
 
 
 _DEFAULT_INDEX_LOCK_TIMEOUT_SECONDS = 60
@@ -1676,57 +1802,61 @@ def _create_missing_indexes() -> None:
 
 
 def run_migrations() -> None:
-    db.create_all()
-    # DDL for columns added to pre-existing tables must run before ANY step that
-    # issues an ORM query: a mapped column missing from the table makes the whole
-    # SELECT fail, and on PostgreSQL that aborts the session's transaction.
-    _migrate_ci_columns()
-    _migrate_cluster_build_columns()
-    _purge_orphan_provisioning_rows()
-    _sanitize_legacy_build_profile_proxies()
-    _migrate_zoho_integration_columns()
-    _migrate_ticketing_tables()
-    _migrate_deploy_automation_columns()
-    _migrate_mobile_app_columns()
-    _backfill_build_signature_state()
-    _migrate_user_onboarding_columns()
-    _migrate_application_intelligence_columns()
-    _migrate_deployment_request_columns()
-    _migrate_change_bundle_columns()
-    _migrate_alert_routing_user_receivers()
-    _migrate_clusters_table()
-    _migrate_app_catalog_helm_columns()
-    _migrate_alert_policy_evaluation_columns()
-    _migrate_alert_delivery_log_group_column()
-    _migrate_log_alert_columns()
-    _migrate_service_alert_columns()
-    _migrate_legacy_users()
-    _migrate_app_service_deployments()
-    _migrate_app_service_topology_positions()
-    _migrate_app_service_topology_edge_meta()
-    _migrate_topology_components()
-    _migrate_service_catalog_columns()
-    _migrate_client_service_connections()
-    _migrate_client_service_egress_connections()
-    _migrate_registry_connection_columns()
-    _migrate_merge_check_columns()
-    _migrate_mcp_access_columns()
-    _migrate_ticket_agent_columns()
-    _seed_builtin_ci_runners()
-    from .access_rules import migrate_all_users_legacy_rules
-    from .migrate_alert_routing import run_alert_routing_migrations
+    with _cached_schema():
+        db.create_all()
+        # DDL for columns added to pre-existing tables must run before ANY step that
+        # issues an ORM query: a mapped column missing from the table makes the whole
+        # SELECT fail, and on PostgreSQL that aborts the session's transaction.
+        _migrate_ci_columns()
+        _migrate_cluster_build_columns()
+        _purge_orphan_provisioning_rows()
+        _sanitize_legacy_build_profile_proxies()
+        _migrate_zoho_integration_columns()
+        _migrate_ticketing_tables()
+        _migrate_deploy_automation_columns()
+        _migrate_mobile_app_columns()
+        # One probe pass per installation: binaries that stay "unknown" (file
+        # gone, unreadable) used to be re-probed, up to 500, on every boot.
+        if not _marker_done("mobile_signature_backfill_v1"):
+            if _backfill_build_signature_state():
+                _mark_done("mobile_signature_backfill_v1")
+        _migrate_user_onboarding_columns()
+        _migrate_application_intelligence_columns()
+        _migrate_deployment_request_columns()
+        _migrate_change_bundle_columns()
+        _migrate_alert_routing_user_receivers()
+        _migrate_clusters_table()
+        _migrate_app_catalog_helm_columns()
+        _migrate_alert_policy_evaluation_columns()
+        _migrate_alert_delivery_log_group_column()
+        _migrate_log_alert_columns()
+        _migrate_service_alert_columns()
+        _migrate_legacy_users()
+        _migrate_app_service_deployments()
+        _migrate_app_service_topology_positions()
+        _migrate_app_service_topology_edge_meta()
+        _migrate_topology_components()
+        _migrate_service_catalog_columns()
+        _migrate_client_service_connections()
+        _migrate_client_service_egress_connections()
+        _migrate_registry_connection_columns()
+        _migrate_merge_check_columns()
+        _migrate_mcp_access_columns()
+        _migrate_ticket_agent_columns()
+        _seed_builtin_ci_runners()
+        from .migrate_alert_routing import run_alert_routing_migrations
 
-    migrate_all_users_legacy_rules()
-    run_alert_routing_migrations()
-    _sync_role_permissions()
-    # Must run BEFORE the prune: it reads the old rows the prune is about to drop.
-    _migrate_renamed_permissions()
-    _grant_ticket_agent_to_ticket_managers()
-    _grant_ci_approve_to_build_retriers()
-    _prune_obsolete_permissions()
-    # Cluster access (Area C): not schema, but one-time data fix-ups that must
-    # run on every start.
-    _encrypt_plaintext_kubeconfigs()
-    _interrupt_orphaned_upgrade_jobs()
-    # Last, once every ALTER above has added the columns an index may cover.
-    _create_missing_indexes()
+        _migrate_legacy_access_rules()
+        run_alert_routing_migrations()
+        _sync_role_permissions()
+        # Must run BEFORE the prune: it reads the old rows the prune is about to drop.
+        _migrate_renamed_permissions()
+        _grant_ticket_agent_to_ticket_managers()
+        _grant_ci_approve_to_build_retriers()
+        _prune_obsolete_permissions()
+        # Cluster access (Area C): not schema, but one-time data fix-ups that must
+        # run on every start.
+        _encrypt_plaintext_kubeconfigs()
+        _interrupt_orphaned_upgrade_jobs()
+        # Last, once every ALTER above has added the columns an index may cover.
+        _create_missing_indexes()
