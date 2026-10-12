@@ -136,7 +136,7 @@ export default function ReleasesView({ environments, refreshKey }) {
         <div className="pr-empty pr-empty--small">
           <PrIcon.Ladder />
           <p>
-            Nothing yet. Releases you send from Promote land here, with each application&apos;s fate — and so does every
+            Nothing yet. Releases promoted from the Timetable land here, with each application&apos;s fate — and so does every
             deploy the ladder stopped, from any path.
           </p>
         </div>

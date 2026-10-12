@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { createPromotionRelease } from "../../api/promotionsApi.js";
+import { useEscapeToClose } from "../../hooks/useEscapeToClose.js";
 import { PrIcon } from "./icons.jsx";
 import { RELEASE_STATUS, defaultReleaseName, formatAge, plural, releasePayload } from "./promotionModel.js";
 
@@ -21,14 +22,11 @@ export default function ReviewDialog({ plan, from, to, clusters, onRemove, onClo
   const [release, setRelease] = useState(null);
   const dialogRef = useRef(null);
 
+  useEscapeToClose(() => (release ? onDone(release) : onClose()), !busy);
+
   useEffect(() => {
     dialogRef.current?.focus();
-    const onKey = (event) => {
-      if (event.key === "Escape" && !busy) (release ? onDone(release) : onClose());
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [busy, release, onClose, onDone]);
+  }, []);
 
   const reasonNeeded = plan.exceptions > 0;
   const canSend = !busy && plan.items.length > 0 && name.trim() && (!reasonNeeded || reason.trim().length >= MIN_REASON);
@@ -170,6 +168,9 @@ export default function ReviewDialog({ plan, from, to, clusters, onRemove, onClo
                       onChange={(event) => setReason(event.target.value)}
                       placeholder="e.g. Hotfix for the card authorisation outage (INC-2291); SIT is down until Friday."
                     />
+                    {reason.trim().length < MIN_REASON && (
+                      <small>At least {MIN_REASON} characters — approvers decide on this.</small>
+                    )}
                   </label>
                 </section>
               )}

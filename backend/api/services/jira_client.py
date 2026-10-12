@@ -91,6 +91,16 @@ class JiraError(Exception):
         self.status = status
 
 
+class JiraConfigError(JiraError):
+    """KubeSight's own Jira settings are incomplete, so nothing was sent to Jira.
+
+    Still a ``JiraError`` for every caller; the ticketing routes answer it with
+    409 ("configure it") instead of 502 ("Jira failed").
+    """
+
+    config_problem = True
+
+
 @dataclass
 class JiraConfig:
     """Everything a Jira call needs, with the API token already decrypted."""
@@ -153,10 +163,10 @@ def _request(
 def _auth_headers(cfg: JiraConfig) -> Dict[str, str]:
     """Basic (Cloud, email + API token) or Bearer (Server/DC personal access token)."""
     if not cfg.api_token:
-        raise JiraError("Jira is not fully configured (no API token / personal access token).")
+        raise JiraConfigError("Jira is not fully configured (no API token / personal access token).")
     if cfg.is_cloud:
         if not cfg.email:
-            raise JiraError("Jira Cloud needs the account email the API token belongs to.")
+            raise JiraConfigError("Jira Cloud needs the account email the API token belongs to.")
         raw = f"{cfg.email}:{cfg.api_token}".encode("utf-8")
         credential = base64.b64encode(raw).decode("ascii")
         authorization = f"Basic {credential}"
@@ -251,7 +261,7 @@ def get_myself(cfg: JiraConfig) -> Dict[str, Any]:
 def get_project(cfg: JiraConfig) -> Dict[str, Any]:
     """The configured project, so the test can confirm the key actually resolves."""
     if not cfg.project_key:
-        raise JiraError("No Jira project key is configured.", 400)
+        raise JiraConfigError("No Jira project key is configured.", 400)
     return _call(
         cfg,
         "GET",
@@ -694,7 +704,7 @@ def get_screen(cfg: JiraConfig, fresh: bool = False) -> Dict[str, Any]:
     """
     _assert_screen_allowed(cfg)
     if not cfg.screen_id:
-        raise JiraError("No Jira screen id is configured.", 400)
+        raise JiraConfigError("No Jira screen id is configured.", 400)
     key = f"screen:{cfg.base_url}:{cfg.screen_id}"
     if fresh:
         _SCREEN_CACHE.invalidate(key)

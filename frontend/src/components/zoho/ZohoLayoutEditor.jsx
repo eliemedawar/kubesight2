@@ -13,6 +13,8 @@ import ZohoSourcePicker from "./ZohoSourcePicker.jsx";
 import { IconAlert, IconHistory, IconRefresh, IconSearch } from "./icons.jsx";
 import { CREATABLE_TYPES, linesToValues, valuesToLines } from "./zohoFieldMeta";
 import { useTicketing } from "../ticketing/TicketingContext.jsx";
+import { useEscapeToClose } from "../catalog/ciShared.jsx";
+import { useRouter } from "../../routes/RouterContext.jsx";
 
 export default function ZohoLayoutEditor({
   canManage = false,
@@ -21,12 +23,16 @@ export default function ZohoLayoutEditor({
   onSourceSaved,
   onLayoutChanged,
 }) {
-  const { name: providerName, formNoun, can, capabilities, api } = useTicketing();
+  const { key: providerKey, name: providerName, formNoun, can, capabilities, api } = useTicketing();
+  const { navigate } = useRouter();
   const selectedNamespaces = config.selectedNamespaces || [];
   const customEnvironments = config.customEnvironments || [];
   const [layout, setLayout] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  // 409 from the read = KubeSight's own settings for the provider are
+  // incomplete (e.g. no Jira screen id): the fix is configuring, not retrying.
+  const [errorIsConfig, setErrorIsConfig] = useState(false);
   const [notice, setNotice] = useState("");
   const [query, setQuery] = useState("");
   const [collapsedSections, setCollapsedSections] = useState(() => new Set());
@@ -71,10 +77,12 @@ export default function ZohoLayoutEditor({
   const load = useCallback(async (fresh = false) => {
     setLoading(true);
     setError("");
+    setErrorIsConfig(false);
     try {
       setLayout(await api.getLayout(fresh));
     } catch (err) {
       setError(err.message || `Failed to read the ${providerName} ${formNoun}.`);
+      setErrorIsConfig(err.status === 409);
     } finally {
       setLoading(false);
     }
@@ -236,6 +244,24 @@ export default function ZohoLayoutEditor({
     setCollapsedSections(new Set((layout?.sections || []).map((section) => sectionKey(section))));
   const expandAll = () => setCollapsedSections(new Set());
 
+  // The deployment source is read from Kubernetes, not from the provider, so
+  // it stays editable while the form cannot be read.
+  const sourcePicker = (
+    <ZohoSourcePicker
+      initialClusterId={config.sourceClusterId || ""}
+      initialNamespaces={selectedNamespaces}
+      initialDeployments={config.selectedDeployments || {}}
+      initialCustom={customEnvironments}
+      initialOverrides={config.jobOverrides || []}
+      onClose={closeModal}
+      onSaved={(data) => {
+        closeModal();
+        setNotice(`Source saved. Run “Sync now” to publish it to ${providerName}.`);
+        onSourceSaved?.(data);
+      }}
+    />
+  );
+
   if (loading) {
     return (
       <section className="card">
@@ -250,9 +276,40 @@ export default function ZohoLayoutEditor({
       <section className="card">
         <h3>DevOps Request {formNoun}</h3>
         <ErrorBanner message={error} />
-        <button type="button" className="secondary" onClick={() => load(true)}>
-          Retry
-        </button>
+        <div className="sg-zh-layout-tool-actions">
+          {errorIsConfig ? (
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => navigate({ key: "integrationDetail", params: { integrationKey: providerKey } })}
+            >
+              Open {providerName} settings
+            </button>
+          ) : null}
+          <button type="button" className={errorIsConfig ? "btn-ghost" : "secondary"} onClick={() => load(true)}>
+            Retry
+          </button>
+          {canManage ? (
+            <button type="button" className="btn-ghost" onClick={() => setModal({ mode: "source" })}>
+              Choose namespaces
+            </button>
+          ) : null}
+        </div>
+        {canManage ? (
+          <p className="muted">
+            The namespaces and deployments the dropdowns publish come from the cluster, so you can
+            choose them while {providerName} is unreachable.
+          </p>
+        ) : null}
+        {notice ? (
+          <div className="banner banner-success" role="status">
+            <span>{notice}</span>
+            <button type="button" className="link-button" onClick={() => setNotice("")}>
+              Dismiss
+            </button>
+          </div>
+        ) : null}
+        {modal?.mode === "source" ? sourcePicker : null}
       </section>
     );
   }
@@ -462,19 +519,7 @@ export default function ZohoLayoutEditor({
           onRestored={afterSave}
         />
       ) : modal?.mode === "source" ? (
-        <ZohoSourcePicker
-          initialClusterId={config.sourceClusterId || ""}
-          initialNamespaces={selectedNamespaces}
-          initialDeployments={config.selectedDeployments || {}}
-          initialCustom={customEnvironments}
-          initialOverrides={config.jobOverrides || []}
-          onClose={closeModal}
-          onSaved={(data) => {
-            closeModal();
-            setNotice(`Source saved. Run “Sync now” to publish it to ${providerName}.`);
-            onSourceSaved?.(data);
-          }}
-        />
+        sourcePicker
       ) : modal?.mode === "binding" ? (
         <ZohoBindingModal
           field={modal.field}
@@ -519,6 +564,7 @@ function FieldModal({
   onSaveEdit,
   onSaveNew,
 }) {
+  useEscapeToClose(onClose, !saving);
   const { name: providerName, can, api } = useTicketing();
   const [form, setForm] = useState(() => {
     if (modal.mode === "addField") {

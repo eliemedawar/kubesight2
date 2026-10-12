@@ -13,13 +13,19 @@ export default function VersionMenu({ choices, current, onPick, onClose }) {
     const onDown = (event) => {
       if (ref.current && !ref.current.contains(event.target)) onClose();
     };
-    const onKey = (event) => event.key === "Escape" && onClose();
+    // Capture phase, and the key is claimed, so the app-wide dialog stack
+    // leaves whatever is open underneath alone.
+    const onKey = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onClose();
+    };
     document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
+    document.addEventListener("keydown", onKey, true);
     ref.current?.querySelector("button")?.focus();
     return () => {
       document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("keydown", onKey, true);
     };
   }, [onClose]);
 

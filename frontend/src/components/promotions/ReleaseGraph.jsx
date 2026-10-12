@@ -99,23 +99,36 @@ export default function ReleaseGraph({ timetable, environments, selectedKey, onS
         <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Releases by environment and time">
           {days.map((ms) => {
             const x = Math.max(L, X(ms));
-            const isToday = dayKey(new Date(ms).toISOString(), tz) === dayKey(timetable.now, tz);
+            // Midday of the column, like its label: a local midnight read in
+            // the timetable's zone can fall on the neighbouring day.
+            const isToday = dayKey(new Date(ms + 12 * 3600000).toISOString(), tz) === dayKey(timetable.now, tz);
+            // The first day starts before the window, so it is clipped to the
+            // left edge; when only a sliver of it shows, its label would print
+            // on top of the next day's.
+            const labelFits = Math.min(W - R, X(ms + DAY)) - x >= 64;
             return (
               <g key={ms}>
                 {isToday && <rect x={x} y={T - 24} width={Math.min(W - R, X(ms + DAY)) - x} height={H - T - B + 32} fill="var(--tt-go-soft)" />}
                 <line x1={x} y1={T - 24} x2={x} y2={H - B + 8} stroke="var(--border)" />
-                <text x={x + 8} y={T - 11} fontSize="13" fontWeight="700" fill="var(--text-subtle)">
-                  {fmtDay(new Date(ms + 12 * 3600000).toISOString(), tz)} {new Date(ms + 12 * 3600000).getDate()}
-                </text>
+                {labelFits && (
+                  <text x={x + 8} y={T - 11} fontSize="13" fontWeight="700" fill="var(--text-subtle)">
+                    {fmtDay(new Date(ms + 12 * 3600000).toISOString(), tz)} {new Date(ms + 12 * 3600000).getDate()}
+                  </text>
+                )}
                 {[6, 12, 18].map((h) => {
                   const xh = X(ms + h * 3600000);
                   if (xh < L || xh > W - R) return null;
+                  // The "now" pill sits on the same baseline; an hour label
+                  // under it would print through it, so that one is dropped.
+                  const underNow = Math.abs(xh - X(now)) < 40;
                   return (
                     <g key={h}>
                       <line x1={xh} y1={T} x2={xh} y2={H - B} stroke="var(--border-soft)" />
-                      <text x={xh} y={H - B + 19} fontSize="11" textAnchor="middle" fill="var(--text-muted)">
-                        {String(h).padStart(2, "0")}:00
-                      </text>
+                      {!underNow && (
+                        <text x={xh} y={H - B + 19} fontSize="11" textAnchor="middle" fill="var(--text-muted)">
+                          {String(h).padStart(2, "0")}:00
+                        </text>
+                      )}
                     </g>
                   );
                 })}
@@ -131,7 +144,15 @@ export default function ReleaseGraph({ timetable, environments, selectedKey, onS
             </g>
           ))}
           {lines.map(({ d, at, arrive, a, b, sel, future, color, w }) => (
-            <g key={d.key} className="tt-graph-line" onClick={() => onSelect(d.key)} role="button" aria-label={`${d.code} ${d.status}`}>
+            <g
+              key={d.key}
+              className="tt-graph-line"
+              onClick={() => onSelect(d.key)}
+              onKeyDown={(event) => (event.key === "Enter" || event.key === " ") && (event.preventDefault(), onSelect(d.key))}
+              role="button"
+              tabIndex={0}
+              aria-label={`${d.code} ${d.status}`}
+            >
               <line x1={X(at)} y1={Y(a)} x2={X(arrive)} y2={Y(b)} stroke="transparent" strokeWidth="14" />
               <line x1={X(at)} y1={Y(a)} x2={X(arrive)} y2={Y(b)} stroke={color} strokeWidth={w} strokeLinecap="round" strokeDasharray={future && !sel ? "5 4" : undefined} />
               <circle cx={X(at)} cy={Y(a)} r={sel ? 4.5 : 3} fill={color} />

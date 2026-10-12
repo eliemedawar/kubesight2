@@ -236,6 +236,13 @@ def update_source(provider_key: str):
     return success_response(data)
 
 
+def _provider_error(exc):
+    """A provider client error as a response: 409 when KubeSight's own settings
+    for it are incomplete (the operator has to configure something), else 502
+    (the provider failed or refused)."""
+    return error_response(str(exc), 409 if getattr(exc, "config_problem", False) else 502)
+
+
 @ticketing_bp.route("/<provider_key>/source/clusters", methods=["GET"])
 @require_permission("ticketing:view")
 def source_clusters(provider_key: str):
@@ -285,7 +292,7 @@ def get_field(provider_key: str, field_id: str):
     except LookupError as exc:
         return error_response(str(exc), 404)
     except provider.error as exc:
-        return error_response(str(exc), 502)
+        return _provider_error(exc)
 
 
 @ticketing_bp.route("/<provider_key>/layout", methods=["GET"])
@@ -296,7 +303,7 @@ def get_layout(provider_key: str):
     try:
         return success_response(provider.fields.get_layout_structure(fresh=fresh))
     except provider.error as exc:
-        return error_response(str(exc), 502)
+        return _provider_error(exc)
 
 
 @ticketing_bp.route("/<provider_key>/fields/<field_id>/options", methods=["PUT"])
@@ -311,7 +318,7 @@ def set_field_options(provider_key: str, field_id: str):
     except ValueError as exc:
         return error_response(str(exc), 400)
     except provider.error as exc:
-        return error_response(str(exc), 502)
+        return _provider_error(exc)
     _audit(
         "field_options_updated",
         provider,
@@ -334,7 +341,7 @@ def update_field(provider_key: str, field_id: str):
     except ValueError as exc:
         return error_response(str(exc), 400)
     except provider.error as exc:
-        return error_response(str(exc), 502)
+        return _provider_error(exc)
     _audit(
         "field_updated",
         provider,
@@ -360,7 +367,7 @@ def delete_field(provider_key: str, field_id: str):
     except ValueError as exc:
         return error_response(str(exc), 409)
     except provider.error as exc:
-        return error_response(str(exc), 502)
+        return _provider_error(exc)
     _audit(
         "field_deleted",
         provider,
@@ -387,7 +394,7 @@ def create_field(provider_key: str):
         return error_response(str(exc), 400)
     except provider.error as exc:
         # 403 here is almost always a missing admin scope on the credential.
-        return error_response(str(exc), 502)
+        return _provider_error(exc)
     _audit(
         "field_created",
         provider,
@@ -430,7 +437,7 @@ def plan_layout(provider_key: str):
         except ValueError as exc:
             return error_response(str(exc), 400)
         except provider.error as exc:
-            return error_response(str(exc), 502)
+            return _provider_error(exc)
     if not provider.capabilities.get("layoutPlan"):
         return _unsupported(
             provider, "layoutPlan", "whole-form mutation plans (it applies each change directly)"
@@ -442,7 +449,7 @@ def plan_layout(provider_key: str):
     except layout_svc.LayoutWriteError as exc:
         return error_response(str(exc), 400)
     except provider.error as exc:
-        return error_response(str(exc), 502)
+        return _provider_error(exc)
 
 
 @ticketing_bp.route("/<provider_key>/layout/snapshots", methods=["GET"])
@@ -474,7 +481,7 @@ def plan_layout_snapshot_restore(provider_key: str, snapshot_id: int):
     except layout_svc.LayoutWriteError as exc:
         return error_response(str(exc), 400)
     except provider.error as exc:
-        return error_response(str(exc), 502)
+        return _provider_error(exc)
 
 
 @ticketing_bp.route(
@@ -497,7 +504,7 @@ def restore_layout_snapshot(provider_key: str, snapshot_id: int):
     except layout_svc.LayoutWriteError as exc:
         return error_response(str(exc), 400)
     except provider.error as exc:
-        return error_response(str(exc), 502)
+        return _provider_error(exc)
     _audit(
         "layout_snapshot_restored",
         provider,
@@ -526,7 +533,7 @@ def create_section(provider_key: str):
         # Includes Zoho's LayoutWriteError, which subclasses ValueError.
         return error_response(str(exc), 400)
     except provider.error as exc:
-        return error_response(str(exc), 502)
+        return _provider_error(exc)
     _audit(
         "section_created",
         provider,
@@ -552,7 +559,7 @@ def rename_section(provider_key: str, section_id: str):
     except ValueError as exc:
         return error_response(str(exc), 400)
     except provider.error as exc:
-        return error_response(str(exc), 502)
+        return _provider_error(exc)
     _audit(
         "section_renamed",
         provider,
@@ -580,7 +587,7 @@ def move_field_section(provider_key: str, field_id: str):
     except ValueError as exc:
         return error_response(str(exc), 400)
     except provider.error as exc:
-        return error_response(str(exc), 502)
+        return _provider_error(exc)
     _audit(
         "field_placed",
         provider,
@@ -609,7 +616,7 @@ def plan_convert_field(provider_key: str, field_id: str):
     except ValueError as exc:
         return error_response(str(exc), 400)
     except provider.error as exc:
-        return error_response(str(exc), 502)
+        return _provider_error(exc)
 
 
 @ticketing_bp.route("/<provider_key>/fields/<field_id>/convert", methods=["POST"])
@@ -629,7 +636,7 @@ def convert_field(provider_key: str, field_id: str):
     except ValueError as exc:
         return error_response(str(exc), 400)
     except provider.error as exc:
-        return error_response(str(exc), 502)
+        return _provider_error(exc)
     _audit(
         "field_converted",
         provider,
@@ -683,7 +690,7 @@ def set_field_binding(provider_key: str, field_id: str):
     except ValueError as exc:
         return error_response(str(exc), 400)
     except provider.error as exc:
-        return error_response(str(exc), 502)
+        return _provider_error(exc)
     _audit(
         "field_binding_set",
         provider,
@@ -714,7 +721,7 @@ def preview_field_binding(provider_key: str, field_id: str):
     except ValueError as exc:
         return error_response(str(exc), 400)
     except provider.error as exc:
-        return error_response(str(exc), 502)
+        return _provider_error(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -843,8 +850,8 @@ def inbound_secret_refusal(sync, provider_name: str, provided):
     if not sync.inbound_secret_configured():
         return error_response(
             f"No inbound webhook secret is configured for {provider_name}, so KubeSight "
-            "rejects every webhook delivery. Set one in Ticketing → "
-            f"{provider_name} → Settings → Inbound webhook, then send it in the "
+            "rejects every webhook delivery. Set one in KubeSight under Administration → "
+            f"Integrations → {provider_name} → Inbound webhook, then send it in the "
             "X-Ticketing-Secret header.",
             403,
         )

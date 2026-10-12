@@ -203,8 +203,8 @@ export default function TicketingPage({ canManage = false, embedded = false }) {
       )}
 
       <p className="muted sg-tk-note">
-        Both providers share one deploy surface — the source cluster, its namespaces, the custom
-        environments and the Jenkins router are configured once and used by whichever platform
+        Each provider has its own deploy source — the cluster, namespaces and custom environments
+        its dropdowns publish. The Jenkins router is one connection, used by whichever platform
         raised the ticket.
       </p>
     </div>

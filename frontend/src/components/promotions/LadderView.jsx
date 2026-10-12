@@ -326,7 +326,7 @@ function RulesCard({ envs, clusters, canManage, busy, run }) {
   const [kind, setKind] = useState("pattern");
   const [pattern, setPattern] = useState("");
   const [picked, setPicked] = useState([]);
-  const [nsMap, setNsMap] = useState({ loading: false, items: [] });
+  const [nsMap, setNsMap] = useState({ loading: false, items: [], error: "" });
   const [preview, setPreview] = useState(null);
 
   useEffect(() => {
@@ -341,10 +341,10 @@ function RulesCard({ envs, clusters, canManage, busy, run }) {
   useEffect(() => {
     if (!clusterId || kind !== "namespaces") return undefined;
     let cancelled = false;
-    setNsMap({ loading: true, items: [] });
+    setNsMap({ loading: true, items: [], error: "" });
     getNamespaceMap(clusterId)
-      .then((data) => !cancelled && setNsMap({ loading: false, items: data?.items || [] }))
-      .catch(() => !cancelled && setNsMap({ loading: false, items: [] }));
+      .then((data) => !cancelled && setNsMap({ loading: false, items: data?.items || [], error: "" }))
+      .catch((err) => !cancelled && setNsMap({ loading: false, items: [], error: err.message || "Could not read the namespaces." }));
     return () => {
       cancelled = true;
     };
@@ -463,6 +463,8 @@ function RulesCard({ envs, clusters, canManage, busy, run }) {
             <div className="pr-ns-pick">
               {nsMap.loading ? (
                 <p className="pr-muted">Loading namespaces…</p>
+              ) : nsMap.error ? (
+                <p className="pr-danger-text">{nsMap.error}</p>
               ) : nsMap.items.length === 0 ? (
                 <p className="pr-muted">No namespaces found on this cluster.</p>
               ) : (
@@ -549,7 +551,7 @@ function RulesCard({ envs, clusters, canManage, busy, run }) {
                         className="icon-button pr-x pr-x--sm"
                         disabled={busy}
                         onClick={() => run(() => removeEnvironmentBinding(b.id))}
-                        aria-label={`Remove ${b.namespace} from ${e.name}`}
+                        aria-label={`Remove ${b.wholeCluster ? `the whole of ${b.clusterName}` : b.namespace} from ${e.name}`}
                       >
                         <PrIcon.X />
                       </button>
@@ -569,7 +571,7 @@ function RulesCard({ envs, clusters, canManage, busy, run }) {
 
 function NamespaceMap({ envs, clusters, canManage, busy, run, version }) {
   const [clusterId, setClusterId] = useState("");
-  const [data, setData] = useState({ loading: false, items: [], assigned: 0, unassigned: 0 });
+  const [data, setData] = useState({ loading: false, items: [], assigned: 0, unassigned: 0, error: "" });
   const [show, setShow] = useState("all");
   const [term, setTerm] = useState("");
 
@@ -580,10 +582,10 @@ function NamespaceMap({ envs, clusters, canManage, busy, run, version }) {
   useEffect(() => {
     if (!clusterId) return undefined;
     let cancelled = false;
-    setData((d) => ({ ...d, loading: true }));
+    setData((d) => ({ ...d, loading: true, error: "" }));
     getNamespaceMap(clusterId)
-      .then((res) => !cancelled && setData({ loading: false, ...res }))
-      .catch(() => !cancelled && setData({ loading: false, items: [], assigned: 0, unassigned: 0 }));
+      .then((res) => !cancelled && setData({ loading: false, error: "", ...res }))
+      .catch((err) => !cancelled && setData({ loading: false, items: [], assigned: 0, unassigned: 0, error: err.message || "Could not read the namespaces." }));
     return () => {
       cancelled = true;
     };
@@ -635,6 +637,8 @@ function NamespaceMap({ envs, clusters, canManage, busy, run, version }) {
       <div className="pr-nsmap-table" role="table" aria-label="Namespaces">
         {data.loading && !data.items.length ? (
           <p className="pr-muted">Loading…</p>
+        ) : data.error ? (
+          <p className="pr-danger-text">{data.error}</p>
         ) : rows.length === 0 ? (
           <p className="pr-muted">No namespace here.</p>
         ) : (

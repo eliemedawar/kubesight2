@@ -2,12 +2,14 @@ import { useState } from "react";
 import ErrorBanner from "../common/ErrorBanner.jsx";
 import ZohoLayoutDiff from "./ZohoLayoutDiff.jsx";
 import { useTicketing } from "../ticketing/TicketingContext.jsx";
+import { useEscapeToClose } from "../catalog/ciShared.jsx";
 
 export default function ZohoRenameSectionModal({ section, onClose, onSaved }) {
   const { name: providerName, can, api } = useTicketing();
   const [name, setName] = useState(section?.name || "");
   const [plan, setPlan] = useState(null);
   const [busy, setBusy] = useState(false);
+  useEscapeToClose(onClose, !busy);
   const [error, setError] = useState("");
 
   const preview = async (event) => {

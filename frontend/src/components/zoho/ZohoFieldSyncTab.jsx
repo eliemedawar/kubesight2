@@ -41,7 +41,13 @@ function AgentPreview({ preview, previewLoading, cascadeOn }) {
       {previewLoading ? (
         <p className="muted">Reading the live deployments from the source cluster…</p>
       ) : items.length === 0 ? (
-        <EmptyState message="Nothing published yet — pick a cluster and namespaces first." />
+        <EmptyState
+          message={
+            namespaces.length
+              ? `No deployments found in the ${namespaces.length} chosen namespace${namespaces.length === 1 ? "" : "s"} — nothing to publish yet.`
+              : "Nothing published yet — pick a cluster and namespaces first."
+          }
+        />
       ) : (
         <div className="sg-zh-zform">
           <div className="sg-zh-zform-title">{providerName} · New DevOps Request</div>
@@ -186,7 +192,13 @@ function PublishedValues({ preview, previewLoading }) {
       ) : preview?.error ? (
         <p className="sg-zh-inline-error">{preview.error}</p>
       ) : items.length === 0 ? (
-        <EmptyState message="No deployments yet — pick a cluster and namespaces via “Choose namespaces”." />
+        <EmptyState
+          message={
+            (preview?.namespaces || []).length
+              ? "No deployments found in the chosen namespaces. Check the cluster, or choose other namespaces via “Choose namespaces”."
+              : "No deployments yet — pick a cluster and namespaces via “Choose namespaces”."
+          }
+        />
       ) : (
         <div className="table-wrap sg-zh-tscroll">
           <table className="data-table">

@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 
 import { getPromotionHistory } from "../../api/promotionsApi.js";
+import { useEscapeToClose } from "../../hooks/useEscapeToClose.js";
 import { PrIcon } from "./icons.jsx";
 import { STATE_META, formatMinutes, formatRelative } from "./promotionModel.js";
 
@@ -14,12 +15,11 @@ export default function AppPanel({ app, overview, canDeploy, onClose, onPromote 
   const [history, setHistory] = useState({ loading: true, items: [], error: "" });
   const closeRef = useRef(null);
 
+  useEscapeToClose(onClose);
+
   useEffect(() => {
     closeRef.current?.focus();
-    const onKey = (event) => event.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

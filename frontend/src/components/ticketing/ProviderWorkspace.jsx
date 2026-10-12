@@ -400,7 +400,7 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
             <span className="sg-zh-cmdsep">·</span>
             {/* The Settings tab used to be right here, so say where it went
                 rather than leaving someone hunting for it. */}
-            <span className="muted">connection settings in Settings → Integrations</span>
+            <a href={`#/integrations/${providerKey}`}>Connection settings</a>
           </p>
         </div>
         <div className="sg-zh-cmdactions">

@@ -31,7 +31,7 @@ const SOURCE_LABELS = {
 
 const MODE_TONE = { enforce: "danger", warn: "warn", off: "muted" };
 
-function Section({ title, lede, right, children }) {
+function Section({ title, lede, right, message, onDismiss, children }) {
   return (
     <section className="sg-ap-rule">
       <header className="sg-ap-rule-head">
@@ -41,6 +41,13 @@ function Section({ title, lede, right, children }) {
         </div>
         {right}
       </header>
+      {/* A save's outcome shows in the section that was saved, not at the top
+          of a long page where nobody looking at the Save button would see it. */}
+      {message?.isError ? (
+        <ErrorBanner message={message.text} suppressAccessDenied={false} onDismiss={onDismiss} />
+      ) : message ? (
+        <p className="settings-panel-notice" role="status">{message.text}</p>
+      ) : null}
       {children}
     </section>
   );
@@ -137,6 +144,7 @@ function groupForm(group) {
 function ApproverGroups({ groups, canEdit, onChanged, notify }) {
   const [editing, setEditing] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
   const save = async (form) => {
     setBusy(true);
     try {
@@ -162,11 +170,15 @@ function ApproverGroups({ groups, canEdit, onChanged, notify }) {
   const remove = async (group) => {
     const used = group.alertPolicies?.length ? ` It also receives alerts for: ${group.alertPolicies.join(", ")}.` : "";
     if (!window.confirm(`Delete the group ${group.name}?${used}`)) return;
+    setDeletingId(group.id);
     try {
       await deleteApproverGroup(group.id);
-      onChanged();
+      notify(`Deleted ${group.name}.`);
+      await onChanged();
     } catch (err) {
       notify(err.serverMessage || err.message, true);
+    } finally {
+      setDeletingId(null);
     }
   };
   const items = groups?.items || [];
@@ -202,7 +214,10 @@ function ApproverGroups({ groups, canEdit, onChanged, notify }) {
             {canEdit ? (
               <div className="sg-ap-actions">
                 <button type="button" className="btn-ghost btn-sm" onClick={() => setEditing(groupForm(group))}>Edit</button>
-                <button type="button" className="btn-ghost btn-sm" onClick={() => remove(group)}>Delete</button>
+                <button type="button" className="btn-ghost btn-sm" disabled={deletingId === group.id}
+                        onClick={() => remove(group)}>
+                  {deletingId === group.id ? "Deleting…" : "Delete"}
+                </button>
               </div>
             ) : null}
           </div>
@@ -424,7 +439,8 @@ function HermesRules({ hermes, canEdit, onSaved, notify }) {
 export default function RulesTab() {
   const [rules, setRules] = useState(null);
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
+  // { section, text, isError } — the last save's outcome, shown in its section.
+  const [message, setMessage] = useState(null);
   const load = useCallback(async () => {
     try {
       setRules(await getApprovalRules());
@@ -434,9 +450,14 @@ export default function RulesTab() {
     }
   }, []);
   useEffect(() => { load(); }, [load]);
-  const notify = useCallback((message, isError = false) => {
-    if (isError) { setError(message); setNotice(""); } else { setNotice(message); setError(""); }
-  }, []);
+  const notifyIn = useCallback(
+    (section) => (text, isError = false) => setMessage({ section, text, isError }),
+    []
+  );
+  const sectionMessage = (section) => ({
+    message: message?.section === section ? message : null,
+    onDismiss: () => setMessage(null),
+  });
 
   if (!rules) return error ? <ErrorBanner message={error} suppressAccessDenied={false} /> : <p className="muted">Loading rules…</p>;
   const perms = rules.permissions || {};
@@ -445,24 +466,23 @@ export default function RulesTab() {
   return (
     <div className="sg-ap-rules">
       {error ? <ErrorBanner message={error} suppressAccessDenied={false} onDismiss={() => setError("")} /> : null}
-      {notice ? <p className="settings-panel-notice" role="status">{notice}</p> : null}
 
       {rules.groups ? (
-        <Section title="Who approves"
+        <Section title="Who approves" {...sectionMessage("groups")}
                  lede="Approver groups: people, roles and emails. A group marked “Approves deploys” gets every deployment request and change bundle.">
-          <ApproverGroups groups={rules.groups} canEdit={perms.editGroups} onChanged={load} notify={notify} />
+          <ApproverGroups groups={rules.groups} canEdit={perms.editGroups} onChanged={load} notify={notifyIn("groups")} />
         </Section>
       ) : null}
 
       {rules.clusters ? (
-        <Section title="Clusters" lede="How many different approvers a change to each cluster needs.">
-          <ClusterRules config={rules.clusters} canEdit={perms.editClusters} onSaved={load} notify={notify} />
+        <Section title="Clusters" {...sectionMessage("clusters")} lede="How many different approvers a change to each cluster needs.">
+          <ClusterRules config={rules.clusters} canEdit={perms.editClusters} onSaved={load} notify={notifyIn("clusters")} />
         </Section>
       ) : null}
 
       {rules.hermes ? (
-        <Section title="Hermes tickets" lede="When a ticket action needs a person, and who that is.">
-          <HermesRules hermes={rules.hermes} canEdit={perms.editHermes} onSaved={load} notify={notify} />
+        <Section title="Hermes tickets" {...sectionMessage("hermes")} lede="When a ticket action needs a person, and who that is.">
+          <HermesRules hermes={rules.hermes} canEdit={perms.editHermes} onSaved={load} notify={notifyIn("hermes")} />
         </Section>
       ) : null}
 

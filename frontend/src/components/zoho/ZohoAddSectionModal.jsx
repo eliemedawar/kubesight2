@@ -1,11 +1,13 @@
 import { useState } from "react";
 import ErrorBanner from "../common/ErrorBanner.jsx";
 import { useTicketing } from "../ticketing/TicketingContext.jsx";
+import { useEscapeToClose } from "../catalog/ciShared.jsx";
 
 export default function ZohoAddSectionModal({ onClose, onSaved }) {
   const { formNoun, api } = useTicketing();
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
+  useEscapeToClose(onClose, !busy);
   const [error, setError] = useState("");
 
   const submit = async (event) => {

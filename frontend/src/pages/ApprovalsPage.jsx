@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import RulesTab from "../components/approvals/RulesTab.jsx";
-import { decideApproval, getApprovalsHistory, getApprovalsInbox } from "../api/approvalsApi.js";
+import { decideApproval, getApprovalsCount, getApprovalsHistory, getApprovalsInbox } from "../api/approvalsApi.js";
 import { useRouteParam, useRouter } from "../routes/RouterContext.jsx";
 import { setVisibleInterval } from "../lib/visibleInterval";
 import { parseApiTime } from "../lib/apiTime.js";
@@ -201,6 +201,8 @@ function Inbox({ scope, onCounts }) {
   };
 
   if (!data && !error) return <p className="muted">Loading approvals…</p>;
+  // Never read "nothing is waiting" off a list that did not load.
+  if (!data) return <ErrorBanner message={error} suppressAccessDenied={false} />;
   const items = (data?.items || []).filter((item) => !kind || item.kind === kind);
   return (
     <>
@@ -237,9 +239,14 @@ function History() {
   useEffect(() => {
     let ignore = false;
     setItems(null);
+    setError("");
     getApprovalsHistory(kind)
       .then((data) => { if (!ignore) setItems((data.items || []).map(normalize)); })
-      .catch((err) => { if (!ignore) setError(err.message || "Could not load the history."); });
+      .catch((err) => {
+        if (ignore) return;
+        setError(err.message || "Could not load the history.");
+        setItems([]);
+      });
     return () => { ignore = true; };
   }, [kind]);
   return (
@@ -278,7 +285,7 @@ function History() {
             </tbody>
           </table>
         </div>
-      ) : <p className="muted">Nothing decided yet.</p>}
+      ) : error ? null : <p className="muted">Nothing decided yet.</p>}
     </>
   );
 }
@@ -288,6 +295,16 @@ export default function ApprovalsPage({ clusters = [] }) {
   const [rawTab, setTab] = useRouteParam("tab", "waiting");
   const tab = LEGACY_TAB[rawTab] || rawTab;
   const [counts, setCounts] = useState(null);
+
+  // Landing on History or Rules still shows how much is waiting; the inbox
+  // tabs refresh the numbers themselves.
+  useEffect(() => {
+    let alive = true;
+    getApprovalsCount()
+      .then((data) => { if (alive) setCounts((prev) => prev || data); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   // An old link (#/deployment-requests/active) lands on its new home.
   useEffect(() => {
@@ -314,10 +331,10 @@ export default function ApprovalsPage({ clusters = [] }) {
             <button key={item.key} type="button" className={tab === item.key ? "active" : ""}
                     onClick={() => setTab(item.key)}>
               {item.label}
-              {item.key === "waiting" && counts ? (
+              {item.key === "waiting" && Number.isFinite(counts?.waitingOnMe) ? (
                 <span className={`sg-cnt${counts.waitingOnMe === 0 ? " sg-cnt--zero" : ""}`}>{counts.waitingOnMe}</span>
               ) : null}
-              {item.key === "pending" && counts ? (
+              {item.key === "pending" && Number.isFinite(counts?.pending) ? (
                 <span className={`sg-cnt${counts.pending === 0 ? " sg-cnt--zero" : ""}`}>{counts.pending}</span>
               ) : null}
             </button>

@@ -5,6 +5,7 @@ import useZohoOptionSources from "./useZohoOptionSources.js";
 import { IconAlert } from "./icons.jsx";
 import { linesToValues } from "./zohoFieldMeta";
 import { useTicketingApi } from "../ticketing/TicketingContext.jsx";
+import { useEscapeToClose } from "../catalog/ciShared.jsx";
 
 const STEPS = ["The dropdown", "What it breaks", "Done"];
 
@@ -25,6 +26,8 @@ export default function ZohoConvertFieldModal({ field, onClose, onSaved }) {
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
+  // Loading the plan may be abandoned; applying it may not.
+  useEscapeToClose(onClose, !(busy && plan));
 
   const [form, setForm] = useState({
     label: "",

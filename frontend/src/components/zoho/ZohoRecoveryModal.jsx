@@ -3,6 +3,7 @@ import EmptyState from "../common/EmptyState.jsx";
 import ErrorBanner from "../common/ErrorBanner.jsx";
 import ZohoLayoutDiff from "./ZohoLayoutDiff.jsx";
 import { useTicketing } from "../ticketing/TicketingContext.jsx";
+import { useEscapeToClose } from "../catalog/ciShared.jsx";
 
 const reasonLabel = (reason) =>
   String(reason || "layout_write")
@@ -18,6 +19,7 @@ export default function ZohoRecoveryModal({ canManage, onClose, onRestored }) {
   const [plan, setPlan] = useState(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  useEscapeToClose(onClose, !busy);
   const [error, setError] = useState("");
 
   useEffect(() => {

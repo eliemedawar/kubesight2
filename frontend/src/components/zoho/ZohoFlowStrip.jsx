@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import {
   IconArrowRight,
   IconGrid,
@@ -9,6 +10,7 @@ import {
 import { ACTIVE_RUN_STATUSES } from "./ZohoRunDetail.jsx";
 import { timeAgo } from "./common.jsx";
 import { useTicketing } from "../ticketing/TicketingContext.jsx";
+import { useRouter } from "../../routes/RouterContext.jsx";
 
 // Tone ranking for connectors: a link inherits the worse of its two nodes.
 const TONE_RANK = { ok: 0, info: 1, muted: 2, warn: 3, danger: 4 };
@@ -48,15 +50,56 @@ export default function ZohoFlowStrip({
   jenkins,
   onNavigate,
 }) {
-  const { name: providerName, formNoun } = useTicketing();
+  const { name: providerName, formNoun, api } = useTicketing();
+  const { navigate } = useRouter();
   const enabled = Boolean(config?.enabled);
   const namespaces = config?.selectedNamespaces || [];
 
-  // Source cluster (custom Jenkins-only environments count as a source too)
-  const hasSource = Boolean(
-    config?.sourceClusterId || (config?.customEnvironments || []).length
-  );
-  const sourceTone = hasSource ? "ok" : "warn";
+  // Source cluster (custom Jenkins-only environments count as a source too).
+  // The config holds only the id, so the selectable clusters are read to show
+  // its name and to notice when it no longer exists. null = not known yet.
+  const sourceClusterId = config?.sourceClusterId || "";
+  const customCount = (config?.customEnvironments || []).length;
+  const [sourceClusters, setSourceClusters] = useState(null);
+  useEffect(() => {
+    if (!sourceClusterId || !api?.getSourceClusters) return undefined;
+    let cancelled = false;
+    setSourceClusters(null);
+    api
+      .getSourceClusters()
+      .then((res) => !cancelled && setSourceClusters(res.items || []))
+      .catch(() => !cancelled && setSourceClusters("error"));
+    return () => {
+      cancelled = true;
+    };
+  }, [api, sourceClusterId]);
+  const sourceCluster = Array.isArray(sourceClusters)
+    ? sourceClusters.find((c) => String(c.id) === String(sourceClusterId))
+    : null;
+  const sourceMissing = Array.isArray(sourceClusters) && !sourceCluster;
+  const hasSource = Boolean(sourceClusterId || customCount);
+  const sourceTone = !hasSource ? "warn" : sourceMissing ? "danger" : sourceClusters === "error" ? "muted" : "ok";
+  const sourceMetric = !hasSource
+    ? "Not set"
+    : sourceClusterId
+    ? sourceCluster?.name || sourceClusterId
+    : `${customCount} custom environment(s)`;
+  const sourceSub = !hasSource
+    ? "pick one in Field sync"
+    : sourceMissing
+    ? "cluster no longer exists — pick another in Field sync"
+    : `${namespaces.length} namespace(s) selected`;
+  const sourcePill = !hasSource
+    ? "Not set"
+    : !sourceClusterId
+    ? "Connected"
+    : sourceMissing
+    ? "Missing"
+    : sourceClusters === "error"
+    ? "Not checked"
+    : sourceClusters === null
+    ? "Checking…"
+    : "Connected";
 
   // Field sync
   const syncTone = !enabled
@@ -91,7 +134,7 @@ export default function ZohoFlowStrip({
   const secretSet = Boolean(config?.inboundSecretConfigured);
   const inboundTone = unresolved > 0 ? "danger" : secretSet ? "ok" : "warn";
   const inboundPill =
-    unresolved > 0 ? `${unresolved} unresolved` : secretSet ? "OK" : "Rejecting — no secret";
+    unresolved > 0 ? `${unresolved} unresolved` : secretSet ? "OK" : "Rejecting";
 
   // Deploy automation
   const activeRuns = runs.filter((r) => ACTIVE_RUN_STATUSES.has(r.status));
@@ -111,10 +154,10 @@ export default function ZohoFlowStrip({
       key: "source",
       icon: IconServer,
       title: "Source cluster",
-      metric: hasSource ? config.sourceClusterId : "Not set",
-      sub: hasSource ? `${namespaces.length} namespace(s) selected` : "pick one in Field sync",
+      metric: sourceMetric,
+      sub: sourceSub,
       tone: sourceTone,
-      pill: hasSource ? "Connected" : "Not set",
+      pill: sourcePill,
       target: "fieldsync",
     },
     {
@@ -144,7 +187,8 @@ export default function ZohoFlowStrip({
       icon: IconInbox,
       title: "Inbound tickets",
       metric: ticketsLoading ? "…" : `${tickets.length} received`,
-      sub: secretSet ? "webhook secret set" : "webhook open — no secret",
+      // With no secret the webhook fails closed: every delivery gets a 403.
+      sub: secretSet ? "webhook secret set" : "no secret set — every delivery refused",
       tone: inboundTone,
       pill: inboundPill,
       target: "tickets",
@@ -157,7 +201,9 @@ export default function ZohoFlowStrip({
       sub: jenkinsOn ? "Jenkins router" : "Jenkins not connected",
       tone: autoTone,
       pill: autoPill,
-      target: jenkinsOn ? "tickets" : "settings",
+      // Jenkins is connected in Settings → Integrations; this workspace has no
+      // settings tab any more (an unknown tab would bounce to the dashboard).
+      target: jenkinsOn ? "tickets" : "integration:jenkins",
     },
   ];
 
@@ -175,7 +221,14 @@ export default function ZohoFlowStrip({
               <IconArrowRight />
             </span>
           ) : null}
-          <Node {...node} onClick={() => onNavigate(node.target)} />
+          <Node
+            {...node}
+            onClick={() =>
+              node.target.startsWith("integration:")
+                ? navigate({ key: "integrationDetail", params: { integrationKey: node.target.slice(12) } })
+                : onNavigate(node.target)
+            }
+          />
         </span>
       ))}
     </div>

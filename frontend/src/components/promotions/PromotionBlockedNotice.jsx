@@ -43,7 +43,7 @@ export default function PromotionBlockedNotice({ verdict, changes, onRequested }
           <strong>Refused by the promotion ladder</strong>
           <span>{verdict?.message}</span>
           <span className="pr-blocked-links">
-            <a className="pr-link" href="#/promotions/board">
+            <a className="pr-link" href="#/promotions/timetable">
               Open Promotions
             </a>
             {canAsk && !asking && !sent && (
@@ -70,7 +70,9 @@ export default function PromotionBlockedNotice({ verdict, changes, onRequested }
                 onChange={(event) => setReason(event.target.value)}
                 placeholder="Approvers read this — e.g. the incident it fixes and why it cannot wait."
               />
-              <small>Someone other than you approves it; it deploys by itself once they do.</small>
+              <small>
+                At least {MIN_REASON} characters. Someone other than you approves it; it deploys by itself once they do.
+              </small>
             </label>
             {error && <p className="pr-text-danger">{error}</p>}
             <div className="pr-picker-foot">

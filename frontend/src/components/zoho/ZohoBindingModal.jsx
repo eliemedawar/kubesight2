@@ -4,6 +4,7 @@ import ZohoOptionSourceForm from "./ZohoOptionSourceForm.jsx";
 import useZohoOptionSources from "./useZohoOptionSources.js";
 import { IconAlert } from "./icons.jsx";
 import { useTicketing } from "../ticketing/TicketingContext.jsx";
+import { useEscapeToClose } from "../catalog/ciShared.jsx";
 
 /**
  * Turn one dropdown's options from a hand-typed list into a live source (or
@@ -24,6 +25,7 @@ export default function ZohoBindingModal({ field, onClose, onSaved }) {
   });
   const [enabled, setEnabled] = useState(existing ? existing.enabled : true);
   const [busy, setBusy] = useState(false);
+  useEscapeToClose(onClose, !busy);
   const [error, setError] = useState("");
 
   const save = async () => {

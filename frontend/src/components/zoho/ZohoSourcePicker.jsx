@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import ErrorBanner from "../common/ErrorBanner.jsx";
 import { useTicketing, useTicketingApi } from "../ticketing/TicketingContext.jsx";
+import { useEscapeToClose } from "../catalog/ciShared.jsx";
 
 /**
  * Modal to choose the dropdown source: a cluster + which of its namespaces feed
@@ -39,6 +40,7 @@ export default function ZohoSourcePicker({
   const [loadingNs, setLoadingNs] = useState(false);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [saving, setSaving] = useState(false);
+  useEscapeToClose(onClose, !saving);
   const [error, setError] = useState("");
 
   // Search filters to tame long lists.
@@ -425,6 +427,11 @@ export default function ZohoSourcePicker({
                 {c.name}
               </option>
             ))}
+            {/* The saved cluster may have been removed or be unreachable: name it
+                rather than showing "Select a cluster…" over a saved choice. */}
+            {!loadingClusters && clusterId && !clusters.some((c) => c.id === clusterId) ? (
+              <option value={clusterId}>{clusterId} (not available)</option>
+            ) : null}
           </select>
         </div>
 

@@ -17,14 +17,18 @@ export default function ZohoActionMenu({ label, items, onAction, align = "right"
     const closeOutside = (event) => {
       if (!rootRef.current?.contains(event.target)) setOpen(false);
     };
+    // Capture phase, and the key is claimed, so the layout editor dialog
+    // around the menu stays open.
     const closeOnEscape = (event) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setOpen(false);
     };
     document.addEventListener("pointerdown", closeOutside);
-    document.addEventListener("keydown", closeOnEscape);
+    document.addEventListener("keydown", closeOnEscape, true);
     return () => {
       document.removeEventListener("pointerdown", closeOutside);
-      document.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("keydown", closeOnEscape, true);
     };
   }, [open]);
 

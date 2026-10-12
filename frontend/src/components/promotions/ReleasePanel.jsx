@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { createPromotionRelease, setDepartureExcluded, setDepartureState } from "../../api/promotionsApi.js";
+import { useEscapeToClose } from "../../hooks/useEscapeToClose.js";
 import { PrIcon } from "./icons.jsx";
 import ReviewDialog from "./ReviewDialog.jsx";
 import VersionMenu from "./VersionMenu.jsx";
@@ -144,14 +145,14 @@ export default function ReleasePanel({ dep, overview, timetable, canDeploy, onCh
         </div>
         <p className="tt-r-meta">
           <span>
-            <b>{release ? release.applications : rows.length}</b> applications
+            <b>{release ? release.applications : rows.length}</b> {(release ? release.applications : rows.length) === 1 ? "application" : "applications"}
           </span>
           <span>
             Change{" "}
             {release?.bundleIds?.length ? (
               <b>{release.bundleIds.map((id) => `bundle #${id}`).join(", ")}</b>
             ) : approval.required ? (
-              "one bundle, raised at the cut-off"
+              scheduled ? "one bundle, raised at the cut-off" : "one bundle, raised when you promote"
             ) : (
               "applied directly, no approval"
             )}
@@ -259,7 +260,7 @@ export default function ReleasePanel({ dep, overview, timetable, canDeploy, onCh
         </div>
         <div className="tt-chips" role="group" aria-label="Filter applications">
           <button type="button" className={`btn-ghost tt-chip${filter === "all" ? " is-on" : ""}`} onClick={() => setFilter("all")}>
-            <b>{rows.length}</b> applications
+            <b>{rows.length}</b> {rows.length === 1 ? "application" : "applications"}
           </button>
           {APP_ORDER.filter((k) => counts[k]).map((k) => (
             <button key={k} type="button" className={`btn-ghost tt-chip${filter === k ? " is-on" : ""}`} onClick={() => { setFilter(k); setOpen(new Set()); }}>
@@ -376,7 +377,7 @@ export default function ReleasePanel({ dep, overview, timetable, canDeploy, onCh
 
       <div className="tt-r-foot">
         <span>
-          <b>{groups.length}</b> systems · open one to see its applications
+          <b>{groups.length}</b> {groups.length === 1 ? "system" : "systems"} · open one to see its applications
         </span>
         <span>
           Approvers see <b>one change</b> for the whole release
@@ -444,12 +445,10 @@ function whyText(row, from, to, dep, tz) {
 
 function ConfirmPromote({ dep, from, to, items, workloads, clusters, approval, rollback, counts, left, busy, onCancel, onConfirm }) {
   const goRef = useRef(null);
+  useEscapeToClose(onCancel, !busy);
   useEffect(() => {
     goRef.current?.focus();
-    const onKey = (event) => event.key === "Escape" && !busy && onCancel();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [busy, onCancel]);
+  }, []);
   return (
     <div className="tt-modal-root" role="presentation">
       <div className="tt-scrim" onClick={() => !busy && onCancel()} />

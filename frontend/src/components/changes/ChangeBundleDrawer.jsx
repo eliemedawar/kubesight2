@@ -1,34 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useChangeBundle } from "../../context/ChangeBundleContext";
 import { diffBundleItem } from "../../api/changeBundlesApi";
+import { useEscapeToClose } from "../../hooks/useEscapeToClose.js";
+import { ACTION_LABEL } from "./actionLabels.js";
 import DiffBlock from "./DiffBlock.jsx";
-
-const ACTION_OPTIONS = [
-  { value: "edit_deployment", label: "Edit deployment (YAML)", needs: ["yaml"] },
-  { value: "change_image", label: "Change image / tag", needs: ["image"] },
-  { value: "scale_replicas", label: "Scale replicas", needs: ["replicas"] },
-  { value: "update_env", label: "Update env variables (YAML)", needs: ["yaml"] },
-  { value: "update_resources", label: "Update resource requests/limits (YAML)", needs: ["yaml"] },
-  { value: "update_hpa", label: "Enable/disable or update HPA (YAML)", needs: ["yaml"] },
-  { value: "delete_deployment", label: "Delete deployment", needs: [] },
-];
-
-const ACTION_LABEL = {
-  ...Object.fromEntries(ACTION_OPTIONS.map((o) => [o.value, o.label])),
-  // Not offered here: KubeSight stages these itself when a direct change on an
-  // approval-gated cluster is sent for approval.
-  apply_yaml: "Apply YAML",
-  restart_workload: "Restart",
-  rollback_deployment: "Roll back deployment",
-  edit_configmap: "Edit config map (YAML)",
-  edit_secret: "Edit secret (YAML)",
-  edit_ingress: "Edit ingress (YAML)",
-  edit_resource: "Edit resource (YAML)",
-  helm_install: "Helm install",
-  helm_upgrade: "Helm upgrade",
-  helm_rollback: "Helm rollback",
-  helm_uninstall: "Helm uninstall",
-};
 
 const STATUS_COLORS = {
   valid: "var(--ok)",
@@ -91,7 +66,9 @@ export default function ChangeBundleDrawer() {
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(
       d.getMinutes()
     )}`;
-  }, []);
+    // Recomputed each time the drawer opens: it stays mounted for the whole session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
   useEffect(() => {
     if (isOpen) {
@@ -99,6 +76,27 @@ export default function ChangeBundleDrawer() {
       setError("");
     }
   }, [isOpen, bundle?.note]);
+
+  // Escape closes the drawer like every other dialog (not mid-submit), and
+  // focus moves into it so keyboard users land on what just opened.
+  const panelRef = useRef(null);
+  useEffect(() => {
+    if (isOpen) panelRef.current?.focus();
+  }, [isOpen]);
+  useEscapeToClose(closeDrawer, !busy, isOpen);
+
+  const [removingId, setRemovingId] = useState(null);
+  const handleRemove = async (itemId) => {
+    setRemovingId(itemId);
+    setError("");
+    try {
+      await removeItem(itemId);
+    } catch (removeError) {
+      setError(removeError.message || "Could not remove that change.");
+    } finally {
+      setRemovingId(null);
+    }
+  };
 
   if (!enabled || !isOpen) return null;
 
@@ -139,6 +137,8 @@ export default function ChangeBundleDrawer() {
   return (
     <div className="modal-overlay" role="presentation" onClick={closeDrawer}>
       <aside
+        ref={panelRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-label="Change bundle"
@@ -155,6 +155,7 @@ export default function ChangeBundleDrawer() {
           display: "flex",
           flexDirection: "column",
           overflow: "hidden",
+          outline: "none",
         }}
       >
         <header
@@ -214,8 +215,8 @@ export default function ChangeBundleDrawer() {
                     {item.yamlPreview ? (
                       <button
                         type="button"
-                        className="btn-text"
-                        style={{ fontSize: "0.78rem", padding: 0 }}
+                        className="link-button"
+                        style={{ fontSize: "0.78rem" }}
                         onClick={() => setExpanded(expanded === item.id ? null : item.id)}
                       >
                         {expanded === item.id ? "Hide preview" : "View preview"}
@@ -223,19 +224,20 @@ export default function ChangeBundleDrawer() {
                     ) : null}
                     <button
                       type="button"
-                      className="btn-text"
-                      style={{ fontSize: "0.78rem", padding: 0 }}
+                      className="link-button"
+                      style={{ fontSize: "0.78rem" }}
                       onClick={() => toggleDiff(item)}
                     >
                       {diffOpen === item.id ? "Hide diff" : "View diff"}
                     </button>
                     <button
                       type="button"
-                      className="btn-text"
-                      style={{ fontSize: "0.78rem", padding: 0, color: "var(--danger)" }}
-                      onClick={() => removeItem(item.id)}
+                      className="link-button danger"
+                      style={{ fontSize: "0.78rem" }}
+                      disabled={removingId === item.id}
+                      onClick={() => handleRemove(item.id)}
                     >
-                      Remove
+                      {removingId === item.id ? "Removing…" : "Remove"}
                     </button>
                   </div>
                   {expanded === item.id && item.yamlPreview ? (
@@ -297,7 +299,7 @@ export default function ChangeBundleDrawer() {
             </label>
             <label
               className="form-grid__full"
-              style={{ flexDirection: "row", alignItems: "center", gap: 8, color: "var(--danger)", fontWeight: 600 }}
+              style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}
             >
               <input
                 type="checkbox"
@@ -318,10 +320,10 @@ export default function ChangeBundleDrawer() {
           ) : null}
           {error ? <p className="banner-message error">{error}</p> : null}
           <div className="modal-actions" style={{ marginTop: "var(--space-2)" }}>
-            <button type="button" className="btn-text" onClick={closeDrawer} disabled={busy}>
+            <button type="button" className="btn-ghost" onClick={closeDrawer} disabled={busy}>
               Close
             </button>
-            <button type="button" className="btn-primary" disabled={!canSubmit} onClick={handleSubmit}>
+            <button type="button" className="primary" disabled={!canSubmit} onClick={handleSubmit}>
               {busy ? "Submitting…" : "Submit for Approval"}
             </button>
           </div>

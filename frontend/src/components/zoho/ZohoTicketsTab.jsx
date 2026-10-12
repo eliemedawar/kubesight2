@@ -163,7 +163,7 @@ export default function ZohoTicketsTab({
         ) : (
           <span
             className="status-pill warn"
-            title="Inbound secret not configured — webhooks are rejected. Set one in Settings → Inbound webhook."
+            title={`Inbound secret not configured — webhooks are rejected. Set one in Integrations → ${providerName} → Inbound webhook.`}
           >
             Webhooks rejected — no secret
           </span>

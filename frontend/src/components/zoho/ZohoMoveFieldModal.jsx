@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import ErrorBanner from "../common/ErrorBanner.jsx";
 import ZohoLayoutDiff from "./ZohoLayoutDiff.jsx";
 import { useTicketing } from "../ticketing/TicketingContext.jsx";
+import { useEscapeToClose } from "../catalog/ciShared.jsx";
 
 export default function ZohoMoveFieldModal({
   field,
@@ -18,6 +19,7 @@ export default function ZohoMoveFieldModal({
   const [target, setTarget] = useState(choices[0] || "");
   const [plan, setPlan] = useState(null);
   const [busy, setBusy] = useState(false);
+  useEscapeToClose(onClose, !busy);
   const [error, setError] = useState("");
 
   const move = async () => {

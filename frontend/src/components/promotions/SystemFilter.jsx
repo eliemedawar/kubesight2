@@ -11,12 +11,18 @@ export default function SystemFilter({ systems, selected, onChange }) {
   useEffect(() => {
     if (!open) return undefined;
     const onDown = (event) => ref.current && !ref.current.contains(event.target) && setOpen(false);
-    const onKey = (event) => event.key === "Escape" && setOpen(false);
+    // Capture phase, and the key is claimed, so the app-wide dialog stack
+    // leaves whatever is open underneath alone.
+    const onKey = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setOpen(false);
+    };
     document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
+    document.addEventListener("keydown", onKey, true);
     return () => {
       document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("keydown", onKey, true);
     };
   }, [open]);
 

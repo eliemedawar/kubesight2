@@ -8,8 +8,10 @@ import {
   listMyBundles,
   rejectChangeBundle,
 } from "../api/changeBundlesApi";
+import { ACTION_LABEL } from "../components/changes/actionLabels.js";
 import DiffBlock from "../components/changes/DiffBlock.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
+import { useAuth } from "../context/AuthContext";
 import { usePermission } from "../hooks/usePermission.js";
 import { useRouteParam, useRouter } from "../routes/RouterContext.jsx";
 import { useChangeBundle } from "../context/ChangeBundleContext";
@@ -28,8 +30,18 @@ const STATUS_STYLE = {
   expired: { bg: "var(--bg-interactive)", fg: "var(--text-muted)", label: "Expired" },
 };
 
-function StatusBadge({ status }) {
-  const s = STATUS_STYLE[status] || STATUS_STYLE.draft;
+// One change inside a bundle has its own lifecycle (pending → applying →
+// succeeded | failed | skipped); it is not a draft once the bundle is submitted.
+const ITEM_STATUS_STYLE = {
+  pending: { bg: "var(--bg-interactive)", fg: "var(--text-muted)", label: "Waiting" },
+  applying: { bg: "var(--ai-soft)", fg: "var(--ai)", label: "Applying" },
+  succeeded: { bg: "var(--ok-soft)", fg: "var(--ok)", label: "Applied" },
+  failed: { bg: "var(--danger-soft)", fg: "var(--danger)", label: "Failed" },
+  skipped: { bg: "var(--bg-interactive)", fg: "var(--text-muted)", label: "Skipped" },
+};
+
+function StatusBadge({ status, styles = STATUS_STYLE }) {
+  const s = styles[status] || { ...STATUS_STYLE.draft, label: String(status || "Unknown").replace(/_/g, " ") };
   return (
     <span
       style={{
@@ -70,12 +82,12 @@ function ItemRow({ bundleId, item }) {
     <li className="card" style={{ padding: "var(--space-2) var(--space-3)" }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
         <div style={{ fontSize: "0.85rem" }}>
-          <span style={{ color: "var(--accent-strong)", fontWeight: 600 }}>{item.actionType}</span>{" "}
+          <span style={{ color: "var(--accent-strong)", fontWeight: 600 }}>{ACTION_LABEL[item.actionType] || item.actionType}</span>{" "}
           — {item.clusterName || item.clusterId}
           {item.namespace ? ` / ${item.namespace}` : ""}
           {item.resourceName ? ` / ${item.resourceKind} ${item.resourceName}` : ""}
         </div>
-        <StatusBadge status={item.status === "pending" ? "draft" : item.status} />
+        <StatusBadge status={item.status} styles={ITEM_STATUS_STYLE} />
       </div>
       {item.executionResult?.error ? (
         <p className="muted" style={{ margin: "4px 0 0", fontSize: "0.75rem", color: "var(--danger)" }}>
@@ -83,14 +95,14 @@ function ItemRow({ bundleId, item }) {
         </p>
       ) : null}
       <div style={{ display: "flex", gap: 12, marginTop: 4 }}>
-        <button type="button" className="btn-text" style={{ padding: 0, fontSize: "0.78rem" }} onClick={toggleDiff}>
+        <button type="button" className="link-button" style={{ fontSize: "0.78rem" }} onClick={toggleDiff}>
           {view === "diff" ? "Hide diff" : "View diff"}
         </button>
         {item.yamlPreview ? (
           <button
             type="button"
-            className="btn-text"
-            style={{ padding: 0, fontSize: "0.78rem" }}
+            className="link-button"
+            style={{ fontSize: "0.78rem" }}
             onClick={() => setView((v) => (v === "preview" ? null : "preview"))}
           >
             {view === "preview" ? "Hide preview" : "View preview"}
@@ -121,20 +133,22 @@ function ItemRow({ bundleId, item }) {
   );
 }
 
-function BundleCard({ bundle, canManage, onApprove, onReject, onDelete, busy }) {
+function BundleCard({ bundle, canManage, currentUserId, onApprove, onReject, onDelete, busy }) {
   const [detail, setDetail] = useState(bundle.items ? bundle : null);
   const [open, setOpen] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const [detailError, setDetailError] = useState("");
 
   const toggle = async () => {
     const next = !open;
     setOpen(next);
     if (next && !detail?.items) {
       setLoadingDetail(true);
+      setDetailError("");
       try {
         setDetail(await getChangeBundle(bundle.id));
-      } catch {
-        /* surfaced by parent error handling on action */
+      } catch (err) {
+        setDetailError(err.message || "Could not load the changes in this bundle.");
       } finally {
         setLoadingDetail(false);
       }
@@ -143,6 +157,8 @@ function BundleCard({ bundle, canManage, onApprove, onReject, onDelete, busy }) 
 
   const items = detail?.items || [];
   const canReviewNow = canManage && bundle.status === "pending_approval";
+  // Nobody approves their own bundle (the server refuses it); they may still decline it.
+  const isOwn = currentUserId != null && bundle.requesterId === currentUserId;
 
   return (
     <div className="card" style={{ padding: "var(--space-3)" }}>
@@ -182,8 +198,9 @@ function BundleCard({ bundle, canManage, onApprove, onReject, onDelete, busy }) 
             <>
               <button
                 type="button"
-                className="btn-primary btn-compact"
-                disabled={busy}
+                className="primary btn-compact"
+                disabled={busy || isOwn}
+                title={isOwn ? "Your bundle — another approver decides it." : undefined}
                 onClick={() => onApprove(bundle)}
               >
                 Approve
@@ -204,8 +221,7 @@ function BundleCard({ bundle, canManage, onApprove, onReject, onDelete, busy }) 
           ) ? (
             <button
               type="button"
-              className="btn-text btn-compact"
-              style={{ color: "var(--danger)" }}
+              className="btn-danger-outline btn-compact"
               disabled={busy}
               onClick={() => onDelete(bundle)}
             >
@@ -224,6 +240,10 @@ function BundleCard({ bundle, canManage, onApprove, onReject, onDelete, busy }) 
           <p className="muted" style={{ marginTop: 10 }}>
             Loading changes…
           </p>
+        ) : detailError ? (
+          <p className="banner-message error" style={{ marginTop: 10 }}>
+            {detailError}
+          </p>
         ) : (
           <ul style={{ listStyle: "none", margin: "12px 0 0", padding: 0, display: "grid", gap: 8 }}>
             {items.map((item) => (
@@ -240,6 +260,7 @@ export default function ChangeBundlesPage() {
   const { hasPermission } = usePermission();
   const canManage = hasPermission("change_bundles:manage");
   const canCreate = hasPermission("change_bundles:create");
+  const { user } = useAuth();
   const { openDrawer, refresh: refreshDraft } = useChangeBundle();
 
   const tabs = useMemo(() => {
@@ -315,7 +336,9 @@ export default function ChangeBundlesPage() {
   };
 
   const reject = async (bundle) => {
-    const reason = window.prompt("Reason for rejecting this bundle (optional):", "") ?? "";
+    const reason = window.prompt("Reason for rejecting this bundle (optional):", "");
+    // Cancel on the prompt means "don't reject", not "reject without a reason".
+    if (reason === null) return;
     setBusyId(bundle.id);
     setActionError("");
     try {
@@ -356,7 +379,7 @@ export default function ChangeBundlesPage() {
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             {canCreate ? (
-              <button type="button" className="btn-primary btn-compact" onClick={openDrawer}>
+              <button type="button" className="primary btn-compact" onClick={openDrawer}>
                 Open Change Bundle
               </button>
             ) : null}
@@ -396,6 +419,7 @@ export default function ChangeBundlesPage() {
                 key={bundle.id}
                 bundle={bundle}
                 canManage={canManage}
+                currentUserId={user?.id}
                 busy={busyId === bundle.id}
                 onApprove={approve}
                 onReject={reject}

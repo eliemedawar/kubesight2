@@ -269,9 +269,10 @@ export default function PromotionsPage() {
 function Intro({ canManage, creating, onStart }) {
   const steps = [
     { name: "Dev", note: "any build", mode: "entry" },
-    { name: "SIT", note: "every 2 h", mode: "enforce" },
-    { name: "UAT", note: "Tue & Thu 14:00", mode: "enforce" },
-    { name: "Pre-prod", note: "Fri 10:00", mode: "enforce" },
+    // The ladder starts in Warn (it watches before it blocks), so show that.
+    { name: "SIT", note: "every 2 h", mode: "warn" },
+    { name: "UAT", note: "Tue & Thu 14:00", mode: "warn" },
+    { name: "Pre-prod", note: "Fri 10:00", mode: "warn" },
   ];
   return (
     <section className="pr-intro" aria-label="About promotions">
@@ -321,7 +322,7 @@ function Intro({ canManage, creating, onStart }) {
             <span className="pr-intro-step-name">{step.name}</span>
             <span className={`pr-mode pr-mode--${step.mode}`}>
               <ModeIcon mode={step.mode} />
-              {step.mode === "entry" ? "Entry" : "Enforce"}
+              {step.mode === "entry" ? "Entry" : step.mode === "warn" ? "Warn" : "Enforce"}
             </span>
             <span className="pr-intro-step-note">{step.note}</span>
           </div>
