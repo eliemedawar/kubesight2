@@ -10,6 +10,10 @@ from .k8s_provider import K8sCommandError, _cpu_to_cores, _run_kubectl
 CPU_ALERT_THRESHOLD_PERCENT = float(os.getenv("ALERT_CPU_THRESHOLD_PERCENT", "80"))
 
 _POD_TOP_CACHE_TTL = int(os.getenv("POD_TOP_CACHE_TTL_SECONDS", "15"))
+# A cluster without a working Metrics Server fails `kubectl top` on every call,
+# each one waiting out its timeout. The failure is remembered this long, and
+# callers get "no metrics" at once instead.
+_TOP_FAILURE_TTL = int(os.getenv("KUBECTL_TOP_FAILURE_CACHE_SECONDS", "60"))
 
 PodTopKey = Tuple[str, str]
 PodTopMetrics = Dict[PodTopKey, Dict[str, float]]
@@ -82,6 +86,9 @@ def fetch_pod_top_metrics(access: Union[ClusterAccess, str], _bypass_cache: bool
     from .kubeconfig_vault import kubeconfig_identity
 
     cache_key = f"top-pods:{context_name}:{kubeconfig_identity(kubeconfig_path)}"
+    failed_key = f"topfail:{cache_key}"
+    if not _bypass_cache and _K8S_READ_CACHE.get(failed_key):
+        return {}
 
     def _fetch() -> PodTopMetrics:
         output = _run_kubectl(
@@ -110,6 +117,7 @@ def fetch_pod_top_metrics(access: Union[ClusterAccess, str], _bypass_cache: bool
         # Single-flight: concurrent misses share one kubectl top.
         return _K8S_READ_CACHE.get_or_compute(cache_key, _POD_TOP_CACHE_TTL, _fetch)
     except K8sCommandError:
+        _K8S_READ_CACHE.set(failed_key, True, _TOP_FAILURE_TTL)
         return {}
 
 
@@ -122,16 +130,25 @@ def _top_nodes_output(access: Union[ClusterAccess, str], timeout: Optional[int] 
     from .k8s_provider import _K8S_READ_CACHE
     from .kubeconfig_vault import kubeconfig_identity
 
-    return _K8S_READ_CACHE.get_or_compute(
-        f"top-nodes:{context_name}:{kubeconfig_identity(kubeconfig_path)}",
-        _POD_TOP_CACHE_TTL,
-        lambda: _run_kubectl(
-            ["top", "nodes", "--no-headers"],
-            context=context_name,
-            kubeconfig_path=kubeconfig_path,
-            timeout=timeout,
-        ),
-    )
+    cache_key = f"top-nodes:{context_name}:{kubeconfig_identity(kubeconfig_path)}"
+    failed_key = f"topfail:{cache_key}"
+    failure = _K8S_READ_CACHE.get(failed_key)
+    if failure:
+        raise K8sCommandError(failure)
+    try:
+        return _K8S_READ_CACHE.get_or_compute(
+            cache_key,
+            _POD_TOP_CACHE_TTL,
+            lambda: _run_kubectl(
+                ["top", "nodes", "--no-headers"],
+                context=context_name,
+                kubeconfig_path=kubeconfig_path,
+                timeout=timeout,
+            ),
+        )
+    except K8sCommandError as exc:
+        _K8S_READ_CACHE.set(failed_key, str(exc) or "kubectl top nodes failed", _TOP_FAILURE_TTL)
+        raise
 
 
 def fetch_pod_cpu_usage_cores(access: Union[ClusterAccess, str]) -> Dict[PodTopKey, float]:
@@ -350,8 +367,11 @@ def fetch_node_allocatable(access: Union[ClusterAccess, str]) -> Tuple[float, fl
     """Return (cpu_allocatable_cores, memory_allocatable_gib) from node status."""
     import json
 
-    from .k8s_provider import _run_for_access
+    from .k8s_provider import _run_for_access, cluster_list_items
 
+    if isinstance(access, ClusterAccess) and access.cluster_id:
+        # The shared node list (dashboard, overview, alert scan read it too).
+        return node_allocatable_totals(cluster_list_items(access, "nodes"))
     if not isinstance(access, ClusterAccess):
         access = ClusterAccess(cluster_id="", context_name=access)
     output = _run_for_access(access, ["get", "nodes", "-o", "json"])

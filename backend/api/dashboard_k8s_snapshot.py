@@ -20,6 +20,7 @@ from .k8s_provider import (
     _run_for_access,
     build_namespaces_from_data,
     build_node_health,
+    _server_version_output,
     cluster_list_items,
     compute_pod_display_status,
     is_failed_pod_status,
@@ -133,7 +134,8 @@ def _fetch_dashboard_k8s_snapshot_uncached(access: ClusterAccess) -> DashboardK8
     with ThreadPoolExecutor(max_workers=8) as pool:
         nodes_future = pool.submit(cluster_list_items, access, "nodes", _kt)
         pods_future = pool.submit(cluster_list_items, access, "pods", _kt)
-        version_future = pool.submit(_run_for_access, access, ["version", "-o", "json"], _kt)
+        # Server version changes only on upgrades: shared for 10 minutes.
+        version_future = pool.submit(_server_version_output, access)
         ns_raw_future = pool.submit(cluster_list_items, access, "namespaces", _kt)
         dep_future = pool.submit(cluster_list_items, access, "deployments", _kt)
         svc_future = pool.submit(cluster_list_items, access, "services", _kt)

@@ -212,3 +212,148 @@ def test_helm_version_probe_runs_once():
         assert h.check_helm_available()["version"] == "v3.15.0+g1"
         assert run.call_count == 1
     h._HELM_CACHE.invalidate()
+
+
+# --- kubectl top failures, breaker, pod issues, secrets, namespace counts -----
+
+
+def _access(cid="c-perf"):
+    from api.cluster_access import ClusterAccess
+
+    return ClusterAccess(cid, f"ctx-{cid}", None, cid, False)
+
+
+def test_top_failure_is_remembered_and_does_not_trip_the_breaker():
+    from api import k8s_metrics as m
+    from api import k8s_provider as p
+
+    p._K8S_READ_CACHE.invalidate()
+    access = _access("c-top")
+
+    class Done:
+        returncode = 1
+        stdout = ""
+        stderr = "error: Metrics API not available: context deadline exceeded"
+
+    with patch.object(p.subprocess, "run", return_value=Done()) as run, patch(
+        "api.kube_direct.enabled", return_value=False
+    ):
+        assert m.fetch_pod_top_metrics(access) == {}
+        assert m.fetch_pod_top_metrics(access) == {}
+        assert run.call_count == 1  # second call answered from the failure cache
+    breaker = f"down:{p.kubeconfig_identity(None)}:{access.context_name}"
+    assert not p._K8S_READ_CACHE.get(breaker)
+    assert not p._breaker_trips_on(["get", "--raw", "/api/v1/nodes/n1/proxy/stats/summary"])
+    assert p._breaker_trips_on(["get", "pods", "-A", "-o", "json"])
+    p._K8S_READ_CACHE.invalidate()
+
+
+def test_pod_issues_builds_rows_for_problem_pods_only_and_is_shared():
+    from api import k8s_provider as p
+
+    p._K8S_READ_CACHE.invalidate()
+    healthy = {
+        "metadata": {"name": "ok", "namespace": "a"},
+        "spec": {"containers": [{"name": "c"}]},
+        "status": {"phase": "Running", "containerStatuses": [{"ready": True, "state": {"running": {}}}],
+                   "conditions": [{"type": "Ready", "status": "True"}]},
+    }
+    broken = {
+        "metadata": {"name": "bad", "namespace": "a"},
+        "spec": {"containers": [{"name": "c"}]},
+        "status": {"phase": "Running", "containerStatuses": [
+            {"ready": False, "state": {"waiting": {"reason": "CrashLoopBackOff"}}}]},
+    }
+    with patch.object(p, "cluster_list_items", return_value=[healthy, broken]) as listed, patch(
+        "api.k8s_metrics.fetch_pod_top_metrics", return_value={}
+    ), patch.object(p, "_build_namespace_pods", wraps=p._build_namespace_pods) as build:
+        first = p.cluster_pod_issues_from_k8s(_access("c-issues"))
+        second = p.cluster_pod_issues_from_k8s(_access("c-issues"))
+    assert [row["name"] for row in first["pods"]] == ["bad"]
+    assert second == first
+    assert listed.call_count == 1
+    assert sum(len(call.args[1]) for call in build.call_args_list) == 1
+    p.invalidate_namespace_resources_cache("c-issues")
+    assert p._K8S_READ_CACHE.get("podissues:c-issues") is None
+    p._K8S_READ_CACHE.invalidate()
+
+
+def test_secret_list_reads_no_values():
+    from api import k8s_provider as p
+
+    p._K8S_READ_CACHE.invalidate()
+    seen = []
+
+    def run(_access, args, timeout=None):
+        seen.append(args)
+        return 's1\tOpaque\t2026-01-01T00:00:00Z\t{"app":"x"}\nhelm.v1\thelm.sh/release.v1\t2026-01-02T00:00:00Z\t\n'
+
+    with patch.object(p, "_run_for_access", side_effect=run):
+        rows = p.namespace_resource_list_from_k8s(_access("c-sec"), "ns", "secrets")["secrets"]
+    assert [(r["name"], r["type"], r["labels"]) for r in rows] == [
+        ("s1", "Opaque", {"app": "x"}),
+        ("helm.v1", "helm.sh/release.v1", {}),
+    ]
+    assert seen[0][-1].startswith("jsonpath=")  # never `-o json` with the data
+    p._K8S_READ_CACHE.invalidate()
+
+
+def test_namespace_counts_use_the_namespace_column_only():
+    from api import k8s_provider as p
+
+    p._K8S_READ_CACHE.invalidate()
+    calls = []
+
+    def run(_access, args, timeout=None):
+        calls.append(args)
+        if args[1] == "namespaces":
+            return '{"items": [{"metadata": {"name": "a"}}, {"metadata": {"name": "b"}}]}'
+        return "a\na\nb\n"
+
+    with patch.object(p, "_run_for_access", side_effect=run):
+        payload = p._list_namespaces_from_k8s_uncached(_access("c-cnt"), include_metrics=False)
+    counts = {row["name"]: (row["pods"], row["deployments"], row["services"]) for row in payload["items"]}
+    assert counts == {"a": (2, 2, 2), "b": (1, 1, 1)}
+    assert all("-o" in c and c[c.index("-o") + 1] != "json" for c in calls if c[1] != "namespaces")
+    p._K8S_READ_CACHE.invalidate()
+
+
+# --- live log streams ---------------------------------------------------------
+
+
+def test_live_log_streams_are_capped(app):
+    from api.services import logs_service as ls
+
+    taken = [ls._take_stream_slot() for _ in range(ls.LOG_STREAM_MAX)]
+    try:
+        assert all(taken)
+        assert ls._take_stream_slot() is None
+    finally:
+        for slot in taken:
+            slot.release()
+            slot.release()  # releasing twice is harmless
+    slot = ls._take_stream_slot()
+    assert slot is not None
+    slot.release()
+
+
+# --- log policy scan window ---------------------------------------------------
+
+
+def test_log_scan_starts_just_before_the_previous_scan():
+    from datetime import datetime, timedelta, timezone
+
+    from api.models import AlertPolicy
+    from api.services.log_alert_evaluator import _log_scan_since
+
+    now = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
+    policy = AlertPolicy(name="p", cluster_id="c")
+    config = {"logWindowSeconds": 3600}
+    assert _log_scan_since(policy, config, now) is None  # first scan: whole window
+    policy.last_evaluated_at = now - timedelta(seconds=60)
+    policy.last_evaluation_result = "not_met"
+    assert _log_scan_since(policy, config, now) == now - timedelta(seconds=70)
+    policy.last_evaluation_result = "error"
+    assert _log_scan_since(policy, config, now) is None
+    policy.last_evaluation_result = "met"
+    assert _log_scan_since(policy, {"logWindowSeconds": 30}, now) is None  # window is shorter
