@@ -726,6 +726,54 @@ def test_job_launcher_sends_one_valid_kubernetes_list(monkeypatch):
     ]
 
 
+def test_job_launcher_owns_the_secret_and_policy_in_two_kubectl_calls(monkeypatch):
+    """The Job's uid comes back from the apply itself; the Secret and the
+    NetworkPolicy get their owner in one more apply — not get + patch + patch."""
+    resources = build_job_resources(
+        analysis_id=47,
+        repository_url="https://bitbucket.org/workspace/payment-service.git",
+        revision="main",
+        subdirectory="",
+        repository_token="read-token",
+        callback_token="callback-token",
+    )
+    job = next(item for item in resources if item["kind"] == "Job")
+    applied = {
+        "apiVersion": "v1",
+        "kind": "List",
+        "items": [
+            {"kind": "Secret", "metadata": {"name": "s", "uid": "secret-uid"}},
+            {"kind": "Job", "metadata": {"name": job["metadata"]["name"], "uid": "job-uid-1"}},
+        ],
+    }
+    calls = []
+
+    class Completed:
+        returncode = 0
+
+        def __init__(self, stdout=""):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return Completed(json.dumps(applied) if len(calls) == 1 else "")
+
+    monkeypatch.setattr(
+        "api.services.application_analysis_jobs.subprocess.run", fake_run
+    )
+    launch(resources)
+
+    assert len(calls) == 2
+    assert calls[0][0][-2:] == ["-o", "json"]
+    owned = json.loads(calls[1][1]["input"])["items"]
+    assert [item["kind"] for item in owned] == ["Secret", "NetworkPolicy"]
+    for item in owned:
+        assert item["metadata"]["ownerReferences"][0]["uid"] == "job-uid-1"
+        assert item["metadata"]["ownerReferences"][0]["kind"] == "Job"
+    # The resources passed in are not modified.
+    assert not resources[0]["metadata"].get("ownerReferences")
+
+
 def test_hermes_openai_chat_completions_adapter(monkeypatch):
     from api.services import application_intelligence_hermes as hermes_client
 
