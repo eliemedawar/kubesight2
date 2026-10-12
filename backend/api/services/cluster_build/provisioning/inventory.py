@@ -243,6 +243,17 @@ def _ssl_context(cfg: VSphereConfig) -> ssl.SSLContext:
     return ctx
 
 
+def _http_timeout_s() -> float:
+    """Socket timeout for every vCenter call. Without one a vCenter that
+    accepts the connection and then stalls holds the caller — a request
+    thread, or the provisioning worker — forever."""
+    try:
+        value = float(os.environ.get("KUBESIGHT_VCENTER_TIMEOUT_S", "30"))
+    except ValueError:
+        return 30.0
+    return value if value > 0 else 30.0
+
+
 def _connect(cfg: VSphereConfig):
     try:
         from pyVim.connect import SmartConnect
@@ -257,6 +268,7 @@ def _connect(cfg: VSphereConfig):
         return SmartConnect(
             host=host, port=port, user=cfg.username, pwd=cfg.password,
             sslContext=_ssl_context(cfg), connectionPoolTimeout=30,
+            httpConnectionTimeout=_http_timeout_s(),
         )
     except vim.fault.InvalidLogin as exc:
         raise VSphereError("vCenter rejected the credentials.", status=401) from exc
