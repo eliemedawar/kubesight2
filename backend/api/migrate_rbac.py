@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import inspect, text
@@ -1505,6 +1506,175 @@ def _interrupt_orphaned_upgrade_jobs() -> None:
         logger.warning("Marked %d interrupted upgrade job(s) as failed.", interrupted)
 
 
+_DEFAULT_INDEX_LOCK_TIMEOUT_SECONDS = 60
+
+
+def _index_boot_mode(dialect_name: str) -> str:
+    """``concurrently`` | ``plain`` | ``off`` (``DB_INDEX_BOOT_MODE``).
+
+    PostgreSQL defaults to CONCURRENTLY: building an index on a table the
+    running pod is writing to must not hold its writes for the whole build.
+    Other dialects have no such option and build plainly.
+    """
+    raw = os.getenv("DB_INDEX_BOOT_MODE", "").strip().lower()
+    if raw in {"off", "false", "0", "no", "disabled"}:
+        return "off"
+    if dialect_name != "postgresql":
+        return "plain"
+    if raw == "plain":
+        return "plain"
+    return "concurrently"
+
+
+def _index_lock_timeout_ms() -> int:
+    try:
+        seconds = int(
+            os.getenv("DB_INDEX_LOCK_TIMEOUT_SECONDS", str(_DEFAULT_INDEX_LOCK_TIMEOUT_SECONDS))
+        )
+    except ValueError:
+        seconds = _DEFAULT_INDEX_LOCK_TIMEOUT_SECONDS
+    return max(1, seconds) * 1000
+
+
+def _existing_indexes(conn, table_names) -> tuple:
+    """(valid index names, invalid index names) in the database, read once.
+
+    PostgreSQL and SQLite index names are schema-wide, so a single catalog read
+    covers every table. An INVALID index on PostgreSQL is what an interrupted
+    CREATE INDEX CONCURRENTLY leaves behind: it exists under the name, takes
+    write overhead and serves no reads, so it is rebuilt.
+    """
+    dialect = conn.dialect.name
+    if dialect == "postgresql":
+        rows = conn.execute(
+            text(
+                "SELECT c.relname, i.indisvalid FROM pg_index i "
+                "JOIN pg_class c ON c.oid = i.indexrelid "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = current_schema()"
+            )
+        ).fetchall()
+        return {r[0] for r in rows if r[1]}, {r[0] for r in rows if not r[1]}
+    if dialect == "sqlite":
+        rows = conn.execute(text("SELECT name FROM sqlite_master WHERE type = 'index'")).fetchall()
+        return {r[0] for r in rows}, set()
+    inspector = inspect(conn)
+    names = set()
+    for table_name in table_names:
+        names.update(ix["name"] for ix in inspector.get_indexes(table_name) if ix.get("name"))
+    return names, set()
+
+
+def _index_present(name: str, names: set, max_len: int) -> bool:
+    # PostgreSQL silently truncates identifiers past 63 bytes.
+    return name in names or (bool(max_len) and name[:max_len] in names)
+
+
+def index_ddl(index, dialect, *, concurrently: bool = False) -> str:
+    """``CREATE [UNIQUE] INDEX [CONCURRENTLY] IF NOT EXISTS ...`` for ``index``."""
+    from sqlalchemy.schema import CreateIndex
+
+    ddl = str(CreateIndex(index, if_not_exists=True).compile(dialect=dialect))
+    if concurrently:
+        ddl = re.sub(r"^CREATE (UNIQUE )?INDEX ", r"CREATE \1INDEX CONCURRENTLY ", ddl, count=1)
+    return ddl
+
+
+def create_missing_indexes(metadata=None) -> list:
+    """Create every model-declared index that the database does not have yet.
+
+    ``db.create_all`` only creates whole tables, so an ``Index(...)`` or
+    ``index=True`` added to a model whose table already exists never reached a
+    deployed database. This step closes that gap at every boot: one catalog
+    read, then a CREATE INDEX for each declared index that is missing (partial
+    indexes keep their ``postgresql_where``/``sqlite_where``). Existing indexes
+    are never touched, so a second run is a single catalog read.
+
+    On PostgreSQL the build runs CONCURRENTLY on an AUTOCOMMIT connection, with
+    ``DB_INDEX_LOCK_TIMEOUT_SECONDS`` bounding how long it waits on other
+    sessions. Any failure — a lock wait timing out, duplicates under a new
+    unique index — is logged, the half-built index dropped, and boot carries on:
+    the index is retried on the next start. Returns the names created.
+    """
+    metadata = metadata if metadata is not None else db.metadata
+    engine = db.engine
+    mode = _index_boot_mode(engine.dialect.name)
+    if mode == "off":
+        return []
+    # A concurrent build waits for every transaction that might write the
+    # table; this process's own open session must not be one of them.
+    try:
+        db.session.commit()
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+
+    with engine.connect() as conn:
+        tables = set(inspect(conn).get_table_names())
+        declared = [
+            (table, index)
+            for table in metadata.sorted_tables
+            if table.name in tables
+            for index in sorted(table.indexes, key=lambda ix: str(ix.name or ""))
+            if index.name
+        ]
+        if not declared:
+            return []
+        valid, invalid = _existing_indexes(conn, sorted({t.name for t, _ in declared}))
+        conn.rollback()
+
+    max_len = engine.dialect.max_identifier_length if engine.dialect.name == "postgresql" else 0
+    created = []
+    for table, index in declared:
+        name = str(index.name)
+        if _index_present(name, valid, max_len):
+            continue
+        rebuild_invalid = _index_present(name, invalid, max_len)
+        ddl = index_ddl(index, engine.dialect, concurrently=mode == "concurrently")
+        started = time.perf_counter()
+        try:
+            if mode == "concurrently":
+                with engine.connect() as conn:
+                    conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+                    conn.execute(text(f"SET lock_timeout = {_index_lock_timeout_ms()}"))
+                    try:
+                        if rebuild_invalid:
+                            conn.execute(text(f'DROP INDEX CONCURRENTLY IF EXISTS "{name}"'))
+                        conn.execute(text(ddl))
+                    finally:
+                        conn.execute(text("RESET lock_timeout"))
+            else:
+                with engine.begin() as conn:
+                    if engine.dialect.name == "postgresql":
+                        conn.execute(text(f"SET LOCAL lock_timeout = {_index_lock_timeout_ms()}"))
+                    conn.execute(text(ddl))
+        except Exception as exc:  # noqa: BLE001 — never block boot on an index
+            logger.warning(
+                "Could not create index %s on %s (%s); will retry on the next start.",
+                name,
+                table.name,
+                str(exc).splitlines()[0][:300] if str(exc) else exc.__class__.__name__,
+            )
+            if mode == "concurrently":
+                # A failed CONCURRENTLY build leaves an INVALID index behind.
+                try:
+                    with engine.connect() as conn:
+                        conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+                        conn.execute(text(f"SET lock_timeout = {_index_lock_timeout_ms()}"))
+                        conn.execute(text(f'DROP INDEX CONCURRENTLY IF EXISTS "{name}"'))
+                except Exception:  # noqa: BLE001
+                    logger.debug("Could not drop the invalid index %s", name, exc_info=True)
+            continue
+        created.append(name)
+        logger.info(
+            "Created index %s on %s in %.1fs", name, table.name, time.perf_counter() - started
+        )
+    return created
+
+
+def _create_missing_indexes() -> None:
+    create_missing_indexes()
+
+
 def run_migrations() -> None:
     db.create_all()
     # DDL for columns added to pre-existing tables must run before ANY step that
@@ -1558,3 +1728,5 @@ def run_migrations() -> None:
     # run on every start.
     _encrypt_plaintext_kubeconfigs()
     _interrupt_orphaned_upgrade_jobs()
+    # Last, once every ALTER above has added the columns an index may cover.
+    _create_missing_indexes()
