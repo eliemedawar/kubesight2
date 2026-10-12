@@ -49,6 +49,9 @@ from .scrub import scrub
 logger = logging.getLogger(__name__)
 
 _LOG_TAIL_CHARS = 8000
+# What a live flush scrubs: the tail plus a wide margin, so a secret that
+# straddles the tail's edge is still matched whole before the cut.
+_SCRUB_WINDOW_CHARS = 4 * _LOG_TAIL_CHARS
 _STALE_BUILD_MINUTES = 5
 _CERT_KEY_TTL_HOURS = 2
 _CNI_APPLY_TIMEOUT_S = 600
@@ -181,11 +184,26 @@ class _StreamTail:
     def text(self) -> str:
         return "".join(self._parts)
 
+    def _recent(self) -> str:
+        """The newest _SCRUB_WINDOW_CHARS of output: what a periodic flush
+        scrubs. Scrubbing the whole transcript every 2.5 s only to keep its
+        last _LOG_TAIL_CHARS grew with the step; the margin past the tail is
+        there so a secret straddling the cut (a private key block is ~3 KB)
+        is still seen whole."""
+        newest: List[str] = []
+        size = 0
+        for part in reversed(self._parts):
+            newest.append(part)
+            size += len(part)
+            if size >= _SCRUB_WINDOW_CHARS:
+                break
+        return "".join(reversed(newest))[-_SCRUB_WINDOW_CHARS:]
+
     def flush(self) -> None:
         try:
             step = db.session.get(ClusterBuildStep, self.step_id)
             if step is not None:
-                step.log_tail = _tail(self.text())  # _tail() scrubs
+                step.log_tail = _tail(self._recent())  # _tail() scrubs
                 db.session.commit()
         except Exception:  # noqa: BLE001 — a failed flush must not kill the phase
             db.session.rollback()
