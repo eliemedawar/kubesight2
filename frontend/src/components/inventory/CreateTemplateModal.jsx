@@ -1,10 +1,25 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import SearchableSelect from "../common/SearchableSelect.jsx";
 import useEscapeKey from "../../hooks/useEscapeKey.js";
+import {
+  EMPTY_DEPENDENCY,
+  EMPTY_ENV,
+  EMPTY_FORM,
+  EMPTY_STORAGE_VOLUME,
+  EMPTY_VOLUME,
+  NEW_CATEGORY,
+  PROBE_KEYS,
+  describeKeptExtras,
+  formFromTemplate,
+  freshForm,
+  hasHpaResources as formHasHpaResources,
+  joinExtras,
+  mergeTemplateEdit,
+  validateTemplateForm,
+} from "./templateFormModel.js";
 
 const WORKLOAD_TYPES = ["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"];
 const PULL_POLICIES = ["IfNotPresent", "Always", "Never"];
-const NEW_CATEGORY = "__new__";
 
 // The author picks a single *kind* per variable. The deployer later chooses
 // "existing vs create" for ConfigMap/Secret kinds. Sensitive forces Secret.
@@ -13,11 +28,6 @@ const ENV_KINDS = [
   { value: "configMap", label: "ConfigMap" },
   { value: "secret", label: "Secret" },
 ];
-const KIND_SOURCES = {
-  value: ["value"],
-  configMap: ["existingConfigMap", "createConfigMap"],
-  secret: ["existingSecret", "createSecret"],
-};
 
 // A volume mount sources a whole ConfigMap or Secret as files on disk. The author
 // picks the kind; the deployer later chooses existing-vs-create at deploy time.
@@ -25,10 +35,6 @@ const VOLUME_KINDS = [
   { value: "configMap", label: "ConfigMap" },
   { value: "secret", label: "Secret" },
 ];
-const VOLUME_KIND_SOURCES = {
-  configMap: ["existingConfigMap", "createConfigMap"],
-  secret: ["existingSecret", "createSecret"],
-};
 
 const DEPENDENCY_KINDS = ["postgresql", "redis", "kafka", "rabbitmq", "minio", "service"];
 const PROBE_TYPES = [
@@ -36,200 +42,6 @@ const PROBE_TYPES = [
   { value: "tcp", label: "TCP socket" },
   { value: "command", label: "Command" },
 ];
-const PROBE_KEYS = [
-  { key: "readiness", label: "Readiness probe" },
-  { key: "liveness", label: "Liveness probe" },
-  { key: "startup", label: "Startup probe" },
-];
-
-// A row in the environment-variable *schema*: requirements a deployer fills later,
-// not a concrete value. `default` pre-fills the deployer's field for plain-value vars.
-const EMPTY_ENV = { key: "", required: false, sensitive: false, kind: "value", default: "" };
-
-// Dependencies are informational only — they document the backing services an
-// app needs; they don't wire anything automatically.
-const EMPTY_DEPENDENCY = { kind: "postgresql", name: "", required: true, note: "" };
-
-// A volume-mount schema row: the deployer supplies the actual ConfigMap/Secret
-// (existing or freshly created) at deploy time.
-const EMPTY_VOLUME = { mountPath: "", kind: "configMap", readOnly: false, subPath: "" };
-
-// A persistent-storage volume: each row becomes its own PVC + mount.
-const EMPTY_STORAGE_VOLUME = { size: "1Gi", mountPath: "" };
-
-// Every override the deployer may be granted lives here — the single home for the
-// lock-vs-override decision.
-const DEFAULT_OVERRIDES = {
-  image: false,
-  tag: true,
-  replicas: true,
-  resources: false,
-  storageSize: false,
-  ingressHost: false,
-};
-
-const PROBE_DEFAULTS = {
-  readiness: { enabled: false, type: "http", path: "/", port: "", command: "", initialDelaySeconds: "5", periodSeconds: "10" },
-  liveness: { enabled: false, type: "http", path: "/", port: "", command: "", initialDelaySeconds: "15", periodSeconds: "20" },
-  startup: { enabled: false, type: "http", path: "/", port: "", command: "", initialDelaySeconds: "10", periodSeconds: "10" },
-};
-
-function freshProbes() {
-  return {
-    readiness: { ...PROBE_DEFAULTS.readiness },
-    liveness: { ...PROBE_DEFAULTS.liveness },
-    startup: { ...PROBE_DEFAULTS.startup },
-  };
-}
-
-const EMPTY_FORM = {
-  name: "",
-  description: "",
-  category: "",
-  newCategory: "",
-  workloadType: "Deployment",
-  // Container
-  image: "",
-  tag: "latest",
-  port: "80",
-  replicas: "1",
-  pullPolicy: "IfNotPresent",
-  serviceEnabled: true,
-  // Resources
-  cpuRequest: "100m",
-  cpuLimit: "500m",
-  memoryRequest: "128Mi",
-  memoryLimit: "256Mi",
-  // Autoscaling (HPA) — requires CPU + memory requests to be defined
-  hpaEnabled: false,
-  hpaMinReplicas: "1",
-  hpaMaxReplicas: "5",
-  hpaCpuThreshold: "80",
-  hpaMemoryThreshold: "",
-  // Deployment schema
-  envVars: [{ ...EMPTY_ENV }],
-  overrides: { ...DEFAULT_OVERRIDES },
-  dependencies: [],
-  volumeMounts: [],
-  ingressTls: false,
-  // Storage (simplified — advanced PVC/PV details are no longer authored here).
-  // Each volume row becomes its own PVC + mount at deploy time.
-  storageEnabled: false,
-  storageVolumes: [{ size: "1Gi", mountPath: "/data" }],
-  probes: freshProbes(),
-};
-
-function freshForm(category) {
-  return {
-    ...EMPTY_FORM,
-    category,
-    envVars: [{ ...EMPTY_ENV }],
-    overrides: { ...DEFAULT_OVERRIDES },
-    dependencies: [],
-    volumeMounts: [],
-    storageVolumes: [{ size: "1Gi", mountPath: "/data" }],
-    probes: freshProbes(),
-  };
-}
-
-// Rebuild the editable form from a saved template detail — the inverse of the
-// payload `handleSubmit` assembles, so an existing template round-trips cleanly.
-function formFromTemplate(detail) {
-  const container = detail.containers?.[0] || {};
-  const res = detail.resources || {};
-  const hpa = detail.scaling?.hpa || {};
-  const schema = detail.schema || {};
-  const overrides = schema.overrides || {};
-  const storage = detail.storage || {};
-  const service = detail.networking?.service;
-
-  const envVars = (schema.env || []).map((f) => ({
-    key: f.key || "",
-    required: Boolean(f.required),
-    sensitive: Boolean(f.sensitive),
-    kind: f.sensitive ? "secret" : f.kind || "value",
-    default: f.default || "",
-  }));
-  const dependencies = (schema.dependencies || []).map((d) => ({
-    kind: d.kind || "postgresql",
-    name: d.name || "",
-    required: Boolean(d.required),
-    note: d.note || "",
-  }));
-  const volumeMounts = (schema.volumeMounts || []).map((v) => ({
-    mountPath: v.mountPath || "",
-    kind: v.kind === "secret" ? "secret" : "configMap",
-    readOnly: Boolean(v.readOnly),
-    subPath: v.subPath || "",
-  }));
-
-  // One editable row per persistent mount. Multi-volume templates carry a
-  // `newPvcs` list (one PVC per mount, linked by pvcName); legacy templates
-  // have a single `newPvc` shared by every mount.
-  const storagePvcs = storage.newPvcs?.length
-    ? storage.newPvcs
-    : storage.newPvc
-      ? [storage.newPvc]
-      : [];
-  const storageVolumes = (storage.volumeMounts || []).map((vm, i) => {
-    const pvc = (vm.pvcName && storagePvcs.find((p) => p.name === vm.pvcName)) || storagePvcs[i] || storagePvcs[0] || {};
-    return { size: pvc.size || "1Gi", mountPath: vm.mountPath || "" };
-  });
-
-  const probes = freshProbes();
-  for (const { key } of PROBE_KEYS) {
-    const hc = detail.healthChecks?.[key];
-    if (!hc) continue;
-    probes[key] = {
-      enabled: true,
-      type: hc.type || "http",
-      path: hc.path || "/",
-      port: hc.port != null ? String(hc.port) : "",
-      command: hc.command || "",
-      initialDelaySeconds: String(hc.initialDelaySeconds ?? PROBE_DEFAULTS[key].initialDelaySeconds),
-      periodSeconds: String(hc.periodSeconds ?? PROBE_DEFAULTS[key].periodSeconds),
-    };
-  }
-
-  return {
-    ...EMPTY_FORM,
-    name: detail.name || "",
-    description: detail.description || "",
-    category: detail.category || "Custom",
-    newCategory: "",
-    workloadType: detail.workloadType || "Deployment",
-    image: container.image || "",
-    tag: container.tag || "latest",
-    port: container.ports?.[0] != null ? String(container.ports[0]) : "80",
-    replicas: detail.scaling?.replicas != null ? String(detail.scaling.replicas) : "1",
-    pullPolicy: container.pullPolicy || "IfNotPresent",
-    serviceEnabled: service ? Boolean(service.enabled) : false,
-    cpuRequest: res.cpuRequest || "100m",
-    cpuLimit: res.cpuLimit || "500m",
-    memoryRequest: res.memoryRequest || "128Mi",
-    memoryLimit: res.memoryLimit || "256Mi",
-    hpaEnabled: Boolean(hpa.enabled),
-    hpaMinReplicas: hpa.minReplicas != null ? String(hpa.minReplicas) : "1",
-    hpaMaxReplicas: hpa.maxReplicas != null ? String(hpa.maxReplicas) : "5",
-    hpaCpuThreshold: hpa.cpuThreshold != null ? String(hpa.cpuThreshold) : "80",
-    hpaMemoryThreshold: hpa.memoryThreshold != null ? String(hpa.memoryThreshold) : "",
-    envVars: envVars.length ? envVars : [{ ...EMPTY_ENV }],
-    overrides: {
-      image: Boolean(overrides.image),
-      tag: Boolean(overrides.tag),
-      replicas: Boolean(overrides.replicas),
-      resources: Boolean(overrides.resources),
-      storageSize: Boolean(overrides.storageSize),
-      ingressHost: Boolean(schema.ingress?.supported),
-    },
-    dependencies,
-    volumeMounts,
-    ingressTls: Boolean(schema.ingress?.tls),
-    storageEnabled: Boolean(storage.pvcMode && storage.pvcMode !== "none"),
-    storageVolumes: storageVolumes.length ? storageVolumes : [{ size: storage.newPvc?.size || "1Gi", mountPath: "/data" }],
-    probes,
-  };
-}
 
 export default function CreateTemplateModal({
   open,
@@ -249,6 +61,11 @@ export default function CreateTemplateModal({
   // The form as it was opened, so closing an untouched form needs no confirm.
   const initialFormRef = useRef("");
   const errorRef = useRef(null);
+  // What the template being edited (or the import draft) holds beyond what this
+  // form shows. Saving keeps all of it; the notice says so.
+  const keptExtras = useMemo(() => describeKeptExtras(template || draft), [template, draft]);
+  // A stored NodePort/LoadBalancer Service keeps its type when saved; say so.
+  const serviceType = (template || draft)?.networking?.service?.type || "ClusterIP";
 
   const categoryOptions = useMemo(() => {
     const seen = new Set();
@@ -361,7 +178,7 @@ export default function CreateTemplateModal({
 
   // HPA can only be enabled when both CPU and memory requests are defined,
   // since autoscaling computes utilization relative to those requests.
-  const hasHpaResources = Boolean(form.cpuRequest.trim() && form.memoryRequest.trim());
+  const hasHpaResources = formHasHpaResources(form);
 
   // Generic handlers for repeatable list fields (envVars).
   const updateRow = (field, index, key) => (event) => {
@@ -387,201 +204,19 @@ export default function CreateTemplateModal({
     }));
   };
 
-  const resolveCategory = () => (form.category === NEW_CATEGORY ? form.newCategory : form.category).trim();
-
-  const buildProbe = (probe, fallbackPort) => {
-    if (!probe.enabled) return null;
-    const initialDelaySeconds = Number.parseInt(probe.initialDelaySeconds, 10);
-    const periodSeconds = Number.parseInt(probe.periodSeconds, 10);
-    const port = Number.parseInt(probe.port, 10);
-    const built = {
-      enabled: true,
-      type: probe.type,
-      initialDelaySeconds: Number.isFinite(initialDelaySeconds) ? initialDelaySeconds : 5,
-      periodSeconds: Number.isFinite(periodSeconds) ? periodSeconds : 10,
-    };
-    if (probe.type === "command") {
-      built.command = probe.command.trim();
-    } else {
-      built.port = Number.isFinite(port) ? port : fallbackPort;
-      if (probe.type === "http") built.path = probe.path.trim() || "/";
-    }
-    return built;
-  };
-
-  const slug = (value) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-
   // `asNewVersion` forks the edited template into a fresh "vN" copy instead of
   // overwriting the original — the parent decides the new name and calls create.
   const handleSubmit = async (asNewVersion = false) => {
     setError("");
-    const name = form.name.trim();
-    if (!name) {
-      setError("Template name is required.");
+    const problem = validateTemplateForm(form);
+    if (problem) {
+      setError(problem);
       return;
     }
-    const category = resolveCategory();
-    if (!category) {
-      setError("Choose an existing category or enter a new one.");
-      return;
-    }
-    if (!form.image.trim()) {
-      setError("Container image is required.");
-      return;
-    }
-    if (
-      form.hpaEnabled &&
-      hasHpaResources &&
-      !form.hpaCpuThreshold.trim() &&
-      !form.hpaMemoryThreshold.trim()
-    ) {
-      setError("Set a CPU threshold, a memory threshold, or both for the autoscaler.");
-      return;
-    }
-
-    const port = Number.parseInt(form.port, 10);
-    const replicas = Number.parseInt(form.replicas, 10);
-    const containerName = slug(name) || "main";
-    const payload = {
-      name,
-      description: form.description.trim(),
-      category,
-      workloadType: form.workloadType,
-      containers: [
-        {
-          name: containerName,
-          image: form.image.trim(),
-          tag: form.tag.trim() || "latest",
-          pullPolicy: form.pullPolicy,
-          ports: Number.isFinite(port) ? [port] : [],
-        },
-      ],
-      resources: {
-        cpuRequest: form.cpuRequest.trim(),
-        cpuLimit: form.cpuLimit.trim(),
-        memoryRequest: form.memoryRequest.trim(),
-        memoryLimit: form.memoryLimit.trim(),
-      },
-      scaling: {
-        replicas: Number.isFinite(replicas) ? replicas : 1,
-        // HPA needs CPU + memory requests to compute utilization. Force it off
-        // when either is missing so we never persist an unusable autoscaler.
-        hpa: {
-          enabled: form.hpaEnabled && hasHpaResources,
-          minReplicas: Number.parseInt(form.hpaMinReplicas, 10) || 1,
-          maxReplicas: Number.parseInt(form.hpaMaxReplicas, 10) || 5,
-          // CPU and memory thresholds are independent — set either, or both.
-          cpuThreshold: form.hpaCpuThreshold.trim()
-            ? Number.parseInt(form.hpaCpuThreshold, 10)
-            : null,
-          memoryThreshold: form.hpaMemoryThreshold.trim()
-            ? Number.parseInt(form.hpaMemoryThreshold, 10)
-            : null,
-        },
-      },
-    };
-    if (form.serviceEnabled && Number.isFinite(port)) {
-      payload.networking = {
-        service: { enabled: true, type: "ClusterIP", port, targetPort: port, protocol: "TCP" },
-      };
-    }
-
-    // Environment-variable *schema*: each row declares a kind + requirements, not
-    // a value. The deployer chooses existing-vs-create for ConfigMap/Secret kinds.
-    const envSchema = form.envVars
-      .map((row) => {
-        const key = (row.key || "").trim();
-        if (!key) return null;
-        const sensitive = Boolean(row.sensitive);
-        const kind = sensitive ? "secret" : row.kind || "value";
-        const field = { key, required: Boolean(row.required), sensitive, kind, allowedSources: KIND_SOURCES[kind] };
-        if (kind === "value" && row.default.trim()) field.default = row.default.trim();
-        return field;
-      })
-      .filter(Boolean);
-
-    // Carry non-sensitive defaults through as legacy prefills so summaries stay populated.
-    const envVars = envSchema.filter((f) => f.default).map((f) => ({ name: f.key, value: f.default }));
-    if (envVars.length) payload.environment = { envVars };
-
-    // Storage (simplified): one PVC + mount per volume row, no advanced PV
-    // authoring. Mounts link to their PVC via pvcName; `newPvc` mirrors the
-    // first PVC for older consumers of the single-volume shape.
-    if (form.storageEnabled) {
-      const rows = form.storageVolumes
-        .map((v) => ({ size: (v.size || "").trim() || "1Gi", mountPath: (v.mountPath || "").trim() }))
-        .filter((v) => v.mountPath);
-      const volumes = rows.length ? rows : [{ size: "1Gi", mountPath: "/data" }];
-      const newPvcs = volumes.map((v, i) => ({
-        name: i === 0 ? `${containerName}-data` : `${containerName}-data-${i + 1}`,
-        size: v.size,
-        accessMode: "ReadWriteOnce",
-      }));
-      payload.storage = {
-        pvcMode: "new",
-        newPvc: { ...newPvcs[0] },
-        newPvcs,
-        volumeMounts: volumes.map((v, i) => ({
-          name: i === 0 ? "data" : `data-${i + 1}`,
-          mountPath: v.mountPath,
-          readOnly: false,
-          pvcName: newPvcs[i].name,
-        })),
-      };
-    }
-
-    // Health checks.
-    const fallbackPort = Number.isFinite(port) ? port : 80;
-    const healthChecks = {};
-    for (const { key } of PROBE_KEYS) {
-      const built = buildProbe(form.probes[key], fallbackPort);
-      if (built) healthChecks[key] = built;
-    }
-    if (Object.keys(healthChecks).length) payload.healthChecks = healthChecks;
-
-    // Deployment schema: overrides, env requirements, dependencies, ingress, pull secret.
-    const schema = {};
-    const overrides = {};
-    for (const key of ["image", "tag", "replicas", "resources", "storageSize"]) {
-      if (form.overrides[key]) overrides[key] = true;
-    }
-    if (Object.keys(overrides).length) schema.overrides = overrides;
-    if (envSchema.length) schema.env = envSchema;
-
-    const dependencies = form.dependencies
-      .map((dep) => ({
-        kind: dep.kind,
-        name: (dep.name || dep.kind).trim(),
-        required: Boolean(dep.required),
-        ...(dep.note?.trim() ? { note: dep.note.trim() } : {}),
-      }))
-      .filter((dep) => dep.name);
-    if (dependencies.length) schema.dependencies = dependencies;
-
-    // Volume mounts: each declares a ConfigMap/Secret-backed mount path. The
-    // deployer chooses existing-vs-create for the backing resource at deploy time.
-    const volumeMounts = form.volumeMounts
-      .map((row) => {
-        const mountPath = (row.mountPath || "").trim();
-        if (!mountPath) return null;
-        const kind = row.kind === "secret" ? "secret" : "configMap";
-        const subPath = (row.subPath || "").trim();
-        return {
-          mountPath,
-          kind,
-          allowedSources: VOLUME_KIND_SOURCES[kind],
-          readOnly: Boolean(row.readOnly),
-          ...(subPath ? { subPath } : {}),
-        };
-      })
-      .filter(Boolean);
-    if (volumeMounts.length) schema.volumeMounts = volumeMounts;
-
-    if (form.overrides.ingressHost) {
-      schema.ingress = { supported: true, tls: Boolean(form.ingressTls) };
-    }
-
-    if (Object.keys(schema).length) payload.schema = schema;
+    // Start from the stored template (or import draft) and apply only what was
+    // edited here, so the parts this form can't show are saved unchanged.
+    const stored = template || draft;
+    const payload = mergeTemplateEdit(stored, stored ? JSON.parse(initialFormRef.current) : null, form);
 
     setSaving(true);
     setPendingAction(asNewVersion ? "version" : "save");
@@ -619,6 +254,13 @@ export default function CreateTemplateModal({
         {error ? (
           <p ref={errorRef} className="banner-message error" role="alert">
             {error}
+          </p>
+        ) : null}
+
+        {keptExtras.length ? (
+          <p className="banner-message info template-kept-note" role="note">
+            This template also has {joinExtras(keptExtras)} that this form doesn&apos;t edit; they are kept as
+            they are.
           </p>
         ) : null}
 
@@ -688,7 +330,7 @@ export default function CreateTemplateModal({
             </label>
             <label className="checkbox-row form-grid__full">
               <input type="checkbox" checked={form.serviceEnabled} onChange={toggle("serviceEnabled")} />
-              <span>Expose a ClusterIP service on the container port</span>
+              <span>Expose a {serviceType} service on the container port</span>
             </label>
           </div>
           <p className="muted" style={{ marginTop: "var(--space-2)" }}>
@@ -1123,6 +765,7 @@ export default function CreateTemplateModal({
           <div
             className="modal-card template-close-confirm__panel"
             role="alertdialog"
+            aria-modal="true"
             aria-labelledby="template-close-confirm-title"
             onClick={(e) => e.stopPropagation()}
           >

@@ -17,19 +17,23 @@ from ..db import db
 from ..models import UserTemplate
 from .wizard_templates import get_template as get_builtin_template
 
-# Spec sub-objects copied verbatim into a template's body.
-_SPEC_KEYS = (
-    "containers",
-    "resources",
-    "networking",
-    "scaling",
-    "storage",
-    "healthChecks",
-    "environment",
-    # The deployment schema: which fields are overridable, the env-var requirements,
-    # and the backing-service dependencies a deployer fills in later.
-    "schema",
-)
+# Top-level payload keys that are NOT template body: the row's own columns and the
+# read-only decorations of a detail / import-draft response. Every other key
+# (containers, resources, networking, scaling, storage, healthChecks, environment,
+# schema — and anything else the payload carries) is body and is kept verbatim:
+# a template made by import or the API can carry more than the edit form shows,
+# and an edit must not drop it.
+_NON_SPEC_KEYS = frozenset({
+    "id",
+    "name",
+    "description",
+    "category",
+    "workloadType",
+    "custom",
+    "createdBy",
+    "ciServices",
+    "warnings",
+})
 
 _WORKLOAD_TYPES = (
     "Deployment",
@@ -76,7 +80,7 @@ def _detail(tpl: UserTemplate) -> Dict[str, Any]:
         "category": tpl.category or "Custom",
         "workloadType": tpl.workload_type or "Deployment",
         "custom": True,
-        **{key: spec[key] for key in _SPEC_KEYS if key in spec},
+        **{key: value for key, value in spec.items() if key not in _NON_SPEC_KEYS},
     }
 
 
@@ -121,7 +125,7 @@ def _validate_payload(payload: Dict[str, Any]) -> Tuple[Optional[str], Dict[str,
         if schema.get("dependencies") is not None and not isinstance(schema["dependencies"], list):
             return "Template schema 'dependencies' must be a list.", {}
 
-    spec = {key: payload[key] for key in _SPEC_KEYS if payload.get(key) is not None}
+    spec = {key: value for key, value in payload.items() if key not in _NON_SPEC_KEYS and value is not None}
     cleaned = {
         "name": name,
         "description": (payload.get("description") or "").strip()[:500] or None,

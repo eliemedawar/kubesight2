@@ -311,6 +311,24 @@ def _service_block(
     return None
 
 
+def _container_entry(container: Dict[str, Any]) -> Dict[str, Any]:
+    """One template container: what the manifest generator can emit for it."""
+    image, tag = _split_image(container.get("image") or "")
+    entry: Dict[str, Any] = {
+        "name": str(container.get("name") or "main"),
+        "image": image,
+        "tag": tag,
+        "pullPolicy": container.get("imagePullPolicy") or "IfNotPresent",
+        "ports": _ports(container),
+    }
+    for key in ("command", "args"):
+        if container.get(key):
+            entry[key] = container[key]
+    if container.get("workingDir"):
+        entry["workingDir"] = str(container["workingDir"])
+    return entry
+
+
 def _draft_from_workload(
     doc: Dict[str, Any],
     services: List[Dict[str, Any]],
@@ -330,24 +348,18 @@ def _draft_from_workload(
         return {"name": name, "workloadType": kind, "warnings": warnings, "containers": []}
     if len(containers) > 1:
         warnings.append(
-            f"Workload has {len(containers)} containers; only the first ('"
-            f"{containers[0].get('name') or 'main'}') was imported."
+            f"Workload has {len(containers)} containers; the template form edits the first ('"
+            f"{containers[0].get('name') or 'main'}'). The other {len(containers) - 1} are kept as they "
+            "are and share its resources, environment, volumes and probes when deployed."
         )
     container = containers[0] or {}
-    image, tag = _split_image(container.get("image") or "")
 
     draft: Dict[str, Any] = {
         "name": name,
         "description": f"Imported from YAML ({kind})",
         "category": "Imported",
         "workloadType": kind,
-        "containers": [{
-            "name": str(container.get("name") or "main"),
-            "image": image,
-            "tag": tag,
-            "pullPolicy": container.get("imagePullPolicy") or "IfNotPresent",
-            "ports": _ports(container),
-        }],
+        "containers": [_container_entry(c or {}) for c in containers],
         "resources": _resources(container),
         # Sensible default surface for "what can change"; the user adjusts the rest.
         "schema": {"overrides": {"tag": True, "replicas": True}},

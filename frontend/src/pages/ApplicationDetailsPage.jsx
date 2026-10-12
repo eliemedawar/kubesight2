@@ -94,6 +94,7 @@ export default function ApplicationDetailsPage({
   detail,
   selectedApplicationId = "",
   loading,
+  loadFailed = false,
   onBack,
   user,
   activeTab = "overview",
@@ -433,7 +434,9 @@ export default function ApplicationDetailsPage({
   const detailMatchesSelection =
     !selectedApplicationId || inventoryIdsMatch(detail?.id, selectedApplicationId);
 
-  if (loading || (selectedApplicationId && !detailMatchesSelection)) {
+  // A failed read leaves no detail to match: fall through to "not found"
+  // rather than "Loading…" forever.
+  if (!loadFailed && (loading || (selectedApplicationId && !detailMatchesSelection))) {
     return <p className="muted">Loading application details…</p>;
   }
 

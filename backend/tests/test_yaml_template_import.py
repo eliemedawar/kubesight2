@@ -306,15 +306,44 @@ def test_parser_imports_every_pvc_backed_mount():
     assert storage["pvcMode"] == "new"
 
 
-def test_parser_warns_on_extra_containers():
+def test_parser_keeps_extra_containers_and_warns():
     drafts, error = parse_yaml_to_template_drafts(MULTI_YAML)
     assert error is None
     cache = next(d for d in drafts if d["name"] == "cache")
-    # StatefulSet, first container only, tag defaults to latest.
+    # StatefulSet; tag defaults to latest. The sidecar is kept, not dropped.
     assert cache["workloadType"] == "StatefulSet"
     assert cache["containers"][0]["image"] == "redis"
     assert cache["containers"][0]["tag"] == "latest"
-    assert any("2 containers" in w for w in cache["warnings"])
+    assert [c["name"] for c in cache["containers"]] == ["redis", "sidecar"]
+    assert cache["containers"][1]["image"] == "busybox"
+    assert any("2 containers" in w and "kept" in w for w in cache["warnings"])
+
+
+def test_parser_keeps_container_command_and_args():
+    drafts, error = parse_yaml_to_template_drafts(
+        """
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          image: registry.local/team/worker:2.0
+          command: ["/bin/worker"]
+          args: ["--queue", "jobs"]
+          workingDir: /srv
+"""
+    )
+    assert error is None
+    container = drafts[0]["containers"][0]
+    assert container["image"] == "registry.local/team/worker"
+    assert container["tag"] == "2.0"
+    assert container["command"] == ["/bin/worker"]
+    assert container["args"] == ["--queue", "jobs"]
+    assert container["workingDir"] == "/srv"
 
 
 def test_parser_rejects_invalid_and_empty():
@@ -372,3 +401,71 @@ def test_imported_draft_round_trips_to_template(client, admin_token):
     ).get_json()["data"]
     assert detail["containers"][0]["image"] == "nginx"
     assert detail["schema"]["env"]
+
+
+def test_template_update_keeps_everything_the_payload_carries(client, admin_token):
+    """Create → edit → re-fetch keeps sidecars, per-claim manual PV, NodePort
+    service ports and unknown keys: the server stores the whole body, never
+    just the keys the edit form knows."""
+    payload = {
+        "name": "Round Trip",
+        "category": "Imported",
+        "workloadType": "Deployment",
+        "containers": [
+            {"name": "api", "image": "registry/api", "tag": "1.0", "ports": [8080]},
+            {"name": "shipper", "image": "fluent/fluent-bit", "tag": "2.2", "ports": [2020]},
+        ],
+        "networking": {
+            "service": {
+                "enabled": True,
+                "type": "NodePort",
+                "ports": [{"name": "http", "port": 80, "targetPort": 8080, "nodePort": 30080}],
+            },
+            "ingress": {"enabled": True, "host": "rt.example.com"},
+        },
+        "storage": {
+            "pvcMode": "new",
+            "newPvcs": [{
+                "name": "logs",
+                "size": "10Gi",
+                "advanced": {"createManualPv": True, "storageType": "nfs", "nfsServer": "10.0.0.5"},
+            }],
+            "volumeMounts": [{"name": "data", "mountPath": "/logs", "pvcName": "logs"}],
+        },
+        "podAnnotations": {"prometheus.io/scrape": "true"},
+        # Read-only decorations of a detail / draft are never stored.
+        "warnings": ["imported"],
+        "ciServices": [{"id": 1}],
+    }
+    created = client.post(
+        "/api/inventory/deploy/wizard/templates", json=payload, headers=auth_headers(admin_token)
+    )
+    assert created.status_code == 201, created.get_json()
+    template_id = created.get_json()["data"]["id"]
+
+    detail = client.get(
+        f"/api/inventory/deploy/wizard/templates/{template_id}", headers=auth_headers(admin_token)
+    ).get_json()["data"]
+    assert len(detail["containers"]) == 2
+    assert detail["podAnnotations"] == {"prometheus.io/scrape": "true"}
+    assert "warnings" not in detail
+    assert detail["id"] == template_id and detail["custom"] is True
+
+    # The edit form sends the detail back with one field changed.
+    edited = {**detail, "description": "edited"}
+    edited["containers"] = [{**detail["containers"][0], "tag": "1.1"}, detail["containers"][1]]
+    updated = client.put(
+        f"/api/inventory/deploy/wizard/templates/{template_id}", json=edited, headers=auth_headers(admin_token)
+    )
+    assert updated.status_code == 200, updated.get_json()
+
+    after = client.get(
+        f"/api/inventory/deploy/wizard/templates/{template_id}", headers=auth_headers(admin_token)
+    ).get_json()["data"]
+    assert after["description"] == "edited"
+    assert after["containers"][0]["tag"] == "1.1"
+    assert after["containers"][1] == payload["containers"][1]
+    assert after["networking"] == payload["networking"]
+    assert after["storage"] == payload["storage"]
+    assert after["podAnnotations"] == payload["podAnnotations"]
+    assert "ciServices" not in after

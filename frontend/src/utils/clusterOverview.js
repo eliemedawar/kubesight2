@@ -54,3 +54,39 @@ export function storageDetail(storage) {
   if (known(storage.claimedGiB)) return "Claimed by PVCs / provisioned PVs";
   return "Provisioned persistent volumes";
 }
+
+// Cluster list statuses from the API are healthy / warning / unknown (plus
+// critical / error); the same tone mapping on the Clusters cards and here.
+const STATUS_TONES = {
+  healthy: "ok",
+  warning: "warn",
+  critical: "danger",
+  error: "danger",
+  unknown: "info",
+};
+
+export const statusTone = (status) => STATUS_TONES[String(status).toLowerCase()] || "info";
+
+/** Whole-number share of `capacity` that `used` is, or null when either is unknown. */
+export function usagePercent(used, capacity) {
+  if (!known(used) || !known(capacity) || Number(capacity) <= 0) return null;
+  return Math.round((Number(used) / Number(capacity)) * 100);
+}
+
+/** A count for display: the number, or a dash when it is not known (never 0). */
+export const countValue = (value) => (known(value) ? Number(value).toLocaleString() : "—");
+
+/** "aws · us-east-1 · Kubernetes v1.30.2 · 18 nodes" from the fields the cluster has. */
+export function clusterFacts(cluster) {
+  if (!cluster) return "";
+  const version = cluster.k8sVersion || cluster.version;
+  const nodes = typeof cluster.nodes === "number" ? cluster.nodes : null;
+  return [
+    cluster.provider ? String(cluster.provider).toUpperCase() : null,
+    cluster.region && cluster.region !== "unknown" ? cluster.region : null,
+    version && version !== "unknown" ? `Kubernetes ${version}` : null,
+    nodes != null ? `${nodes} node${nodes === 1 ? "" : "s"}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}

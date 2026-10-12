@@ -57,6 +57,7 @@ import {
   vmCountError,
   vmsOnlyCounts,
   vmwareNameError,
+  planPollDelayMs,
 } from "../../utils/clusterProvisioning.js";
 import {
   createClusterBuild,
@@ -68,6 +69,7 @@ import {
   startClusterBuild,
   updateClusterBuild,
 } from "../../api/clusterBuildsApi.js";
+import { whenVisible } from "../../lib/visibleInterval";
 
 /** The steps this build walks, as [step, label]. A VMs-only build has no
     cluster to put add-ons or workloads on, so it skips those two. */
@@ -1141,35 +1143,58 @@ export default function Wizard({
   canManageTemplates = false,
   currentUserId = null,
   initialBuild = null,
+  draft = null,
+  onDraftChange,
   notify,
   onBuildSaved,
   onBuildLaunched,
   onCancel,
   onOptionsChanged,
 }) {
-  const [step, setStep] = useState(0);
-  const [basics, setBasics] = useState(() => basicsFromBuild(initialBuild));
+  // An unfinished draft the page kept (another tab, a reload) picks up where
+  // it was left. "Edit draft" on a saved build starts from that build instead.
+  // Read once, at mount: the page keeps passing its latest copy back down.
+  const [restored] = useState(() => (initialBuild ? null : draft));
+  const [step, setStep] = useState(() => restored?.step ?? 0);
+  const [basics, setBasics] = useState(() => restored?.basics || basicsFromBuild(initialBuild));
   const [vms, setVms] = useState([]);
   const [vmsLoading, setVmsLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState({ poweredOn: true, tools: false, big: false });
-  const [picked, setPicked] = useState(() => pickedFromBuild(initialBuild));
-  const [manualNodes, setManualNodes] = useState(() => manualFromBuild(initialBuild));
-  const [buildId, setBuildId] = useState(initialBuild?.id || null);
-  const [preflightResult, setPreflightResult] = useState(null);
+  const [picked, setPicked] = useState(() => restored?.picked || pickedFromBuild(initialBuild));
+  const [manualNodes, setManualNodes] = useState(() => restored?.manualNodes || manualFromBuild(initialBuild));
+  const [buildId, setBuildId] = useState(() => restored?.buildId ?? initialBuild?.id ?? null);
+  const [preflightResult, setPreflightResult] = useState(() => restored?.preflightResult || null);
   const [busy, setBusy] = useState(false);
-  const [acked, setAcked] = useState(false);
+  const [acked, setAcked] = useState(() => Boolean(restored?.acked));
   const [editingSource, setEditingSource] = useState(null);
   // The last image check from the Workloads step, so the Blueprint can report
   // it while the user is still standing on that step.
-  const [workloadPlan, setWorkloadPlan] = useState(null);
+  const [workloadPlan, setWorkloadPlan] = useState(() => restored?.workloadPlan || null);
   // VMware: the build as the plan step last read it, and the address preview.
-  const [planBuild, setPlanBuild] = useState(null);
+  const [planBuild, setPlanBuild] = useState(() => restored?.planBuild || null);
   const [addresses, setAddresses] = useState([]);
   const [previewError, setPreviewError] = useState("");
-  const seeded = useRef(Boolean(initialBuild));
+  // A restored draft has already been seeded: re-seeding would put the Small
+  // template's shape and the default machine source back over the user's.
+  // The plumbing seed only fills blanks, so it may still run.
+  const seeded = useRef(Boolean(initialBuild || restored));
   const plumbingSeeded = useRef(Boolean(initialBuild));
-  const sourceSeeded = useRef(Boolean(initialBuild));
+  const sourceSeeded = useRef(Boolean(initialBuild || restored));
+
+  // --- Unsaved draft ----------------------------------------------------------
+  // "Dirty" means the user changed something. Seeding effects also change
+  // state as the catalog and source lists arrive, so the baseline is taken at
+  // the first interaction inside the wizard (capture phase, before that
+  // interaction's own change lands), and dirty is "differs from it".
+  const fingerprint = JSON.stringify({ step, basics, picked, manualNodes });
+  const fingerprintRef = useRef(fingerprint);
+  fingerprintRef.current = fingerprint;
+  const baselineRef = useRef(restored?.baseline ?? null);
+  const markInteraction = () => {
+    if (baselineRef.current === null) baselineRef.current = fingerprintRef.current;
+  };
+  const dirty = baselineRef.current !== null && fingerprint !== baselineRef.current;
 
   const setBasic = (key, value) => setBasics((previous) => ({ ...previous, [key]: value }));
   const catalog = options?.clusterTemplates;
@@ -1181,6 +1206,36 @@ export default function Wizard({
   );
   const vmsOnly = vmware && basics.vmsOnly;
   const steps = wizardSteps(basics.machineSource, basics.vmsOnly);
+
+  // Hand the page every change, so the draft outlives this component. The
+  // page keeps only a dirty draft; a clean one is nothing to lose.
+  const stepLabel = steps.find(([id]) => id === step)?.[1] || "";
+  useEffect(() => {
+    onDraftChange?.({
+      step,
+      stepLabel,
+      basics,
+      picked,
+      manualNodes,
+      buildId,
+      preflightResult,
+      acked,
+      workloadPlan,
+      planBuild,
+      baseline: baselineRef.current,
+      dirty,
+    });
+  }, [onDraftChange, step, stepLabel, basics, picked, manualNodes, buildId, preflightResult, acked, workloadPlan, planBuild, dirty]);
+
+  // A draft restored after a reload comes back without the VM plan (it is
+  // not kept in the browser); read it again when the user is standing on it.
+  const planReread = useRef(Boolean(restored?.planBuild));
+  useEffect(() => {
+    if (planReread.current || !restored || !buildId || step !== STEP_VERIFY) return;
+    planReread.current = true;
+    if (basics.machineSource !== "vmware") return;
+    getClusterBuild(buildId).then(setPlanBuild).catch(() => {});
+  }, [restored, buildId, step, basics.machineSource]);
 
   // Resolve the plumbing once, from whatever is already healthy. This is what
   // lets the Sources row be a statement rather than three questions.
@@ -1544,14 +1599,34 @@ export default function Wizard({
     }
   };
 
-  // While OpenTofu plans, keep reading the build until it says how it went.
+  // While OpenTofu plans, keep reading the build until it says how it went:
+  // fast at first, then backing off (planPollDelayMs). A hidden tab stops
+  // asking until it is looked at again, then reads at once.
   const planning = planBuild?.provisioning?.job?.status === "planning";
   useEffect(() => {
     if (step !== STEP_VERIFY || !planning || !buildId) return undefined;
-    const id = setInterval(() => {
-      getClusterBuild(buildId).then(setPlanBuild).catch(() => {});
-    }, 2000);
-    return () => clearInterval(id);
+    let cancelled = false;
+    let timer = null;
+    const started = Date.now();
+    const schedule = () => {
+      timer = setTimeout(tick, planPollDelayMs(Date.now() - started));
+    };
+    const tick = async () => {
+      await whenVisible();
+      if (cancelled) return;
+      try {
+        const data = await getClusterBuild(buildId);
+        if (!cancelled) setPlanBuild(data);
+      } catch {
+        // The next tick tries again.
+      }
+      if (!cancelled) schedule();
+    };
+    schedule();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [step, planning, buildId]);
 
   const launch = async () => {
@@ -1845,7 +1920,12 @@ export default function Wizard({
   if (!options) return <div className="card sg-cb-card"><p className="muted">Loading…</p></div>;
 
   return (
-    <div className="sg-cb-wizard">
+    <div
+      className="sg-cb-wizard"
+      onClickCapture={markInteraction}
+      onChangeCapture={markInteraction}
+      onKeyDownCapture={markInteraction}
+    >
       <div className="sg-cb-wizard-top">
         <StepRail current={step} onGoBack={setStep} steps={steps} />
         <button className="btn-ghost" type="button" onClick={onCancel}>Cancel</button>

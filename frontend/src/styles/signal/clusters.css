@@ -31,6 +31,20 @@
   height: 0.8125rem;
 }
 
+/* Card actions: Overview (a link) and Request, pushed to the footer's end. */
+.sg-clusters-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+.sg-clusters-actions .sg-clusters-request { margin-left: 0; }
+.sg-clusters-overview { text-decoration: none; }
+.sg-clusters-request:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* Header "Approval rules" is a real link (#/approvals/rules) styled as an
    outline button; base button chrome only targets <button>, so restate it. */
 .sg-clusters-rules-link {

@@ -23,6 +23,7 @@ import {
   totals,
   vmRows,
   vmwareNameError,
+  planPollDelayMs,
 } from "./clusterProvisioning.js";
 import { draftBlueprint, machinesBlueprint } from "./clusterBuilder.js";
 
@@ -324,5 +325,14 @@ describe("VMs first", () => {
   it("draws plain VMs as their own tier", () => {
     const plan = machinesBlueprint({ machines: [{ name: "t-vm-1", role: "vm", ip: "10.0.0.5" }] });
     expect(plan.tiers.map((t) => t.role)).toEqual(["vm"]);
+  });
+});
+
+describe("planPollDelayMs", () => {
+  it("polls every 2 s for the first 30 s, then every 5 s", () => {
+    expect(planPollDelayMs(0)).toBe(2000);
+    expect(planPollDelayMs(29999)).toBe(2000);
+    expect(planPollDelayMs(30000)).toBe(5000);
+    expect(planPollDelayMs(600000)).toBe(5000);
   });
 });

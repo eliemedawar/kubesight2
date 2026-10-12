@@ -617,3 +617,15 @@ export function placementFromSpec(spec) {
     sizeMode: spec.sizeMode || "custom",
   };
 }
+
+// While OpenTofu plans, the wizard re-reads the build: every 2 s for the first
+// 30 s (most plans finish there), then every 5 s so a slow vCenter isn't asked
+// 30 times a minute.
+export const PLAN_POLL_FAST_MS = 2000;
+export const PLAN_POLL_SLOW_MS = 5000;
+export const PLAN_POLL_FAST_FOR_MS = 30000;
+
+/** Delay before the next plan poll, given how long the wizard has been polling. */
+export function planPollDelayMs(elapsedMs) {
+  return elapsedMs < PLAN_POLL_FAST_FOR_MS ? PLAN_POLL_FAST_MS : PLAN_POLL_SLOW_MS;
+}

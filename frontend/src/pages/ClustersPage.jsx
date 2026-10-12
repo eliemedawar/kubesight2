@@ -4,18 +4,8 @@ import RequestDeploymentModal from "../components/clusters/RequestDeploymentModa
 import { useAuth } from "../context/AuthContext";
 import { createDeploymentRequest } from "../api";
 import { EMPTY_MESSAGES } from "../utils/authz.js";
-
-// Cluster list statuses from the API are healthy / warning / unknown; keep the
-// same tone mapping the old DataTable pill used so colours don't shift.
-const STATUS_TONES = {
-  healthy: "ok",
-  warning: "warn",
-  critical: "danger",
-  error: "danger",
-  unknown: "info",
-};
-
-const statusTone = (status) => STATUS_TONES[String(status).toLowerCase()] || "info";
+import { statusTone } from "../utils/clusterOverview.js";
+import { describeEmailResult } from "../lib/emailResult.js";
 
 const barFillClass = (value) => {
   if (value >= 95) return "sg-bar-fill sg-bar-fill--danger";
@@ -49,6 +39,15 @@ function SendIcon() {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="m22 2-7 20-4-9-9-4Z" />
       <path d="M22 2 11 13" />
+    </svg>
+  );
+}
+
+function ArrowIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M5 12h14" />
+      <path d="m13 6 6 6-6 6" />
     </svg>
   );
 }
@@ -124,6 +123,9 @@ export default function ClustersPage({
   // included — requests approval on clusters that require it.
   const canManageRecipients = hasPermission("deployment_requests:manage");
   const canRequest = hasPermission("deployment_requests:request");
+  // The per-cluster overview (#/clusters/<id>/overview); every listed cluster
+  // is one this user can reach, so the page permission is the only gate.
+  const canViewOverview = hasPermission("overview:view");
   const requesterName = user?.fullName || user?.username || "";
 
   const [activeCluster, setActiveCluster] = useState(null);
@@ -158,18 +160,13 @@ export default function ClustersPage({
         windowTimezone,
       });
       setActiveCluster(null);
-      const emailResult = result?.emailResult;
-      if (emailResult?.sent > 0) {
-        setNotice(
-          `Request sent to the management team (${emailResult.sent} recipient${
-            emailResult.sent === 1 ? "" : "s"
-          } notified). You can track it under My Requests.`
-        );
-      } else if (emailResult?.skipped) {
-        setNotice(
-          "Request submitted. It is pending review — email notification was skipped " +
-            `(${emailResult.reason || "no recipients configured"}). You can track it under My Requests.`
-        );
+      // Approver emails go out in the background: say they are queued, not
+      // that anyone was notified yet.
+      const email = describeEmailResult(result?.emailResult);
+      if (email.kind === "queued" || email.kind === "sent") {
+        setNotice(`Request sent to the management team — ${email.text}. You can track it under My Requests.`);
+      } else if (email.kind === "skipped" || email.kind === "failed") {
+        setNotice(`Request submitted. It is pending review — ${email.text}. You can track it under My Requests.`);
       } else {
         setNotice("Request submitted and is pending review. You can track it under My Requests.");
       }
@@ -258,15 +255,29 @@ export default function ClustersPage({
                 {cluster.region && cluster.region !== "unknown" ? (
                   <span className="sg-tag">{cluster.region}</span>
                 ) : null}
-                {canRequest ? (
-                  <button
-                    type="button"
-                    className="sg-clusters-request"
-                    onClick={() => openRequest(clusterRef)}
-                  >
-                    Request
-                    <SendIcon />
-                  </button>
+                {canViewOverview || canRequest ? (
+                  <span className="sg-clusters-actions">
+                    {canViewOverview ? (
+                      <a
+                        className="sg-clusters-request sg-clusters-overview"
+                        href={`#/clusters/${encodeURIComponent(clusterRef.id)}/overview`}
+                        aria-label={`Overview of ${clusterRef.name}`}
+                      >
+                        Overview
+                        <ArrowIcon />
+                      </a>
+                    ) : null}
+                    {canRequest ? (
+                      <button
+                        type="button"
+                        className="sg-clusters-request"
+                        onClick={() => openRequest(clusterRef)}
+                      >
+                        Request
+                        <SendIcon />
+                      </button>
+                    ) : null}
+                  </span>
                 ) : null}
               </footer>
             </article>

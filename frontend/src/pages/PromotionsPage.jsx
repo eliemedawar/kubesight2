@@ -16,8 +16,17 @@ import { formatRelative, gateQueue, planRelease } from "../components/promotions
 import { fmtTime } from "../components/promotions/timetableModel.js";
 import { useAuth } from "../context/AuthContext";
 import { useRouteParam, useRouteQuery } from "../routes/RouterContext.jsx";
+import { setVisibleInterval } from "../lib/visibleInterval";
 
-const REFRESH_MS = 45000;
+// The board polls while the tab is visible (hidden tabs skip ticks and catch up
+// on return). The overview is cached for 60 s server-side, so asking sooner only
+// returns the same scan; the timetable is database-only and its cut-offs move,
+// so it ticks a little faster. The setup (the ladder itself) changes only when
+// someone edits it: it is read on load, after edits, on Refresh and when the
+// window regains focus — never on a timer.
+const OVERVIEW_REFRESH_MS = 60000;
+const TIMETABLE_REFRESH_MS = 45000;
+const SETUP_FOCUS_MIN_GAP_MS = 30000;
 
 /**
  * Promotions: releases leave each environment on a timetable.
@@ -56,10 +65,12 @@ export default function PromotionsPage() {
     toastTimer.current = setTimeout(() => setToast(""), 3600);
   }, []);
 
+  const setupReadAt = useRef(0);
   const load = useCallback(async ({ refresh = false } = {}) => {
     setError("");
     try {
       const data = await getPromotionSetup();
+      setupReadAt.current = Date.now();
       setSetup(data);
       if (data.environments.length) {
         const [ov, tt] = await Promise.all([getPromotionOverview({ refresh }), getPromotionTimetable()]);
@@ -84,13 +95,46 @@ export default function PromotionsPage() {
   }, [load]);
 
   // The board is live: departures board, cut-offs and statuses move on their own.
+  const ladderReady = Boolean(setup?.environments?.length);
+  const ladderReadyRef = useRef(ladderReady);
+  ladderReadyRef.current = ladderReady;
   useEffect(() => {
-    if (!setup?.environments?.length) return undefined;
-    const id = setInterval(() => {
-      if (document.visibilityState === "visible") load();
-    }, REFRESH_MS);
-    return () => clearInterval(id);
-  }, [setup, load]);
+    if (!ladderReady) return undefined;
+    let alive = true;
+    const tick = (fetcher, apply) => () =>
+      fetcher()
+        .then((data) => {
+          if (!alive) return;
+          apply(data);
+          setError("");
+        })
+        .catch((err) => alive && setError(err.message || "Could not load the promotion ladder."));
+    const stopOverview = setVisibleInterval(tick(getPromotionOverview, setOverview), OVERVIEW_REFRESH_MS);
+    const stopTimetable = setVisibleInterval(tick(getPromotionTimetable, setTimetable), TIMETABLE_REFRESH_MS);
+    return () => {
+      alive = false;
+      stopOverview();
+      stopTimetable();
+    };
+  }, [ladderReady]);
+
+  // Someone may have changed the ladder from another tab or machine: re-read
+  // the setup when the window comes back into focus (at most every 30 s), and
+  // the whole board when a ladder appeared or went away meanwhile.
+  useEffect(() => {
+    const onFocus = () => {
+      if (Date.now() - setupReadAt.current < SETUP_FOCUS_MIN_GAP_MS) return;
+      setupReadAt.current = Date.now();
+      getPromotionSetup()
+        .then((data) => {
+          if (Boolean(data.environments.length) !== ladderReadyRef.current) load();
+          else setSetup(data);
+        })
+        .catch(() => {});
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [load]);
 
   const refresh = async () => {
     setRefreshing(true);
