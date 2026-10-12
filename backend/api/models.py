@@ -1335,6 +1335,10 @@ class ChangeBundle(db.Model):
     promotion_exception = db.Column(db.JSON, nullable=True)
     execution_started_at = db.Column(db.DateTime(timezone=True), nullable=True)
     execution_finished_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    # When it was sent for approval. created_at is when the draft (the cart)
+    # was opened, which can be months earlier; the approvals inbox counts the
+    # wait from here. NULL while a draft.
+    submitted_at = db.Column(db.DateTime(timezone=True), nullable=True)
     created_at = db.Column(
         db.DateTime(timezone=True),
         nullable=False,

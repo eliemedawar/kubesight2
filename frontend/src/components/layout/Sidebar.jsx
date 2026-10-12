@@ -5,6 +5,11 @@ import { buildNavGroups, sidebarKeyFor } from "../../lib/navigation.js";
 import { navIcon } from "./navIcons.jsx";
 import { getApprovalsCount } from "../../api/approvalsApi.js";
 import { setVisibleInterval } from "../../lib/visibleInterval";
+import {
+  approvalsCountClaimed,
+  setApprovalsWaiting,
+  useApprovalsWaitingValue,
+} from "../../lib/approvalsBadge.js";
 
 // Which groups a user folded away. Per browser, like the theme: a convenience,
 // never state anything else depends on.
@@ -53,21 +58,25 @@ const SearchGlyph = () => (
   </svg>
 );
 
-/** How many approvals wait on this person — the Approvals link's badge. */
+/** How many approvals wait on this person — the Approvals link's badge.
+ *  The count lives in lib/approvalsBadge: an open Approvals inbox polls it
+ *  every 20 s and publishes it, and while it does this skips its own fetch. */
 function useApprovalsWaiting(enabled) {
-  const [count, setCount] = useState(0);
+  const count = useApprovalsWaitingValue();
   useEffect(() => {
     if (!enabled) return undefined;
     let alive = true;
-    const load = () =>
+    const load = () => {
+      if (approvalsCountClaimed()) return;
       getApprovalsCount()
-        .then((data) => { if (alive) setCount(Number(data?.waitingOnMe) || 0); })
+        .then((data) => { if (alive) setApprovalsWaiting(Number(data?.waitingOnMe) || 0); })
         .catch(() => {});
+    };
     load();
     const stop = setVisibleInterval(load, 60000);
     return () => { alive = false; stop(); };
   }, [enabled]);
-  return count;
+  return enabled ? count || 0 : 0;
 }
 
 const isMac =

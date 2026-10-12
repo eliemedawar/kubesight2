@@ -869,7 +869,8 @@ def _offer(task: TicketInterpretation, build: ClusterBuild, job) -> None:
     task.approval_nonce = secrets.token_hex(4)
     from . import engine
 
-    task.expires_at = engine._now() + timedelta(hours=int(row.approval_timeout_hours or 24))
+    task.approval_requested_at = engine._now()
+    task.expires_at = task.approval_requested_at + timedelta(hours=int(row.approval_timeout_hours or 24))
     db.session.commit()
     ticket = db.session.get(ZohoInboundTicket, task.ticket_record_id) if task.ticket_record_id else None
     if agent_settings.telegram_ready(row):

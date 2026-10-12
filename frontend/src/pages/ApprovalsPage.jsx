@@ -8,14 +8,23 @@
  *  that decides who approves what.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import RulesTab from "../components/approvals/RulesTab.jsx";
 import { decideApproval, getApprovalsCount, getApprovalsHistory, getApprovalsInbox } from "../api/approvalsApi.js";
 import { useRouteParam, useRouter } from "../routes/RouterContext.jsx";
 import { setVisibleInterval } from "../lib/visibleInterval";
 import { parseApiTime } from "../lib/apiTime.js";
+import {
+  adjustApprovalsWaiting,
+  approvalsWaitingAge,
+  claimApprovalsCount,
+  getApprovalsWaiting,
+  setApprovalsWaiting,
+  useApprovalsWaitingValue,
+} from "../lib/approvalsBadge.js";
 import { initialsOf, waitingFor, formatDate, IconCheck, IconClock } from "../components/clusters/RequestsTable.jsx";
+import { confirmDialog, promptDialog } from "../lib/dialogs.js";
 
 const TABS = [
   { key: "waiting", label: "Waiting on me" },
@@ -34,6 +43,11 @@ const KIND_FILTERS = [
   { key: "ci_stage", label: "CI approvals" },
   { key: "cluster_destroy", label: "Cluster destroys" },
 ];
+
+// History comes a page at a time ("Load older" asks for the next one).
+const HISTORY_PAGE = 50;
+// The inbox polls every 20 s; a count younger than that is current enough.
+const INBOX_POLL_MS = 20000;
 
 const OUTCOME_TONE = {
   approved: "ok", executed: "ok", completed: "ok", success: "ok",
@@ -164,6 +178,8 @@ function Inbox({ scope, onCounts }) {
       const next = await getApprovalsInbox(scope);
       setData({ ...next, items: (next.items || []).map(normalize) });
       onCounts?.(next.counts);
+      // The sidebar badge reads the same number instead of fetching its own.
+      setApprovalsWaiting(next.counts?.waitingOnMe);
       if (!silent) setError("");
     } catch (err) {
       if (!silent) setError(err.message || "Could not load approvals.");
@@ -172,18 +188,31 @@ function Inbox({ scope, onCounts }) {
 
   useEffect(() => { setData(null); load(); }, [load]);
   // Others vote by email, in Telegram or on other pages: keep the list honest.
-  useEffect(() => setVisibleInterval(() => load({ silent: true }), 20000), [load]);
+  useEffect(() => setVisibleInterval(() => load({ silent: true }), INBOX_POLL_MS), [load]);
+  // While this polls, the sidebar badge skips its own fetch.
+  useEffect(() => claimApprovalsCount(), []);
 
   const decide = async (item, action) => {
     let text = "";
     if (action === "reject" && item.actions?.rejectField) {
-      const answer = window.prompt(`Why reject "${item.title}"? (optional)`, "");
+      const answer = await promptDialog({
+        title: "Reject",
+        message: `Why reject "${item.title}"?`,
+        label: "Reason (optional)",
+        confirmLabel: "Reject",
+        tone: "danger",
+      });
       if (answer === null) return;
       text = answer;
     }
     if (action === "approve") {
       const question = CONFIRM_APPROVE[item.kind]?.(item);
-      if (question && !window.confirm(question)) return;
+      if (question && !(await confirmDialog({
+        title: item.kind === "cluster_destroy" ? "Approve destroy" : "Approve",
+        message: question,
+        confirmLabel: "Approve",
+        tone: item.kind === "cluster_destroy" ? "danger" : "default",
+      }))) return;
     }
     setBusyKey(item.key);
     setError("");
@@ -191,6 +220,12 @@ function Inbox({ scope, onCounts }) {
     try {
       await decideApproval(item, action, text);
       setNotice(`${action === "approve" ? "Approved" : "Rejected"}: ${item.title}`);
+      // A vote takes the item off "waiting on me": the badges drop at once,
+      // and the reload below brings the exact numbers.
+      adjustApprovalsWaiting(-1);
+      setData((prev) => (prev && scope === "mine"
+        ? { ...prev, items: prev.items.filter((other) => other.key !== item.key) }
+        : prev));
       await load({ silent: true });
     } catch (err) {
       setError(err.serverMessage || err.message || `Could not ${action}.`);
@@ -232,16 +267,28 @@ function Inbox({ scope, onCounts }) {
   );
 }
 
+const historyRowKey = (item) => `${item.key}-${item.decidedAt}`;
+
 function History() {
   const [kind, setKind] = useState("");
   const [items, setItems] = useState(null);
+  const [nextBefore, setNextBefore] = useState(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
+  // Only the newest kind's answers may write the list.
+  const kindRef = useRef(kind);
+  kindRef.current = kind;
   useEffect(() => {
     let ignore = false;
     setItems(null);
+    setNextBefore(null);
     setError("");
-    getApprovalsHistory(kind)
-      .then((data) => { if (!ignore) setItems((data.items || []).map(normalize)); })
+    getApprovalsHistory(kind, { limit: HISTORY_PAGE })
+      .then((data) => {
+        if (ignore) return;
+        setItems((data.items || []).map(normalize));
+        setNextBefore(data.nextBefore || null);
+      })
       .catch((err) => {
         if (ignore) return;
         setError(err.message || "Could not load the history.");
@@ -249,6 +296,28 @@ function History() {
       });
     return () => { ignore = true; };
   }, [kind]);
+
+  // The cursor is the server's own `nextBefore` (the last row's decidedAt as
+  // sent), never the normalized copy shown in the table.
+  const loadOlder = async () => {
+    const asked = kind;
+    setLoadingMore(true);
+    setError("");
+    try {
+      const data = await getApprovalsHistory(asked, { limit: HISTORY_PAGE, before: nextBefore });
+      if (kindRef.current !== asked) return;
+      setItems((prev) => {
+        const seen = new Set((prev || []).map(historyRowKey));
+        const older = (data.items || []).map(normalize).filter((item) => !seen.has(historyRowKey(item)));
+        return [...(prev || []), ...older];
+      });
+      setNextBefore(data.nextBefore || null);
+    } catch (err) {
+      if (kindRef.current === asked) setError(err.message || "Could not load older decisions.");
+    } finally {
+      setLoadingMore(false);
+    }
+  };
   return (
     <>
       <div className="sg-ap-filters" role="group" aria-label="Filter by kind">
@@ -269,7 +338,7 @@ function History() {
             </thead>
             <tbody>
               {items.map((item) => (
-                <tr key={`${item.key}-${item.decidedAt}`}>
+                <tr key={historyRowKey(item)}>
                   <td>
                     <span className={`sg-ap-kind is-${item.kind}`}>{item.kindLabel}</span>{" "}
                     {item.href ? <a href={item.href}>{item.title}</a> : item.title}
@@ -286,6 +355,13 @@ function History() {
           </table>
         </div>
       ) : error ? null : <p className="muted">Nothing decided yet.</p>}
+      {items?.length && nextBefore ? (
+        <div className="sg-ap-more">
+          <button type="button" className="btn-outline btn-compact" onClick={loadOlder} disabled={loadingMore}>
+            {loadingMore ? "Loading…" : "Load older"}
+          </button>
+        </div>
+      ) : null}
     </>
   );
 }
@@ -295,13 +371,18 @@ export default function ApprovalsPage({ clusters = [] }) {
   const [rawTab, setTab] = useRouteParam("tab", "waiting");
   const tab = LEGACY_TAB[rawTab] || rawTab;
   const [counts, setCounts] = useState(null);
+  // "Waiting on me" is the number the sidebar badge shows: one shared value
+  // (lib/approvalsBadge) that the inbox, the sidebar and votes all update.
+  const waitingOnMe = useApprovalsWaitingValue();
 
   // Landing on History or Rules still shows how much is waiting; the inbox
-  // tabs refresh the numbers themselves.
+  // tabs refresh the numbers themselves. A count the sidebar fetched moments
+  // ago is reused rather than asked for again.
   useEffect(() => {
+    if (getApprovalsWaiting() != null && approvalsWaitingAge() < INBOX_POLL_MS) return undefined;
     let alive = true;
     getApprovalsCount()
-      .then((data) => { if (alive) setCounts((prev) => prev || data); })
+      .then((data) => { if (alive) setApprovalsWaiting(data?.waitingOnMe); })
       .catch(() => {});
     return () => { alive = false; };
   }, []);
@@ -331,8 +412,8 @@ export default function ApprovalsPage({ clusters = [] }) {
             <button key={item.key} type="button" className={tab === item.key ? "active" : ""}
                     onClick={() => setTab(item.key)}>
               {item.label}
-              {item.key === "waiting" && Number.isFinite(counts?.waitingOnMe) ? (
-                <span className={`sg-cnt${counts.waitingOnMe === 0 ? " sg-cnt--zero" : ""}`}>{counts.waitingOnMe}</span>
+              {item.key === "waiting" && Number.isFinite(waitingOnMe) ? (
+                <span className={`sg-cnt${waitingOnMe === 0 ? " sg-cnt--zero" : ""}`}>{waitingOnMe}</span>
               ) : null}
               {item.key === "pending" && Number.isFinite(counts?.pending) ? (
                 <span className={`sg-cnt${counts.pending === 0 ? " sg-cnt--zero" : ""}`}>{counts.pending}</span>

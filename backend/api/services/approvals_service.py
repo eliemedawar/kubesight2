@@ -41,6 +41,8 @@ KIND_LABELS = {
     "cluster_destroy": "Cluster Builder destroy",
 }
 _LIMIT = 200
+# Sorts an item with no time last.
+_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
 
 
 def _iso(dt: Optional[datetime]) -> Optional[str]:
@@ -320,7 +322,9 @@ def _change_bundles(user) -> List[Dict[str, Any]]:
             summary=data.get("note") or "",
             where=", ".join(data.get("clusterNames") or []) or None,
             requestedBy=data["requesterName"],
-            requestedAt=data["createdAt"],
+            # The wait counts from submission: a draft (the cart) can be
+            # opened months before it is sent.
+            requestedAt=data.get("submittedAt") or data["createdAt"],
             expiresAt=data.get("requestedEndTime"),
             approvals=data["approvals"],
             required=data["requiredApprovals"],
@@ -369,7 +373,8 @@ def _hermes(user) -> List[Dict[str, Any]]:
             summary=task.understanding or "",
             where=where,
             requestedBy="Hermes",
-            requestedAt=data.get("createdAt"),
+            # When the approval was asked for, not when the run started.
+            requestedAt=_iso(task.approval_requested_at) or data.get("createdAt"),
             expiresAt=data.get("expiresAt"),
             approvals=0,
             required=1,
@@ -687,7 +692,8 @@ def inbox(user, scope: str = "mine") -> Dict[str, Any]:
             failed.append(KIND_LABELS[kind])
     mine = [i for i in items if i["canDecide"]]
     shown = mine if scope == "mine" else items
-    shown.sort(key=lambda i: i.get("requestedAt") or "", reverse=True)
+    # By moment, not by string: the kinds format their times differently.
+    shown.sort(key=lambda i: _parse_before(i.get("requestedAt")) or _EPOCH, reverse=True)
     _cache_count(user, len(mine), generation)
     return {
         "items": shown,
@@ -802,7 +808,8 @@ def _history_bundles(user, limit: int, before: Optional[datetime]) -> List[Dict[
             "title": f"Change bundle #{row.id} — {data['itemCount']} change(s)",
             "summary": data.get("rejectionReason") or data.get("note") or "",
             "where": ", ".join(data.get("clusterNames") or []) or None,
-            "requestedBy": data["requesterName"], "requestedAt": data["createdAt"],
+            "requestedBy": data["requesterName"],
+            "requestedAt": data.get("submittedAt") or data["createdAt"],
             "outcome": data["status"], "decidedBy": data.get("approvedByName"),
             "decidedAt": data.get("approvedAt") or data.get("updatedAt"),
             "href": "#/change-bundles/all",
@@ -825,7 +832,8 @@ def _history_hermes(user, limit: int, before: Optional[datetime]) -> List[Dict[s
             "title": f"{task.ticket_number or 'Ticket'}: {engine._describe_change(task)}",
             "summary": task.decision_note or task.understanding or "",
             "where": (vm or {}).get("profile") or task.namespace,
-            "requestedBy": "Hermes", "requestedAt": _iso(task.created_at),
+            "requestedBy": "Hermes",
+            "requestedAt": _iso(task.approval_requested_at or task.created_at),
             "outcome": "approved" if approved else ("error" if task.status == "error" else "rejected"),
             "decidedBy": task.decided_by, "decidedAt": _iso(task.decided_at),
             "href": f"#/ticketing/{task.provider or 'zoho'}/tickets",
@@ -841,7 +849,8 @@ def _history_hermes(user, limit: int, before: Optional[datetime]) -> List[Dict[s
             "key": f"hermes:{task.id}", "kind": "hermes", "kindLabel": KIND_LABELS["hermes"],
             "title": f"{task.ticket_number or 'Ticket'}: {engine._describe_change(task)}",
             "summary": task.decision_note or "",
-            "where": task.namespace, "requestedBy": "Hermes", "requestedAt": _iso(task.created_at),
+            "where": task.namespace, "requestedBy": "Hermes",
+            "requestedAt": _iso(task.approval_requested_at or task.created_at),
             "outcome": "withdrawn" if task.status == "superseded" else "expired",
             "decidedBy": None, "decidedAt": _iso(task.finished_at),
             "href": f"#/ticketing/{task.provider or 'zoho'}/tickets",
@@ -944,7 +953,7 @@ _HISTORY: Dict[str, Callable] = {
 
 
 def _decided_sort_key(item: Dict[str, Any]) -> datetime:
-    return _parse_before(item.get("decidedAt")) or datetime.min.replace(tzinfo=timezone.utc)
+    return _parse_before(item.get("decidedAt")) or _EPOCH
 
 
 def history(user, kind: Optional[str] = None, limit: int = _LIMIT, before: Any = None) -> Dict[str, Any]:

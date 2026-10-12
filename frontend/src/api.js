@@ -33,6 +33,7 @@ export {
   listPermissions,
   updateRolePermissions,
   listAuditLogs,
+  listAuditActors,
   exportAuditLogs,
 } from "./api/usersApi";
 export {

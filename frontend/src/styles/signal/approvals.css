@@ -40,6 +40,7 @@
 .sg-ap-history td { vertical-align: top; }
 .sg-ap-hsum { font-size: 0.74rem; margin-top: 0.15rem; max-width: 34rem; }
 .sg-ap-when { white-space: nowrap; }
+.sg-ap-more { display: flex; justify-content: center; margin-top: 0.75rem; }
 
 /* Rules */
 .sg-ap-rules { display: grid; gap: 1rem; }

@@ -166,6 +166,9 @@ class TicketInterpretation(db.Model):
     # stale callback for the same row id cannot decide it.
     approval_nonce = db.Column(db.String(32), nullable=True)
     expires_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    # When it was put in front of an approver; the inbox counts the wait from
+    # here (the run may have started much earlier). NULL on older rows.
+    approval_requested_at = db.Column(db.DateTime(timezone=True), nullable=True)
     decided_by = db.Column(db.String(120), nullable=True)
     decided_at = db.Column(db.DateTime(timezone=True), nullable=True)
     decision_note = db.Column(db.Text, nullable=True)

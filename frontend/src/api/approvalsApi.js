@@ -10,8 +10,12 @@ export const getApprovalsInbox = (scope = "mine") =>
 
 export const getApprovalsCount = () => request("/api/approvals/count");
 
-export const getApprovalsHistory = (kind) =>
-  request("/api/approvals/history", { query: { kind: kind || undefined } });
+/** Newest first. `before` (a previous page's `nextBefore`) returns the page
+ *  after it; `nextBefore` is null on the last page. */
+export const getApprovalsHistory = (kind, { limit, before } = {}) =>
+  request("/api/approvals/history", {
+    query: { kind: kind || undefined, limit: limit || undefined, before: before || undefined },
+  });
 
 export const getApprovalRules = () => request("/api/approvals/rules");
 

@@ -47,7 +47,10 @@ export const listPermissions = () => request("/api/permissions");
 export const updateRolePermissions = (roleId, permissions) =>
   request(`/api/roles/${roleId}/permissions`, { method: "PUT", body: { permissions } });
 
+// query: limit, offset, from/to (ISO, UTC; `to` is exclusive), actor, action.
 export const listAuditLogs = (query = {}) => request("/api/audit-logs", { query });
+// The names the actor filter offers (every user + "KubeSight automation").
+export const listAuditActors = () => request("/api/audit-logs/actors");
 
 // Downloads a filtered CSV of audit entries. Uses a raw fetch (not `request`,
 // which parses JSON) so the response comes back as a Blob, and carries the

@@ -785,7 +785,8 @@ def request_approval(record_id: Any, arguments: Dict[str, Any], user=None) -> Di
     task.route, task.status = "approval", "awaiting_approval"
     task.comment = text
     task.approval_nonce = secrets.token_hex(4)
-    task.expires_at = _now() + timedelta(hours=int(row.approval_timeout_hours or 24))
+    task.approval_requested_at = _now()
+    task.expires_at = task.approval_requested_at + timedelta(hours=int(row.approval_timeout_hours or 24))
     task.error = None
     db.session.commit()
     _post(ticket, text)

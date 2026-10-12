@@ -292,6 +292,8 @@ def serialize_bundle(
         "itemCount": len(row.items),
         "createdAt": _iso(row.created_at),
         "updatedAt": _iso(row.updated_at),
+        # When it went for approval (null while a draft).
+        "submittedAt": _iso(row.submitted_at),
     }
     if include_items:
         payload["items"] = [serialize_item(item) for item in sorted(row.items, key=lambda i: i.position)]
@@ -1139,6 +1141,7 @@ def submit_bundle(
         required = min(configured_required, total) if total else 1
     bundle.total_recipients = total
     bundle.required_approvals = required
+    bundle.submitted_at = now
 
     if required == 0:
         bundle.status = "approved"

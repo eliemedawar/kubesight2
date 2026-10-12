@@ -172,6 +172,11 @@ def _migrate_ticket_agent_columns() -> None:
             "ticket_agent_settings", "vm_requests_enabled", "BOOLEAN DEFAULT false"
         )
         _add_column_if_missing("ticket_agent_settings", "vm_approvers", "TEXT")
+    # When the task was put in front of an approver (the run itself can start
+    # long before: a Hermes outage backoff, a VM plan). NULL falls back to
+    # created_at, which is all an older row has.
+    if "ticket_interpretations" in _table_names():
+        _add_column_if_missing("ticket_interpretations", "approval_requested_at", "DATETIME")
 
 
 def _purge_orphan_provisioning_rows() -> None:
@@ -660,6 +665,24 @@ def _migrate_deployment_request_columns() -> None:
         )
 
 
+def _backfill_bundle_submitted_at(have_audit: bool) -> None:
+    """Every bundle that left draft gets its submission time: its latest
+    BUNDLE_SUBMITTED audit entry, or else its created_at. Drafts stay NULL."""
+    from_audit = (
+        "(SELECT MAX(a.created_at) FROM audit_logs a "
+        "WHERE a.target_type = 'change_bundle' AND a.action = 'BUNDLE_SUBMITTED' "
+        "AND a.target_id = CAST(change_bundles.id AS VARCHAR(32)))"
+    )
+    value = f"COALESCE({from_audit}, change_bundles.created_at)" if have_audit else "change_bundles.created_at"
+    with db.engine.begin() as conn:
+        conn.execute(
+            text(
+                f"UPDATE change_bundles SET submitted_at = {value} "
+                "WHERE submitted_at IS NULL AND status <> 'draft'"
+            )
+        )
+
+
 def _migrate_change_bundle_columns() -> None:
     """Forward-compatible column adds for change bundles (tables come from create_all)."""
     table_names = _table_names()
@@ -672,6 +695,13 @@ def _migrate_change_bundle_columns() -> None:
         # Set on a bundle that carries a deploy the promotion ladder refused:
         # it always needs at least one approval, whatever the cluster's rule.
         _add_column_if_missing("change_bundles", "promotion_exception", "JSON")
+        # When the bundle was sent for approval (a draft is created when the
+        # cart first opens, so created_at made a bundle submitted today look
+        # months old in the approvals inbox).
+        _add_column_if_missing("change_bundles", "submitted_at", "DATETIME")
+        if not _marker_done("change_bundle_submitted_at_v1"):
+            _backfill_bundle_submitted_at("audit_logs" in table_names)
+            _mark_done("change_bundle_submitted_at_v1")
     if "promotion_events" in table_names:
         _add_column_if_missing("promotion_events", "release_id", "INTEGER")
     if "promotion_environments" in table_names:
