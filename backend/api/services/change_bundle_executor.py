@@ -10,8 +10,13 @@ bundle was approved.
 from __future__ import annotations
 
 import logging
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+from sqlalchemy import or_
 
 from ..audit import log_audit
 from ..db import db
@@ -21,7 +26,6 @@ from .deployment_service import (
     _cleanup_temp,
     _run_kubectl_for_cluster,
     _write_temp_yaml,
-    check_registry_images,
     sanitize_for_apply,
     validate_yaml,
 )
@@ -80,7 +84,9 @@ def _target_name_error(item: ChangeBundleItem, mode: str) -> Optional[str]:
     )
 
 
-def _revalidate(item: ChangeBundleItem, mode: str) -> Tuple[Optional[str], Optional[str]]:
+def _revalidate(
+    item: ChangeBundleItem, mode: str, registry_cache: Optional[Dict[Any, Any]] = None
+) -> Tuple[Optional[str], Optional[str]]:
     """Re-check the item against live cluster state at execution time.
 
     Returns ``(error, reason)``: ``error`` is None when the item is good to apply;
@@ -101,7 +107,11 @@ def _revalidate(item: ChangeBundleItem, mode: str) -> Tuple[Optional[str], Optio
         # was present when the bundle was staged may have been deleted before the
         # (possibly days-later) deploy window opened. Block enforcement stops the
         # apply so a now-missing image never reaches the cluster.
-        _checks, blocking, image_err = check_registry_images(item.yaml_preview or "", item.cluster_id)
+        from .change_bundle_service import registry_images_check
+
+        _checks, blocking, image_err = registry_images_check(
+            item.yaml_preview or "", item.cluster_id, registry_cache
+        )
         if blocking:
             return image_err, "image"
 
@@ -308,17 +318,55 @@ def execute_bundle(bundle: ChangeBundle) -> str:
     """Execute every item of an approved bundle in order. Returns the final status."""
     if bundle.status not in ("approved", "scheduled"):
         raise RuntimeError(f"Bundle #{bundle.id} is not executable (status={bundle.status}).")
+    claimed = _claim(bundle.id)
+    if claimed != "claimed":
+        if claimed == "expired":
+            return "expired"
+        raise RuntimeError("Window has not started yet." if claimed == "early" else f"Bundle #{bundle.id} was taken.")
+    return _run_claimed(bundle.id)
 
+
+def _claim(bundle_id: int) -> str:
+    """Move a due bundle to ``deploying`` (committed) so no other tick runs it.
+
+    Returns ``"claimed"``, ``"expired"`` (its window ended: marked expired),
+    ``"early"`` (its window has not opened) or ``"taken"`` (no longer
+    approved/scheduled — another tick won it).
+    """
+    bundle = db.session.get(ChangeBundle, bundle_id)
+    if bundle is None or bundle.status not in ("approved", "scheduled"):
+        return "taken"
     now = _now()
     start = _aware(bundle.requested_start_time)
     end = _aware(bundle.requested_end_time)
     if start and now < start:
-        raise RuntimeError("Window has not started yet.")
+        return "early"
     if end and now > end:
-        return _mark_expired(bundle)
+        _mark_expired(bundle)
+        return "expired"
+    # Conditional claim: two ticks (or two processes) never both win.
+    won = ChangeBundle.query.filter(
+        ChangeBundle.id == bundle_id, ChangeBundle.status.in_(("approved", "scheduled"))
+    ).update({"status": "deploying", "execution_started_at": now, "updated_at": now},
+             synchronize_session=False)
+    db.session.commit()
+    if not won:
+        return "taken"
+    return "claimed"
 
-    bundle.status = "deploying"
-    bundle.execution_started_at = now
+
+def _touch(bundle: ChangeBundle) -> None:
+    """Heartbeat of a running bundle: stale-run recovery reads updated_at."""
+    bundle.updated_at = _now()
+
+
+def _run_claimed(bundle_id: int) -> str:
+    """Apply every item of a bundle this process claimed. Returns the final status."""
+    db.session.expire_all()
+    bundle = db.session.get(ChangeBundle, bundle_id)
+    if bundle is None or bundle.status != "deploying":
+        return getattr(bundle, "status", "missing")
+    _touch(bundle)
     db.session.commit()
     log_audit(
         ACTION_EXEC_STARTED,
@@ -328,6 +376,7 @@ def execute_bundle(bundle: ChangeBundle) -> str:
         details={"bundleId": bundle.id, "itemCount": len(bundle.items)},
     )
 
+    registry_cache: Dict[Any, Any] = {}
     succeeded = 0
     failed = 0
     stopped = False
@@ -340,9 +389,10 @@ def execute_bundle(bundle: ChangeBundle) -> str:
 
         mode = (item.new_payload_json or {}).get("execution", {}).get("mode", "apply")
         item.status = "applying"
+        _touch(bundle)
         db.session.commit()
 
-        err, reason = _revalidate(item, mode)
+        err, reason = _revalidate(item, mode, registry_cache)
         if err:
             failed += 1
             item.status = "failed"
@@ -542,33 +592,124 @@ def _watch_settings() -> Tuple[int, bool]:
 def watch_bundle_rollouts() -> int:
     """Advance every active post-execution watch one step (scheduler tick).
 
-    Each watch is isolated in try/except so one broken watch can't stall the
-    rest. Returns how many watches were looked at.
+    Watches are grouped by (cluster, namespace): one ``kubectl get`` per
+    group, not per watch, and a cluster that fails to answer is skipped for
+    the rest of the pass (its watches read "could not read — retrying", as a
+    failed read always did). Settings are read once per pass. Each watch is
+    still isolated in try/except so one broken watch can't stall the rest.
+    Returns how many watches were looked at.
     """
     from ..models import BundleRolloutWatch
 
-    watches = BundleRolloutWatch.query.filter_by(status="watching").all()
+    watches = BundleRolloutWatch.query.filter_by(status="watching").order_by(BundleRolloutWatch.id).all()
+    if not watches:
+        return 0
+    settings = _watch_settings()
+    groups: Dict[Tuple[str, str], List[Any]] = {}
     for watch in watches:
-        try:
-            _advance_watch(watch)
-            db.session.commit()
-        except Exception:  # noqa: BLE001 — defensive; next tick retries
-            logger.exception("Bundle rollout watch #%s failed to advance", watch.id)
-            db.session.rollback()
+        groups.setdefault((watch.cluster_id, watch.namespace), []).append(watch)
+    failed_clusters: Dict[str, Exception] = {}
+    for (cluster_id, namespace), members in groups.items():
+        real = should_use_real_k8s(cluster_id)
+        healths: Dict[str, Any] = {}
+        if real:
+            if cluster_id in failed_clusters:
+                healths = {w.deployment_name: failed_clusters[cluster_id] for w in members}
+            else:
+                healths = _read_group_health(cluster_id, namespace, [w.deployment_name for w in members])
+                errors = [h for h in healths.values() if isinstance(h, _ClusterUnreachable)]
+                if errors:
+                    failed_clusters[cluster_id] = errors[0]
+        for watch in members:
+            try:
+                _advance_watch(watch, health=healths.get(watch.deployment_name) if real else None,
+                               settings=settings)
+                db.session.commit()
+            except Exception:  # noqa: BLE001 — defensive; next tick retries
+                logger.exception("Bundle rollout watch #%s failed to advance", watch.id)
+                db.session.rollback()
     return len(watches)
 
 
-def _advance_watch(watch) -> None:
+class _ClusterUnreachable(K8sCommandError):
+    """The whole group's read failed: the cluster is skipped for this pass."""
+
+
+def _health_of(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """deployment_service.rollout_health's reading of one Deployment document."""
+    status = doc.get("status") or {}
+    generation = int((doc.get("metadata") or {}).get("generation") or 0)
+    observed = int(status.get("observedGeneration") or 0)
+    return {
+        "observedCurrent": observed >= generation,
+        "desired": int((doc.get("spec") or {}).get("replicas") or 0),
+        "ready": int(status.get("readyReplicas") or 0),
+        "updated": int(status.get("updatedReplicas") or 0),
+        "total": int(status.get("replicas") or 0),
+        "available": int(status.get("availableReplicas") or 0),
+    }
+
+
+def _read_group_health(cluster_id: str, namespace: str, names: List[str]) -> Dict[str, Any]:
+    """name -> health dict, or the exception reading it raised.
+
+    One watched deployment in the namespace: the usual single read. Several:
+    one ``kubectl get deployments -n <ns> -o json`` for all of them.
+    """
+    import json
+
+    from . import deployment_service
+
+    if len(set(names)) == 1:
+        try:
+            return {names[0]: deployment_service.rollout_health(cluster_id, namespace, names[0])}
+        except (K8sCommandError, ValueError) as exc:
+            return {names[0]: exc}
+    from ..k8s_provider import _run_for_access, require_valid_k8s_names
+
+    try:
+        require_valid_k8s_names(namespace=namespace, names=())
+    except K8sCommandError as exc:  # a bad name is this group's problem, not the cluster's
+        return {name: exc for name in names}
+    try:
+        access = resolve_cluster_access(cluster_id)
+        if not access:
+            raise K8sCommandError(f"Cluster '{cluster_id}' was not found.")
+        raw = _run_for_access(access, ["get", "deployments", "-n", namespace, "-o", "json"])
+        docs = {
+            (item.get("metadata") or {}).get("name"): item
+            for item in (json.loads(raw).get("items") or [])
+            if isinstance(item, dict)
+        }
+    except (K8sCommandError, ValueError) as exc:
+        failure = _ClusterUnreachable(str(exc))
+        return {name: failure for name in names}
+    out: Dict[str, Any] = {}
+    for name in names:
+        doc = docs.get(name)
+        out[name] = (
+            _health_of(doc) if doc is not None
+            else K8sCommandError(f'deployments.apps "{name}" not found')
+        )
+    return out
+
+
+def _advance_watch(watch, *, health: Any = None, settings: Optional[Tuple[int, bool]] = None) -> None:
+    """One step of one watch. ``health`` is its pre-read rollout health (or the
+    exception reading it raised); None reads it here."""
     from .deployment_service import rollout_health
 
     if not should_use_real_k8s(watch.cluster_id):
         _finish_watch(watch, "healthy", "[mock] 1/1 ready")
         return
 
-    timeout_min, rollback_enabled = _watch_settings()
+    timeout_min, rollback_enabled = settings or _watch_settings()
     detail = ""
     try:
-        health = rollout_health(watch.cluster_id, watch.namespace, watch.deployment_name)
+        if health is None:
+            health = rollout_health(watch.cluster_id, watch.namespace, watch.deployment_name)
+        if isinstance(health, Exception):
+            raise health
         if not health["observedCurrent"]:
             # Stale status — the controller hasn't reconciled the applied spec
             # yet, so the counters still describe the previous template.
@@ -714,50 +855,199 @@ def _notify_rollout_failure(watch, message: str, rollback_note: str) -> None:
                 "Details: KubeSight → Change Bundles.",
             ]
         )
-        for address in sorted(recipients):
-            try:
-                send_email(address, subject, body)
-            except Exception:  # noqa: BLE001 — keep sending to the rest
-                continue
+        from .change_bundle_service import _send_in_background
+
+        # Off the scheduler thread: each SMTP send can wait 30 s.
+        _send_in_background(
+            [(address, subject, body, None) for address in sorted(recipients)],
+            f"Change bundle #{watch.bundle_id} rollout-failure email",
+            sender=send_email,
+        )
     except Exception:  # noqa: BLE001 — notification must never break the tick
         logger.exception("Rollout-failure notification failed for bundle #%s", watch.bundle_id)
 
 
-def process_due_bundles(now: Optional[datetime] = None) -> Dict[str, int]:
-    """Execute approved bundles whose window has opened; expire those whose window passed.
+# ---------------------------------------------------------------------------
+# The scheduler tick: expire, claim, and hand claimed bundles to workers
+# ---------------------------------------------------------------------------
 
-    Safe to call repeatedly (idempotent on already-terminal bundles).
+_pool_lock = threading.Lock()
+_pool: Optional[ThreadPoolExecutor] = None
+_running: set = set()  # bundle ids a worker of this process is applying
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, "").strip() or default)
+    except ValueError:
+        return default
+
+
+def _workers() -> int:
+    return max(1, _int_env("CHANGE_BUNDLE_WORKERS", 2))
+
+
+def _stale_minutes() -> int:
+    """A ``deploying`` bundle nobody has advanced for this long was orphaned
+    (KubeSight restarted mid-run). Longer than any single item can take."""
+    return max(10, _int_env("CHANGE_BUNDLE_STALE_MINUTES", 60))
+
+
+def _testing() -> bool:
+    try:
+        from flask import current_app
+
+        return bool(current_app.config.get("TESTING"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _executor() -> ThreadPoolExecutor:
+    global _pool
+    with _pool_lock:
+        if _pool is None:
+            _pool = ThreadPoolExecutor(max_workers=_workers(), thread_name_prefix="change-bundle")
+        return _pool
+
+
+def _run_in_app(app, bundle_id: int) -> None:
+    with app.app_context():
+        try:
+            _run_claimed(bundle_id)
+        except Exception:  # noqa: BLE001 — a worker must never die silently
+            logger.exception("Change bundle #%s execution failed", bundle_id)
+            db.session.rollback()
+            _abandon(bundle_id, "KubeSight hit an internal error while applying this bundle.")
+        finally:
+            with _pool_lock:
+                _running.discard(bundle_id)
+            db.session.remove()
+
+
+def _abandon(bundle_id: int, reason: str) -> None:
+    """Close a ``deploying`` bundle that will not finish: unfinished items are
+    marked failed/skipped — never re-applied, since some may have run."""
+    try:
+        bundle = db.session.get(ChangeBundle, bundle_id)
+        if bundle is None or bundle.status != "deploying":
+            return
+        succeeded = 0
+        for item in bundle.items:
+            if item.status == "succeeded":
+                succeeded += 1
+            elif item.status == "applying":
+                item.status = "failed"
+                item.execution_result = {"ok": False, "error": reason, "phase": "interrupted"}
+            elif item.status == "pending":
+                item.status = "skipped"
+                item.execution_result = {"skipped": True, "reason": reason}
+        final = "partially_failed" if succeeded else "failed"
+        bundle.status = final
+        bundle.execution_finished_at = _now()
+        db.session.commit()
+        log_audit(
+            ACTION_PARTIAL if succeeded else ACTION_FAILED,
+            actor=None,
+            target_type="change_bundle",
+            target_id=str(bundle.id),
+            details={"bundleId": bundle.id, "succeeded": succeeded, "interrupted": reason},
+        )
+        from .change_bundle_service import notify_requester_outcome
+
+        notify_requester_outcome(bundle, final, detail=reason)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not close interrupted change bundle #%s", bundle_id)
+        db.session.rollback()
+
+
+def _recover_stale(now: datetime) -> int:
+    """Fail ``deploying`` bundles no worker of this process runs and nobody has
+    advanced for :func:`_stale_minutes` — left behind by a restart. They are
+    not re-run: some of their items may already be applied."""
+    cutoff = now - timedelta(minutes=_stale_minutes())
+    with _pool_lock:
+        mine = set(_running)
+    stale = [
+        bundle_id for (bundle_id,) in db.session.query(ChangeBundle.id).filter(
+            ChangeBundle.status == "deploying", ChangeBundle.updated_at < cutoff
+        )
+        if bundle_id not in mine
+    ]
+    for bundle_id in stale:
+        _abandon(
+            bundle_id,
+            "KubeSight stopped while this bundle was being applied; the unfinished changes were "
+            "not re-run. Check the cluster, then stage what is missing again.",
+        )
+    return len(stale)
+
+
+def _expire_due(now: datetime) -> int:
+    """Expire every bundle whose window ended before it could run or be approved."""
+    ids = [
+        bundle_id for (bundle_id,) in db.session.query(ChangeBundle.id).filter(
+            ChangeBundle.status.in_(("approved", "scheduled", "pending_approval")),
+            ChangeBundle.requested_end_time.isnot(None),
+            ChangeBundle.requested_end_time < now,
+        ).order_by(ChangeBundle.id)
+    ]
+    for bundle_id in ids:
+        bundle = db.session.get(ChangeBundle, bundle_id)
+        if bundle is not None:
+            _mark_expired(bundle)
+    return len(ids)
+
+
+def process_due_bundles(now: Optional[datetime] = None) -> Dict[str, int]:
+    """Expire bundles whose window passed; start approved bundles whose window opened.
+
+    Only ids are read to find what is due. A due bundle is claimed (moved to
+    ``deploying``) here and applied by a worker thread, so a large bundle
+    never stalls the scheduler's other jobs; at most ``CHANGE_BUNDLE_WORKERS``
+    run at once and the rest wait for a later tick. Under TESTING the claimed
+    bundle is applied inline. Safe to call repeatedly.
     """
     now = now or _now()
-    executed = 0
-    expired = 0
+    expired = _expire_due(now)
 
-    candidates = ChangeBundle.query.filter(
-        ChangeBundle.status.in_(["approved", "scheduled"])
-    ).all()
-    for bundle in candidates:
-        start = _aware(bundle.requested_start_time)
-        end = _aware(bundle.requested_end_time)
-        if end is not None and now > end:
-            _mark_expired(bundle)
+    due = [
+        bundle_id for (bundle_id,) in db.session.query(ChangeBundle.id).filter(
+            ChangeBundle.status.in_(("approved", "scheduled")),
+            or_(ChangeBundle.requested_start_time.is_(None), ChangeBundle.requested_start_time <= now),
+        ).order_by(ChangeBundle.id)
+    ]
+    executed = 0
+    inline = _testing()
+    for bundle_id in due:
+        if not inline:
+            with _pool_lock:
+                if len(_running) >= _workers():
+                    break  # every worker is busy: the next tick picks it up
+        try:
+            claimed = _claim(bundle_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Change bundle #%s could not be claimed", bundle_id)
+            db.session.rollback()
+            continue
+        if claimed == "expired":
             expired += 1
             continue
-        if start is None or now >= start:
+        if claimed != "claimed":
+            continue
+        executed += 1
+        if inline:
             try:
-                execute_bundle(bundle)
-                executed += 1
-            except Exception:
-                logger.exception("Change bundle #%s execution failed", bundle.id)
+                _run_claimed(bundle_id)
+            except Exception:  # noqa: BLE001
+                logger.exception("Change bundle #%s execution failed", bundle_id)
+                db.session.rollback()
+                _abandon(bundle_id, "KubeSight hit an internal error while applying this bundle.")
+            continue
+        from flask import current_app
 
-    # Bundles still awaiting approval once their window has passed can never run.
-    stale_pending = ChangeBundle.query.filter(
-        ChangeBundle.status == "pending_approval",
-        ChangeBundle.requested_end_time.isnot(None),
-    ).all()
-    for bundle in stale_pending:
-        end = _aware(bundle.requested_end_time)
-        if end is not None and now > end:
-            _mark_expired(bundle)
-            expired += 1
+        with _pool_lock:
+            _running.add(bundle_id)
+        _executor().submit(_run_in_app, current_app._get_current_object(), bundle_id)
 
+    _recover_stale(now)
     return {"executed": executed, "expired": expired}

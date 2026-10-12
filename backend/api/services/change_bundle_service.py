@@ -16,6 +16,8 @@ re-implementing them:
 
 from __future__ import annotations
 
+import logging
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -426,11 +428,16 @@ def _list_loaders() -> tuple:
 
     Items and votes are joined eager loads by default, and joined together they
     multiply (a bundle with 4 items and 3 votes is 12 rows); a list only counts
-    them, so each comes in its own SELECT ... IN. The requester and approver are
-    batched the same way, without their access collections.
+    them, so each comes in its own SELECT ... IN — and only the columns a summary
+    reads, never an item's payloads or YAML preview (a Helm item carries its
+    whole chart archive). The requester and approver are batched the same way,
+    without their access collections.
     """
     return (
-        selectinload(ChangeBundle.items),
+        selectinload(ChangeBundle.items).load_only(
+            ChangeBundleItem.id, ChangeBundleItem.bundle_id, ChangeBundleItem.position,
+            ChangeBundleItem.cluster_id, ChangeBundleItem.cluster_name,
+        ),
         selectinload(ChangeBundle.votes),
         user_display_loader(ChangeBundle.requester),
         user_display_loader(ChangeBundle.approved_by),
@@ -708,7 +715,56 @@ def promotion_refusal(item: ChangeBundleItem) -> Optional[str]:
     return None
 
 
-def _validate_item_now(item: ChangeBundleItem) -> None:
+def registry_images_check(
+    yaml_content: str, cluster_id: Optional[str], cache: Optional[Dict[Any, Any]] = None
+) -> Tuple[List[Dict[str, Any]], bool, Optional[str]]:
+    """:func:`check_registry_images`, asking the registry once per image per run.
+
+    ``cache`` lives for one run (a bundle being staged or executed): a hundred
+    items deploying the same image make one registry call, not a hundred.
+    Without a cache this is exactly ``check_registry_images``.
+    """
+    if cache is None:
+        return check_registry_images(yaml_content, cluster_id)
+    try:
+        from .registry_service import check_image, images_from_documents
+
+        documents, err = parse_yaml_documents(yaml_content)
+        if err or not documents:
+            return [], False, None
+        checks: List[Dict[str, Any]] = []
+        seen: set = set()
+        for image in images_from_documents(documents):
+            key = str(image or "").strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            if (key, cluster_id) not in cache:
+                cache[(key, cluster_id)] = check_image(key, cluster_id=cluster_id)
+            checks.append(cache[(key, cluster_id)])
+        blocked = [c for c in checks if c.get("blocking")]
+        if not blocked:
+            return checks, False, None
+        # Same wording as check_registry_images.
+        missing = [c["image"] for c in blocked if c.get("status") == "not_found"]
+        unconfirmed = [c["image"] for c in blocked if c.get("status") != "not_found"]
+        where = "this cluster's registries" if any(c.get("clusterScoped") for c in blocked) else "the linked registry"
+        parts = []
+        if missing:
+            parts.append(f"not found in {where} — " + ", ".join(missing))
+        if unconfirmed:
+            parts.append(
+                f"could not be confirmed because {where} could not be reached — " + ", ".join(unconfirmed)
+            )
+        return checks, True, (
+            "Deployment blocked: image(s) " + "; ".join(parts) + ". Push the image, "
+            "correct the tag or fix the registry connection, then try again."
+        )
+    except Exception:  # noqa: BLE001 — the image gate must never break a deploy
+        return [], False, None
+
+
+def _validate_item_now(item: ChangeBundleItem, registry_cache: Optional[Dict[Any, Any]] = None) -> None:
     """Static (submission-time) validation. Live cluster state is re-checked at execution."""
     mode = (item.new_payload_json or {}).get("execution", {}).get("mode")
     if mode == "apply":
@@ -718,7 +774,9 @@ def _validate_item_now(item: ChangeBundleItem) -> None:
         if not err:
             # Reject staging an image that's missing from its linked registry
             # (block enforcement) — early feedback; execution re-checks too.
-            _checks, blocking, image_err = check_registry_images(item.yaml_preview or "", item.cluster_id)
+            _checks, blocking, image_err = registry_images_check(
+                item.yaml_preview or "", item.cluster_id, registry_cache
+            )
             if blocking:
                 err = image_err
         if not err:
@@ -734,7 +792,9 @@ def _validate_item_now(item: ChangeBundleItem) -> None:
     elif mode == "helm" and item.action_type in ("helm_install", "helm_upgrade"):
         # The rendered manifest (when helm could render it) is checked against
         # the linked registries like a YAML apply; execution re-checks too.
-        _checks, blocking, image_err = check_registry_images(item.yaml_preview or "", item.cluster_id)
+        _checks, blocking, image_err = registry_images_check(
+            item.yaml_preview or "", item.cluster_id, registry_cache
+        )
         refusal = None if blocking else promotion_refusal(item)
         item.validation_status = "invalid" if (blocking or refusal) else "valid"
         item.validation_message = image_err if blocking else refusal
@@ -762,7 +822,41 @@ def add_item(user: Optional[User], bundle_id: int, payload: Dict[str, Any]) -> D
     bundle = get_bundle_or_error(bundle_id)
     _assert_owner(bundle, user)
     _assert_editable(bundle)
+    next_position = max((i.position for i in bundle.items), default=-1) + 1
+    item = _stage_item(user, bundle, payload, position=next_position)
+    bundle.updated_at = datetime.now(timezone.utc)
+    db.session.commit()
+    _audit_item_added(user, bundle, item)
+    return serialize_bundle(bundle)
 
+
+def _audit_item_added(user: Optional[User], bundle: ChangeBundle, item: ChangeBundleItem, commit: bool = True) -> None:
+    log_audit(
+        ACTION_ITEM_ADDED,
+        actor=user,
+        target_type="change_bundle",
+        target_id=str(bundle.id),
+        details={
+            "bundleId": bundle.id,
+            "itemId": item.id,
+            "actionType": item.action_type,
+            "clusterId": item.cluster_id,
+            "namespace": item.namespace,
+            "resourceName": item.resource_name,
+        },
+        commit=commit,
+    )
+
+
+def _stage_item(
+    user: Optional[User],
+    bundle: ChangeBundle,
+    payload: Dict[str, Any],
+    *,
+    position: int,
+    registry_cache: Optional[Dict[Any, Any]] = None,
+) -> ChangeBundleItem:
+    """Build, check and add one item to ``bundle`` (flushed, not committed)."""
     action_type = str(payload.get("actionType") or payload.get("action_type") or "").strip()
     if action_type not in ACTION_TYPES:
         raise ChangeBundleError(f"Unsupported action type: {action_type}", 400)
@@ -804,10 +898,9 @@ def add_item(user: Optional[User], bundle_id: int, payload: Dict[str, Any]) -> D
             f"You do not have access to {resolved_namespace} in this cluster.", 403
         )
 
-    next_position = max((i.position for i in bundle.items), default=-1) + 1
     item = ChangeBundleItem(
         bundle_id=bundle.id,
-        position=next_position,
+        position=position,
         action_type=action_type,
         cluster_id=cluster_id,
         cluster_name=cluster_name or cluster_id,
@@ -821,26 +914,10 @@ def add_item(user: Optional[User], bundle_id: int, payload: Dict[str, Any]) -> D
         },
         yaml_preview=built.get("yamlPreview"),
     )
-    _validate_item_now(item)
+    _validate_item_now(item, registry_cache)
     db.session.add(item)
-    bundle.updated_at = datetime.now(timezone.utc)
-    db.session.commit()
-
-    log_audit(
-        ACTION_ITEM_ADDED,
-        actor=user,
-        target_type="change_bundle",
-        target_id=str(bundle.id),
-        details={
-            "bundleId": bundle.id,
-            "itemId": item.id,
-            "actionType": action_type,
-            "clusterId": cluster_id,
-            "namespace": resolved_namespace,
-            "resourceName": item.resource_name,
-        },
-    )
-    return serialize_bundle(bundle)
+    db.session.flush()
+    return item
 
 
 def remove_item(user: Optional[User], bundle_id: int, item_id: int) -> Dict[str, Any]:
@@ -1320,19 +1397,68 @@ def _build_email(bundle: ChangeBundle, requester_name: str, voter_email: str = "
     return subject, text_body, html_body
 
 
+def _deliver(messages: List[Tuple[str, str, str, Optional[str]]], sender=None) -> Tuple[int, List[str]]:
+    sender = sender or send_email
+    sent, errors = 0, []
+    for address, subject, body, html_body in messages:
+        try:
+            if html_body is None:
+                sender(address, subject, body)
+            else:
+                sender(address, subject, body, html_body=html_body)
+            sent += 1
+        except EmailDeliveryError as exc:
+            errors.append(f"{address}: {exc}")
+        except Exception as exc:  # noqa: BLE001 — keep sending to the rest
+            errors.append(f"{address}: {exc}")
+    return sent, errors
+
+
+def _send_in_background(
+    messages: List[Tuple[str, str, str, Optional[str]]], what: str, sender=None
+) -> Optional[Tuple[int, List[str]]]:
+    """Send ready-built emails off the request / scheduler thread.
+
+    Each SMTP send can wait up to its 30 s timeout; a vote or the 15 s
+    scheduler tick must not. The messages are built before the thread starts
+    (no database access in it). Under TESTING they are sent inline and the
+    (sent, errors) result is returned; otherwise None.
+    """
+    from flask import current_app
+
+    try:
+        app = current_app._get_current_object()
+    except RuntimeError:
+        app = None
+    if app is None or app.config.get("TESTING"):
+        return _deliver(messages, sender)
+
+    def _runner() -> None:
+        with app.app_context():
+            try:
+                sent, errors = _deliver(messages, sender)
+                if errors:
+                    logging.getLogger(__name__).warning("%s: %d sent, failures: %s", what, sent, errors)
+            except Exception:  # noqa: BLE001 — notification is best-effort
+                logging.getLogger(__name__).exception("%s failed", what)
+
+    threading.Thread(target=_runner, name="change-bundle-email", daemon=True).start()
+    return None
+
+
 def _notify_approvers(bundle: ChangeBundle, requester_name: str, recipients: List[str]) -> Dict[str, Any]:
     if not smtp_is_configured():
         return {"sent": 0, "skipped": True, "reason": "SMTP not configured."}
     if not recipients:
         return {"sent": 0, "skipped": True, "reason": "No approver email recipients configured."}
-    sent, errors = 0, []
+    messages = []
     for address in recipients:
         subject, body, html_body = _build_email(bundle, requester_name, voter_email=address)
-        try:
-            send_email(address, subject, body, html_body=html_body)
-            sent += 1
-        except EmailDeliveryError as exc:
-            errors.append(f"{address}: {exc}")
+        messages.append((address, subject, body, html_body))
+    result = _send_in_background(messages, f"Change bundle #{bundle.id} approval emails")
+    if result is None:
+        return {"sent": 0, "queued": len(messages), "recipients": recipients, "errors": []}
+    sent, errors = result
     return {"sent": sent, "recipients": recipients, "errors": errors}
 
 
@@ -1415,11 +1541,9 @@ def notify_requester_outcome(bundle: ChangeBundle, status: Optional[str] = None,
     </td></tr>
   </table>
 </body></html>"""
-        send_email(
-            address,
-            f"KubeSight Change Bundle #{bundle.id} — {label}",
-            text_body,
-            html_body=html_body,
+        _send_in_background(
+            [(address, f"KubeSight Change Bundle #{bundle.id} — {label}", text_body, html_body)],
+            f"Change bundle #{bundle.id} outcome email",
         )
     except Exception:  # noqa: BLE001 — outcome mail is best-effort by design
         pass
@@ -1482,8 +1606,18 @@ def queue_many_for_approval(
     db.session.add(bundle)
     db.session.commit()
     try:
-        for payload in payloads:
-            add_item(user, bundle.id, payload)
+        # One pass, one commit, one registry lookup per image: staging N
+        # changes item by item re-read and re-serialized the whole bundle N
+        # times and asked the registry for every item.
+        registry_cache: Dict[Any, Any] = {}
+        staged = [
+            _stage_item(user, bundle, payload, position=position, registry_cache=registry_cache)
+            for position, payload in enumerate(payloads)
+        ]
+        bundle.updated_at = datetime.now(timezone.utc)
+        for item in staged:
+            _audit_item_added(user, bundle, item, commit=False)
+        db.session.commit()
         db.session.refresh(bundle)
         invalid = [i for i in bundle.items if i.validation_status == "invalid"]
         if invalid:
