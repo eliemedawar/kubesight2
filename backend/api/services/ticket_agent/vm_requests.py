@@ -675,9 +675,22 @@ def _latest_job(build_id: int):
 
 def advance() -> int:
     """Move every VM request one step. Returns how many changed."""
+    from sqlalchemy import Text, cast, or_
+
     changed = 0
+    # Only requests something can still happen to: planning, executing, or a
+    # finished one whose draft build still has to be deleted (cleanup flag).
+    # Reading every request of the route reloaded up to 200 rows a tick.
+    decision = cast(TicketInterpretation.decision, Text)
     rows = (
-        TicketInterpretation.query.filter_by(route=ROUTE)
+        TicketInterpretation.query.filter(
+            TicketInterpretation.route == ROUTE,
+            or_(
+                TicketInterpretation.status.in_((PLANNING, "executed")),
+                decision.like('%"cleanup": true%'),
+                decision.like('%"cleanup":true%'),
+            ),
+        )
         .order_by(TicketInterpretation.id.desc()).limit(200).all()
     )
     for task in rows:
@@ -694,8 +707,9 @@ def advance() -> int:
 
 
 def _advance_one(task: TicketInterpretation) -> bool:
-    # Provisioning workers commit from their own sessions: read what they wrote.
-    db.session.expire_all()
+    # Provisioning workers commit from their own sessions: read what they wrote
+    # (this task only — expiring the whole session reloaded every row).
+    db.session.refresh(task)
     vm = _vm(task)
     if vm.get("cleanup"):
         return _finish_cleanup(task, vm)
