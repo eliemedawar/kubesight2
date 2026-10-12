@@ -3,6 +3,11 @@ import { getContainerLogs, streamContainerLogs } from "../api/clustersApi.js";
 import { appendLogLines, applyLogSnapshot, getIncrementalTailCursor } from "../utils/logFormat.js";
 import { buildLogTimeQuery } from "../utils/logTimeRange.js";
 
+// When the server has no free live-stream slot (429), the viewer polls for new
+// lines instead and tries the stream again a little later.
+const POLL_FALLBACK_MS = 3000;
+const STREAM_RETRY_MS = 60000;
+
 function logTargetKey(filters) {
   return [
     filters.cluster,
@@ -201,58 +206,145 @@ export default function useLogsViewer(filters, { enabled = true } = {}) {
   }, [liveEnabled, hasTarget, fetchLogs]);
 
   // Live mode: follow logs over a Server-Sent Events stream (kubectl logs -f).
+  // The stream is closed while the browser tab is hidden and reopened (from
+  // the newest line already shown) when it is visible again; the server ends
+  // a stream after a while (reason "max_duration") and it is reopened the same
+  // way. With no free stream slot (429), new lines are polled instead.
   useEffect(() => {
     if (!liveEnabled || !hasTarget) {
       return undefined;
     }
 
-    const controller = new AbortController();
     let cancelled = false;
+    let controller = null;
+    let pollTimer = null;
+    let retryTimer = null;
     const currentFilters = filtersRef.current;
+    const isHidden = () => typeof document !== "undefined" && document.hidden;
 
-    const query = { timestamps: "true", tailLines: "200" };
+    const baseQuery = { timestamps: "true", tailLines: "200" };
     const timeQuery = buildLogTimeQuery(currentFilters);
     if (timeQuery.query?.sinceSeconds) {
-      query.sinceSeconds = timeQuery.query.sinceSeconds;
+      baseQuery.sinceSeconds = timeQuery.query.sinceSeconds;
     }
 
-    setError("");
-    streamContainerLogs(
-      currentFilters.cluster,
-      currentFilters.namespace,
-      currentFilters.pod,
-      currentFilters.container,
-      {
-        query,
-        signal: controller.signal,
-        onEvent: ({ event, data }) => {
-          if (cancelled) {
+    const stopPolling = () => {
+      if (pollTimer) {
+        window.clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      if (retryTimer) {
+        window.clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+    };
+
+    const closeStream = () => {
+      if (controller) {
+        controller.abort();
+        controller = null;
+      }
+    };
+
+    const startPolling = () => {
+      if (pollTimer || cancelled) {
+        return;
+      }
+      pollTimer = window.setInterval(() => {
+        if (!isHidden()) {
+          fetchLogs({ silent: true, incremental: true });
+        }
+      }, POLL_FALLBACK_MS);
+      retryTimer = window.setTimeout(() => {
+        stopPolling();
+        openStream();
+      }, STREAM_RETRY_MS);
+    };
+
+    function openStream() {
+      if (cancelled || controller || pollTimer || isHidden()) {
+        return;
+      }
+      const own = new AbortController();
+      controller = own;
+      const query = { ...baseQuery };
+      // Reconnecting: continue after the newest line already on screen.
+      const cursor = logLinesRef.current.length ? getIncrementalTailCursor(logLinesRef.current) : null;
+      if (cursor) {
+        query.sinceTime = cursor;
+        delete query.sinceSeconds;
+      }
+      let endReason = null;
+      streamContainerLogs(
+        currentFilters.cluster,
+        currentFilters.namespace,
+        currentFilters.pod,
+        currentFilters.container,
+        {
+          query,
+          signal: own.signal,
+          onEvent: ({ event, data }) => {
+            if (cancelled) {
+              return;
+            }
+            if (event === "line" && data?.line) {
+              setLogLines((prev) => appendLogLines(prev, [data.line]));
+            } else if (event === "error" && data?.message) {
+              setError(data.message);
+            } else if (event === "end") {
+              endReason = data?.reason || null;
+            }
+          },
+        }
+      )
+        .then(() => {
+          if (controller === own) {
+            controller = null;
+          }
+          if (!cancelled && endReason === "max_duration") {
+            openStream();
+          }
+        })
+        .catch((streamError) => {
+          if (controller === own) {
+            controller = null;
+          }
+          if (cancelled || streamError.name === "AbortError") {
             return;
           }
-          if (event === "line" && data?.line) {
-            setLogLines((prev) => appendLogLines(prev, [data.line]));
-          } else if (event === "error" && data?.message) {
-            setError(data.message);
+          if (streamError.status === 429) {
+            fetchLogs({ silent: true, incremental: true });
+            startPolling();
+            return;
           }
-        },
-      }
-    )
-      .catch((streamError) => {
-        if (!cancelled && streamError.name !== "AbortError") {
           setError(streamError.message);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          initialLoadDoneRef.current = true;
-        }
-      });
+        })
+        .finally(() => {
+          if (!cancelled) {
+            initialLoadDoneRef.current = true;
+          }
+        });
+    }
+
+    const onVisibility = () => {
+      if (isHidden()) {
+        closeStream();
+      } else if (!pollTimer) {
+        openStream();
+      }
+    };
+
+    setError("");
+    openStream();
+    document.addEventListener("visibilitychange", onVisibility);
 
     return () => {
       cancelled = true;
-      controller.abort();
+      document.removeEventListener("visibilitychange", onVisibility);
+      stopPolling();
+      closeStream();
     };
-  }, [liveEnabled, hasTarget, logTargetKeyValue]);
+  }, [liveEnabled, hasTarget, logTargetKeyValue, fetchLogs]);
 
   const refreshLogs = useCallback(() => {
     fetchLogs({ silent: false, incremental: false });
