@@ -46,6 +46,9 @@ export function useVmwarePlacement(connectionId, notify) {
   return { data, loading, error, refresh: () => load(true) };
 }
 
+// Readable names for the size inputs' labels ("Workers memory GB", not "memoryGb").
+const SIZE_LABELS = { cpu: "vCPU", memoryGb: "memory GB", diskGb: "disk GB" };
+
 const VERDICT_TEXT = { ok: "Compatible", warn: "Usable, with warnings", bad: "Cannot be used" };
 const CHECK_GLYPH = { ok: "✓", warn: "!", bad: "✕", info: "i" };
 
@@ -154,7 +157,7 @@ function SizesTable({ counts, sizes, setSizes, template, minimums }) {
                           type="number"
                           min={floor}
                           className={`sg-cb-input sg-cb-mono sg-cb-pv-num ${Number(value) < floor ? "is-bad" : ""}`}
-                          aria-label={`${ROLE_TITLE[role]} ${key}`}
+                          aria-label={`${ROLE_TITLE[role]} ${SIZE_LABELS[key]}`}
                           value={value}
                           onChange={(event) => setSizes({
                             ...sizes,

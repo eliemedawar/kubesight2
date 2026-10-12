@@ -348,7 +348,8 @@ export function OpenTofuStatus({ notify, canRelease }) {
       </div>
       {!engine.available && engine.mode === "real" ? (
         <p className="sg-cb-field-error">
-          The `tofu` binary is not in this backend image. Rebuild it from backend/Dockerfile, which installs OpenTofu and the provider.
+          The <span className="sg-cb-mono">tofu</span> binary is not in this backend image. Rebuild it from{" "}
+          <span className="sg-cb-mono">backend/Dockerfile</span>, which installs OpenTofu and the provider.
         </p>
       ) : null}
       {states.length ? (

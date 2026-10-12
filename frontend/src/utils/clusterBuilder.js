@@ -899,8 +899,10 @@ export function deriveReadiness({
   const needsAttention = segments.filter(
     (segment) => segment.state === "warn" || segment.state === "bad"
   );
+  // Only a missing way in blocks a build. No vCenter just means machines are
+  // entered by hand, and no source profile means internet defaults.
   const blocking = segments.filter(
-    (segment) => segment.state === "idle" && segment.key !== "sources"
+    (segment) => segment.state === "idle" && segment.key === "ssh"
   );
 
   return {
@@ -911,7 +913,7 @@ export function deriveReadiness({
       ? "Not ready to build"
       : needsAttention.length ? "Ready to build" : "Ready to build",
     sub: blocking.length
-      ? `${blocking.map((segment) => segment.label.toLowerCase()).join(" and ")} not configured`
+      ? `${blocking.map((segment) => segment.label).join(" and ")} not configured`
       : needsAttention.length
         ? `${needsAttention.length} source${needsAttention.length === 1 ? "" : "s"} need${needsAttention.length === 1 ? "s" : ""} a re-test`
         : "every source is fresh",

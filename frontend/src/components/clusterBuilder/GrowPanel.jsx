@@ -339,6 +339,11 @@ export default function GrowPanel({ build, canExecute, notify, onChanged, onClos
           >
             {busy ? "Working…" : "Preflight the new machines"}
           </button>
+          {!canExecute ? (
+            <span className="muted">
+              Machines can be queued; preflighting and joining them needs the build-execute permission.
+            </span>
+          ) : null}
           {grouped ? (
             <span className={`sg-cb-grow-verdict is-${grouped.verdict}`}>
               {grouped.counts.fail

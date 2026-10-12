@@ -42,7 +42,7 @@ export default function ClusterBuilderPage({
   // /cluster-builder/builds/:buildId. Back closes a build, then steps tabs.
   const { route, params: routeParams, navigate } = useRouter();
   const onBuildDetail = route.key === "clusterBuildDetail";
-  const tab = onBuildDetail ? "floor" : routeParams.tab || "floor";
+  const requestedTab = onBuildDetail ? "floor" : routeParams.tab || "floor";
   const selectedBuildId = onBuildDetail ? routeParams.buildId || null : null;
   const setTab = useCallback(
     (next) => navigate({ key: "clusterBuilder", params: { tab: next } }),
@@ -63,6 +63,9 @@ export default function ClusterBuilderPage({
   const [options, setOptions] = useState(null);
   const [editingBuild, setEditingBuild] = useState(null);
   const [infra, setInfra] = useState(EMPTY_INFRA);
+  // The wizard picks its default sources from these lists, so it has to know
+  // when they have actually arrived rather than read the empty placeholder.
+  const [infraReady, setInfraReady] = useState(false);
   const previousStatuses = useRef(null);
   // Ticks so elapsed clocks advance between polls.
   const [now, setNow] = useState(() => Date.now());
@@ -118,6 +121,7 @@ export default function ClusterBuilderPage({
       profiles: profiles.items ?? previous.profiles,
       buildProfiles: buildProfiles.items ?? previous.buildProfiles,
     }));
+    setInfraReady(true);
   }, [canManageSSH, canManageVSphere]);
 
   useEffect(() => {
@@ -136,6 +140,36 @@ export default function ClusterBuilderPage({
   }, []);
 
   const canManageInfra = canManageVSphere || canManageSSH || canManageBuildProfiles;
+  // A tab this person cannot open (a shared #/cluster-builder/new link, say)
+  // falls back to the Builds floor rather than an empty page under the tabs.
+  const tab = (requestedTab === "new" && !canCreate) || (requestedTab === "sources" && !canManageInfra)
+    ? "floor"
+    : requestedTab;
+
+  // Leaving the wizard any way other than Cancel (a tab, Back) must not leave
+  // the draft it was editing behind: the next "New build" would reopen it and
+  // save over that draft.
+  useEffect(() => {
+    if (tab !== "new") setEditingBuild(null);
+  }, [tab]);
+
+  // Coming back to the floor re-reads the list: the wizard may have saved a
+  // draft on the way (preflight saves one) without telling the page.
+  // True only when the page opened on the floor, where the mount effect above
+  // has just read the list.
+  const skipFloorReload = useRef(tab === "floor" && !selectedBuildId);
+  useEffect(() => {
+    if (tab !== "floor" || selectedBuildId) return;
+    if (skipFloorReload.current) { skipFloorReload.current = false; return; }
+    reloadBuilds();
+  }, [tab, selectedBuildId, reloadBuilds]);
+
+  // A success notice is news, not a fixture: it fades after a few seconds.
+  useEffect(() => {
+    if (!notice) return undefined;
+    const id = setTimeout(() => setNotice(""), 8000);
+    return () => clearTimeout(id);
+  }, [notice]);
 
   const active = builds.some(
     (build) => ["building", "preflighting", "provisioning", "destroying"].includes(build.status)
@@ -199,6 +233,9 @@ export default function ClusterBuilderPage({
 
       {tab === "floor" && selectedBuildId ? (
         <BuildDetail
+          // Keyed so moving between builds starts clean: no log, panel or
+          // failure focus carried over from the previous one.
+          key={selectedBuildId}
           buildId={selectedBuildId}
           canCreate={canCreate}
           canExecute={canExecute}
@@ -217,6 +254,7 @@ export default function ClusterBuilderPage({
           buildProfiles={infra.buildProfiles}
           canManageTemplates={canManageTemplates}
           currentUserId={currentUserId}
+          onOptionsChanged={reloadOptions}
         />
       ) : null}
 
@@ -242,6 +280,7 @@ export default function ClusterBuilderPage({
         <Wizard
           options={options}
           infra={infra}
+          infraReady={infraReady}
           canExecute={canExecute}
           canManageTemplates={canManageTemplates}
           currentUserId={currentUserId}

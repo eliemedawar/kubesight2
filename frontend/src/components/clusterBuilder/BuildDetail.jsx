@@ -406,6 +406,7 @@ export default function BuildDetail({
   buildProfiles = [],
   canManageTemplates = false,
   currentUserId = null,
+  onOptionsChanged = null,
 }) {
   const [growing, setGrowing] = useState(false);
   const [destroyOpen, setDestroyOpen] = useState(false);
@@ -413,6 +414,10 @@ export default function BuildDetail({
   const [bringing, setBringing] = useState(false);
   const [addingAddons, setAddingAddons] = useState(false);
   const [build, setBuild] = useState(null);
+  // Why the first read failed (a deleted build, a mistyped address) — without
+  // it the page would say "Loading…" forever.
+  const [loadError, setLoadError] = useState("");
+  const loadedOnce = useRef(false);
   const [logs, setLogs] = useState(null);
   // The step being viewed: {id, nodeId, phase}.
   const [logStep, setLogStep] = useState(null);
@@ -426,14 +431,27 @@ export default function BuildDetail({
   const stickToBottom = useRef(true);
   const failureOpened = useRef(false);
   const [now, setNow] = useState(() => Date.now());
+  const rootEl = useRef(null);
+
+  // A day-two panel opens below the receipt, usually under the fold: bring it
+  // into view, or the button looks like it did nothing.
+  useEffect(() => {
+    if (!(growing || addingAddons || bringing || savingTemplate || destroyOpen)) return;
+    const panel = rootEl.current?.querySelector(".sg-cb-grow, .sg-cb-pv-panel, .sg-cb-pv-danger");
+    panel?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+  }, [growing, addingAddons, bringing, savingTemplate, destroyOpen]);
 
   const load = useCallback(async () => {
     try {
       const data = await getClusterBuild(buildId);
       setBuild(data);
+      setLoadError("");
+      loadedOnce.current = true;
       return data;
     } catch (error) {
-      notify(error.message, true);
+      setLoadError(error.message || String(error));
+      // Before the first read the card below says it; a banner would repeat it.
+      if (loadedOnce.current) notify(error.message, true);
       return null;
     }
   }, [buildId, notify]);
@@ -560,7 +578,20 @@ export default function BuildDetail({
     [build]
   );
 
-  if (!build) return <div className="card sg-cb-card"><p className="muted">Loading…</p></div>;
+  if (!build) {
+    return (
+      <div className="card sg-cb-card">
+        {loadError ? (
+          <>
+            <p className="muted">This build could not be opened: {loadError}</p>
+            <div className="sg-cb-actions">
+              <button className="btn-outline" type="button" onClick={onBack}>← All builds</button>
+            </div>
+          </>
+        ) : <p className="muted">Loading…</p>}
+      </div>
+    );
+  }
 
   const isVmware = build.machineSource === "vmware";
   const vmCount = build.provisioning?.state?.vmCount || 0;
@@ -639,7 +670,7 @@ export default function BuildDetail({
   };
 
   return (
-    <div className="sg-cb-detail">
+    <div className="sg-cb-detail" ref={rootEl}>
       <div className="sg-cb-detail-head">
         <button className="btn-ghost" type="button" onClick={onBack}>← All builds</button>
         <h3>{build.name}</h3>
@@ -669,7 +700,12 @@ export default function BuildDetail({
               className="btn-outline"
               type="button"
               disabled={busy}
-              onClick={() => act(() => cancelClusterBuild(build.id))}
+              onClick={() => {
+                if (!window.confirm(
+                  `Cancel the build "${build.name}"? Completed phases are kept; you can resume or delete it afterwards.`
+                )) return;
+                act(() => cancelClusterBuild(build.id));
+              }}
             >
               Cancel build
             </button>
@@ -694,6 +730,23 @@ export default function BuildDetail({
               onClick={() => act(() => preflightClusterBuild(build.id))}
             >
               Run preflight
+            </button>
+          ) : null}
+          {/* Usually Retry lives in the failure hero. A build can also fail
+              outside any step (an add-on manifest that could not be resolved,
+              say) — then there is no hero, and without this no way forward. */}
+          {canExecute && !point && ["failed", "cancelled"].includes(build.status) ? (
+            <button
+              className="primary"
+              type="button"
+              disabled={busy}
+              onClick={() => act(() => retryClusterBuild(build.id), () => {
+                failureOpened.current = false;
+                follow.current = true;
+                load();
+              })}
+            >
+              {build.status === "cancelled" ? "Resume" : "Retry"}
             </button>
           ) : null}
           {canExecute && build.status === "preflight_passed" && !provisionBusy ? (
@@ -836,7 +889,14 @@ export default function BuildDetail({
       ) : null}
 
       {isDone && savingTemplate ? (
-        <SaveTemplatePanel build={build} notify={notify} onClose={() => setSavingTemplate(false)} />
+        <SaveTemplatePanel
+          build={build}
+          notify={notify}
+          onClose={() => setSavingTemplate(false)}
+          // The wizard's template gallery reads the page's options: refresh
+          // them so the new template is offered without a reload.
+          onSaved={onOptionsChanged ? () => onOptionsChanged() : undefined}
+        />
       ) : null}
 
       {/* New VMs come from OpenTofu; machines it already created that are still

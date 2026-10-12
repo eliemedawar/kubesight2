@@ -554,7 +554,17 @@ describe("deriveReadiness", () => {
     });
     expect(readiness.state).toBe("blocked");
     expect(readiness.headline).toBe("Not ready to build");
-    expect(readiness.sub).toContain("ssh reach");
+    expect(readiness.sub).toContain("SSH reach");
+  });
+
+  it("does not block on a missing vCenter — machines can be entered by hand", () => {
+    const readiness = deriveReadiness({
+      builds: [], infra: { ...infra, vsphere: [] },
+      addonCatalog: catalog, canManageInfra: true, now: NOW,
+    });
+    expect(readiness.segments[0]).toMatchObject({ key: "vsphere", state: "idle" });
+    expect(readiness.state).not.toBe("blocked");
+    expect(readiness.headline).toBe("Ready to build");
   });
 
   it("reports a failed test as worse than an old one", () => {

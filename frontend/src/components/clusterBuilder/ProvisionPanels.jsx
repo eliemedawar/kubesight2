@@ -307,8 +307,13 @@ function DestroyDecision({ build, job, currentUserId, canExecute, busy, act, ref
                 Reject
               </button>
               <button className="btn-danger" type="button" disabled={busy}
-                      onClick={() => act(() => approveClusterDestroy(build.id, job.id, note))}>
-                Approve and destroy
+                      onClick={() => {
+                        if (!window.confirm(
+                          `Destroy ${build.name}? Its VMs are deleted from vCenter and this cannot be undone.`
+                        )) return;
+                        act(() => approveClusterDestroy(build.id, job.id, note));
+                      }}>
+                {busy ? "Working…" : "Approve and destroy"}
               </button>
             </div>
           </>
@@ -486,19 +491,23 @@ export function ProvisionCard({
     </button>
   ) : null;
 
-  if (!job) {
+  // A discarded plan leaves a draft exactly where it started: without this it
+  // fell through every branch below, and the draft had no way to plan again.
+  if (!job || (job.status === "discarded" && build.status === "draft")) {
     if (build.status !== "draft") return null;
     return (
       <div className="card sg-cb-card sg-cb-pv-wait">
         <div>
           <b>No VMs yet</b>
           <p className="muted">
+            {job ? "The last plan was discarded. " : ""}
             KubeSight creates this build&apos;s machines in vCenter. Make a plan to see exactly what it will create.
           </p>
+          {refusalNote}
         </div>
         {canExecute ? (
           <button className="primary" type="button" disabled={busy} onClick={() => act(() => planClusterVms(build.id))}>
-            Make the plan
+            {busy ? "Planning…" : "Make the plan"}
           </button>
         ) : null}
       </div>
@@ -685,6 +694,9 @@ export function ProvisionCard({
   return null;
 }
 
+// Readable names for the size inputs' labels ("Workers memory GB", not "memoryGb").
+const SIZE_LABELS = { cpu: "vCPU", memoryGb: "memory GB", diskGb: "disk GB" };
+
 const GROW_ROLES = [
   // [spec role, node role, payload key]
   ["worker", "worker", "workers"],
@@ -772,7 +784,7 @@ export function ProvisionGrowPanel({ build, canExecute, notify, onChanged, onClo
                 {["cpu", "memoryGb", "diskGb"].map((key) => (
                   <td key={key}>
                     <input type="number" min={1} className="sg-cb-input sg-cb-mono sg-cb-pv-num"
-                           aria-label={`${ROLE_TITLE[role]} ${key}`}
+                           aria-label={`${ROLE_TITLE[role]} ${SIZE_LABELS[key]}`}
                            disabled={!counts[role]}
                            value={sizes[role]?.[key] ?? ""}
                            onChange={(e) => setSizes({ ...sizes, [role]: { ...sizes[role], [key]: Number(e.target.value) } })} />

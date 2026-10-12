@@ -303,7 +303,7 @@ textarea.sg-cb-input { line-height: 1.6; resize: vertical; }
 }
 .sg-cb-librow {
   display: grid; align-items: center; width: 100%; text-align: left; cursor: pointer;
-  grid-template-columns: 104px minmax(140px, 1.1fr) 116px minmax(130px, 1.2fr) 132px 16px;
+  grid-template-columns: 104px minmax(140px, 1.1fr) 116px minmax(130px, 1.2fr) 172px 16px;
   gap: 14px; padding: 12px 18px; font: inherit;
   background: none; border: 0; border-top: 1px solid var(--border-soft);
 }
@@ -633,8 +633,12 @@ button.sg-cb-step:hover { border-color: var(--accent); color: var(--accent-stron
 }
 .sg-cb-manual { display: flex; flex-direction: column; gap: 9px; align-items: flex-start; }
 .sg-cb-manual h4 { margin: 0; font-size: 13px; font-weight: 800; color: var(--text-strong); }
-.sg-cb-manual-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.sg-cb-manual-row .sg-cb-input { width: auto; min-width: 130px; padding: 6px 10px; }
+/* A grid, so Remove stays on its row instead of wrapping under it at 1280. */
+.sg-cb-manual-row {
+  display: grid; gap: 8px; align-items: center; width: 100%;
+  grid-template-columns: minmax(120px, 1fr) minmax(120px, 1.2fr) minmax(120px, 1.2fr) auto;
+}
+.sg-cb-manual-row .sg-cb-input { width: 100%; min-width: 0; padding: 6px 10px; }
 
 /* ── Add-on shelf ───────────────────────────────────────────────────── */
 .sg-cb-shelf {
@@ -1008,6 +1012,10 @@ button.sg-cb-step:hover { border-color: var(--accent); color: var(--accent-stron
 @media (max-width: 1180px) {
   .sg-cb-split { grid-template-columns: 1fr; }
   .sg-cb-bp { position: static; }
+  /* The sidebar takes 240px of this width: drop the glyph and let the time
+     wrap, or the row overflows its card and clips the first column. */
+  .sg-cb-librow { grid-template-columns: minmax(120px, 1.1fr) 108px minmax(110px, 1.2fr) 120px 16px; }
+  .sg-cb-librow > .sg-cb-glyph { display: none; }
 }
 @media (max-width: 900px) {
   .sg-cb-ready-verdict { border-right: 0; border-bottom: 1px solid var(--border); flex: 1 1 100%; }

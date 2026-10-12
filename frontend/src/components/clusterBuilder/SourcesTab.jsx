@@ -394,7 +394,7 @@ function SourceProfileForm({ onSave, onClose, busy }) {
       <div className="sg-cb-actions">
         <button className="btn-ghost" type="button" onClick={onClose}>Cancel</button>
         <button className="primary" type="button" disabled={!valid || busy} onClick={save}>
-          Save profile
+          {busy ? "Saving…" : "Save profile"}
         </button>
       </div>
     </div>
@@ -417,6 +417,9 @@ export default function SourcesTab({
   const [credForm, setCredForm] = useState({ ...EMPTY_CRED });
   const [routeForm, setRouteForm] = useState({ ...EMPTY_ROUTE });
   const [testHosts, setTestHosts] = useState({});
+  // The row whose connection test is running ("vs-3", "ssh-1"): a test can
+  // take a while, and a second click would only queue another one.
+  const [testing, setTesting] = useState(null);
 
   const run = async (fn, after) => {
     setBusy(true);
@@ -430,6 +433,36 @@ export default function SourcesTab({
       setBusy(false);
     }
   };
+
+  /** Removing a source cannot be undone: ask first, then say it happened. */
+  const remove = (what, name, fn) => {
+    if (!window.confirm(`Remove the ${what} "${name}"? This cannot be undone.`)) return;
+    run(fn, () => notify(`Removed ${name}.`));
+  };
+
+  const test = async (key, fn) => {
+    setTesting(key);
+    try {
+      await fn();
+    } catch (error) {
+      notify(error.message || String(error), true);
+    } finally {
+      setTesting(null);
+    }
+  };
+
+  const vsReady = Boolean(
+    vsForm.name.trim() && vsForm.baseUrl.trim() && vsForm.username.trim() && vsForm.password
+  );
+  const credReady = Boolean(
+    credForm.name.trim() && credForm.username.trim() && credForm.secret
+    && (credForm.sudoMode !== "password" || credForm.sudoPassword)
+  );
+  const routeReady = Boolean(
+    routeForm.name.trim() && routeForm.credentialId
+    && (routeForm.routeMode !== "bastion"
+      || (routeForm.bastionHost.trim() && routeForm.bastionCredentialId))
+  );
 
   const coverage = bundleCoverage(addonCatalog);
 
@@ -473,11 +506,12 @@ export default function SourcesTab({
               Skip TLS verification
             </label>
             <div className="sg-cb-actions sg-cb-span">
-              <button className="primary" type="button" disabled={busy} onClick={() => run(
+              {!vsReady ? <span className="muted">Name, URL, username and password are all needed.</span> : null}
+              <button className="primary" type="button" disabled={busy || !vsReady} onClick={() => run(
                 () => createVSphereConnection(vsForm),
-                () => { setVsForm({ ...EMPTY_VS }); setOpen(null); }
+                () => { setVsForm({ ...EMPTY_VS }); setOpen(null); notify(`vCenter ${vsForm.name} saved. Test it next.`); }
               )}>
-                Save connection
+                {busy ? "Saving…" : "Save connection"}
               </button>
             </div>
           </div>
@@ -492,22 +526,21 @@ export default function SourcesTab({
             right={(
               <>
                 <Freshness at={row.lastTestedAt} status={row.lastConnectionStatus === "ok" ? "ok" : row.lastConnectionStatus ? "failed" : null} />
-                <button className="btn-ghost btn-sm" type="button" onClick={async () => {
-                  try {
-                    const result = await testVSphereConnection(row.id);
-                    notify(
-                      result.status === "ok"
-                        ? `Connected — ${result.vmCount} machines visible.`
-                        : result.error,
-                      result.status !== "ok"
-                    );
-                    reloadInfra();
-                  } catch (error) { notify(error.message, true); }
-                }}>
-                  Test now
+                <button className="btn-ghost btn-sm" type="button" disabled={Boolean(testing)}
+                        onClick={() => test(`vs-${row.id}`, async () => {
+                          const result = await testVSphereConnection(row.id);
+                          notify(
+                            result.status === "ok"
+                              ? `Connected — ${result.vmCount} machines visible.`
+                              : result.error || `${row.name} did not answer.`,
+                            result.status !== "ok"
+                          );
+                          await reloadInfra();
+                        })}>
+                  {testing === `vs-${row.id}` ? "Testing…" : "Test now"}
                 </button>
-                <button className="btn-ghost btn-sm" type="button"
-                        onClick={() => run(() => deleteVSphereConnection(row.id))}>
+                <button className="btn-ghost btn-sm" type="button" disabled={busy}
+                        onClick={() => remove("vCenter", row.name, () => deleteVSphereConnection(row.id))}>
                   Remove
                 </button>
               </>
@@ -613,11 +646,12 @@ export default function SourcesTab({
                      onChange={(e) => setCredForm({ ...credForm, port: Number(e.target.value) })} />
             </Field>
             <div className="sg-cb-actions sg-cb-span">
-              <button className="primary" type="button" disabled={busy} onClick={() => run(
+              {!credReady ? <span className="muted">Name, username and the secret are all needed.</span> : null}
+              <button className="primary" type="button" disabled={busy || !credReady} onClick={() => run(
                 () => createSshCredential(credForm),
-                () => { setCredForm({ ...EMPTY_CRED }); setOpen(null); }
+                () => { setCredForm({ ...EMPTY_CRED }); setOpen(null); notify(`Credential ${credForm.name} saved.`); }
               )}>
-                Save credential
+                {busy ? "Saving…" : "Save credential"}
               </button>
             </div>
           </div>
@@ -675,7 +709,12 @@ export default function SourcesTab({
               </select>
             </Field>
             <div className="sg-cb-actions sg-cb-span">
-              <button className="primary" type="button" disabled={busy} onClick={() => run(
+              {!routeReady ? (
+                <span className="muted">
+                  {credentials.length ? "Name the route and choose its credential." : "Add a credential first — a route logs in with one."}
+                </span>
+              ) : null}
+              <button className="primary" type="button" disabled={busy || !routeReady} onClick={() => run(
                 () => createSshProfile({
                   ...routeForm,
                   credentialId: Number(routeForm.credentialId) || undefined,
@@ -683,9 +722,9 @@ export default function SourcesTab({
                     ? Number(routeForm.bastionCredentialId)
                     : undefined,
                 }),
-                () => { setRouteForm({ ...EMPTY_ROUTE }); setOpen(null); }
+                () => { setRouteForm({ ...EMPTY_ROUTE }); setOpen(null); notify(`Route ${routeForm.name} saved. Test it against a node.`); }
               )}>
-                Save route
+                {busy ? "Saving…" : "Save route"}
               </button>
             </div>
           </div>
@@ -714,23 +753,24 @@ export default function SourcesTab({
                     value={testHosts[row.id] || ""}
                     onChange={(e) => setTestHosts({ ...testHosts, [row.id]: e.target.value })}
                   />
-                  <button className="btn-ghost btn-sm" type="button" onClick={async () => {
-                    try {
-                      const result = await testSshProfile(row.id, testHosts[row.id] || "");
-                      notify(
-                        result.status === "ok"
-                          ? `Connected as ${result.effectiveUser} (${result.kernel}, ${result.latencyMs} ms).`
-                          : result.error,
-                        result.status !== "ok"
-                      );
-                      reloadInfra();
-                    } catch (error) { notify(error.message, true); }
-                  }}>
-                    Test
+                  <button className="btn-ghost btn-sm" type="button"
+                          disabled={Boolean(testing) || !(testHosts[row.id] || "").trim()}
+                          title={(testHosts[row.id] || "").trim() ? undefined : "Enter a host to test against"}
+                          onClick={() => test(`ssh-${row.id}`, async () => {
+                            const result = await testSshProfile(row.id, (testHosts[row.id] || "").trim());
+                            notify(
+                              result.status === "ok"
+                                ? `Connected as ${result.effectiveUser} (${result.kernel}, ${result.latencyMs} ms).`
+                                : result.error || `${row.name} could not log in.`,
+                              result.status !== "ok"
+                            );
+                            await reloadInfra();
+                          })}>
+                    {testing === `ssh-${row.id}` ? "Testing…" : "Test"}
                   </button>
                 </span>
-                <button className="btn-ghost btn-sm" type="button"
-                        onClick={() => run(() => deleteSshProfile(row.id))}>
+                <button className="btn-ghost btn-sm" type="button" disabled={busy}
+                        onClick={() => remove("SSH route", row.name, () => deleteSshProfile(row.id))}>
                   Remove
                 </button>
               </>
@@ -752,8 +792,8 @@ export default function SourcesTab({
                   name={row.name}
                   sub={`${row.username} · ${row.authMethod === "key" ? "private key" : "password"} · port ${row.port}`}
                   right={(
-                    <button className="btn-ghost btn-sm" type="button"
-                            onClick={() => run(() => deleteSshCredential(row.id))}>
+                    <button className="btn-ghost btn-sm" type="button" disabled={busy}
+                            onClick={() => remove("SSH credential", row.name, () => deleteSshCredential(row.id))}>
                       Remove
                     </button>
                   )}
@@ -782,7 +822,10 @@ export default function SourcesTab({
           <SourceProfileForm
             busy={busy}
             onClose={() => setOpen(null)}
-            onSave={(payload) => run(() => createBuildProfile(payload), () => setOpen(null))}
+            onSave={(payload) => run(
+              () => createBuildProfile(payload),
+              () => { setOpen(null); notify(`Source profile ${payload.name} saved.`); }
+            )}
           />
         ) : null}
 
@@ -799,8 +842,8 @@ export default function SourcesTab({
                     {summary.incomplete
                       ? <StatusPill status="fail">{summary.incomplete}</StatusPill>
                       : <StatusPill status="ok">complete</StatusPill>}
-                    <button className="btn-ghost btn-sm" type="button"
-                            onClick={() => run(() => deleteBuildProfile(row.id))}>
+                    <button className="btn-ghost btn-sm" type="button" disabled={busy}
+                            onClick={() => remove("source profile", row.name, () => deleteBuildProfile(row.id))}>
                       Remove
                     </button>
                   </>

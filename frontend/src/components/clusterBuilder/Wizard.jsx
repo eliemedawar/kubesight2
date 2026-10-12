@@ -643,7 +643,7 @@ function MachinesStep({
           No vCenter is configured, so machines are entered by hand. Add hosts below, or
           connect a vCenter under Sources to pick from inventory.
         </p>
-        <ManualHosts manualNodes={manualNodes} setManualNodes={setManualNodes} />
+        <ManualHosts manualNodes={manualNodes} setManualNodes={setManualNodes} startOpen />
       </div>
     );
   }
@@ -760,13 +760,28 @@ function MachinesStep({
 }
 
 /** The exception, kept to one line until someone needs it. */
-function ManualHosts({ manualNodes, setManualNodes }) {
-  const [open, setOpen] = useState(manualNodes.length > 0);
+function ManualHosts({ manualNodes, setManualNodes, startOpen = false }) {
+  // With no vCenter, manual hosts are the only way in: start open, with a row.
+  const [open, setOpen] = useState(manualNodes.length > 0 || startOpen);
+  useEffect(() => {
+    if (startOpen && !manualNodes.length) setManualNodes([{ role: "", hostname: "", address: "" }]);
+    // Once, on mount: removing every row afterwards is the user's choice.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   if (!open) {
     return (
       <div className="sg-cb-manual-teaser">
         <span className="muted">Machine not in vCenter?</span>
-        <button className="btn-outline btn-sm" type="button" onClick={() => setOpen(true)}>
+        <button
+          className="btn-outline btn-sm"
+          type="button"
+          onClick={() => {
+            // Opening the section should give a row to type into, not a
+            // heading and another "Add" button.
+            if (!manualNodes.length) setManualNodes([{ role: "", hostname: "", address: "" }]);
+            setOpen(true);
+          }}
+        >
           Add a manual host
         </button>
       </div>
@@ -1121,6 +1136,7 @@ function VerifyStep({ grouped, preflightResult, busy, onRerun }) {
 export default function Wizard({
   options,
   infra,
+  infraReady = true,
   canExecute = false,
   canManageTemplates = false,
   currentUserId = null,
@@ -1152,6 +1168,7 @@ export default function Wizard({
   const [addresses, setAddresses] = useState([]);
   const [previewError, setPreviewError] = useState("");
   const seeded = useRef(Boolean(initialBuild));
+  const plumbingSeeded = useRef(Boolean(initialBuild));
   const sourceSeeded = useRef(Boolean(initialBuild));
 
   const setBasic = (key, value) => setBasics((previous) => ({ ...previous, [key]: value }));
@@ -1168,25 +1185,36 @@ export default function Wizard({
   // Resolve the plumbing once, from whatever is already healthy. This is what
   // lets the Sources row be a statement rather than three questions.
   useEffect(() => {
+    if (plumbingSeeded.current || !options || !infraReady) return;
+    // Waits for the page's source lists: opened straight from a link, the
+    // wizard mounts before they arrive, and seeding from the empty placeholder
+    // left the SSH route unchosen for good.
+    plumbingSeeded.current = true;
+    const { vcenter, route, buildProfile } = preferredSources(infra);
+    setBasics((previous) => ({
+      ...previous,
+      vsphereConnectionId: previous.vsphereConnectionId || (vcenter ? String(vcenter.id) : ""),
+      connectionProfileId: previous.connectionProfileId || (route ? String(route.id) : ""),
+      buildProfileId: previous.buildProfileId || (buildProfile ? String(buildProfile.id) : ""),
+    }));
+  }, [options, infra, infraReady]);
+
+  useEffect(() => {
     if (seeded.current || !options) return;
     seeded.current = true;
-    const { vcenter, route, buildProfile } = preferredSources(infra);
     const small = findTemplate(options.clusterTemplates, "small");
     setBasics((previous) => ({
       ...previous,
       k8sVersion: previous.k8sVersion || options.k8sVersions[0] || "",
       podCidr: options.defaults?.podCidr || previous.podCidr,
       serviceCidr: options.defaults?.serviceCidr || previous.serviceCidr,
-      vsphereConnectionId: vcenter ? String(vcenter.id) : "",
-      connectionProfileId: route ? String(route.id) : "",
-      buildProfileId: buildProfile ? String(buildProfile.id) : "",
       ...(small ? {
         counts: { ...small.counts },
         // A template carries role sizes only; the plain-VM size stays.
         sizes: { ...previous.sizes, ...JSON.parse(JSON.stringify(small.sizes)) },
       } : {}),
     }));
-  }, [options, infra]);
+  }, [options]);
 
   // A vCenter that can create VMs makes that the default — it is the reason
   // this wizard has a second path at all. Decided once; the user can switch.
@@ -2024,7 +2052,7 @@ export default function Wizard({
                     disabled={!acked || busy}
                     onClick={launch}
                   >
-                    Build cluster
+                    {busy ? "Starting…" : "Build cluster"}
                   </button>
                 </div>
               ) : (
@@ -2042,7 +2070,7 @@ export default function Wizard({
                     disabled={grouped.verdict === "fail" || busy}
                     onClick={launch}
                   >
-                    Build cluster
+                    {busy ? "Starting…" : "Build cluster"}
                   </button>
                 </div>
               )}

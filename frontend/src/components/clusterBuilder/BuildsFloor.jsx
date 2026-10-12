@@ -190,7 +190,13 @@ function LibraryRow({ build, catalog, now, onOpen, canCreate, notify, onChanged 
   if (build.status === "failed" && build.currentPhase) {
     middle = <>Stopped at <b>{PHASE_LABELS[build.currentPhase] || build.currentPhase}</b></>;
   } else if (build.status === "draft") {
-    middle = build.nodeCounts?.controlPlane ? shapeSummary(build) : "No machines assigned yet";
+    // A VMware draft has no machines until its plan is applied — that is the
+    // next step, not something missing.
+    middle = build.nodeCounts?.controlPlane ? shapeSummary(build)
+      : build.machineSource === "vmware" ? "No VMs yet — open it to make the plan"
+        : "No machines assigned yet";
+  } else if (build.status === "provision_failed") {
+    middle = "VM creation stopped — open it to see why";
   } else if (build.status === "preflight_passed") {
     middle = "Preflight passed — not launched";
   } else if (build.status === "vms_ready") {

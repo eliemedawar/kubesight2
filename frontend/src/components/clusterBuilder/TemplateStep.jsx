@@ -74,11 +74,13 @@ function TemplateCard({ template, selected, onSelect, canManage, onRename, onDel
           <div className="sg-cb-tpl-edit">
             <input className="sg-cb-input" aria-label="Template name" value={name}
                    onChange={(event) => setName(event.target.value)} />
-            <button className="btn-outline btn-sm" type="button" onClick={async () => {
-              await onRename(template, name);
-              setRenaming(false);
-            }}>Save</button>
-            <button className="btn-ghost btn-sm" type="button" onClick={() => setRenaming(false)}>Cancel</button>
+            <button className="btn-outline btn-sm" type="button"
+                    disabled={!name.trim() || name.trim() === template.name}
+                    onClick={async () => {
+                      if (await onRename(template, name.trim())) setRenaming(false);
+                    }}>Save</button>
+            <button className="btn-ghost btn-sm" type="button"
+                    onClick={() => { setName(template.name); setRenaming(false); }}>Cancel</button>
           </div>
         ) : (
           <div className="sg-cb-tpl-edit">
@@ -99,8 +101,11 @@ export function TemplateGallery({ catalog, selectedId, onSelect, canManage, noti
       await updateClusterTemplate(template.dbId, { name });
       notify(`Renamed to “${name}”.`);
       onCatalogChanged?.();
+      return true;
     } catch (error) {
+      // Stays in rename mode, so the name is not lost with the error.
       notify(error.message || String(error), true);
+      return false;
     }
   };
   const remove = async (template) => {
