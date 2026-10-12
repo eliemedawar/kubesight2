@@ -900,7 +900,10 @@ def _advance_one(build: CiBuild) -> None:
         db.session.commit()
         return
 
-    _pump_logs(build, stage, adapter, handle)
+    # The runner's view of the build, read once and shared by the drain and
+    # the poll below (and the final drain, if the stage ended).
+    observation = _observe(adapter, [handle])
+    _pump_logs(build, stage, adapter, handle, observation)
 
     definition = _definition_for(build, stage)
     timeout = int(definition.get("timeoutSeconds") or 1800)
@@ -913,7 +916,11 @@ def _advance_one(build: CiBuild) -> None:
         status = TIMEOUT
     else:
         try:
-            status = adapter.poll(handle)
+            status = (
+                adapter.poll(handle, observation=observation)
+                if observation is not None
+                else adapter.poll(handle)
+            )
         except RunnerError as exc:
             logger.warning("Runner poll failed for stage %s: %s", stage.id, exc)
             status = FAILED
@@ -921,7 +928,9 @@ def _advance_one(build: CiBuild) -> None:
     if status not in TERMINAL_STATUSES:
         return
 
-    _close_from_runner(build, stage, status, adapter, handle, definition, timeout)
+    _close_from_runner(
+        build, stage, status, adapter, handle, definition, timeout, observation=observation
+    )
     if _parallel_mode(build)[0] == parallel_groups.SEQUENTIAL and not _runs_whole_build(adapter):
         # A group member run on its own: say so in its log. Appended once the
         # stage is over, never before — a per-stage runner numbers its own
@@ -978,11 +987,14 @@ def _close_from_runner(
     timeout: int,
     *,
     cancelled_message: Optional[str] = None,
+    observation=None,
 ) -> None:
     """Close a stage the runner reported terminal, and release what it held."""
     # One final drain: output flushed as the container exited would otherwise
     # be lost, because the pump before the poll ran ahead of the terminal state.
-    _pump_logs(build, stage, adapter, handle)
+    # (With an observation the runner knows what it already read completely,
+    # so this costs nothing when there is nothing left.)
+    _pump_logs(build, stage, adapter, handle, observation)
 
     if status == SUCCEEDED:
         _collect_artifacts(build, stage, adapter, handle, definition)
@@ -1135,13 +1147,18 @@ def _advance_group(build: CiBuild, rows: List[CiBuildStage]) -> None:
                 _close_stage(row, "failed", "The runner for this stage is no longer available.")
                 continue
             handles[row.id] = handle
-            _pump_logs(build, row, adapter, handle)
+        observation = _observe(adapter, list(handles.values()))
+        for row in running:
+            handle = handles.get(row.id)
+            if handle is None:
+                continue
+            _pump_logs(build, row, adapter, handle, observation)
             timed_out = _member_timed_out(build, row, adapter, handle, whole_build)
             if timed_out:
                 statuses[row.id] = TIMEOUT
 
         to_poll = [row for row in running if row.id in handles and row.id not in statuses]
-        statuses.update(_poll_members(adapter, to_poll, handles))
+        statuses.update(_poll_members(adapter, to_poll, handles, observation))
 
         # Cancelled members last, so a fail-fast stop can name the member
         # whose failure caused it even when both were seen in this one poll.
@@ -1165,6 +1182,7 @@ def _advance_group(build: CiBuild, rows: List[CiBuildStage]) -> None:
                 definition,
                 int(definition.get("timeoutSeconds") or _DEFAULT_STAGE_TIMEOUT_SECONDS),
                 cancelled_message=message,
+                observation=observation,
             )
         db.session.commit()
 
@@ -1242,14 +1260,17 @@ def _member_timed_out(
     return True
 
 
-def _poll_members(adapter, rows: List[CiBuildStage], handles: Dict[int, RunnerHandle]) -> Dict[int, str]:
+def _poll_members(
+    adapter, rows: List[CiBuildStage], handles: Dict[int, RunnerHandle], observation=None
+) -> Dict[int, str]:
     """Every member's status, in one observation when the runner offers one."""
     if not rows:
         return {}
     many = getattr(adapter, "poll_many", None)
     if callable(many):
         try:
-            by_ref = many([handles[row.id] for row in rows])
+            members = [handles[row.id] for row in rows]
+            by_ref = many(members, observation=observation) if observation is not None else many(members)
             return {row.id: by_ref.get(handles[row.id].external_ref, RUNNING) for row in rows}
         except RunnerError as exc:
             logger.warning("Runner poll failed for a parallel group: %s", exc)
@@ -2018,39 +2039,44 @@ def _build_plan(build: CiBuild, adapter, callback_token: str) -> List[StageExecu
 
 
 
-# A viewer polls a running stage about once a second, but logs were only
-# ingested on the shared scheduler tick — so output could sit unseen for a whole
-# tick even though the pod had already printed it. Draining on demand closes
-# that gap; the cooldown keeps several viewers of one build from turning into
-# several `kubectl logs` calls a second. Matched to the viewer's own poll so a
-# tailing log is never a whole beat behind the pod.
-_LOG_PUMP_COOLDOWN_SECONDS = float(os.getenv("CI_LOG_PUMP_COOLDOWN_SECONDS", "1"))
-_last_log_pump: Dict[int, float] = {}
+# Building a masker decrypts every secret in scope, so it is built only when
+# there are lines to mask and then kept for a short while. Keyed by STAGE, not
+# build: a secret added mid-build reaches the stages that start after it, and
+# a stage's masker is built after that stage started.
+_MASKER_TTL_SECONDS = float(os.getenv("CI_LOG_MASKER_TTL_SECONDS", "60"))
+_maskers: Dict[Tuple[int, int, str], Tuple[float, Any]] = {}
+_maskers_lock = threading.Lock()
 
 
-def pump_stage_logs(build: CiBuild, stage: CiBuildStage) -> None:
-    """Drain a running stage's newest output now, if it is not too soon."""
-    if stage.status != "running":
-        return
+def log_masker(build: CiBuild, stage_id: int = 0):
+    """The masker for this build's output, from a short per-stage cache."""
+    # queued_at too: ids are reused when a database is recreated (tests), and
+    # a masker must never outlive the build it was made for.
+    key = (int(build.id or 0), int(stage_id or 0), str(build.queued_at))
     now = time.monotonic()
-    if now - _last_log_pump.get(stage.id, 0.0) < _LOG_PUMP_COOLDOWN_SECONDS:
-        return
-    if len(_last_log_pump) > 500:
-        _last_log_pump.clear()  # Bounded: these are only rate-limit timestamps.
-    _last_log_pump[stage.id] = now
+    with _maskers_lock:
+        cached = _maskers.get(key)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+    mask = logs_service.build_masker(_mask_values(build))
+    with _maskers_lock:
+        if len(_maskers) > 500:
+            _maskers.clear()  # Bounded: a dropped masker is only rebuilt.
+        _maskers[key] = (now + _MASKER_TTL_SECONDS, mask)
+    return mask
 
-    adapter = _adapter_for(build)
-    handle = _handle_for(build, stage)
-    if adapter is None or handle is None:
-        return
+
+def _observe(adapter, handles: List[RunnerHandle]):
+    """One read of the runner's view of these stages, when it offers that
+    (see the Kubernetes runner's ``observe``) - or None."""
+    observe = getattr(adapter, "observe", None)
+    if not callable(observe) or not handles:
+        return None
     try:
-        _pump_logs(build, stage, adapter, handle)
-        db.session.commit()
+        return observe(handles)
     except Exception:
-        # Reading logs must never break reading logs: the scheduler tick will
-        # drain the same output shortly.
-        db.session.rollback()
-        logger.exception("On-demand log pump failed for stage %s", stage.id)
+        logger.exception("Observing runner state failed")
+        return None
 
 
 def _mask_values(build: CiBuild) -> List[str]:
@@ -2083,21 +2109,37 @@ def _mask_values(build: CiBuild) -> List[str]:
     return values
 
 
-def _pump_logs(build: CiBuild, stage: CiBuildStage, adapter, handle: RunnerHandle) -> None:
-    """Drain new output into ``ci_log_chunks``, masked on the way in."""
-    mask = logs_service.build_masker(_mask_values(build))
-    after = logs_service.highest_seq(stage.id)
+def _pump_logs(
+    build: CiBuild, stage: CiBuildStage, adapter, handle: RunnerHandle, observation=None
+) -> None:
+    """Drain new output into ``ci_log_chunks``, masked on the way in.
+
+    Never raises: output that could not be read or stored this pass is read
+    again on the next, and a log problem must never be what fails a build.
+    """
+    if stage.log_truncated:
+        return  # At the stage's line cap: nothing more would be stored.
     try:
-        chunks = list(adapter.drain_logs(handle, after))
+        after = logs_service.highest_seq(stage.id)
+        if observation is not None:
+            chunks = list(adapter.drain_logs(handle, after, observation=observation))
+        else:
+            chunks = list(adapter.drain_logs(handle, after))
     except Exception:
         logger.exception("Draining logs for stage %s failed", stage.id)
         return
-    if chunks:
+    if not chunks:
+        return
+    try:
         logs_service.append(
             stage,
             [(chunk.seq, chunk.content, chunk.stream) for chunk in chunks],
-            mask=mask,
+            mask=log_masker(build, stage.id),
+            known_max=after,
         )
+    except Exception:
+        logger.exception("Storing logs for stage %s failed", stage.id)
+        db.session.rollback()
 
 
 def _collect_artifacts(
