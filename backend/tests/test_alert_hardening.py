@@ -23,9 +23,14 @@ ACCESS = ClusterAccess(cluster_id="real-1", context_name="ctx-real", kubeconfig_
 
 @pytest.fixture(autouse=True)
 def _fresh_volume_cache():
+    from api.k8s_provider import _K8S_READ_CACHE
+
+    # The evaluator shares node/PVC lists through the kubectl read cache.
     k8s_volume_stats.clear_cache()
+    _K8S_READ_CACHE.invalidate()
     yield
     k8s_volume_stats.clear_cache()
+    _K8S_READ_CACHE.invalidate()
 
 
 def _node(name, ready=True):

@@ -40,12 +40,20 @@ def fetch_pod_logs(
     since_seconds: int,
     *,
     raise_errors: bool = False,
+    since_time: Optional[datetime] = None,
 ) -> str:
     """Return pod log text with timestamps from kubectl logs --since.
 
     By default a kubectl failure reads as empty logs; ``raise_errors`` lets a
     caller that must tell "quiet" from "unreadable" see the error.
+    ``since_time`` (when given) replaces the ``--since`` window.
     """
+    if since_time is not None:
+        from .log_time_filters import format_rfc3339_z
+
+        since_flag = f"--since-time={format_rfc3339_z(since_time)}"
+    else:
+        since_flag = f"--since={_since_arg(since_seconds)}"
     args = [
         "logs",
         pod_name,
@@ -53,7 +61,7 @@ def fetch_pod_logs(
         namespace,
         "-c",
         container_name,
-        f"--since={_since_arg(since_seconds)}",
+        since_flag,
         "--timestamps=true",
     ]
     try:
@@ -184,6 +192,41 @@ def find_log_matches(
     return matches
 
 
+LogKey = Tuple[str, str, str]  # (namespace, pod, container)
+_LOG_FETCH_WORKERS = 4
+
+
+def fetch_logs_parallel(
+    access: Union[ClusterAccess, str],
+    keys: List[LogKey],
+    since_seconds: int,
+    *,
+    since_time: Optional[datetime] = None,
+) -> Dict[LogKey, Union[str, K8sCommandError]]:
+    """Read many containers' logs side by side (kubectl only, no app context).
+
+    A log policy over a 20-pod deployment read its logs one container after
+    another; this reads up to four at a time. Each value is the log text, or
+    the K8sCommandError that reading it raised."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(key: LogKey) -> Union[str, K8sCommandError]:
+        namespace, pod_name, container_name = key
+        try:
+            return fetch_pod_logs(
+                access, namespace, pod_name, container_name, since_seconds,
+                raise_errors=True, since_time=since_time,
+            )
+        except K8sCommandError as exc:
+            return exc
+
+    unique = list(dict.fromkeys(keys))
+    if len(unique) <= 1:
+        return {key: _one(key) for key in unique}
+    with ThreadPoolExecutor(max_workers=min(_LOG_FETCH_WORKERS, len(unique))) as pool:
+        return dict(zip(unique, pool.map(_one, unique)))
+
+
 def scan_pod_logs_for_matches(
     access: Union[ClusterAccess, str],
     *,
@@ -197,10 +240,12 @@ def scan_pod_logs_for_matches(
     context_after: int,
     max_lines: int,
     failed_containers: Optional[List[str]] = None,
+    prefetched: Optional[Dict[LogKey, Union[str, K8sCommandError]]] = None,
 ) -> List[PodLogMatch]:
     """Scan every container of ``pod``. When ``failed_containers`` is given,
     containers whose logs could not be read are appended to it (and skipped)
-    instead of silently reading as "no matches"."""
+    instead of silently reading as "no matches". ``prefetched`` (from
+    :func:`fetch_logs_parallel`) supplies the log text instead of kubectl."""
     meta = pod.get("metadata", {}) or {}
     pod_name = meta.get("name")
     if not pod_name:
@@ -208,7 +253,14 @@ def scan_pod_logs_for_matches(
 
     results: List[PodLogMatch] = []
     for container_name in pod_container_names(pod):
-        if failed_containers is None:
+        fetched = (prefetched or {}).get((namespace, pod_name, container_name))
+        if fetched is not None:
+            if isinstance(fetched, K8sCommandError):
+                if failed_containers is not None:
+                    failed_containers.append(container_name)
+                continue
+            log_text = fetched
+        elif failed_containers is None:
             log_text = fetch_pod_logs(access, namespace, pod_name, container_name, since_seconds)
         else:
             try:

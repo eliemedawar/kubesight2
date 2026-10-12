@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..access_engine import can_view_alert, is_admin
 from ..alert_policy_catalog import normalize_log_config
 from ..db import db
-from ..k8s_logs import find_log_matches, scan_pod_logs_for_matches
+from ..k8s_logs import fetch_logs_parallel, find_log_matches, pod_container_names, scan_pod_logs_for_matches
 from ..k8s_provider import K8sCommandError
 from ..models import AlertHistory, AlertPolicy, LogAlertSeen, User
 
@@ -238,6 +238,25 @@ def _resolve_quiet_log_alerts(
     return resolved
 
 
+# Overlap with the previous scan, so a line written while it ran is not missed.
+_LOG_SCAN_OVERLAP_SECONDS = 10
+
+
+def _log_scan_since(policy: AlertPolicy, log_config: Dict[str, Any], now: datetime) -> Optional[datetime]:
+    """Where this scan starts: just before the previous one, never earlier than
+    the window. Lines older than that were matched (and deduplicated) last
+    time; re-reading the whole window every tick only cost kubectl time.
+    None (use the plain window) after an error or on the first scan."""
+    from datetime import timedelta
+
+    last = _as_utc(policy.last_evaluated_at)
+    if last is None or (policy.last_evaluation_result or "") == "error":
+        return None
+    window_start = now - timedelta(seconds=int(log_config.get("logWindowSeconds") or 60))
+    since = max(last - timedelta(seconds=_LOG_SCAN_OVERLAP_SECONDS), window_start)
+    return since if since > window_start else None
+
+
 def evaluate_log_policy(
     policy: AlertPolicy,
     cluster_id: str,
@@ -262,6 +281,8 @@ def evaluate_log_policy(
     unreadable_containers: set = set()
     listing_ok = True
 
+    # Pass 1: list the pods of every target.
+    target_pods: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]] = []
     for target in targets:
         namespace = target.get("namespace") or ""
         resource_type = target.get("resourceType") or "deployment"
@@ -279,7 +300,34 @@ def evaluate_log_policy(
             if resource_type == "deployment" and resource_name:
                 pod_name = f"{resource_name}-abc123"
             pods = [{"metadata": {"name": pod_name, "namespace": namespace}, "spec": {"containers": [{"name": "app"}]}}]
+        target_pods.append((target, pods))
 
+    # Pass 2 (kubectl only): read every container's logs, a few at a time,
+    # from just before the last scan rather than the whole window again.
+    prefetched: Dict[Any, Any] = {}
+    if access:
+        log_keys = [
+            ((pod.get("metadata") or {}).get("namespace") or (target.get("namespace") or ""),
+             (pod.get("metadata") or {}).get("name"),
+             container)
+            for target, pods in target_pods
+            for pod in pods
+            if (pod.get("metadata") or {}).get("name")
+            for container in pod_container_names(pod)
+        ]
+        if log_keys:
+            prefetched = fetch_logs_parallel(
+                access,
+                log_keys,
+                log_config["logWindowSeconds"],
+                since_time=_log_scan_since(policy, log_config, now),
+            )
+
+    # Pass 3 (this thread): match, dedupe and write.
+    for target, pods in target_pods:
+        namespace = target.get("namespace") or ""
+        resource_type = target.get("resourceType") or "deployment"
+        resource_name = target.get("resourceName")
         deployment_name = resource_name if resource_type == "deployment" else None
 
         for pod in pods:
@@ -301,6 +349,7 @@ def evaluate_log_policy(
                     context_after=log_config["contextLinesAfter"],
                     max_lines=log_config["maxLines"],
                     failed_containers=failed_containers,
+                    prefetched=prefetched,
                 )
                 for failed in failed_containers:
                     unreadable_containers.add((pod_name, failed))
