@@ -233,6 +233,16 @@ def _register_error_handlers(app: Flask) -> None:
 
 
 _GZIP_MIN_BYTES = int(os.getenv("RESPONSE_GZIP_MIN_BYTES", "1024"))
+# 4, not 6: on a 1.3 MB resource table level 6 costs ~50% more CPU (GIL held)
+# for ~10% smaller output, which a LAN never notices.
+def _gzip_level_from_env() -> int:
+    try:
+        return min(9, max(1, int(os.getenv("RESPONSE_GZIP_LEVEL", "4"))))
+    except ValueError:
+        return 4
+
+
+_GZIP_LEVEL = _gzip_level_from_env()
 _GZIP_MIMETYPES = ("application/json", "text/", "application/javascript")
 
 
@@ -262,7 +272,7 @@ def _configure_response_compression(app: Flask) -> None:
         body = response.get_data()
         if len(body) < _GZIP_MIN_BYTES:
             return response
-        response.set_data(gzip.compress(body, compresslevel=6))
+        response.set_data(gzip.compress(body, compresslevel=_GZIP_LEVEL))
         response.headers["Content-Encoding"] = "gzip"
         response.headers["Content-Length"] = str(len(response.get_data()))
         vary = response.headers.get("Vary", "")
@@ -329,6 +339,10 @@ def create_app(config_object=None) -> Flask:
         "SQLALCHEMY_ENGINE_OPTIONS",
         _default_engine_options(app.config["SQLALCHEMY_DATABASE_URI"]),
     )
+
+    # Flask sorts JSON keys by default: ~35% of the encode time on big payloads,
+    # for an order no client relies on (JSON objects are unordered).
+    app.json.sort_keys = False
 
     db.init_app(app)
     _configure_cors(app)
