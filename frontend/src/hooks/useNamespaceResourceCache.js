@@ -4,6 +4,12 @@ import { emptyNamespaceResources } from "../lib/resourceTypes.js";
 import { resourceCache, RESOURCE_CACHE_TTL_MS } from "../services/resourceCacheService.js";
 import { setVisibleInterval } from "../lib/visibleInterval";
 
+// How old a server-side copy a live tick accepts: just under one interval,
+// so each tick still shows data newer than the last one (5 s live → 4 s).
+export function liveMaxAgeSeconds(liveIntervalMs) {
+  return Math.max(1, Math.round((Number(liveIntervalMs) || 0) / 1000) - 1);
+}
+
 function setsEqual(a, b) {
   if (a.size !== b.size) {
     return false;
@@ -25,8 +31,9 @@ function setsEqual(a, b) {
  * @param {string} options.activeListKey - resource list key to load/refresh (e.g. "pods")
  * @param {boolean} options.enabled - fetch when true
  * @param {function} options.filterResources - RBAC filter: (clusterId, namespace, partial) => filtered
- * @param {number} options.liveIntervalMs - when > 0, re-read the active tab from the cluster
- *   (bypassing both caches) on this interval, quietly, while the browser tab is visible
+ * @param {number} options.liveIntervalMs - when > 0, re-read the active tab on this interval,
+ *   quietly, while the browser tab is visible (bypassing the client cache; the server may
+ *   answer from a copy up to one interval old that other viewers share)
  */
 export function useNamespaceResourceCache({
   clusterId,
@@ -86,7 +93,7 @@ export function useNamespaceResourceCache({
   );
 
   const fetchListKey = useCallback(
-    async (listKey, { force = false, silent = false, background = false } = {}) => {
+    async (listKey, { force = false, silent = false, background = false, maxAge } = {}) => {
       if (!clusterId || !namespace || !listKey) {
         return;
       }
@@ -124,8 +131,11 @@ export function useNamespaceResourceCache({
         try {
           // Manual refresh (force) bypasses the server-side read cache too, so
           // the user always gets live data when they explicitly ask for it.
+          // Live ticks pass maxAge instead: a copy the server read a moment
+          // ago for another viewer is as live as a new kubectl call.
           const payload = await getResourceListByType(clusterId, namespace, listKey, {
-            fresh: force,
+            fresh: force && !(maxAge > 0),
+            maxAge,
           });
           const items = payload[listKey] || [];
           applyListKey(clusterId, namespace, listKey, items);
@@ -242,7 +252,12 @@ export function useNamespaceResourceCache({
       if (resourceCache.getInflight(clusterId, namespace, activeListKey)) {
         return;
       }
-      fetchListKey(activeListKey, { force: true, silent: true, background: true }).catch(() => {});
+      fetchListKey(activeListKey, {
+        force: true,
+        silent: true,
+        background: true,
+        maxAge: liveMaxAgeSeconds(liveIntervalMs),
+      }).catch(() => {});
     };
     const timer = window.setInterval(tick, liveIntervalMs);
     const onVisible = () => {

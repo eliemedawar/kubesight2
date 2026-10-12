@@ -112,6 +112,41 @@ def _pod_matches_deployment_selector(pod: Dict[str, Any], selector: Dict[str, An
     return bool(match_labels or selector.get("matchExpressions"))
 
 
+_SCAN_SHARE_SECONDS = 10
+
+
+def _shared_items(access, kind: str, namespace: Optional[str] = None) -> List[Dict[str, Any]]:
+    """``kubectl get <kind>`` items, shared briefly with every other reader.
+
+    Without a namespace this is the same cluster-wide list (same cache key) the
+    dashboard, overview and alert scan read, so a tick of N policies costs one
+    kubectl call per kind instead of one per policy. With a namespace the list
+    lives under ``res:<cluster>:<ns>:`` so mutations there drop it. No stale
+    serving: an alert must not fire on minutes-old pod states. The returned
+    objects are shared — read them, never change them. Raises K8sCommandError
+    or ValueError like kubectl/json."""
+    from ..k8s_provider import _CLUSTER_SCOPED_KINDS, _K8S_READ_CACHE
+
+    if namespace:
+        key = f"res:{access.cluster_id}:{namespace}:raw-{kind}"
+        args = ["get", kind, "-n", namespace, "-o", "json"]
+    else:
+        key = f"all:{access.cluster_id}:{kind}"
+        args = (
+            ["get", kind, "-o", "json"]
+            if kind in _CLUSTER_SCOPED_KINDS
+            else ["get", kind, "--all-namespaces", "-o", "json"]
+        )
+
+    def _fetch() -> List[Dict[str, Any]]:
+        items = json.loads(_run_for_access(access, args)).get("items", [])
+        return items if isinstance(items, list) else []
+
+    if not getattr(access, "cluster_id", None):
+        return _fetch()  # no stable cache identity
+    return _K8S_READ_CACHE.get_or_compute(key, _SCAN_SHARE_SECONDS, _fetch)
+
+
 def _is_not_found(exc: Exception) -> bool:
     text = str(exc).lower()
     return "notfound" in text or "not found" in text
@@ -121,18 +156,17 @@ def _deployment_selector(access, namespace: str, deployment_name: str, *, strict
     if name_error(namespace=namespace, names=((deployment_name, "deployment name"),)):
         return {}  # not a valid K8s name: no such deployment (and never an argv)
     try:
-        dep_output = _run_for_access(
-            access,
-            ["get", "deployment", deployment_name, "-n", namespace, "-o", "json"],
-        )
-        deployment = json.loads(dep_output)
-        return (deployment.get("spec", {}).get("selector") or {}).copy()
-    except K8sCommandError as exc:
+        deployments = _shared_items(access, "deployments", namespace)
+    except (K8sCommandError, ValueError) as exc:
         # strict: a missing deployment genuinely has no pods, but any other
         # failure is "unknown" and must reach the caller.
         if strict and not _is_not_found(exc):
             raise
         return {}
+    for deployment in deployments:
+        if (deployment.get("metadata") or {}).get("name") == deployment_name:
+            return dict((deployment.get("spec") or {}).get("selector") or {})
+    return {}
 
 
 def _deployment_match_labels(access, namespace: str, deployment_name: str) -> Dict[str, str]:
@@ -157,63 +191,30 @@ def _list_pods_for_scope(
     """Pods in scope. With ``strict`` a kubectl failure raises K8sCommandError
     instead of looking like "no pods" (a named pod or deployment that does not
     exist still returns [])."""
-    if resource_type == "pod":
-        if resource_name:
-            if name_error(namespace=namespace, names=((resource_name, "pod name"),)):
-                return []  # not a valid K8s name: no such pod (and never an argv)
-            try:
-                pod_output = _run_for_access(
-                    access,
-                    ["get", "pod", resource_name, "-n", namespace, "-o", "json"],
-                )
-                pod = json.loads(pod_output)
-                return [pod] if pod.get("metadata", {}).get("name") else []
-            except K8sCommandError as exc:
-                if strict and not _is_not_found(exc):
-                    raise
-                return []
-        try:
-            pods_output = _run_for_access(access, ["get", "pods", "-n", namespace, "-o", "json"])
-            return json.loads(pods_output).get("items", [])
-        except K8sCommandError:
-            if strict:
-                raise
+    # Every branch filters the namespace pod list, shared by all the policies
+    # (and log policies) of a tick, instead of one kubectl call per policy.
+    if resource_type not in ("pod", "deployment"):
+        return []
+    if resource_type == "pod" and resource_name and name_error(
+        namespace=namespace, names=((resource_name, "pod name"),)
+    ):
+        return []  # not a valid K8s name: no such pod (and never an argv)
+    selector: Dict[str, Any] = {}
+    if resource_type == "deployment" and resource_name:
+        selector = _deployment_selector(access, namespace, resource_name, strict=strict)
+        if not selector:
             return []
-
-    if resource_type == "deployment":
-        if resource_name:
-            selector = _deployment_selector(access, namespace, resource_name, strict=strict)
-            if not selector:
-                return []
-            label_selector = _label_selector_string(selector)
-            if label_selector:
-                try:
-                    pods_output = _run_for_access(
-                        access,
-                        ["get", "pods", "-n", namespace, "-l", label_selector, "-o", "json"],
-                    )
-                    pods = json.loads(pods_output).get("items", [])
-                    if pods:
-                        return pods
-                except K8sCommandError:
-                    pass
-            try:
-                pods_output = _run_for_access(access, ["get", "pods", "-n", namespace, "-o", "json"])
-                pod_items = json.loads(pods_output).get("items", [])
-            except K8sCommandError:
-                if strict:
-                    raise
-                return []
-            return [pod for pod in pod_items if _pod_matches_deployment_selector(pod, selector)]
-        try:
-            pods_output = _run_for_access(access, ["get", "pods", "-n", namespace, "-o", "json"])
-            return json.loads(pods_output).get("items", [])
-        except K8sCommandError:
-            if strict:
-                raise
-            return []
-
-    return []
+    try:
+        pod_items = _shared_items(access, "pods", namespace)
+    except (K8sCommandError, ValueError):
+        if strict:
+            raise
+        return []
+    if resource_type == "pod" and resource_name:
+        return [pod for pod in pod_items if (pod.get("metadata") or {}).get("name") == resource_name]
+    if selector:
+        return [pod for pod in pod_items if _pod_matches_deployment_selector(pod, selector)]
+    return list(pod_items)
 
 
 def _collect_workload_cpu_memory_observations(
@@ -336,11 +337,9 @@ def _collect_real_observations(
         "pod_pending",
     }
     if pod_metrics.intersection(metric_keys):
-        ns_flag = ["-n", namespace] if namespace else ["-A"]
         try:
-            pods_output = _run_for_access(access, ["get", "pods", *ns_flag, "-o", "json"])
-            pod_items = json.loads(pods_output).get("items", [])
-        except K8sCommandError:
+            pod_items = _shared_items(access, "pods", namespace)
+        except (K8sCommandError, ValueError):
             pod_items = []
 
         for pod in pod_items:
@@ -403,9 +402,8 @@ def _collect_real_observations(
 
     if "node_not_ready" in metric_keys or "disk_usage_percent" in metric_keys:
         try:
-            nodes_output = _run_for_access(access, ["get", "nodes", "-o", "json"])
-            node_items = json.loads(nodes_output).get("items", [])
-        except K8sCommandError as exc:
+            node_items = _shared_items(access, "nodes")
+        except (K8sCommandError, ValueError) as exc:
             node_items = []
             for key in ("node_not_ready", "disk_usage_percent"):
                 if key in metric_keys:
@@ -448,11 +446,9 @@ def _collect_real_observations(
                 )
 
     if "deployment_unavailable_replicas" in metric_keys:
-        ns_flag = ["-n", namespace] if namespace else ["-A"]
         try:
-            dep_output = _run_for_access(access, ["get", "deployments", *ns_flag, "-o", "json"])
-            dep_items = json.loads(dep_output).get("items", [])
-        except K8sCommandError:
+            dep_items = _shared_items(access, "deployments", namespace)
+        except (K8sCommandError, ValueError):
             dep_items = []
         for dep in dep_items:
             meta = dep.get("metadata", {})
@@ -472,11 +468,9 @@ def _collect_real_observations(
             )
 
     if "pvc_usage_percent" in metric_keys:
-        ns_flag = ["-n", namespace] if namespace else ["-A"]
         try:
-            pvc_output = _run_for_access(access, ["get", "pvc", *ns_flag, "-o", "json"])
-            pvc_items = json.loads(pvc_output).get("items", [])
-        except K8sCommandError as exc:
+            pvc_items = _shared_items(access, "pvc", namespace)
+        except (K8sCommandError, ValueError) as exc:
             pvc_items = []
             data_gaps["pvc_usage_percent"] = f"Could not list PVCs: {exc}"
         # Only Bound claims have usage; a Pending claim is not "85% full".
@@ -709,16 +703,20 @@ def _record_policy_evaluation(
     )
 
 
-def _policy_due_for_evaluation(policy: AlertPolicy, now: datetime) -> bool:
+def _is_due(interval_seconds: Optional[int], last_evaluated_at: Optional[datetime], now: datetime) -> bool:
     from ..alert_policy_catalog import DEFAULT_EVALUATION_INTERVAL_SECONDS
 
-    interval = int(policy.evaluation_interval_seconds or DEFAULT_EVALUATION_INTERVAL_SECONDS)
-    if policy.last_evaluated_at is None:
+    interval = int(interval_seconds or DEFAULT_EVALUATION_INTERVAL_SECONDS)
+    if last_evaluated_at is None:
         return True
-    last_evaluated = policy.last_evaluated_at
+    last_evaluated = last_evaluated_at
     if last_evaluated.tzinfo is None:
         last_evaluated = last_evaluated.replace(tzinfo=timezone.utc)
     return (now - last_evaluated).total_seconds() >= interval
+
+
+def _policy_due_for_evaluation(policy: AlertPolicy, now: datetime) -> bool:
+    return _is_due(policy.evaluation_interval_seconds, policy.last_evaluated_at, now)
 
 
 def evaluate_policies_for_cluster(
@@ -736,8 +734,31 @@ def evaluate_policies_for_cluster(
     if user and not is_admin(user) and not is_sentinel_cluster and not can_access_cluster(user, cluster_id):
         return []
 
+    now = datetime.now(timezone.utc)
+    # Which policies are due, from three columns only: most ticks find none,
+    # and then neither the policies (with their receivers) are loaded nor the
+    # cluster access resolved.
+    due_ids = [
+        policy_id
+        for policy_id, interval, last_evaluated_at in db.session.query(
+            AlertPolicy.id, AlertPolicy.evaluation_interval_seconds, AlertPolicy.last_evaluated_at
+        )
+        .filter(AlertPolicy.cluster_id == cluster_id, AlertPolicy.enabled.is_(True))
+        .order_by(AlertPolicy.id.asc())
+        .all()
+        if _is_due(interval, last_evaluated_at, now)
+    ]
+    if not due_ids:
+        return []
+
+    from sqlalchemy.orm import selectinload
+
     policies = (
-        AlertPolicy.query.filter_by(cluster_id=cluster_id, enabled=True)
+        AlertPolicy.query.options(
+            selectinload(AlertPolicy.notification_receivers),
+            selectinload(AlertPolicy.notification_receiver_groups),
+        )
+        .filter(AlertPolicy.id.in_(due_ids))
         .order_by(AlertPolicy.id.asc())
         .all()
     )
@@ -751,7 +772,6 @@ def evaluate_policies_for_cluster(
     )
     updated_rows: List[AlertHistory] = []
     policies_evaluated = False
-    now = datetime.now(timezone.utc)
 
     for index, policy in enumerate(policies):
         if persist and index and db.session.dirty | db.session.new:

@@ -280,21 +280,39 @@ def _workloads_for_access(access, namespace: str, kubectl_kind: str) -> Dict[str
     Cached under the shared ``res:{cluster}:{ns}:`` prefix (10s TTL + stale
     serve), so Clients/Services tab loads and health polls share one kubectl
     call per (namespace, kind) and mutations invalidate it automatically."""
-    from ..k8s_provider import K8sCommandError, _run_for_access, cached_namespace_read
+    from ..k8s_provider import _degraded_ok, cached_namespace_read
 
     def _fetch() -> Dict[str, Dict[str, Any]]:
-        try:
-            output = _run_for_access(access, ["get", kubectl_kind, "-n", namespace, "-o", "json"])
-            items = json.loads(output).get("items", [])
-            return {
-                item.get("metadata", {}).get("name", ""): item
-                for item in items
-                if item.get("metadata", {}).get("name")
-            }
-        except (K8sCommandError, Exception):
-            return {}
+        items = _namespace_items_or_degraded(access, namespace, kubectl_kind, {})
+        return {
+            item.get("metadata", {}).get("name", ""): item
+            for item in items
+            if item.get("metadata", {}).get("name")
+        }
 
-    return cached_namespace_read(access, namespace, f"svc-{kubectl_kind}", _fetch)
+    return _degraded_ok(
+        lambda: cached_namespace_read(access, namespace, f"svc-{kubectl_kind}", _fetch)
+    )
+
+
+def _namespace_items_or_degraded(access, namespace: str, kubectl_kind: str, empty: Any) -> List[Dict[str, Any]]:
+    """``kubectl get <kind> -n <ns>`` items for a cached closure.
+
+    A transient failure raises DegradedRead(empty) so the cache does not keep
+    serving "nothing deployed" for minutes; a permanent one (forbidden, kind
+    not served) is a real, cacheable empty answer."""
+    from ..k8s_provider import DegradedRead, K8sCommandError, _is_permanent_read_failure, _run_for_access
+
+    try:
+        output = _run_for_access(access, ["get", kubectl_kind, "-n", namespace, "-o", "json"])
+        items = json.loads(output).get("items", [])
+        return items if isinstance(items, list) else []
+    except K8sCommandError as exc:
+        if _is_permanent_read_failure(str(exc)):
+            return []
+        raise DegradedRead(empty) from exc
+    except Exception as exc:  # bad JSON and the like
+        raise DegradedRead(empty) from exc
 
 
 def _deployments_for_access(access, namespace: str) -> Dict[str, Dict[str, Any]]:
@@ -338,16 +356,16 @@ def _pods_for_access(access, namespace: str) -> List[Dict[str, Any]]:
     """Run ``kubectl get pods`` for an already-resolved cluster access. Touches
     neither the DB nor the Flask app context, so it is safe in worker threads.
     Cached like :func:`_workloads_for_access`."""
-    from ..k8s_provider import K8sCommandError, _run_for_access, cached_namespace_read
+    from ..k8s_provider import _degraded_ok, cached_namespace_read
 
-    def _fetch() -> List[Dict[str, Any]]:
-        try:
-            output = _run_for_access(access, ["get", "pods", "-n", namespace, "-o", "json"])
-            return json.loads(output).get("items", [])
-        except (K8sCommandError, Exception):
-            return []
-
-    return cached_namespace_read(access, namespace, "svc-pods", _fetch)
+    return _degraded_ok(
+        lambda: cached_namespace_read(
+            access,
+            namespace,
+            "svc-pods",
+            lambda: _namespace_items_or_degraded(access, namespace, "pods", []),
+        )
+    )
 
 
 def _fetch_namespace_pods(cluster_id: str, namespace: str, user=None) -> List[Dict[str, Any]]:
@@ -961,6 +979,14 @@ def _save_topology(service_id: int, topology_payload: Dict[str, Any]) -> None:
 # Public CRUD API
 # ---------------------------------------------------------------------------
 
+def service_list_cached(user=None) -> bool:
+    """Whether :func:`list_services` has an unexpired cached list for ``user``."""
+    cache_key = getattr(user, "id", None) if user else "anon"
+    with _list_services_cache_lock:
+        cached = _list_services_cache.get(cache_key)
+    return bool(cached and cached[0] > time.time())
+
+
 def list_services(user=None) -> Dict[str, Any]:
     cache_enabled = not _list_cache_disabled()
     cache_key = getattr(user, "id", None) if user else "anon"
@@ -984,8 +1010,13 @@ def list_services(user=None) -> Dict[str, Any]:
     payload = {"items": items, "count": len(items)}
 
     if cache_enabled:
+        now_ts = time.time()
         with _list_services_cache_lock:
-            _list_services_cache[cache_key] = (time.time() + _LIST_CACHE_TTL_SECONDS, payload)
+            # Keyed per user: drop expired entries on write so the dict does
+            # not grow with every user who ever opened the page.
+            for stale_key in [k for k, v in _list_services_cache.items() if v[0] <= now_ts]:
+                del _list_services_cache[stale_key]
+            _list_services_cache[cache_key] = (now_ts + _LIST_CACHE_TTL_SECONDS, payload)
     return payload
 
 

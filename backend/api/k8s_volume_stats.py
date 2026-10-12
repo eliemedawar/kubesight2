@@ -40,7 +40,9 @@ from .k8s_provider import K8sCommandError, _run_for_access
 
 DEFAULT_CACHE_SECONDS = 10
 DEFAULT_NODE_TIMEOUT_SECONDS = 8
-DEFAULT_MAX_WORKERS = 8
+# Each probe is a kubectl call through the shared slots; three at a time keeps
+# a large cluster's node sweep from taking every slot from page reads.
+DEFAULT_MAX_WORKERS = 3
 
 _cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _cache_lock = threading.Lock()

@@ -223,27 +223,39 @@ def _alerts_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
         str(item.get("id")) for item in visible_clusters(user)
     ]
     items: List[Dict[str, Any]] = []
-    for cid in cluster_ids:
-        if should_use_real_k8s(cid):
-            try:
-                from ...k8s_provider import list_alerts_from_k8s
+    real_ids = [cid for cid in cluster_ids if should_use_real_k8s(cid)]
+    scans: Dict[str, Any] = {}
+    if real_ids:
+        from ...k8s_provider import list_alerts_for_clusters
 
-                items.extend(list_alerts_from_k8s(cluster_id=cid).get("items") or [])
-            except Exception:
-                # One unreachable cluster must not blank the other clusters'
-                # alerts. Said in metadata rather than swallowed entirely.
-                items.append(
-                    {
-                        "id": f"kubesight-unreachable-{cid}",
-                        "severity": "warning",
-                        "title": "Alerts unavailable",
-                        "message": f"KubeSight could not read alerts from '{cid}'.",
-                        "clusterId": cid,
-                        "source": "kubesight",
-                    }
-                )
-        else:
+        # Every cluster scanned side by side (one slow cluster used to delay
+        # the answer by its full timeout per cluster before it).
+        try:
+            scans = list_alerts_for_clusters(real_ids)
+        except Exception:
+            scans = {cid: None for cid in real_ids}
+    for cid in cluster_ids:
+        if cid not in real_ids:
             items.extend(_filter_mock_alerts(cid))
+            continue
+        if cid not in scans:
+            continue  # not resolvable: no cluster to read alerts from
+        result = scans[cid]
+        if result is None:
+            # One unreachable cluster must not blank the other clusters'
+            # alerts. Said in metadata rather than swallowed entirely.
+            items.append(
+                {
+                    "id": f"kubesight-unreachable-{cid}",
+                    "severity": "warning",
+                    "title": "Alerts unavailable",
+                    "message": f"KubeSight could not read alerts from '{cid}'.",
+                    "clusterId": cid,
+                    "source": "kubesight",
+                }
+            )
+            continue
+        items.extend(result.get("items") or [])
 
     from ..access import keep_allowed
 

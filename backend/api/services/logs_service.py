@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
+import time
+import weakref
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 
@@ -266,6 +270,37 @@ def _sse_frame(event: str, payload: Dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
 
 
+# Each live stream holds a request thread (prod runs 8) and a `kubectl logs -f`
+# process for as long as the tab stays open. Past this many at once, a new
+# stream gets 429 and the page falls back to polling; each stream also ends
+# after LOG_STREAM_MAX_SECONDS (the page reconnects from where it stopped), so
+# a forgotten tab cannot hold a thread forever.
+LOG_STREAM_MAX = max(1, int(os.getenv("LOG_STREAM_MAX", "4")))
+LOG_STREAM_MAX_SECONDS = max(30, int(os.getenv("LOG_STREAM_MAX_SECONDS", "900")))
+_LOG_STREAM_SLOTS = threading.BoundedSemaphore(LOG_STREAM_MAX)
+
+
+class _StreamSlot:
+    """One taken stream slot, released exactly once."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._held = True
+
+    def release(self) -> None:
+        with self._lock:
+            if not self._held:
+                return
+            self._held = False
+        _LOG_STREAM_SLOTS.release()
+
+
+def _take_stream_slot() -> Optional[_StreamSlot]:
+    if not _LOG_STREAM_SLOTS.acquire(blocking=False):
+        return None
+    return _StreamSlot()
+
+
 def stream_pod_logs(
     *,
     cluster_id: str,
@@ -329,32 +364,55 @@ def stream_pod_logs(
     if not access:
         return None, error_response("Cluster not found", 404)
 
-    def generator() -> Iterator[str]:
-        yield _sse_frame("open", {"stream": "live"})
-        try:
-            for kind, text in stream_pod_log_lines(
-                access=access,
-                namespace=namespace,
-                pod=pod_name,
-                container=container,
-                since_seconds=time_filters.since_seconds,
-                since_time=time_filters.since_time,
-                tail_lines=params["tail_lines"],
-                timestamps=params["timestamps"],
-            ):
-                if kind == "idle":
-                    yield ": hb\n\n"
-                    continue
-                # Drop probe traffic and our own log-polling requests from the
-                # live stream, matching the snapshot endpoint's behaviour.
-                if is_logs_api_self_line(text) or is_health_probe_log_line(text):
-                    continue
-                yield _sse_frame("line", {"line": text})
-        except K8sCommandError as exc:
-            yield _sse_frame("error", {"message": str(exc)})
-        yield _sse_frame("end", {"reason": "closed"})
+    slot = _take_stream_slot()
+    if slot is None:
+        return None, error_response(
+            "Too many live log streams are open right now; showing logs by polling instead.",
+            429,
+        )
 
-    return generator, None
+    def generator() -> Iterator[str]:
+        started = time.monotonic()
+        reason = "closed"
+        try:
+            yield _sse_frame("open", {"stream": "live"})
+            try:
+                for kind, text in stream_pod_log_lines(
+                    access=access,
+                    namespace=namespace,
+                    pod=pod_name,
+                    container=container,
+                    since_seconds=time_filters.since_seconds,
+                    since_time=time_filters.since_time,
+                    tail_lines=params["tail_lines"],
+                    timestamps=params["timestamps"],
+                ):
+                    if time.monotonic() - started > LOG_STREAM_MAX_SECONDS:
+                        # Leaving the loop closes kubectl; the client reconnects.
+                        reason = "max_duration"
+                        break
+                    if kind == "idle":
+                        yield ": hb\n\n"
+                        continue
+                    # Drop probe traffic and our own log-polling requests from the
+                    # live stream, matching the snapshot endpoint's behaviour.
+                    if is_logs_api_self_line(text) or is_health_probe_log_line(text):
+                        continue
+                    yield _sse_frame("line", {"line": text})
+            except K8sCommandError as exc:
+                yield _sse_frame("error", {"message": str(exc)})
+            yield _sse_frame("end", {"reason": reason})
+        finally:
+            slot.release()
+
+    def factory() -> Iterator[str]:
+        stream = generator()
+        # A generator that is never started never runs its finally: release
+        # the slot when it is dropped instead.
+        weakref.finalize(stream, slot.release)
+        return stream
+
+    return factory, None
 
 
 def _mock_namespace_pods(cluster_id: str, namespace: str) -> Optional[list]:

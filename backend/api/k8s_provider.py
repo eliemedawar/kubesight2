@@ -67,25 +67,28 @@ _UNREACHABLE_BACKOFF_SECONDS = int(os.getenv("K8S_UNREACHABLE_BACKOFF_SECONDS", 
 def invalidate_namespace_resources_cache(
     cluster_id: Optional[str] = None, namespace: Optional[str] = None
 ) -> None:
-    """Drop cached namespace/resource reads after a mutation (deploy, restart, scale)."""
-    if cluster_id and namespace:
-        _K8S_READ_CACHE.invalidate(f"res:{cluster_id}:{namespace}:")
-        _K8S_READ_CACHE.invalidate(f"nslist:{cluster_id}")
-        _K8S_READ_CACHE.invalidate(f"nscounts:{cluster_id}")
-        _K8S_READ_CACHE.invalidate(f"nsmetrics:{cluster_id}")
-        _K8S_READ_CACHE.invalidate(f"all:{cluster_id}:")
-    elif cluster_id:
-        _K8S_READ_CACHE.invalidate(f"res:{cluster_id}:")
-        _K8S_READ_CACHE.invalidate(f"nslist:{cluster_id}")
-        _K8S_READ_CACHE.invalidate(f"nscounts:{cluster_id}")
-        _K8S_READ_CACHE.invalidate(f"nsmetrics:{cluster_id}")
+    """Drop cached namespace/resource reads after a mutation (deploy, restart, scale).
+
+    Per-cluster keys are dropped exactly (or by a prefix ending in ``:``):
+    ``nslist:custom-1`` as a plain prefix would also drop custom-10..19."""
+    if cluster_id:
+        if namespace:
+            _K8S_READ_CACHE.invalidate(f"res:{cluster_id}:{namespace}:")
+        else:
+            _K8S_READ_CACHE.invalidate(f"res:{cluster_id}:")
+        for bucket in _PER_CLUSTER_DERIVED_KEYS:
+            _K8S_READ_CACHE.invalidate(f"{bucket}:{cluster_id}", exact=True)
         _K8S_READ_CACHE.invalidate(f"all:{cluster_id}:")
     else:
         _K8S_READ_CACHE.invalidate("res:")
-        _K8S_READ_CACHE.invalidate("nslist:")
-        _K8S_READ_CACHE.invalidate("nscounts:")
-        _K8S_READ_CACHE.invalidate("nsmetrics:")
+        for bucket in _PER_CLUSTER_DERIVED_KEYS:
+            _K8S_READ_CACHE.invalidate(f"{bucket}:")
         _K8S_READ_CACHE.invalidate("all:")
+
+
+# Cluster-wide summaries derived from the namespace contents, keyed
+# ``<bucket>:<cluster_id>``; a mutation anywhere in the cluster drops them.
+_PER_CLUSTER_DERIVED_KEYS = ("nslist", "nscounts", "nsmetrics", "nsnames", "podissues")
 
 
 def _is_true(value: str) -> bool:
@@ -196,6 +199,41 @@ def _refuse_unsafe_kubectl_args(args: List[str]) -> None:
 # a slot is free). Long-lived streams (logs -f, exec) do not take a slot.
 _KUBECTL_MAX_CONCURRENCY = max(1, int(os.getenv("KUBECTL_MAX_CONCURRENCY", "8")))
 _KUBECTL_SLOTS = threading.BoundedSemaphore(_KUBECTL_MAX_CONCURRENCY)
+# One slow cluster must not hold every slot: each cluster may use at most this
+# many of them at once, so reads against the other clusters keep flowing.
+_KUBECTL_PER_CLUSTER_CONCURRENCY = max(
+    1,
+    min(
+        _KUBECTL_MAX_CONCURRENCY,
+        int(os.getenv("KUBECTL_PER_CLUSTER_CONCURRENCY", str(max(1, _KUBECTL_MAX_CONCURRENCY // 2)))),
+    ),
+)
+_CLUSTER_SLOTS: Dict[str, threading.BoundedSemaphore] = {}
+_CLUSTER_SLOTS_LOCK = threading.Lock()
+
+
+def _cluster_slots(breaker_key: str) -> threading.BoundedSemaphore:
+    with _CLUSTER_SLOTS_LOCK:
+        slots = _CLUSTER_SLOTS.get(breaker_key)
+        if slots is None:
+            slots = threading.BoundedSemaphore(_KUBECTL_PER_CLUSTER_CONCURRENCY)
+            _CLUSTER_SLOTS[breaker_key] = slots
+        return slots
+
+
+def _breaker_trips_on(args: List[str]) -> bool:
+    """Whether a failure of this call may mark the whole cluster unreachable.
+
+    `kubectl top` (Metrics Server) and `get --raw .../proxy/...` (one kubelet)
+    time out on their own while the API server is fine; tripping the breaker
+    on them blanked every page for a healthy cluster."""
+    if not args:
+        return False
+    if args[0] == "top":
+        return False
+    if args[0] == "get" and "--raw" in args and any("/proxy/" in str(a) for a in args):
+        return False
+    return True
 
 
 def _run_kubectl(
@@ -211,6 +249,8 @@ def _run_kubectl(
         and args[0] != "config"  # local kubeconfig ops never touch the API
         and not caching_disabled()
     )
+    # Every API call honours an open breaker; only some may open it.
+    breaker_trips = breaker_enabled and _breaker_trips_on(args)
     if breaker_enabled and _K8S_READ_CACHE.get(breaker_key):
         raise K8sCommandError(
             "Cluster API is unreachable (a recent request timed out). "
@@ -233,7 +273,7 @@ def _run_kubectl(
         try:
             direct = kube_direct.try_read(args, kubeconfig_path, context, request_timeout)
         except kube_direct.DirectReadError as exc:
-            if exc.network and breaker_enabled:
+            if exc.network and breaker_trips:
                 _K8S_READ_CACHE.set(breaker_key, True, _UNREACHABLE_BACKOFF_SECONDS)
             raise K8sCommandError(str(exc)) from exc
         if direct is not None:
@@ -255,7 +295,7 @@ def _run_kubectl(
             elif not env.get("KUBECONFIG") and env.get("K8S_KUBECONFIG"):
                 env["KUBECONFIG"] = env["K8S_KUBECONFIG"]
 
-            with _KUBECTL_SLOTS:
+            with _cluster_slots(breaker_key), _KUBECTL_SLOTS:
                 completed = subprocess.run(
                     command,
                     capture_output=True,
@@ -271,7 +311,7 @@ def _run_kubectl(
             "kubectl not found. Please install kubectl and ensure it is on your PATH."
         )
     except subprocess.TimeoutExpired:
-        if breaker_enabled:
+        if breaker_trips:
             _K8S_READ_CACHE.set(breaker_key, True, _UNREACHABLE_BACKOFF_SECONDS)
         raise K8sCommandError(
             f"kubectl command timed out after {effective_timeout}s: {' '.join(args[:3])}"
@@ -281,7 +321,7 @@ def _run_kubectl(
         # Trip the breaker on network-level timeouts so the next callers fail
         # fast instead of each re-paying kubectl's retry loop (~25s) against an
         # unreachable API server.
-        if breaker_enabled and any(
+        if breaker_trips and any(
             marker in stderr
             for marker in (
                 "Client.Timeout exceeded",
@@ -350,6 +390,19 @@ def _node_capacity_totals(node_items: List[Dict[str, Any]]) -> tuple[float, floa
     return cpu_capacity, mem_capacity
 
 
+_SERVER_VERSION_TTL_SECONDS = int(os.getenv("K8S_SERVER_VERSION_CACHE_SECONDS", "600"))
+
+
+def _server_version_output(access: ClusterAccess) -> str:
+    """``kubectl version -o json``, kept 10 minutes: the cluster list probed
+    it for every cluster on every rebuild, and it changes only on upgrades."""
+    return _K8S_READ_CACHE.get_or_compute(
+        f"version:{access.cluster_id}:{kubeconfig_identity(access.kubeconfig_path)}:{access.context_name or ''}",
+        _SERVER_VERSION_TTL_SECONDS,
+        lambda: _run_for_access(access, ["version", "-o", "json"]),
+    )
+
+
 def _discovered_cluster_from_context(context_name: str, now: str) -> Dict[str, Any]:
     cluster_id = _context_to_cluster_id(context_name)
     version = "unknown"
@@ -365,7 +418,7 @@ def _discovered_cluster_from_context(context_name: str, now: str) -> Dict[str, A
         is_custom=False,
     )
     try:
-        version_output = _run_for_access(access, ["version", "-o", "json"])
+        version_output = _server_version_output(access)
         version_data = json.loads(version_output)
         version = (
             version_data.get("serverVersion", {}).get("gitVersion")
@@ -376,9 +429,7 @@ def _discovered_cluster_from_context(context_name: str, now: str) -> Dict[str, A
 
     node_items: List[Dict[str, Any]] = []
     try:
-        nodes_output = _run_for_access(access, ["get", "nodes", "-o", "json"])
-        nodes_data = json.loads(nodes_output)
-        node_items = nodes_data.get("items", [])
+        node_items = cluster_list_items(access, "nodes")
         nodes = len(node_items)
         if any(
             not any(
@@ -483,7 +534,7 @@ def _custom_cluster_item(cluster_snapshot: Dict[str, Any], now: str) -> Dict[str
 
         # The version probe runs alongside the node list + usage reads.
         with ThreadPoolExecutor(max_workers=1) as version_pool:
-            version_future = version_pool.submit(_run_for_access, access, ["version", "-o", "json"])
+            version_future = version_pool.submit(_server_version_output, access)
             node_status, nodes, cpu_usage_percent, memory_usage_percent = _custom_cluster_node_usage(access)
             if node_status:
                 status = node_status
@@ -525,8 +576,7 @@ def _custom_cluster_node_usage(
     cpu_usage_percent: Optional[float] = None
     memory_usage_percent: Optional[float] = None
     try:
-        nodes_output = _run_for_access(access, ["get", "nodes", "-o", "json"])
-        node_items = json.loads(nodes_output).get("items", [])
+        node_items = cluster_list_items(access, "nodes")
         nodes = len(node_items)
         if node_items:
             from .k8s_metrics import cluster_resource_usage
@@ -616,6 +666,9 @@ def invalidate_cluster_list_cache() -> None:
     _K8S_READ_CACHE.invalidate("custom-clusters-active")
     _K8S_READ_CACHE.invalidate("contexts")
     _K8S_READ_CACHE.invalidate("kcfg-server:")
+    # A re-pointed cluster may be a different API server.
+    _K8S_READ_CACHE.invalidate("version:")
+    _K8S_READ_CACHE.invalidate("nodeips:")
     from . import kube_direct
 
     kube_direct.forget_endpoints()
@@ -1165,7 +1218,7 @@ def cached_namespace_read(access: ClusterAccess, namespace: str, bucket: str, co
 # Each view keeps its own cache; this short one only lets their refreshes share
 # one kubectl call (and one JSON parse — a big cluster's pod list is ~10 MB)
 # when they land within a few seconds of each other.
-_CLUSTER_LIST_SHARE_SECONDS = int(os.getenv("K8S_CLUSTER_LIST_SHARE_SECONDS", "5"))
+_CLUSTER_LIST_SHARE_SECONDS = int(os.getenv("K8S_CLUSTER_LIST_SHARE_SECONDS", "10"))
 _CLUSTER_SCOPED_KINDS = {"nodes", "namespaces", "persistentvolumes", "storageclasses"}
 
 
@@ -1186,6 +1239,29 @@ def cluster_list_items(
     )
 
 
+def _namespace_stub_items(access: ClusterAccess, kind: str) -> List[Dict[str, Any]]:
+    """One ``{"metadata": {"namespace": ns}}`` stub per object of ``kind``.
+
+    The namespace summary only counts objects per namespace. When another view
+    already holds the full cluster-wide list it is reused; otherwise kubectl
+    prints just the namespace column, instead of every object as JSON (a big
+    cluster's pod list is ~10 MB to fetch and parse)."""
+    shared = _K8S_READ_CACHE.get(f"all:{access.cluster_id}:{kind}")
+    if shared is not None:
+        return shared
+
+    def _fetch() -> List[Dict[str, Any]]:
+        output = _run_for_access(
+            access,
+            ["get", kind, "--all-namespaces", "-o", "custom-columns=NS:.metadata.namespace", "--no-headers"],
+        )
+        return [{"metadata": {"namespace": line}} for line in _custom_column_lines(output)]
+
+    return _K8S_READ_CACHE.get_or_compute(
+        f"all:{access.cluster_id}:{kind}:ns-column", _CLUSTER_LIST_SHARE_SECONDS, _fetch
+    )
+
+
 def _list_namespaces_from_k8s_uncached(
     access: ClusterAccess, include_metrics: bool = True
 ) -> Dict[str, Any]:
@@ -1201,9 +1277,9 @@ def _list_namespaces_from_k8s_uncached(
     max_workers = 5 if include_metrics else 4
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         ns_future = pool.submit(cluster_list_items, access, "namespaces")
-        pods_future = pool.submit(cluster_list_items, access, "pods")
-        dep_future = pool.submit(cluster_list_items, access, "deployments")
-        svc_future = pool.submit(cluster_list_items, access, "services")
+        pods_future = pool.submit(_namespace_stub_items, access, "pods")
+        dep_future = pool.submit(_namespace_stub_items, access, "deployments")
+        svc_future = pool.submit(_namespace_stub_items, access, "services")
         pod_top_future = (
             pool.submit(fetch_pod_top_metrics, access, False, top_timeout)
             if include_metrics
@@ -1253,8 +1329,7 @@ def summarize_node_items(node_items: List[Dict[str, Any]]) -> List[Dict[str, str
 
 
 def list_nodes_from_k8s(access: ClusterAccess) -> List[Dict[str, str]]:
-    output = _run_for_access(access, ["get", "nodes", "-o", "json"])
-    items = summarize_node_items(json.loads(output).get("items", []))
+    items = summarize_node_items(cluster_list_items(access, "nodes"))
     items.sort(key=lambda item: (item["status"] != "Ready", item["name"]))
     return items
 
@@ -1401,8 +1476,7 @@ def build_node_health(
 def node_health_from_k8s(access: ClusterAccess) -> List[Dict[str, Any]]:
     from .k8s_metrics import fetch_node_top_per_node
 
-    output = _run_for_access(access, ["get", "nodes", "-o", "json"])
-    node_items = json.loads(output).get("items", [])
+    node_items = cluster_list_items(access, "nodes")
     try:
         top_by_name = fetch_node_top_per_node(access)
     except Exception:
@@ -1411,10 +1485,8 @@ def node_health_from_k8s(access: ClusterAccess) -> List[Dict[str, Any]]:
 
 
 def list_storage_classes_from_k8s(access: ClusterAccess) -> List[Dict[str, Any]]:
-    output = _run_for_access(access, ["get", "storageclass", "-o", "json"])
-    data = json.loads(output)
     items: List[Dict[str, Any]] = []
-    for sc in data.get("items", []):
+    for sc in cluster_list_items(access, "storageclasses"):
         meta = sc.get("metadata", {}) or {}
         annotations = meta.get("annotations") or {}
         is_default = (
@@ -1575,12 +1647,120 @@ def format_service_target_pods(
     return "-"
 
 
-def _get_namespace_items(access: ClusterAccess, resource_kind: str, namespace: str) -> List[Dict[str, Any]]:
+class DegradedRead(Exception):
+    """A cached read whose kubectl call failed transiently.
+
+    Raised from inside a cache closure so TTLCache does not store the degraded
+    value (an empty list served for minutes as if the namespace were empty);
+    the public wrapper catches it and returns ``value`` exactly as before."""
+
+    def __init__(self, value: Any):
+        super().__init__("degraded read")
+        self.value = value
+
+
+def _degraded_ok(read: Callable[[], Any]) -> Any:
+    try:
+        return read()
+    except DegradedRead as exc:
+        return exc.value
+
+
+# Failures that will not go away on retry — a token that may not list a kind,
+# a kind this cluster does not serve. Their empty result is a real answer and
+# may be cached; anything else (timeouts, refused connections) may not.
+_PERMANENT_READ_FAILURES = (
+    "forbidden",
+    "doesn't have a resource type",
+    "the server could not find the requested resource",
+    "notfound",
+)
+
+
+def _is_permanent_read_failure(message: str) -> bool:
+    lowered = (message or "").lower()
+    return any(marker in lowered for marker in _PERMANENT_READ_FAILURES)
+
+
+def _get_namespace_items(
+    access: ClusterAccess,
+    resource_kind: str,
+    namespace: str,
+    failures: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Items of one kind in a namespace; [] when kubectl fails.
+
+    ``failures`` (optional) collects the kinds whose read failed transiently,
+    so a cached caller can refuse to cache that empty list."""
     try:
         output = _run_for_access(access, ["get", resource_kind, "-n", namespace, "-o", "json"])
         return json.loads(output).get("items", [])
-    except K8sCommandError:
+    except (K8sCommandError, ValueError) as exc:
+        if failures is not None and not _is_permanent_read_failure(str(exc)):
+            failures.append(resource_kind)
         return []
+
+
+# The Secrets tab shows name, type, labels and age; `get secrets -o json`
+# carried every value too (Helm keeps each release revision in a Secret, so a
+# namespace with a few charts is megabytes). These columns are all it reads.
+_SECRET_SUMMARY_JSONPATH = (
+    "jsonpath={range .items[*]}{.metadata.name}{\"\\t\"}{.type}{\"\\t\"}"
+    "{.metadata.creationTimestamp}{\"\\t\"}{.metadata.labels}{\"\\n\"}{end}"
+)
+
+
+def _parse_label_column(text: str) -> Dict[str, str]:
+    text = (text or "").strip()
+    if not text:
+        return {}
+    if text.startswith("{"):
+        try:
+            value = json.loads(text)
+            return {str(k): str(v) for k, v in value.items()} if isinstance(value, dict) else {}
+        except ValueError:
+            return {}
+    if text.startswith("map[") and text.endswith("]"):
+        labels: Dict[str, str] = {}
+        for pair in text[4:-1].split():
+            key, _, value = pair.partition(":")
+            if key:
+                labels[key] = value
+        return labels
+    return {}
+
+
+def _secret_summary_items(
+    access: ClusterAccess, namespace: str, failures: Optional[List[str]] = None
+) -> List[Dict[str, Any]]:
+    """Secrets in a namespace as metadata-only stubs (no ``data``)."""
+    try:
+        output = _run_for_access(
+            access, ["get", "secrets", "-n", namespace, "-o", _SECRET_SUMMARY_JSONPATH]
+        )
+    except K8sCommandError as exc:
+        if failures is not None and not _is_permanent_read_failure(str(exc)):
+            failures.append("secrets")
+        return []
+    items: List[Dict[str, Any]] = []
+    for line in (output or "").splitlines():
+        if not line.strip():
+            continue
+        name, secret_type, created, labels = (line.split("\t") + ["", "", "", ""])[:4]
+        if not name:
+            continue
+        items.append(
+            {
+                "metadata": {
+                    "name": name,
+                    "namespace": namespace,
+                    "creationTimestamp": created or None,
+                    "labels": _parse_label_column(labels),
+                },
+                "type": secret_type or "Opaque",
+            }
+        )
+    return items
 
 
 def read_namespaced_resource_json(
@@ -1663,13 +1843,20 @@ def _namespace_endpoints_by_name(access: ClusterAccess, namespace: str) -> Dict[
     return endpoints_targets_by_name(endpoints_items)
 
 
+_NODE_IP_TTL_SECONDS = int(os.getenv("K8S_NODE_IP_CACHE_SECONDS", "60"))
+
+
 def _node_ips_for_services(access: ClusterAccess, svc_items: List[Dict[str, Any]]) -> List[str]:
     if not any((item.get("spec") or {}).get("type") == "NodePort" for item in svc_items):
         return []
+    # Node addresses barely change; every Services tab load used to list nodes.
     try:
-        nodes_output = _run_for_access(access, ["get", "nodes", "-o", "json"])
-        return _node_ips_from_items(json.loads(nodes_output).get("items", []))
-    except K8sCommandError:
+        return _K8S_READ_CACHE.get_or_compute(
+            f"nodeips:{access.cluster_id}",
+            _NODE_IP_TTL_SECONDS,
+            lambda: _node_ips_from_items(cluster_list_items(access, "nodes")),
+        )
+    except (K8sCommandError, ValueError):
         return []
 
 
@@ -2116,20 +2303,28 @@ def _build_namespace_cronjobs(namespace: str, cj_items: List[Dict[str, Any]]) ->
 
 
 def namespace_resources_from_k8s(
-    access: ClusterAccess, namespace: str, fresh: bool = False
+    access: ClusterAccess,
+    namespace: str,
+    fresh: bool = False,
+    max_age: Optional[float] = None,
 ) -> Dict[str, Any]:
     """All resource lists for a namespace, cached briefly and shared across users.
 
     RBAC filtering happens in the route layer, so the cached payload is safe to
-    share. ``fresh=True`` (manual refresh) bypasses and repopulates the cache."""
+    share. ``fresh=True`` (manual refresh) bypasses and repopulates the cache;
+    ``max_age`` (live polling) accepts a cached copy up to that many seconds
+    old, so N viewers polling together share one kubectl round."""
     key = f"res:{access.cluster_id}:{namespace}:__all__"
     if fresh:
-        _K8S_READ_CACHE.invalidate(key)
-    return _K8S_READ_CACHE.get_or_compute(
-        key,
-        _RESOURCE_LIST_TTL_SECONDS,
-        lambda: _namespace_resources_from_k8s_uncached(access, namespace),
-        stale_ttl=_STALE_SERVE_TTL_SECONDS,
+        _K8S_READ_CACHE.invalidate(key, exact=True)
+    return _degraded_ok(
+        lambda: _K8S_READ_CACHE.get_or_compute(
+            key,
+            _RESOURCE_LIST_TTL_SECONDS,
+            lambda: _namespace_resources_from_k8s_uncached(access, namespace),
+            stale_ttl=_STALE_SERVE_TTL_SECONDS,
+            max_age=max_age,
+        )
     )
 
 
@@ -2142,8 +2337,12 @@ def _namespace_resources_from_k8s_uncached(access: ClusterAccess, namespace: str
         "daemonsets", "jobs", "cronjobs", "configmaps", "secrets", "ingress",
     ]
 
+    failures: List[str] = []
+
     def _fetch(kind: str) -> tuple:
-        return kind, _get_namespace_items(access, kind, namespace)
+        if kind == "secrets":
+            return kind, _secret_summary_items(access, namespace, failures)
+        return kind, _get_namespace_items(access, kind, namespace, failures)
 
     def _fetch_endpoints() -> tuple:
         return "endpoints", _namespace_endpoints_by_name(access, namespace)
@@ -2180,7 +2379,7 @@ def _namespace_resources_from_k8s_uncached(access: ClusterAccess, namespace: str
     top_by_pod = results.get("top", {})
     node_ips = _node_ips_for_services(access, svc_items)
 
-    return {
+    payload = {
         "namespace": namespace,
         "pods": _build_namespace_pods(namespace, pod_items, top_by_pod),
         "deployments": _build_namespace_deployments(namespace, dep_items),
@@ -2194,71 +2393,87 @@ def _namespace_resources_from_k8s_uncached(access: ClusterAccess, namespace: str
         "secrets": _build_namespace_secrets(namespace, secret_items),
         "ingress": _build_namespace_ingress(namespace, ing_items),
     }
+    if failures:
+        raise DegradedRead(payload)
+    return payload
 
 
 def namespace_resource_list_from_k8s(
-    access: ClusterAccess, namespace: str, list_key: str, fresh: bool = False
+    access: ClusterAccess,
+    namespace: str,
+    list_key: str,
+    fresh: bool = False,
+    max_age: Optional[float] = None,
 ) -> Dict[str, Any]:
     """One resource list for a namespace, cached briefly and shared across users.
 
     RBAC filtering happens in the route layer, so the cached payload is safe to
-    share. ``fresh=True`` (manual refresh) bypasses and repopulates the cache."""
+    share. ``fresh=True`` (manual refresh) bypasses and repopulates the cache;
+    ``max_age`` (live polling) accepts a cached copy up to that many seconds
+    old, so N viewers polling together share one kubectl call."""
     if list_key not in NAMESPACE_RESOURCE_LIST_KEYS:
         raise ValueError(f"Unsupported resource type: {list_key}")
     key = f"res:{access.cluster_id}:{namespace}:{list_key}"
     if fresh:
-        _K8S_READ_CACHE.invalidate(key)
-    return _K8S_READ_CACHE.get_or_compute(
-        key,
-        _RESOURCE_LIST_TTL_SECONDS,
-        lambda: _namespace_resource_list_from_k8s_uncached(access, namespace, list_key),
-        stale_ttl=_STALE_SERVE_TTL_SECONDS,
+        _K8S_READ_CACHE.invalidate(key, exact=True)
+    return _degraded_ok(
+        lambda: _K8S_READ_CACHE.get_or_compute(
+            key,
+            _RESOURCE_LIST_TTL_SECONDS,
+            lambda: _namespace_resource_list_from_k8s_uncached(access, namespace, list_key),
+            stale_ttl=_STALE_SERVE_TTL_SECONDS,
+            max_age=max_age,
+        )
     )
 
 
 def _namespace_resource_list_from_k8s_uncached(
     access: ClusterAccess, namespace: str, list_key: str
 ) -> Dict[str, Any]:
+    failures: List[str] = []
     if list_key == "pods":
         from .k8s_metrics import fetch_pod_top_metrics
 
-        pod_items = _get_namespace_items(access, "pods", namespace)
+        pod_items = _get_namespace_items(access, "pods", namespace, failures)
         top_by_pod = fetch_pod_top_metrics(access)
         items = _build_namespace_pods(namespace, pod_items, top_by_pod)
     elif list_key == "services":
-        svc_items = _get_namespace_items(access, "services", namespace)
+        svc_items = _get_namespace_items(access, "services", namespace, failures)
         endpoints_by_name = _namespace_endpoints_by_name(access, namespace)
         node_ips = _node_ips_for_services(access, svc_items)
         items = _build_namespace_services(namespace, svc_items, endpoints_by_name, node_ips)
     elif list_key == "deployments":
-        dep_items = _get_namespace_items(access, "deployments", namespace)
+        dep_items = _get_namespace_items(access, "deployments", namespace, failures)
         items = _build_namespace_deployments(namespace, dep_items)
     elif list_key == "replicasets":
-        rs_items = _get_namespace_items(access, "replicasets", namespace)
+        rs_items = _get_namespace_items(access, "replicasets", namespace, failures)
         items = _build_namespace_replicasets(namespace, rs_items)
     elif list_key == "statefulsets":
-        sts_items = _get_namespace_items(access, "statefulsets", namespace)
+        sts_items = _get_namespace_items(access, "statefulsets", namespace, failures)
         items = _build_namespace_statefulsets(namespace, sts_items)
     elif list_key == "daemonsets":
-        ds_items = _get_namespace_items(access, "daemonsets", namespace)
+        ds_items = _get_namespace_items(access, "daemonsets", namespace, failures)
         items = _build_namespace_daemonsets(namespace, ds_items)
     elif list_key == "jobs":
-        job_items = _get_namespace_items(access, "jobs", namespace)
+        job_items = _get_namespace_items(access, "jobs", namespace, failures)
         items = _build_namespace_jobs(namespace, job_items)
     elif list_key == "configmaps":
-        cm_items = _get_namespace_items(access, "configmaps", namespace)
+        cm_items = _get_namespace_items(access, "configmaps", namespace, failures)
         items = _build_namespace_configmaps(namespace, cm_items)
     elif list_key == "secrets":
-        secret_items = _get_namespace_items(access, "secrets", namespace)
+        secret_items = _secret_summary_items(access, namespace, failures)
         items = _build_namespace_secrets(namespace, secret_items)
     elif list_key == "ingress":
-        ing_items = _get_namespace_items(access, "ingress", namespace)
+        ing_items = _get_namespace_items(access, "ingress", namespace, failures)
         items = _build_namespace_ingress(namespace, ing_items)
     else:
-        cj_items = _get_namespace_items(access, "cronjobs", namespace)
+        cj_items = _get_namespace_items(access, "cronjobs", namespace, failures)
         items = _build_namespace_cronjobs(namespace, cj_items)
 
-    return {"namespace": namespace, list_key: items}
+    payload = {"namespace": namespace, list_key: items}
+    if failures:
+        raise DegradedRead(payload)
+    return payload
 
 
 def namespace_deployment_env_names_from_k8s(
@@ -2273,18 +2488,21 @@ def namespace_deployment_env_names_from_k8s(
     """
     key = f"res:{access.cluster_id}:{namespace}:deployment-env-names"
     if fresh:
-        _K8S_READ_CACHE.invalidate(key)
-    return _K8S_READ_CACHE.get_or_compute(
-        key,
-        _RESOURCE_LIST_TTL_SECONDS,
-        lambda: _deployment_env_names_uncached(access, namespace),
-        stale_ttl=_STALE_SERVE_TTL_SECONDS,
+        _K8S_READ_CACHE.invalidate(key, exact=True)
+    return _degraded_ok(
+        lambda: _K8S_READ_CACHE.get_or_compute(
+            key,
+            _RESOURCE_LIST_TTL_SECONDS,
+            lambda: _deployment_env_names_uncached(access, namespace),
+            stale_ttl=_STALE_SERVE_TTL_SECONDS,
+        )
     )
 
 
 def _deployment_env_names_uncached(access: ClusterAccess, namespace: str) -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {}
-    for item in _get_namespace_items(access, "deployments", namespace):
+    failures: List[str] = []
+    for item in _get_namespace_items(access, "deployments", namespace, failures):
         name = (item.get("metadata") or {}).get("name")
         if not name:
             continue
@@ -2301,7 +2519,12 @@ def _deployment_env_names_uncached(access: ClusterAccess, namespace: str) -> Dic
                     seen.add(var)
                     names.append(var)
         out[name] = names
+    if failures:
+        raise DegradedRead(out)
     return out
+
+
+_POD_ISSUES_TTL_SECONDS = int(os.getenv("K8S_POD_ISSUES_CACHE_SECONDS", "5"))
 
 
 def cluster_pod_issues_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
@@ -2309,34 +2532,56 @@ def cluster_pod_issues_from_k8s(access: ClusterAccess) -> Dict[str, Any]:
 
     A single ``kubectl get pods --all-namespaces`` call (plus one ``top`` call)
     backs the cross-namespace "issues" view so users don't have to open each
-    namespace looking for CrashLoopBackOff / ImagePullBackOff / etc.
+    namespace looking for CrashLoopBackOff / ImagePullBackOff / etc. The scan
+    is user-independent and shared for a few seconds (served stale while one
+    refresh runs); RBAC filtering happens in the route on the result.
     """
+    return _degraded_ok(
+        lambda: _K8S_READ_CACHE.get_or_compute(
+            f"podissues:{access.cluster_id}",
+            _POD_ISSUES_TTL_SECONDS,
+            lambda: _cluster_pod_issues_uncached(access),
+            stale_ttl=_STALE_SERVE_TTL_SECONDS,
+        )
+    )
+
+
+def _cluster_pod_issues_uncached(access: ClusterAccess) -> Dict[str, Any]:
     from collections import defaultdict
     from .k8s_metrics import fetch_pod_top_metrics
 
+    failed = False
     try:
         pod_items = cluster_list_items(access, "pods")
-    except K8sCommandError:
+    except (K8sCommandError, ValueError):
         pod_items = []
+        failed = True
 
-    try:
-        top_by_pod = fetch_pod_top_metrics(access)
-    except Exception:
-        top_by_pod = {}
-
+    # Only problem pods become rows: building a row per pod (metrics, limits,
+    # age) for a few thousand healthy pods was most of this scan's cost.
     by_namespace: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for pod in pod_items:
+        if not is_issue_pod_status(compute_pod_display_status(pod)):
+            continue
         ns = (pod.get("metadata") or {}).get("namespace") or "default"
         by_namespace[ns].append(pod)
 
+    top_by_pod: Dict[Any, Any] = {}
+    if by_namespace:
+        try:
+            top_by_pod = fetch_pod_top_metrics(access)
+        except Exception:
+            top_by_pod = {}
+
     pods: List[Dict[str, Any]] = []
     for ns, items in by_namespace.items():
-        for row in _build_namespace_pods(ns, items, top_by_pod):
-            if is_issue_pod_status(row.get("status")):
-                pods.append(row)
+        pods.extend(_build_namespace_pods(ns, items, top_by_pod))
 
     pods.sort(key=lambda p: ((p.get("namespace") or ""), (p.get("name") or "")))
-    return {"pods": pods, "count": len(pods)}
+    payload = {"pods": pods, "count": len(pods)}
+    if failed:
+        raise DegradedRead(payload)  # an unreadable cluster is not "no issues"
+    return payload
 
 
 def _event_timestamp_value(event: Dict[str, Any]) -> float:
@@ -2381,6 +2626,9 @@ def _normalize_k8s_event(event: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+_FIELD_SELECTOR_VALUE = _re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
+
+
 def namespace_events_from_k8s(
     access: ClusterAccess,
     namespace: str,
@@ -2390,7 +2638,17 @@ def namespace_events_from_k8s(
     limit: Optional[int] = None,
 ) -> Dict[str, Any]:
     require_valid_k8s_names(namespace=namespace)
-    output = _run_for_access(access, ["get", "events", "-n", namespace, "-o", "json"])
+    args = ["get", "events", "-n", namespace, "-o", "json"]
+    # Narrow on the API server when asked about one object: a busy namespace
+    # holds thousands of events. The client-side filter below stays as is.
+    selectors = [
+        f"involvedObject.{field}={value.strip()}"
+        for field, value in (("kind", involved_kind), ("name", involved_name))
+        if value and _FIELD_SELECTOR_VALUE.match(value.strip())
+    ]
+    if selectors:
+        args += ["--field-selector", ",".join(selectors)]
+    output = _run_for_access(access, args)
     raw_items = json.loads(output).get("items", [])
 
     if involved_kind:

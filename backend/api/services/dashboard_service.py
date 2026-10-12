@@ -1126,6 +1126,13 @@ def get_dashboard_summary(cluster_id: str, user: Optional[User] = None) -> Tuple
     if cache_key:
         ttl = _cache_ttl_for_payload(payload)
         with _dashboard_summary_cache_lock:
+            # Keyed per user and cluster: drop expired entries on write so the
+            # dict does not grow with every user/cluster pair ever seen.
+            expired_before = time.time()
+            for stale_key in [
+                k for k, v in _dashboard_summary_cache.items() if v[0] <= expired_before
+            ]:
+                del _dashboard_summary_cache[stale_key]
             _dashboard_summary_cache[cache_key] = (
                 time.time() + ttl,
                 payload,

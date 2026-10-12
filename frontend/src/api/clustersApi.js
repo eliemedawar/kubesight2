@@ -45,16 +45,25 @@ export const listNamespaceConfigResources = (clusterId, namespace) =>
     `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/config-resources`
   );
 
-export const getResourcesByClusterNamespace = (clusterId, namespace, { fresh = false } = {}) =>
+// `fresh` (manual refresh) makes the server re-read the cluster; `maxAge`
+// (live polling) accepts the server's shared copy up to that many seconds old,
+// so every viewer polling the same namespace shares one kubectl call.
+const resourceQuery = ({ fresh = false, maxAge } = {}) => {
+  if (fresh) return { fresh: 1 };
+  if (maxAge > 0) return { maxAge };
+  return undefined;
+};
+
+export const getResourcesByClusterNamespace = (clusterId, namespace, options = {}) =>
   request(
     `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/resources`,
-    { query: fresh ? { fresh: 1 } : undefined }
+    { query: resourceQuery(options) }
   );
 
-export const getResourceListByType = (clusterId, namespace, resourceType, { fresh = false } = {}) =>
+export const getResourceListByType = (clusterId, namespace, resourceType, options = {}) =>
   request(
     `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/resources/${encodeURIComponent(resourceType)}`,
-    { query: fresh ? { fresh: 1 } : undefined }
+    { query: resourceQuery(options) }
   );
 
 export const getClusterPodIssues = (clusterId) =>
