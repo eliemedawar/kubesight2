@@ -120,7 +120,7 @@ def test_receiver_crud_and_policy_dispatch(client, admin_token):
         from api.services.alert_routing_service import dispatch_policy_alert_notifications
 
         alert = {
-            "id": "history-1",
+            "id": "history-crud-1",
             "policyId": policy_id,
             "policyName": "High CPU",
             "severity": "critical",
@@ -322,9 +322,13 @@ def test_repeat_delivery_respects_policy_evaluation_interval(client, admin_token
         assert second["skipped"] == 1
         assert send_email.call_count == 1
 
+        from api.models import AlertRoutingDeliverySent
+
         log = AlertDeliveryLog.query.filter_by(alert_id=alert["id"], status="success").first()
         assert log is not None
-        log.delivered_at = datetime.now(timezone.utc) - timedelta(seconds=61)
+        # The repeat cadence runs off the delivery marker (last success).
+        marker = AlertRoutingDeliverySent.query.filter_by(alert_id=alert["id"]).one()
+        marker.sent_at = datetime.now(timezone.utc) - timedelta(seconds=61)
         db.session.commit()
 
         third = dispatch_policy_alert_notifications(alert)

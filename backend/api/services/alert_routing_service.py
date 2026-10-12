@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import logging
+import os
+import threading
+import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, urlunparse
 
 from ..db import db
-from ..email_delivery import EmailDeliveryError, send_alert_email, smtp_is_configured
+from ..email_delivery import EmailDeliveryError, SmtpSession, send_alert_email, smtp_is_configured
 from ..models import (
     AlertDeliveryLog,
     AlertPolicy,
@@ -21,6 +27,8 @@ from ..models import (
     User,
 )
 from ..secret_encryption import decrypt_secret, encrypt_secret
+
+logger = logging.getLogger(__name__)
 
 VALID_RECEIVER_TYPES = {"email", "webhook", "slack", "user", "role"}
 # Receiver types whose recipients are email addresses (delivered over SMTP).
@@ -837,28 +845,123 @@ def send_receiver_test(receiver_id: int) -> Dict[str, Any]:
         raise EmailDeliveryError(str(exc)) from exc
 
 
-def _destinations_for_policy(policy_id: int) -> List[Tuple[AlertRoutingReceiver, str]]:
-    policy = AlertPolicy.query.get(policy_id)
-    if not policy:
-        return []
+@dataclass
+class ReceiverSnapshot:
+    """A detached, thread-safe copy of a receiver for one delivery.
 
-    destinations: Dict[int, Tuple[AlertRoutingReceiver, str]] = {}
-    for group in list(policy.notification_receiver_groups or []):
-        if not group.enabled:
-            continue
-        for receiver in list(group.members or []):
-            if not receiver.enabled:
+    Deliveries run on worker threads that must not touch ORM objects owned by
+    the scheduler's session, so everything a delivery (and the receiver filter)
+    needs is copied here on the calling thread. Email recipients are resolved
+    on the calling thread too, once per sweep (``emails``).
+    """
+
+    id: int
+    name: str
+    receiver_type: str
+    email_address: Optional[str] = None
+    user_id: Optional[int] = None
+    role_id: Optional[int] = None
+    url: Optional[str] = None
+    http_method: str = "POST"
+    headers: Dict[str, Any] = field(default_factory=dict)
+    secret_encrypted: Optional[str] = None
+    severity_filter: List[str] = field(default_factory=list)
+    namespace_filter: Optional[str] = None
+    cluster_filter: Optional[str] = None
+    emails: Optional[List[str]] = None
+
+
+def snapshot_receiver(receiver: Any) -> ReceiverSnapshot:
+    if isinstance(receiver, ReceiverSnapshot):
+        return receiver
+    return ReceiverSnapshot(
+        id=receiver.id,
+        name=receiver.name or "",
+        receiver_type=receiver.receiver_type or "",
+        email_address=receiver.email_address,
+        user_id=receiver.user_id,
+        role_id=receiver.role_id,
+        url=receiver.url,
+        http_method=receiver.http_method or "POST",
+        headers=dict(receiver.headers) if isinstance(receiver.headers, dict) else {},
+        secret_encrypted=receiver.secret_encrypted,
+        severity_filter=list(receiver.severity_filter)
+        if isinstance(receiver.severity_filter, list)
+        else [],
+        namespace_filter=receiver.namespace_filter,
+        cluster_filter=receiver.cluster_filter,
+    )
+
+
+def _snapshot_emails(snapshot: ReceiverSnapshot) -> List[str]:
+    """Resolve (once) and cache the recipient emails of an email-channel snapshot."""
+    if snapshot.emails is not None:
+        return snapshot.emails
+    if snapshot.receiver_type not in EMAIL_CHANNEL_TYPES:
+        snapshot.emails = []
+        return snapshot.emails
+    if snapshot.receiver_type == "user":
+        user = User.query.get(snapshot.user_id) if snapshot.user_id else None
+        candidates = [user.email] if user and user.is_active else []
+    elif snapshot.receiver_type == "role":
+        candidates = []
+        if snapshot.role_id:
+            candidates = [
+                email
+                for (email,) in db.session.query(User.email).filter(
+                    User.role_id == snapshot.role_id,
+                    User.is_active.is_(True),
+                )
+            ]
+    else:
+        candidates = [snapshot.email_address]
+    seen: set = set()
+    out: List[str] = []
+    for addr in candidates:
+        address = (addr or "").strip()
+        if "@" in address and address.lower() not in seen:
+            seen.add(address.lower())
+            out.append(address)
+    snapshot.emails = out
+    return out
+
+
+def destinations_for_policies(
+    policy_ids: List[int],
+) -> Dict[int, List[Tuple[ReceiverSnapshot, str]]]:
+    """Destinations of several policies at once, as detached snapshots.
+
+    One receiver shared by several policies is snapshotted once, so its email
+    recipients are resolved once per sweep, not once per alert.
+    """
+    ids = sorted({int(pid) for pid in policy_ids if pid})
+    if not ids:
+        return {}
+    snapshots: Dict[int, ReceiverSnapshot] = {}
+
+    def _snap(receiver: AlertRoutingReceiver) -> ReceiverSnapshot:
+        if receiver.id not in snapshots:
+            snapshots[receiver.id] = snapshot_receiver(receiver)
+        return snapshots[receiver.id]
+
+    out: Dict[int, List[Tuple[ReceiverSnapshot, str]]] = {}
+    for policy in AlertPolicy.query.filter(AlertPolicy.id.in_(ids)).all():
+        destinations: Dict[int, Tuple[ReceiverSnapshot, str]] = {}
+        for group in list(policy.notification_receiver_groups or []):
+            if not group.enabled:
                 continue
-            if receiver.id not in destinations:
-                destinations[receiver.id] = (receiver, group.name)
+            for receiver in list(group.members or []):
+                if receiver.enabled and receiver.id not in destinations:
+                    destinations[receiver.id] = (_snap(receiver), group.name)
+        for receiver in list(policy.notification_receivers or []):
+            if receiver.enabled and receiver.id not in destinations:
+                destinations[receiver.id] = (_snap(receiver), "")
+        out[policy.id] = list(destinations.values())
+    return out
 
-    for receiver in list(policy.notification_receivers or []):
-        if not receiver.enabled:
-            continue
-        if receiver.id not in destinations:
-            destinations[receiver.id] = (receiver, "")
 
-    return list(destinations.values())
+def _destinations_for_policy(policy_id: int) -> List[Tuple[ReceiverSnapshot, str]]:
+    return destinations_for_policies([policy_id]).get(int(policy_id), [])
 
 
 def _slack_alert_payload(alert: Dict[str, Any]) -> Dict[str, Any]:
@@ -918,70 +1021,151 @@ def _policy_repeat_interval_seconds(policy_id: Optional[int]) -> int:
     return int(policy.evaluation_interval_seconds or DEFAULT_EVALUATION_INTERVAL_SECONDS)
 
 
+# ── Delivery bookkeeping ────────────────────────────────────────────────────
+# ``alert_routing_delivery_sent`` holds, per (alert, receiver):
+#   firing | active  -> time of the last successful delivery (normal cadence)
+#   retry-first      -> first failed attempt of the current failure streak
+#   retry-last       -> latest failed attempt of the current failure streak
+# A success clears both retry markers. Markers of alerts that are no longer
+# active are pruned by the sweep, so the table stays small.
+_SUCCESS_MARKERS = ("firing", "active")
+_RETRY_FIRST = "retry-first"
+_RETRY_LAST = "retry-last"
+_RETRY_MARKERS = (_RETRY_FIRST, _RETRY_LAST)
+# First retry after a failed delivery waits this long; each further failure
+# doubles the wait, never beyond the policy's repeat interval.
+RETRY_BASE_SECONDS = 60
+_IN_CHUNK = 500
+
+MarkerMap = Dict[Tuple[str, int], Dict[str, datetime]]
+
+
+def _aware(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def load_delivery_markers(alert_ids: List[str]) -> MarkerMap:
+    """All delivery markers of the given alerts, in one IN query per 500 ids."""
+    ids = sorted({str(alert_id) for alert_id in alert_ids if alert_id})
+    out: MarkerMap = {}
+    for start in range(0, len(ids), _IN_CHUNK):
+        chunk = ids[start : start + _IN_CHUNK]
+        rows = db.session.query(
+            AlertRoutingDeliverySent.alert_id,
+            AlertRoutingDeliverySent.receiver_id,
+            AlertRoutingDeliverySent.alert_status,
+            AlertRoutingDeliverySent.sent_at,
+        ).filter(AlertRoutingDeliverySent.alert_id.in_(chunk))
+        for alert_id, receiver_id, status, sent_at in rows:
+            out.setdefault((alert_id, int(receiver_id)), {})[status] = _aware(sent_at)
+    return out
+
+
+def next_delivery_at(markers: Dict[str, datetime], interval_seconds: int) -> Optional[datetime]:
+    """When the next delivery attempt is due (None = now).
+
+    Normal cadence: one delivery per repeat interval after the last success.
+    After a failure, retry with exponential backoff from ``RETRY_BASE_SECONDS``
+    (60 s, 60 s, 120 s, 240 s, ... measured from the start of the failure
+    streak), capped at the repeat interval — so a dead receiver is not retried
+    on every 15 s tick, and a recovered one is back on its normal cadence after
+    its next success.
+    """
+    interval = max(1, int(interval_seconds))
+    successes = [markers[key] for key in _SUCCESS_MARKERS if markers.get(key)]
+    last_success = max(successes) if successes else None
+    last_failure = markers.get(_RETRY_LAST)
+    if last_failure and (last_success is None or last_failure >= last_success):
+        first_failure = markers.get(_RETRY_FIRST) or last_failure
+        streak = max(0.0, (last_failure - first_failure).total_seconds())
+        delay = min(interval, max(RETRY_BASE_SECONDS, streak))
+        return last_failure + timedelta(seconds=delay)
+    if last_success:
+        return last_success + timedelta(seconds=interval)
+    return None
+
+
 def _due_for_repeat_delivery(
     alert_id: str,
     receiver_id: int,
     alert_status: str,
     interval_seconds: int,
+    markers: Optional[MarkerMap] = None,
+    now: Optional[datetime] = None,
 ) -> bool:
-    """Return True when enough time elapsed since the last successful delivery."""
+    """True when a delivery attempt for this alert/receiver is due now."""
     if alert_status not in {"firing", "active"}:
         return False
+    if markers is None:
+        markers = load_delivery_markers([alert_id])
+    due_at = next_delivery_at(markers.get((alert_id, int(receiver_id)), {}), interval_seconds)
+    return due_at is None or (now or datetime.now(timezone.utc)) >= due_at
 
-    last = (
-        AlertDeliveryLog.query.filter_by(
-            alert_id=alert_id,
-            receiver_id=receiver_id,
-            status="success",
+
+def _upsert_marker(alert_id: str, receiver_id: int, status: str, at: datetime) -> None:
+    row = AlertRoutingDeliverySent.query.filter_by(
+        alert_id=alert_id, receiver_id=receiver_id, alert_status=status
+    ).first()
+    if row:
+        row.sent_at = at
+        return
+    db.session.add(
+        AlertRoutingDeliverySent(
+            alert_id=alert_id, receiver_id=receiver_id, alert_status=status, sent_at=at
         )
-        .order_by(AlertDeliveryLog.delivered_at.desc())
-        .first()
     )
-    if not last or not last.delivered_at:
-        return True
-
-    last_at = last.delivered_at
-    if last_at.tzinfo is None:
-        last_at = last_at.replace(tzinfo=timezone.utc)
-    elapsed = (datetime.now(timezone.utc) - last_at).total_seconds()
-    return elapsed >= max(1, int(interval_seconds))
 
 
 def _mark_delivered(alert_id: str, receiver_id: int, alert_status: str) -> None:
     now = datetime.now(timezone.utc)
-    row = AlertRoutingDeliverySent.query.filter_by(
-        alert_id=alert_id,
-        receiver_id=receiver_id,
-        alert_status=alert_status,
+    _upsert_marker(alert_id, receiver_id, alert_status, now)
+    AlertRoutingDeliverySent.query.filter(
+        AlertRoutingDeliverySent.alert_id == alert_id,
+        AlertRoutingDeliverySent.receiver_id == receiver_id,
+        AlertRoutingDeliverySent.alert_status.in_(_RETRY_MARKERS),
+    ).delete(synchronize_session=False)
+
+
+def _mark_failed(alert_id: str, receiver_id: int) -> None:
+    now = datetime.now(timezone.utc)
+    _upsert_marker(alert_id, receiver_id, _RETRY_LAST, now)
+    first = AlertRoutingDeliverySent.query.filter_by(
+        alert_id=alert_id, receiver_id=receiver_id, alert_status=_RETRY_FIRST
     ).first()
-    if row:
-        row.sent_at = now
-        return
-    db.session.add(
-        AlertRoutingDeliverySent(
-            alert_id=alert_id,
-            receiver_id=receiver_id,
-            alert_status=alert_status,
-            sent_at=now,
+    if first is None:
+        db.session.add(
+            AlertRoutingDeliverySent(
+                alert_id=alert_id, receiver_id=receiver_id, alert_status=_RETRY_FIRST, sent_at=now
+            )
         )
-    )
 
 
-def _deliver_to_receiver(receiver: AlertRoutingReceiver, alert: Dict[str, Any]) -> None:
+def _deliver_to_receiver(receiver: Any, alert: Dict[str, Any]) -> None:
+    """Send one alert to one receiver (an ORM row or a ReceiverSnapshot).
+
+    Email channels: all recipients go over a single SMTP session (one connect
+    and login). Fails only when every recipient failed.
+    """
     if receiver.receiver_type in EMAIL_CHANNEL_TYPES:
         if not smtp_is_configured():
             raise EmailDeliveryError("SMTP is not configured.")
-        addresses = resolve_receiver_emails(receiver)
+        if isinstance(receiver, ReceiverSnapshot):
+            addresses = _snapshot_emails(receiver)
+        else:
+            addresses = resolve_receiver_emails(receiver)
         if not addresses:
             raise EmailDeliveryError(
                 "No active recipients for this receiver (user disabled or no email)."
             )
         errors: List[str] = []
-        for address in addresses:
-            try:
-                send_alert_email(address, alert)
-            except EmailDeliveryError as exc:
-                errors.append(f"{address}: {exc}")
+        with SmtpSession() as smtp:
+            for address in addresses:
+                try:
+                    send_alert_email(address, alert, session=smtp)
+                except EmailDeliveryError as exc:
+                    errors.append(f"{address}: {exc}")
         if errors and len(errors) == len(addresses):
             raise EmailDeliveryError("; ".join(errors))
         return
@@ -994,11 +1178,151 @@ def _deliver_to_receiver(receiver: AlertRoutingReceiver, alert: Dict[str, Any]) 
     _post_webhook(receiver, payload)
 
 
+# ── Delivery queue ──────────────────────────────────────────────────────────
+# The scheduler tick only decides WHAT is due; the sending (webhooks block up
+# to 10 s, SMTP up to 30 s) happens on a small pool, and each worker writes its
+# own delivery log row and markers. A dead receiver therefore costs the tick
+# nothing, and an (alert, receiver) pair still in flight is never queued twice.
+# Tests (app.config["TESTING"]) send inline so results are deterministic.
+DELIVERY_WORKERS = max(1, int(os.getenv("ALERT_DELIVERY_WORKERS", "4") or 4))
+_executor: Optional[ThreadPoolExecutor] = None
+_executor_lock = threading.Lock()
+_in_flight: set = set()
+_in_flight_lock = threading.Lock()
+# Tests flip this to exercise the pool path.
+_FORCE_ASYNC = False
+
+
+@dataclass
+class _DeliveryJob:
+    alert_id: str
+    alert_status: str
+    alert: Dict[str, Any]
+    receiver: ReceiverSnapshot
+    group_name: str = ""
+
+
+def _deliver_inline() -> bool:
+    if _FORCE_ASYNC:
+        return False
+    try:
+        from flask import current_app
+
+        return bool(current_app.config.get("TESTING"))
+    except Exception:
+        return True
+
+
+def _get_executor() -> ThreadPoolExecutor:
+    global _executor
+    with _executor_lock:
+        if _executor is None:
+            _executor = ThreadPoolExecutor(
+                max_workers=DELIVERY_WORKERS, thread_name_prefix="alert-delivery"
+            )
+        return _executor
+
+
+def _record_attempt(job: _DeliveryJob, error: Optional[str]) -> None:
+    """Write the markers and the delivery log row for one attempt."""
+    try:
+        if error is None:
+            _mark_delivered(job.alert_id, job.receiver.id, job.alert_status)
+        else:
+            _mark_failed(job.alert_id, job.receiver.id)
+        _record_delivery_log(
+            alert_id=job.alert_id,
+            receiver=job.receiver,
+            status="success" if error is None else "failed",
+            error_message=error,
+            alert=job.alert,
+            group_name=job.group_name,
+        )
+        db.session.commit()
+        return
+    except Exception:
+        db.session.rollback()
+        logger.exception(
+            "Could not record alert delivery markers: alert=%s receiver=%s",
+            job.alert_id,
+            job.receiver.id,
+        )
+    try:  # at least keep the log row
+        _record_delivery_log(
+            alert_id=job.alert_id,
+            receiver=job.receiver,
+            status="success" if error is None else "failed",
+            error_message=error,
+            alert=job.alert,
+            group_name=job.group_name,
+        )
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+
+
+def _execute_job(job: _DeliveryJob) -> Optional[str]:
+    """Deliver and record one job. Returns the error text, or None on success."""
+    try:
+        _deliver_to_receiver(job.receiver, job.alert)
+        error = None
+    except Exception as exc:  # noqa: BLE001 — every failure is logged, never raised
+        error = str(exc) or exc.__class__.__name__
+    _record_attempt(job, error)
+    return error
+
+
+def _submit_job(job: _DeliveryJob) -> bool:
+    """Queue a job on the pool. False when this alert/receiver is in flight."""
+    from flask import current_app
+
+    key = (job.alert_id, job.receiver.id)
+    with _in_flight_lock:
+        if key in _in_flight:
+            return False
+        _in_flight.add(key)
+    app = current_app._get_current_object()
+
+    def _task() -> None:
+        try:
+            with app.app_context():
+                try:
+                    _execute_job(job)
+                finally:
+                    db.session.remove()
+        except Exception:
+            logger.exception("Alert delivery worker failed: alert=%s", job.alert_id)
+        finally:
+            with _in_flight_lock:
+                _in_flight.discard(key)
+
+    try:
+        _get_executor().submit(_task)
+    except Exception:
+        with _in_flight_lock:
+            _in_flight.discard(key)
+        raise
+    return True
+
+
+def wait_for_pending_deliveries(timeout: float = 10.0) -> bool:
+    """Block until every queued delivery finished (tests, graceful shutdown)."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        with _in_flight_lock:
+            if not _in_flight:
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+
+
 def _dispatch_to_destinations(
     alert: Dict[str, Any],
-    destinations: List[Tuple[AlertRoutingReceiver, str]],
+    destinations: List[Tuple[Any, str]],
     *,
     repeat_interval_seconds: Optional[int] = None,
+    markers: Optional[MarkerMap] = None,
 ) -> Dict[str, Any]:
     alert_id = str(alert.get("id") or "").strip()
     alert_status = str(alert.get("status") or "firing").strip().lower()
@@ -1008,50 +1332,51 @@ def _dispatch_to_destinations(
     if alert_status not in {"firing", "active"}:
         return {"sent": 0, "skipped": 0, "errors": []}
 
-    interval_seconds = _policy_repeat_interval_seconds(
-        int(alert["policyId"]) if alert.get("policyId") else None
-    )
     if repeat_interval_seconds is not None:
         interval_seconds = max(1, int(repeat_interval_seconds))
+    else:
+        interval_seconds = _policy_repeat_interval_seconds(
+            int(alert["policyId"]) if alert.get("policyId") else None
+        )
+    if markers is None:
+        markers = load_delivery_markers([alert_id])
+    inline = _deliver_inline()
+    now = datetime.now(timezone.utc)
 
-    summary: Dict[str, Any] = {"sent": 0, "skipped": 0, "filtered": 0, "errors": []}
+    summary: Dict[str, Any] = {"sent": 0, "queued": 0, "skipped": 0, "filtered": 0, "errors": []}
     for receiver, group_name in destinations:
         # Receiver filters apply on every path (policy alerts, groups,
         # operational alerts) because they all funnel through here.
         if not receiver_matches_alert(receiver, alert):
             summary["filtered"] += 1
             continue
-        if not _due_for_repeat_delivery(alert_id, receiver.id, alert_status, interval_seconds):
+        if not _due_for_repeat_delivery(
+            alert_id, receiver.id, alert_status, interval_seconds, markers=markers, now=now
+        ):
             summary["skipped"] += 1
             continue
-        try:
-            _deliver_to_receiver(receiver, alert)
-            _mark_delivered(alert_id, receiver.id, alert_status)
-            _record_delivery_log(
-                alert_id=alert_id,
-                receiver=receiver,
-                status="success",
-                alert=alert,
-                group_name=group_name,
-            )
-            db.session.commit()
-            summary["sent"] += 1
-        except Exception as exc:
-            db.session.rollback()
-            _record_delivery_log(
-                alert_id=alert_id,
-                receiver=receiver,
-                status="failed",
-                error_message=str(exc),
-                alert=alert,
-                group_name=group_name,
-            )
-            try:
-                db.session.commit()
-            except Exception:
-                db.session.rollback()
-            label = f"{group_name}: {receiver.name}" if group_name else receiver.name
-            summary["errors"].append(f"{label}: {exc}")
+        snapshot = snapshot_receiver(receiver)
+        if snapshot.receiver_type in EMAIL_CHANNEL_TYPES:
+            _snapshot_emails(snapshot)  # resolve on this thread, not the worker
+        job = _DeliveryJob(
+            alert_id=alert_id,
+            alert_status=alert_status,
+            alert=dict(alert),
+            receiver=snapshot,
+            group_name=group_name,
+        )
+        if inline:
+            error = _execute_job(job)
+            if error is None:
+                summary["sent"] += 1
+            else:
+                label = f"{group_name}: {snapshot.name}" if group_name else snapshot.name
+                summary["errors"].append(f"{label}: {error}")
+            continue
+        if _submit_job(job):
+            summary["queued"] += 1
+        else:
+            summary["skipped"] += 1  # previous attempt still in flight
 
     return summary
 
@@ -1075,15 +1400,30 @@ def notify_operational_alert(alert: Dict[str, Any]) -> Dict[str, Any]:
     return _dispatch_to_destinations(payload, destinations, repeat_interval_seconds=1)
 
 
-def dispatch_policy_alert_notifications(alert: Dict[str, Any]) -> Dict[str, Any]:
+def dispatch_policy_alert_notifications(
+    alert: Dict[str, Any],
+    *,
+    destinations: Optional[List[Tuple[Any, str]]] = None,
+    interval_seconds: Optional[int] = None,
+    markers: Optional[MarkerMap] = None,
+) -> Dict[str, Any]:
+    """Deliver a policy alert to its receivers.
+
+    The sweep passes ``destinations``/``interval_seconds``/``markers`` it
+    resolved once for all alerts; single-alert callers leave them out.
+    """
     policy_id = alert.get("policyId")
     if not policy_id:
         return {"sent": 0, "skipped": 0, "errors": ["Policy alert missing policyId"]}
-    interval_seconds = _policy_repeat_interval_seconds(int(policy_id))
+    if interval_seconds is None:
+        interval_seconds = _policy_repeat_interval_seconds(int(policy_id))
+    if destinations is None:
+        destinations = _destinations_for_policy(int(policy_id))
     return _dispatch_to_destinations(
         alert,
-        _destinations_for_policy(int(policy_id)),
+        destinations,
         repeat_interval_seconds=interval_seconds,
+        markers=markers,
     )
 
 
@@ -1091,12 +1431,54 @@ def prune_delivery_markers(active_alert_ids: List[str]) -> int:
     """Delete delivery markers for alerts that are no longer active.
 
     Called from the scheduler sweep (never from a read path). With no active
-    alerts at all every marker is stale.
+    alerts at all every marker is stale. Reads the (small) set of marker alert
+    ids first and only issues a DELETE + commit when something is stale.
     """
-    query = AlertRoutingDeliverySent.query
-    ids = [str(alert_id) for alert_id in active_alert_ids if alert_id]
-    if ids:
-        query = query.filter(AlertRoutingDeliverySent.alert_id.notin_(ids))
-    removed = query.delete(synchronize_session=False)
+    active = {str(alert_id) for alert_id in active_alert_ids if alert_id}
+    existing = {
+        alert_id
+        for (alert_id,) in db.session.query(AlertRoutingDeliverySent.alert_id).distinct()
+    }
+    stale = sorted(existing - active)
+    if not stale:
+        return 0
+    removed = 0
+    for start in range(0, len(stale), _IN_CHUNK):
+        chunk = stale[start : start + _IN_CHUNK]
+        removed += int(
+            AlertRoutingDeliverySent.query.filter(
+                AlertRoutingDeliverySent.alert_id.in_(chunk)
+            ).delete(synchronize_session=False)
+            or 0
+        )
+    db.session.commit()
+    return removed
+
+
+def delivery_log_retention_days() -> Optional[int]:
+    """ALERT_DELIVERY_LOG_RETENTION_DAYS; unset, invalid or <= 0 = keep forever."""
+    raw = os.getenv("ALERT_DELIVERY_LOG_RETENTION_DAYS", "").strip()
+    if not raw:
+        return None
+    try:
+        days = int(raw)
+    except ValueError:
+        return None
+    return days if days > 0 else None
+
+
+def prune_delivery_logs(*, now: Optional[datetime] = None) -> int:
+    """Opt-in retention: delete delivery log rows older than the retention window.
+
+    Off unless ALERT_DELIVERY_LOG_RETENTION_DAYS is set to a positive number of
+    days. Returns the number of rows deleted.
+    """
+    days = delivery_log_retention_days()
+    if not days:
+        return 0
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=days)
+    removed = AlertDeliveryLog.query.filter(AlertDeliveryLog.delivered_at < cutoff).delete(
+        synchronize_session=False
+    )
     db.session.commit()
     return int(removed or 0)
