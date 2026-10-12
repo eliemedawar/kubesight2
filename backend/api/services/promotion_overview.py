@@ -69,8 +69,14 @@ def pending_changes() -> Dict[Tuple[str, str, str], List[Tuple[str, int]]]:
 
     out: Dict[Tuple[str, str, str], List[Tuple[str, int]]] = {}
     try:
+        from sqlalchemy.orm import load_only
+
         items = (
-            ChangeBundleItem.query.join(ChangeBundle, ChangeBundleItem.bundle_id == ChangeBundle.id)
+            ChangeBundleItem.query.options(load_only(
+                ChangeBundleItem.id, ChangeBundleItem.bundle_id, ChangeBundleItem.cluster_id,
+                ChangeBundleItem.namespace, ChangeBundleItem.resource_name, ChangeBundleItem.yaml_preview,
+            ))
+            .join(ChangeBundle, ChangeBundleItem.bundle_id == ChangeBundle.id)
             .filter(ChangeBundle.status.in_(("pending_approval", "approved", "scheduled", "deploying")))
             .all()
         )

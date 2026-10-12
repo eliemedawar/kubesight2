@@ -405,7 +405,9 @@ def _bundle_states(ids: List[int]) -> Dict[int, str]:
         return {}
     from ..models import ChangeBundle
 
-    return {b.id: b.status for b in ChangeBundle.query.filter(ChangeBundle.id.in_(ids)).all()}
+    # Only the status: the board never needs a bundle's items or votes.
+    rows = db.session.query(ChangeBundle.id, ChangeBundle.status).filter(ChangeBundle.id.in_(ids)).all()
+    return {bundle_id: status for bundle_id, status in rows}
 
 
 def serialize_release(row: PromotionRelease, bundle_states: Optional[Dict[int, str]] = None) -> Dict[str, Any]:
