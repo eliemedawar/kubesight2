@@ -23,7 +23,7 @@ from ..k8s_metrics import fetch_pod_top_metrics, format_k8s_age, metrics_server_
 from ..k8s_provider import (
     K8sCommandError,
     list_clusters_from_k8s,
-    namespace_resources_from_k8s,
+    namespace_resource_list_from_k8s,
     resolve_cluster_access,
     should_use_real_k8s,
 )
@@ -1471,6 +1471,48 @@ def _mock_detail(cluster_id: str, namespace: str, app_name: str) -> Optional[Dic
     }
 
 
+# The kinds an application's detail page shows (see _filter_resources_for_app),
+# keyed as the namespace bundle names them. ReplicaSets, Jobs and CronJobs are
+# not read: the full bundle fetched them for nothing.
+_DETAIL_LIST_KEYS = {
+    "pods": "pods",
+    "deployments": "deployments",
+    "statefulsets": "statefulsets",
+    "daemonsets": "daemonsets",
+    "services": "services",
+    "ingress": "ingress",
+    "configmaps": "configMaps",
+    "secrets": "secrets",
+}
+
+
+def _namespace_resources_for_detail(access: ClusterAccess, namespace: str) -> Dict[str, Any]:
+    """The namespace lists an app detail needs, from the per-list cache the
+    Resources page fills too (kubectl only, so the lists load side by side)."""
+    from ..ttl_cache import caching_disabled
+
+    def _one(list_key: str):
+        return list_key, namespace_resource_list_from_k8s(access, namespace, list_key).get(list_key, [])
+
+    keys = list(_DETAIL_LIST_KEYS)
+    if caching_disabled():
+        results = [_one(key) for key in keys]  # tests: stay on the app context
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(_one, keys))
+    payload: Dict[str, Any] = {
+        "namespace": namespace,
+        "replicasets": [],
+        "jobs": [],
+        "cronjobs": [],
+    }
+    for list_key, items in results:
+        payload[_DETAIL_LIST_KEYS[list_key]] = items
+    return payload
+
+
 def get_inventory_detail(user: Optional[User], inventory_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
     parsed = parse_inventory_id(inventory_id)
     if not parsed:
@@ -1486,7 +1528,7 @@ def get_inventory_detail(user: Optional[User], inventory_id: str) -> Tuple[Optio
         if not access:
             return None, "Cluster not found", 404
         try:
-            namespace_resources = namespace_resources_from_k8s(access, namespace)
+            namespace_resources = _namespace_resources_for_detail(access, namespace)
         except K8sCommandError as exc:
             return None, str(exc), 503
         list_row = _find_inventory_row_for_detail(
