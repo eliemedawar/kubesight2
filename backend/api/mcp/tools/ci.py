@@ -1350,9 +1350,9 @@ def _source_error(exc: Exception) -> ToolError:
     "kubesight_repo_revisions",
     permission="ci_services:view",
     description=(
-        "The branches, tags and recent commits of a service's repository. Use "
-        "this to find the revision to read code at, or to check that a branch a "
-        "build named still exists."
+        "The branches of a service's repository (and its tags and recent commits "
+        "when asked through kinds). Use this to find the revision to read code "
+        "at, or to check that a branch a build named still exists."
     ),
     schema={
         "type": "object",
@@ -1361,7 +1361,10 @@ def _source_error(exc: Exception) -> ToolError:
             "kinds": {
                 "type": "array",
                 "items": {"type": "string", "enum": ["branch", "tag", "commit"]},
-                "description": "Narrows the fetch. Defaults to all three.",
+                "description": (
+                    "What to fetch. Defaults to branches only; ask for tags or "
+                    "commits when you need them."
+                ),
             },
             "limit": {"type": "integer", "minimum": 1, "maximum": MAX_ROWS},
         },
@@ -1377,8 +1380,8 @@ def _repo_revisions(arguments: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(requested, str):
         requested = [requested]
     kinds = tuple(
-        kind for kind in (requested or []) if kind in ("branch", "tag", "commit")
-    )
+        kind for kind in (requested or ["branch"]) if kind in ("branch", "tag", "commit")
+    ) or ("branch",)
     try:
         payload = catalog.list_branches(row, kinds=kinds)
     except (catalog.CatalogError, SourceError, ValueError) as exc:
@@ -1561,10 +1564,16 @@ def _builds_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
     if arguments.get("service"):
         service_id = _service_or_error(arguments["service"]).id
 
-    rows, total = engine.list_builds(
-        service_id=service_id,
-        status=str(arguments.get("status") or "") or None,
-        limit=_limit(arguments),
+    status = str(arguments.get("status") or "") or None
+    limit = _limit(arguments)
+    rows, _ = engine.list_builds(
+        service_id=service_id, status=status, limit=limit, with_total=False, with_service=True
+    )
+    # Counted only when the page is full: a short page is the whole answer.
+    total = (
+        len(rows)
+        if len(rows) < limit
+        else engine.list_builds(service_id=service_id, status=status, limit=1)[1]
     )
     return {
         "count": len(rows),
@@ -1661,14 +1670,15 @@ def _build_logs(arguments: Dict[str, Any]) -> Dict[str, Any]:
     except (TypeError, ValueError):
         tail = 200
 
-    payload = logs.read(stage_id, after_seq=0, limit=MAX_LOG_LINES * 4)
-    lines = [line["content"] for line in payload.get("lines") or []]
+    # The LAST lines, read newest-first by seq. Reading from the start and
+    # slicing showed the wrong part of any stage longer than the read.
+    payload = logs.read_tail(stage.id, tail)
     return {
         "build": build_id,
         "stage": {"id": stage.id, "name": stage.name, "status": stage.status,
                   "exitCode": stage.exit_code, "error": stage.error},
-        "truncated": len(lines) > tail,
-        "lines": lines[-tail:],
+        "truncated": bool(payload["truncated"]),
+        "lines": [line["content"] for line in payload["lines"]],
     }
 
 
@@ -1768,8 +1778,7 @@ def _build_failure(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     explained = []
     for stage in failed:
-        payload = logs.read(stage.id, after_seq=0, limit=MAX_LOG_LINES * 4)
-        lines = [line["content"] for line in payload.get("lines") or []]
+        payload = logs.read_tail(stage.id, tail)
         explained.append(
             {
                 "id": stage.id,
@@ -1777,8 +1786,8 @@ def _build_failure(arguments: Dict[str, Any]) -> Dict[str, Any]:
                 "status": stage.status,
                 "exitCode": stage.exit_code,
                 "error": stage.error,
-                "truncated": len(lines) > tail,
-                "tail": lines[-tail:],
+                "truncated": bool(payload["truncated"]),
+                "tail": [line["content"] for line in payload["lines"]],
             }
         )
 
