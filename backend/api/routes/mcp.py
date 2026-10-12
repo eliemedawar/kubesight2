@@ -75,9 +75,19 @@ def mcp_endpoint():
     # Advertise only what this token could actually call. ``tools.call``
     # re-checks every permission, so this is not the boundary — it is what keeps
     # a viewer's agent from planning around sixteen tools that will refuse it.
+    # Only ``tools/list`` reads the catalog, so a ``tools/call`` (most traffic)
+    # does not build and filter ninety-odd definitions it never sends.
+    items = message if isinstance(message, list) else [message]
+    lists_tools = any(
+        isinstance(item, dict) and item.get("method") == "tools/list" for item in items
+    )
     body, has_body = protocol.batch(
         message,
-        tools=access.filter_definitions(tools.definitions(user=user), policy),
+        tools=(
+            access.filter_definitions(tools.definitions(user=user), policy)
+            if lists_tools
+            else []
+        ),
         call=call,
         server_version=SERVER_VERSION,
     )
