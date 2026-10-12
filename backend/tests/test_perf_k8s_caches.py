@@ -46,3 +46,94 @@ def test_rollout_reads_do_not_invalidate_caches(app):
             "c1", ["rollout", "restart", "deployment/x", "-n", "ns"]
         )
         assert inv.call_count == 1
+
+
+# --- TTLCache: max_age, exact invalidation (no app context = caching on) ------
+
+
+def test_ttl_cache_max_age_reuses_young_entry_and_recomputes_old_one():
+
+
+    from api.ttl_cache import TTLCache
+
+    cache = TTLCache("t")
+    calls = []
+
+    def compute():
+        calls.append(1)
+        return len(calls)
+
+    assert cache.get_or_compute("k", 60, compute, max_age=4) == 1
+    assert cache.get_or_compute("k", 60, compute, max_age=4) == 1
+    assert len(calls) == 1
+    # Pretend the entry was stored 5 s ago: a max_age=4 poller recomputes,
+    # a plain reader keeps the (still fresh) entry.
+    with cache._lock:
+        f, s, v, stored = cache._entries["k"]
+        cache._entries["k"] = (f, s, v, stored - 5)
+    assert cache.get_or_compute("k", 60, compute) == 1
+    assert cache.get_or_compute("k", 60, compute, max_age=4) == 2
+    assert cache.age("k") is not None and cache.age("k") < 1
+
+
+
+def test_ttl_cache_exact_invalidation_does_not_overmatch():
+    from api.ttl_cache import TTLCache
+
+    cache = TTLCache("t")
+    cache.set("nslist:custom-1", 1, 60)
+    cache.set("nslist:custom-10", 10, 60)
+    cache.invalidate("nslist:custom-1", exact=True)
+    assert cache.get("nslist:custom-1") is None
+    assert cache.get("nslist:custom-10") == 10
+
+
+def test_namespace_invalidation_keeps_other_clusters():
+    from api import k8s_provider as p
+
+    p._K8S_READ_CACHE.set("nslist:custom-1", "a", 60)
+    p._K8S_READ_CACHE.set("nslist:custom-10", "b", 60)
+    p._K8S_READ_CACHE.set("res:custom-10:ns:pods", "c", 60)
+    p.invalidate_namespace_resources_cache("custom-1", "ns")
+    assert p._K8S_READ_CACHE.get("nslist:custom-1") is None
+    assert p._K8S_READ_CACHE.get("nslist:custom-10") == "b"
+    assert p._K8S_READ_CACHE.get("res:custom-10:ns:pods") == "c"
+    p._K8S_READ_CACHE.invalidate()
+
+
+def test_failed_namespace_list_is_not_cached():
+    from api import k8s_provider as p
+    from api.cluster_access import ClusterAccess
+
+    p._K8S_READ_CACHE.invalidate()
+    access = ClusterAccess("cfail", "ctx", None, "cfail", False)
+    outputs = [p.K8sCommandError("i/o timeout"), '{"items": [{"metadata": {"name": "d1"}}]}']
+
+    def run(_access, args, timeout=None):
+        value = outputs.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    with patch.object(p, "_run_for_access", side_effect=run):
+        first = p.namespace_resource_list_from_k8s(access, "ns", "deployments")
+        assert first["deployments"] == []  # degraded exactly as before ...
+        second = p.namespace_resource_list_from_k8s(access, "ns", "deployments")
+        # ... but not cached: the next read goes back to the cluster.
+        assert [d["name"] for d in second["deployments"]] == ["d1"]
+    p._K8S_READ_CACHE.invalidate()
+
+
+def test_forbidden_namespace_list_is_cached_as_empty():
+    from api import k8s_provider as p
+    from api.cluster_access import ClusterAccess
+
+    p._K8S_READ_CACHE.invalidate()
+    access = ClusterAccess("cforb", "ctx", None, "cforb", False)
+    with patch.object(
+        p, "_run_for_access", side_effect=p.K8sCommandError("secrets is forbidden: User x")
+    ) as run:
+        assert p.namespace_resource_list_from_k8s(access, "ns", "secrets")["secrets"] == []
+        assert p.namespace_resource_list_from_k8s(access, "ns", "secrets")["secrets"] == []
+        assert run.call_count == 1
+    p._K8S_READ_CACHE.invalidate()

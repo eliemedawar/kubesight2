@@ -44,7 +44,11 @@ _INVENTORY_DISCOVERY_STALE_SECONDS = int(_os.getenv("INVENTORY_DISCOVERY_STALE_S
 
 
 def invalidate_inventory_discovery_cache(cluster_id: Optional[str] = None) -> None:
-    _INVENTORY_DISCOVERY_CACHE.invalidate(f"inv:{cluster_id}" if cluster_id else "inv:")
+    if cluster_id:
+        # Exact key: as a prefix, "inv:custom-1" would also drop custom-10..19.
+        _INVENTORY_DISCOVERY_CACHE.invalidate(f"inv:{cluster_id}", exact=True)
+    else:
+        _INVENTORY_DISCOVERY_CACHE.invalidate("inv:")
 
 WORKLOAD_TYPES = ("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
 RESOURCE_TYPE_BY_WORKLOAD = {

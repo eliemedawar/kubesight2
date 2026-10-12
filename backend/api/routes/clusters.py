@@ -143,6 +143,21 @@ def _list_clusters_payload():
     return discovered
 
 
+def _max_age_arg() -> Optional[float]:
+    """``?maxAge=N`` from live polling: a cached copy up to N seconds old is fine.
+
+    Clamped to [1, 60] so a poller can neither force a fresh kubectl call on
+    every tick (that is what ``fresh=1`` is for) nor pin very old data."""
+    raw = request.args.get("maxAge")
+    if raw in (None, ""):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return min(max(value, 1.0), 60.0)
+
+
 def _resolve_cluster_access_or_error(cluster_id: str):
     if should_use_real_k8s(cluster_id):
         access = resolve_cluster_access(cluster_id)
@@ -556,7 +571,9 @@ def namespace_resources(cluster_id: str, namespace: str):
     if access:
         try:
             fresh = request.args.get("fresh") in ("1", "true")
-            resources = namespace_resources_from_k8s(access, namespace, fresh=fresh)
+            resources = namespace_resources_from_k8s(
+                access, namespace, fresh=fresh, max_age=_max_age_arg()
+            )
             if user:
                 resources = filter_namespace_resources(user, cluster_id, resources)
             return success_response(resources)
@@ -621,7 +638,7 @@ def namespace_resource_list(cluster_id: str, namespace: str, resource_type: str)
         try:
             fresh = request.args.get("fresh") in ("1", "true")
             resources = namespace_resource_list_from_k8s(
-                access, namespace, resource_type, fresh=fresh
+                access, namespace, resource_type, fresh=fresh, max_age=_max_age_arg()
             )
             if user:
                 resources = filter_namespace_resources(user, cluster_id, resources)

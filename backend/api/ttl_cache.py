@@ -46,15 +46,20 @@ class TTLCache:
       when ``stale_ttl`` is used — it runs on a plain daemon thread.
     - Failed computations are never cached; the leader's exception propagates
       to every waiter of that flight.
+    - ``max_age`` (optional, seconds) asks for a value no older than that:
+      a younger cached value is returned as is, an older one is recomputed
+      (single-flight, so N pollers asking at once still share one compute).
     - ``invalidate(prefix)`` drops entries whose string key starts with the
       prefix, so mutation endpoints can precisely evict one cluster/namespace.
+      End a prefix with its delimiter (``res:c1:``) or pass ``exact=True`` —
+      ``nslist:custom-1`` as a prefix would also drop ``nslist:custom-10``.
     """
 
     def __init__(self, name: str = ""):
         self.name = name
         self._lock = threading.Lock()
-        # key -> (fresh_until, stale_until, value)
-        self._entries: Dict[Any, Tuple[float, float, Any]] = {}
+        # key -> (fresh_until, stale_until, value, stored_at)
+        self._entries: Dict[Any, Tuple[float, float, Any, float]] = {}
         self._inflight: Dict[Any, _Flight] = {}
         self._last_sweep = time.monotonic()
 
@@ -73,7 +78,7 @@ class TTLCache:
     def set(self, key: Any, value: Any, ttl: float, stale_ttl: float = 0) -> None:
         now = time.monotonic()
         with self._lock:
-            self._entries[key] = (now + ttl, now + ttl + max(stale_ttl, 0), value)
+            self._entries[key] = (now + ttl, now + ttl + max(stale_ttl, 0), value, now)
             if now - self._last_sweep > self._SWEEP_INTERVAL_SECONDS:
                 self._last_sweep = now
                 for dead in [k for k, entry in self._entries.items() if entry[1] <= now]:
@@ -92,6 +97,9 @@ class TTLCache:
                 pass  # keep serving stale until it ages out of the stale window
             else:
                 self.set(key, value, ttl, stale_ttl)
+                # A max_age caller may be waiting on this flight.
+                flight.value = value
+                flight.ok = True
             finally:
                 with self._lock:
                     if self._inflight.get(key) is flight:
@@ -107,12 +115,21 @@ class TTLCache:
             self._inflight[key] = flight
         thread.start()
 
+    def age(self, key: Any) -> Optional[float]:
+        """Seconds since ``key`` was stored, or None when it is not cached."""
+        with self._lock:
+            entry = self._entries.get(key)
+            if not entry or entry[1] <= time.monotonic():
+                return None
+            return time.monotonic() - entry[3]
+
     def get_or_compute(
         self,
         key: Any,
         ttl: float,
         compute: Callable[[], Any],
         stale_ttl: float = 0,
+        max_age: Optional[float] = None,
     ) -> Any:
         if caching_disabled():
             return compute()
@@ -120,9 +137,12 @@ class TTLCache:
         now = time.monotonic()
         with self._lock:
             entry = self._entries.get(key)
-            if entry and entry[0] > now:
+            too_old = bool(entry and max_age is not None and now - entry[3] > max_age)
+            if entry and entry[0] > now and not too_old:
                 return entry[2]
-            serve_stale = bool(entry and stale_ttl > 0 and entry[1] > now)
+            serve_stale = bool(
+                entry and stale_ttl > 0 and entry[1] > now and not too_old
+            )
             stale_value = entry[2] if serve_stale else None
             flight = self._inflight.get(key)
             if flight is None and not serve_stale:
@@ -162,10 +182,13 @@ class TTLCache:
                     del self._inflight[key]
             flight.event.set()
 
-    def invalidate(self, prefix: Any = None) -> None:
+    def invalidate(self, prefix: Any = None, exact: bool = False) -> None:
         with self._lock:
             if prefix is None:
                 self._entries.clear()
+                return
+            if exact:
+                self._entries.pop(prefix, None)
                 return
             if isinstance(prefix, str):
                 stale = [
