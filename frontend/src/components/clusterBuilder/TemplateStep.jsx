@@ -14,6 +14,7 @@ import {
   totals,
 } from "../../utils/clusterProvisioning.js";
 import { deleteClusterTemplate, updateClusterTemplate } from "../../api/clusterBuildsApi.js";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 /** The shape at thumbnail scale: pills = load balancers, red = control planes. */
 export function MiniShape({ counts }) {
@@ -109,7 +110,12 @@ export function TemplateGallery({ catalog, selectedId, onSelect, canManage, noti
     }
   };
   const remove = async (template) => {
-    if (!window.confirm(`Delete the template “${template.name}”? Builds made from it are not affected.`)) return;
+    if (!(await confirmDialog({
+      title: "Delete template",
+      message: `Delete the template “${template.name}”? Builds made from it are not affected.`,
+      confirmLabel: "Delete",
+      tone: "danger",
+    }))) return;
     try {
       await deleteClusterTemplate(template.dbId);
       notify(`Deleted “${template.name}”.`);

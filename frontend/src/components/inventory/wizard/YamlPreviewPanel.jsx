@@ -41,7 +41,12 @@ export default function YamlPreviewPanel({
   };
 
   return (
-    <div className={`wizard-yaml-panel${fullscreen ? " wizard-yaml-panel--fullscreen" : ""}`}>
+    <div
+      className={`wizard-yaml-panel${fullscreen ? " wizard-yaml-panel--fullscreen" : ""}`}
+      role={fullscreen ? "dialog" : undefined}
+      aria-modal={fullscreen ? "true" : undefined}
+      aria-label={fullscreen ? "Generated manifest fullscreen" : undefined}
+    >
       <div className="wizard-yaml-panel__toolbar">
         <span className="muted">Generated Manifest</span>
         <div className="wizard-yaml-panel__actions">

@@ -82,6 +82,21 @@ export default function LogViewer({
   // a dialog).
   useEscapeToClose(() => setIsMaximized(false), true, isMaximized);
 
+  // Leaving fullscreen unmounts the search box; if focus was there (or was
+  // dropped), put it back on the toggle instead of the page body. A layout
+  // effect, so it lands before the dialog-focus observer looks for lost focus.
+  const maximizeButtonRef = useRef(null);
+  const wasMaximizedRef = useRef(false);
+  useLayoutEffect(() => {
+    if (wasMaximizedRef.current && !isMaximized) {
+      const active = document.activeElement;
+      if (!active || active === document.body || !active.isConnected) {
+        maximizeButtonRef.current?.focus({ preventScroll: true });
+      }
+    }
+    wasMaximizedRef.current = isMaximized;
+  }, [isMaximized]);
+
   const filteredLines = useMemo(() => {
     let visible = lines;
     visible = filterLogLinesBySearch(visible, searchText);
@@ -214,11 +229,15 @@ export default function LogViewer({
     URL.revokeObjectURL(url);
   };
 
+  // Maximized, the viewer covers the page: a modal, so focus stays in it.
+  const maximizedDialogProps = isMaximized
+    ? { role: "dialog", "aria-modal": "true", "aria-label": "Logs, full screen" }
+    : {};
+
   return (
     <section
       className={`card log-viewer ${isMaximized ? "log-viewer--maximized" : ""} ${className}`.trim()}
-      role="log"
-      aria-live={live ? "polite" : "off"}
+      {...maximizedDialogProps}
     >
       <div className="log-viewer__toolbar">
         <div className="log-viewer__toolbar-actions">
@@ -240,6 +259,7 @@ export default function LogViewer({
           <button
             type="button"
             className="btn-outline btn-sm"
+            ref={maximizeButtonRef}
             onClick={toggleMaximized}
             aria-pressed={isMaximized}
           >
@@ -271,7 +291,7 @@ export default function LogViewer({
       ) : null}
 
       {hasLines ? (
-        <div className="log-viewer__frame">
+        <div className="log-viewer__frame" role="log" aria-live={live ? "polite" : "off"}>
           <div ref={scrollRef} className="log-viewer__scroll" onScroll={handleScroll}>
             <LogContent lines={displayLines} revision={logRevision} />
           </div>

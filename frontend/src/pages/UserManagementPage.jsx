@@ -26,6 +26,7 @@ import { temporaryPasswordNotice } from "../utils/sensitiveResponses.js";
 import RolesPanel from "../components/user-management/RolesPanel";
 import { isFullAccessRole } from "../lib/rolePresets";
 import { parseApiTime } from "../lib/apiTime.js";
+import { confirmDialog } from "../lib/dialogs.js";
 
 const UserFormModal = lazy(() => import("../components/user-management/UserFormModal.jsx"));
 
@@ -378,7 +379,8 @@ export default function UserManagementPage({ clusters = [] }) {
   };
 
   const runAction = async (user, actionFn, { confirm, onResult } = {}) => {
-    if (confirm && !window.confirm(confirm)) {
+    // `confirm` is the confirmDialog() options (or just its message).
+    if (confirm && !(await confirmDialog(confirm))) {
       return;
     }
     setError("");
@@ -403,9 +405,12 @@ export default function UserManagementPage({ clusters = [] }) {
       return;
     }
     const label = user.fullName || user.username;
-    const confirmed = window.confirm(
-      `Disable user "${label}" (${user.username})?\n\nThey will no longer be able to sign in. This can be reversed by editing the user and marking them active again.`
-    );
+    const confirmed = await confirmDialog({
+      title: "Disable user",
+      message: `Disable user "${label}" (${user.username})?\n\nThey will no longer be able to sign in. This can be reversed by editing the user and marking them active again.`,
+      confirmLabel: "Disable",
+      tone: "danger",
+    });
     if (!confirmed) {
       return;
     }
@@ -427,11 +432,15 @@ export default function UserManagementPage({ clusters = [] }) {
       return;
     }
     const label = user.fullName || user.username;
-    const confirmed = window.confirm(
-      `Permanently delete user "${label}" (${user.username})?\n\n` +
+    const confirmed = await confirmDialog({
+      title: "Delete user",
+      message:
+        `Permanently delete user "${label}" (${user.username})?\n\n` +
         "This cannot be undone. Their access grants and API tokens are removed; " +
-        "past audit/history entries are kept but no longer linked to an account."
-    );
+        "past audit/history entries are kept but no longer linked to an account.",
+      confirmLabel: "Delete",
+      tone: "danger",
+    });
     if (!confirmed) {
       return;
     }
@@ -603,7 +612,7 @@ export default function UserManagementPage({ clusters = [] }) {
             className="primary users-btn-sm"
             onClick={() =>
               runAction(user, unlockUser, {
-                confirm: `Unlock ${user.username}?`,
+                confirm: { title: "Unlock account", message: `Unlock ${user.username}?`, confirmLabel: "Unlock" },
               })
             }
             disabled={busy}
@@ -618,7 +627,11 @@ export default function UserManagementPage({ clusters = [] }) {
             className="btn-outline users-btn-sm"
             onClick={() =>
               runAction(user, resendTemporaryPassword, {
-                confirm: `Send a new temporary password to ${user.username}?`,
+                confirm: {
+                  title: "Resend temporary password",
+                  message: `Send a new temporary password to ${user.username}?`,
+                  confirmLabel: "Send",
+                },
                 onResult: (r) => showTemporaryPasswordNotice(r, "updated"),
               })
             }
@@ -649,7 +662,12 @@ export default function UserManagementPage({ clusters = [] }) {
                   type="button"
                   onClick={() =>
                     runAction(user, resetUserMfa, {
-                      confirm: `Reset MFA for ${user.username}? They must re-enrol at next sign-in.`,
+                      confirm: {
+                        title: "Reset MFA",
+                        message: `Reset MFA for ${user.username}? They must re-enrol at next sign-in.`,
+                        confirmLabel: "Reset MFA",
+                        tone: "danger",
+                      },
                     })
                   }
                   disabled={busy}
@@ -662,7 +680,11 @@ export default function UserManagementPage({ clusters = [] }) {
                   type="button"
                   onClick={() =>
                     runAction(user, resendTemporaryPassword, {
-                      confirm: `Send a new temporary password to ${user.username}?`,
+                      confirm: {
+                        title: "Resend temporary password",
+                        message: `Send a new temporary password to ${user.username}?`,
+                        confirmLabel: "Send",
+                      },
                       onResult: (r) => showTemporaryPasswordNotice(r, "updated"),
                     })
                   }
@@ -676,7 +698,12 @@ export default function UserManagementPage({ clusters = [] }) {
                   type="button"
                   onClick={() =>
                     runAction(user, forcePasswordReset, {
-                      confirm: `Force ${user.username} to reset their password?`,
+                      confirm: {
+                        title: "Force password reset",
+                        message: `Force ${user.username} to reset their password?`,
+                        confirmLabel: "Force reset",
+                        tone: "danger",
+                      },
                       onResult: (r) => showTemporaryPasswordNotice(r, "updated"),
                     })
                   }
@@ -690,7 +717,12 @@ export default function UserManagementPage({ clusters = [] }) {
                   type="button"
                   onClick={() =>
                     runAction(user, lockUser, {
-                      confirm: `Lock ${user.username} until an admin unlocks the account?`,
+                      confirm: {
+                        title: "Lock account",
+                        message: `Lock ${user.username} until an admin unlocks the account?`,
+                        confirmLabel: "Lock",
+                        tone: "danger",
+                      },
                     })
                   }
                   disabled={busy}

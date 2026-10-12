@@ -47,6 +47,7 @@ export default function AlertRoutingModal({
       <section
         className="card modal-panel routing-modal"
         role="dialog"
+        aria-modal="true"
         aria-labelledby="routing-modal-title"
         onClick={(event) => event.stopPropagation()}
       >

@@ -229,6 +229,7 @@ export default function RegisterServiceWizard({ onClose, onCreated, onOpenServic
       <div
         className="modal-card sg-ci-wizard"
         role="dialog"
+        aria-modal="true"
         aria-label="Register a service"
         onClick={(event) => event.stopPropagation()}
       >

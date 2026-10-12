@@ -16,6 +16,7 @@ import PageTitle from "../components/common/PageTitle.jsx";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import { setVisibleInterval } from "../lib/visibleInterval";
 import { useEscapeToClose } from "../hooks/useEscapeToClose.js";
+import { confirmDialog } from "../lib/dialogs.js";
 
 const STATUS_BADGE = { healthy: "pass", degraded: "warning", unhealthy: "fail", unknown: "pending" };
 const STATUS_LABEL = { healthy: "Healthy", degraded: "Degraded", unhealthy: "Unhealthy", unknown: "Unknown" };
@@ -312,7 +313,7 @@ export default function ComponentsPage() {
 
   const handleDelete = async (c) => {
     if (deletingId) return;
-    if (!window.confirm(`Delete component "${c.name}"? It will be unlinked from any topologies that use it.`)) return;
+    if (!(await confirmDialog({ title: "Delete component", message: `Delete component "${c.name}"? It will be unlinked from any topologies that use it.`, confirmLabel: "Delete", tone: "danger" }))) return;
     setDeletingId(c.id);
     try {
       await deleteComponent(c.id);

@@ -192,6 +192,7 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
       <div
         className="modal-card sg-ci-run-modal"
         role="dialog"
+        aria-modal="true"
         aria-label={`Run a build of ${service.name}`}
         onClick={(event) => event.stopPropagation()}
       >

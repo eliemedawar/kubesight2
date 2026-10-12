@@ -26,6 +26,7 @@ import {
   listVmRequestProfiles,
   updateVmRequestProfile,
 } from "../../api/clusterBuildsApi.js";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 const DEFAULT_SIZE = { cpu: 2, memoryGb: 4, diskGb: 40 };
 const DEFAULT_MAX = { cpu: 8, memoryGb: 32, diskGb: 200 };
@@ -255,7 +256,12 @@ export default function VmRequestProfiles({ vsphere, sshProfiles, notify }) {
     } catch (error) { notify(error.serverMessage || error.message, true); }
   };
   const remove = async (row) => {
-    if (!window.confirm(`Remove the VM request profile ${row.name}? Hermes stops offering it; VMs already made stay.`)) return;
+    if (!(await confirmDialog({
+      title: "Remove VM request profile",
+      message: `Remove the VM request profile ${row.name}? Hermes stops offering it; VMs already made stay.`,
+      confirmLabel: "Remove",
+      tone: "danger",
+    }))) return;
     try {
       await deleteVmRequestProfile(row.id);
       load();

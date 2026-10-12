@@ -674,6 +674,7 @@ export default function ApplicationBuilderWizard({
           <section
             className="card modal-panel wizard-close-confirm__panel"
             role="alertdialog"
+            aria-modal="true"
             aria-labelledby="app-builder-close-confirm-title"
             onClick={(e) => e.stopPropagation()}
           >

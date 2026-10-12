@@ -3,6 +3,7 @@ import ErrorBanner from "../common/ErrorBanner";
 import { useEscapeToClose } from "../../hooks/useEscapeToClose.js";
 import LoadingState from "../common/LoadingState";
 import { buildJumpTargets, buildNavGroups, workspaceOfPage } from "../../lib/navigation.js";
+import DialogHost from "../common/DialogHost.jsx";
 import JumpPalette from "./JumpPalette";
 import Sidebar from "./Sidebar";
 import Topbar from "./Topbar";
@@ -115,6 +116,7 @@ export default function AppShell({
         onOpenJump={() => setJumpOpen(true)}
         open={sidebarOpen}
       />
+      <DialogHost />
       <JumpPalette
         open={jumpOpen}
         targets={jumpTargets}

@@ -5,6 +5,7 @@ import LoadingState from "../common/LoadingState.jsx";
 import { isAccessDeniedError } from "../../utils/authz.js";
 import { permissionSummary } from "../../lib/permissionCatalog";
 import RoleFormModal from "./RoleFormModal";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 export default function RolesPanel({
   roles,
@@ -57,7 +58,12 @@ export default function RolesPanel({
       userCount > 0
         ? `Delete role "${role.name}"?\n\n⚠️ ${userCount} user(s) are assigned to this role and will have their role unassigned.\n\nThis cannot be undone.`
         : `Delete role "${role.name}"?\n\nThis cannot be undone.`;
-    const confirmed = window.confirm(warning);
+    const confirmed = await confirmDialog({
+      title: "Delete role",
+      message: warning,
+      confirmLabel: "Delete",
+      tone: "danger",
+    });
     if (!confirmed) {
       return;
     }

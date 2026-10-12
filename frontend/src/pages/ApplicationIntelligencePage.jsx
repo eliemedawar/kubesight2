@@ -55,6 +55,7 @@ import {
 import "./ApplicationIntelligencePage.css";
 import { setVisibleInterval } from "../lib/visibleInterval";
 import { useEscapeToClose } from "../hooks/useEscapeToClose.js";
+import { confirmDialog } from "../lib/dialogs.js";
 
 const EMPTY_FORM = {
   name: "",
@@ -423,11 +424,14 @@ function AnalyzeModal({
   const deleteSelectedCredential = async () => {
     const selected = credentials.find((item) => String(item.id) === String(form.credentialProfileId));
     if (!selected) return;
-    const confirmed = window.confirm(
-      `Delete credential profile "${selected.name}"?\n\n`
-      + "Its encrypted token will be permanently removed. Profiles already used "
-      + "by an application, pull-request record, or CI service cannot be deleted.",
-    );
+    const confirmed = await confirmDialog({
+      title: "Delete credential profile",
+      message: `Delete credential profile "${selected.name}"?\n\n`
+        + "Its encrypted token will be permanently removed. Profiles already used "
+        + "by an application, pull-request record, or CI service cannot be deleted.",
+      confirmLabel: "Delete",
+      tone: "danger",
+    });
     if (!confirmed) return;
     setCredentialDeleting(true);
     setError("");

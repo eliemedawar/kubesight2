@@ -9,6 +9,7 @@ import {
   pickNamespacedResources,
 } from "../../api/serviceBlueprintsApi.js";
 import { useEscapeToClose } from "./ciShared.jsx";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 const ENVIRONMENTS = ["dev", "staging", "production", "custom"];
 
@@ -671,10 +672,16 @@ export default function DeployFromBlueprintWizard({ blueprintId, blueprintName, 
   // A stray backdrop click or Escape must not silently throw away the
   // mapping and values: ask first once anything was chosen. Nothing closes
   // while a request is in flight, and the finished step closes freely.
-  const requestClose = () => {
+  const requestClose = async () => {
     if (busy) return;
     const dirty = step < 4 && (step > 0 || JSON.stringify(target) !== JSON.stringify(openingTarget.current));
-    if (dirty && !window.confirm("Discard this registration? What you entered will be lost.")) return;
+    if (dirty && !(await confirmDialog({
+      title: "Discard registration",
+      message: "Discard this registration? What you entered will be lost.",
+      confirmLabel: "Discard",
+      cancelLabel: "Keep editing",
+      tone: "danger",
+    }))) return;
     onClose();
   };
   useEscapeToClose(requestClose, !busy);

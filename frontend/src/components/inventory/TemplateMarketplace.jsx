@@ -13,6 +13,7 @@ import {
 import { groupTemplatesByCategory, resolveCategoryOrder } from "../../utils/applicationTemplates.js";
 import CreateTemplateModal from "./CreateTemplateModal.jsx";
 import ImportTemplatesModal from "./ImportTemplatesModal.jsx";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 export default function TemplateMarketplace({
   canDeploy = false,
@@ -144,9 +145,12 @@ export default function TemplateMarketplace({
   const handleDeleteCategory = async (category, count) => {
     if (deletingCategory) return;
     if (
-      !window.confirm(
-        `Delete the "${category}" category and its ${count} template${count === 1 ? "" : "s"}? This cannot be undone.`,
-      )
+      !(await confirmDialog({
+        title: "Delete category",
+        message: `Delete the "${category}" category and its ${count} template${count === 1 ? "" : "s"}? This cannot be undone.`,
+        confirmLabel: "Delete",
+        tone: "danger",
+      }))
     )
       return;
     setActionError("");
@@ -164,7 +168,12 @@ export default function TemplateMarketplace({
 
   const handleDelete = async (template) => {
     if (deletingId) return;
-    if (!window.confirm(`Delete the template "${template.name}"? This cannot be undone.`)) return;
+    if (!(await confirmDialog({
+      title: "Delete template",
+      message: `Delete the template "${template.name}"? This cannot be undone.`,
+      confirmLabel: "Delete",
+      tone: "danger",
+    }))) return;
     setActionError("");
     setDeletingId(template.id);
     try {
@@ -343,7 +352,11 @@ export default function TemplateMarketplace({
                       <div key={template.id} className="template-card-slot">
                         <button
                           type="button"
-                          className="template-card card"
+                          className={[
+                            "template-card card",
+                            onGenerateForm ? "template-card--with-form" : "",
+                            canManageTemplates && template.custom ? "template-card--editable" : "",
+                          ].filter(Boolean).join(" ")}
                           onClick={() => handleTemplateClick(template.id)}
                           disabled={!canDeploy || busy}
                         >

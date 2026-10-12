@@ -11,6 +11,7 @@ import LoadingState from "../common/LoadingState.jsx";
 import EmptyState from "../common/EmptyState.jsx";
 import EditConnectionModal from "./EditConnectionModal.jsx";
 import { useEscapeToClose } from "../../hooks/useEscapeToClose.js";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 const HEALTH_BADGE = { healthy: "pass", warning: "warning", critical: "fail", unknown: "pending" };
 const CONN_STATUS_BADGE = { active: "pass", degraded: "warning", inactive: "fail", planned: "pending" };
@@ -315,7 +316,12 @@ export default function ClientDetailModal({
   };
 
   const handleRemove = async (svc) => {
-    if (!window.confirm(`Remove connectivity for "${svc.serviceName}"? The service stays linked to the client.`)) return;
+    if (!(await confirmDialog({
+      title: "Remove connectivity",
+      message: `Remove connectivity for "${svc.serviceName}"? The service stays linked to the client.`,
+      confirmLabel: "Remove",
+      tone: "danger",
+    }))) return;
     try {
       await deleteClientServiceConnection(client.id, svc.serviceId);
       await loadServices();

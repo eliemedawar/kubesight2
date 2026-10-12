@@ -34,6 +34,7 @@ import {
   testSshProfile,
   testVSphereConnection,
 } from "../../api/clusterBuildsApi.js";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 const POLICY_TONE = { pinned: "is-ok", strict: "is-ok", tofu: "is-warn" };
 
@@ -435,8 +436,13 @@ export default function SourcesTab({
   };
 
   /** Removing a source cannot be undone: ask first, then say it happened. */
-  const remove = (what, name, fn) => {
-    if (!window.confirm(`Remove the ${what} "${name}"? This cannot be undone.`)) return;
+  const remove = async (what, name, fn) => {
+    if (!(await confirmDialog({
+      title: `Remove ${what}`,
+      message: `Remove the ${what} "${name}"? This cannot be undone.`,
+      confirmLabel: "Remove",
+      tone: "danger",
+    }))) return;
     run(fn, () => notify(`Removed ${name}.`));
   };
 

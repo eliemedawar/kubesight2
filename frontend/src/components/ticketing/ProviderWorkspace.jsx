@@ -16,6 +16,7 @@ import {
 } from "../../api/ticketAgentApi.js";
 import { useTicketing } from "./TicketingContext.jsx";
 import { setVisibleInterval } from "../../lib/visibleInterval";
+import { confirmDialog, promptDialog } from "../../lib/dialogs.js";
 
 // One provider's workspace: command bar → flow strip → three rooms. This is the
 // page the Ticketing tab opens when a provider card is picked, and it is
@@ -170,7 +171,11 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
     const question = vm
       ? `Approve OpenTofu plan #${vm.jobId} for ${task.ticketNumber || "this ticket"}? It creates ${(vm.machines || []).length || vm.count} VM(s) in vCenter.`
       : `Approve and run what Hermes proposed for ${task.ticketNumber || "this ticket"}?`;
-    if (!window.confirm(question)) {
+    if (!(await confirmDialog({
+      title: vm ? "Approve VM plan" : "Approve and run",
+      message: question,
+      confirmLabel: "Approve",
+    }))) {
       return;
     }
     setError("");
@@ -189,10 +194,13 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
   };
 
   const rejectTask = async (task) => {
-    const note = window.prompt(
-      "Reject this request? Optionally say why — Hermes uses it in its comment to the requester.",
-      ""
-    );
+    const note = await promptDialog({
+      title: "Reject request",
+      message: "Reject this request? Optionally say why — Hermes uses it in its comment to the requester.",
+      label: "Reason (optional)",
+      confirmLabel: "Reject",
+      tone: "danger",
+    });
     if (note === null) return;
     setError("");
     setNotice("");
@@ -248,7 +256,13 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
   };
 
   const cancelRun = async (run) => {
-    if (!window.confirm(`Cancel automation run for ${run.ticketNumber || `#${run.id}`}?`)) {
+    if (!(await confirmDialog({
+      title: "Cancel run",
+      message: `Cancel automation run for ${run.ticketNumber || `#${run.id}`}?`,
+      confirmLabel: "Cancel run",
+      cancelLabel: "Keep running",
+      tone: "danger",
+    }))) {
       return;
     }
     setError("");
@@ -265,7 +279,12 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
 
   const removeTicket = async (ticket) => {
     const label = ticket.ticketNumber || ticket.ticketId || `#${ticket.id}`;
-    if (!window.confirm(`Delete inbound ticket ${label} from the log?`)) {
+    if (!(await confirmDialog({
+      title: "Delete ticket",
+      message: `Delete inbound ticket ${label} from the log?`,
+      confirmLabel: "Delete",
+      tone: "danger",
+    }))) {
       return;
     }
     setError("");

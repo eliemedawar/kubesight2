@@ -2123,6 +2123,7 @@ tr:last-child td {
   background: none;
   border: none;
   padding: 0;
+  min-height: 0;
   color: var(--accent);
   text-decoration: underline;
   cursor: pointer;
@@ -3004,6 +3005,58 @@ button:focus-visible {
   word-break: break-word;
 }
 
+/* Audit Logs: the time range row above the filters. */
+.audit-range {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.audit-range .settings-segmented {
+  flex-wrap: wrap;
+}
+
+.audit-range .settings-segmented button {
+  white-space: nowrap;
+}
+
+.audit-range__label {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+.audit-range__days {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.audit-range__days label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+.audit-range__hint {
+  font-size: var(--font-size-xs);
+}
+
+/* Actor / action / cluster, then Clear and Export on the same row. */
+.user-filters.audit-filters {
+  grid-template-columns: minmax(10rem, 1.4fr) minmax(10rem, 1.2fr) minmax(10rem, 1.2fr) auto auto;
+}
+
+@media (max-width: 900px) {
+  .user-filters.audit-filters {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
 .access-denied {
   text-align: center;
 }
@@ -3707,6 +3760,26 @@ button:focus-visible {
   display: grid;
   gap: var(--space-1);
   margin-bottom: var(--space-3);
+}
+
+/* confirmDialog() / promptDialog() (components/common/DialogHost.jsx): asked
+   from inside drawers, fullscreen editors and the jump palette, so it sits
+   above all of them (only the coach marks go higher). */
+.app-dialog-overlay {
+  z-index: 5500;
+}
+
+.app-dialog {
+  width: min(30rem, 100%);
+}
+
+.app-dialog__message {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.app-dialog__hint {
+  margin: 0;
 }
 
 .app-details-tabs {
@@ -4595,19 +4668,15 @@ button:focus-visible {
   width: 100%;
 }
 
-/* The card is a <button>, so the base button rule in ui-polish owns its padding.
-   Reserve room for the absolutely positioned overlays instead: the "Form" pill
+/* Reserve room for the overlays positioned over the card: the "Form" pill
    bottom-right and the edit/delete pair top-right, so neither covers the
    workload badge or the description. */
-.template-card-slot:has(.template-card__form-btn) .template-card::after {
-  content: "";
-  display: block;
-  flex: none;
-  height: 1.9rem;
+.template-card--with-form {
+  padding-bottom: calc(var(--space-4) + 1.5rem);
 }
 
-.template-card-slot:has(.template-card__edit) .template-card__header {
-  padding-right: 3.6rem;
+.template-card--editable .template-card__header {
+  padding-right: 3rem;
 }
 
 .template-card-slot .template-card__description {
@@ -4629,6 +4698,7 @@ button:focus-visible {
   justify-content: center;
   width: 1.5rem;
   height: 1.5rem;
+  min-height: 0;
   padding: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius-full);
@@ -4665,6 +4735,7 @@ button:focus-visible {
   justify-content: center;
   width: 1.5rem;
   height: 1.5rem;
+  min-height: 0;
   padding: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius-full);
@@ -4700,6 +4771,7 @@ button:focus-visible {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
+  min-height: 0;
   padding: 0.15rem 0.55rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-control);

@@ -386,6 +386,7 @@ export default function ZohoSourcePicker({
       <section
         className="card modal-panel sg-zh-picker"
         role="dialog"
+        aria-modal="true"
         aria-label="Choose dropdown source"
         onClick={(e) => e.stopPropagation()}
       >

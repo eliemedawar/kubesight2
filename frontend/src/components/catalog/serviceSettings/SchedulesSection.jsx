@@ -27,6 +27,7 @@ import {
   toForm,
   toPayload,
 } from "./scheduleModel.js";
+import { confirmDialog } from "../../../lib/dialogs.js";
 
 // Last-run status moves on its own (a build finishes, a 02:00 run fires), so
 // the list re-reads itself while it is on screen. Slow on purpose: nothing
@@ -118,7 +119,12 @@ export default function SchedulesSection({ service, canEdit, canRun, onError, on
   };
 
   const remove = async (schedule) => {
-    if (!window.confirm(`Delete the schedule “${schedule.name}”? Builds it already started are kept.`)) return;
+    if (!(await confirmDialog({
+      title: "Delete schedule",
+      message: `Delete the schedule “${schedule.name}”? Builds it already started are kept.`,
+      confirmLabel: "Delete",
+      tone: "danger",
+    }))) return;
     try {
       await deleteCiSchedule(service.id, schedule.id);
       onNotice(`Schedule “${schedule.name}” deleted.`);

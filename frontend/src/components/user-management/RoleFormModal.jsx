@@ -174,9 +174,9 @@ export default function RoleFormModal({
         if (e.target === e.currentTarget && !saving) onClose();
       }}
     >
-      <div className="modal-card modal-card--wide" role="dialog" aria-modal="true">
+      <div className="modal-card modal-card--wide" role="dialog" aria-modal="true" aria-labelledby="role-form-title">
         <div className="modal-card__header">
-          <h3>{title}</h3>
+          <h3 id="role-form-title">{title}</h3>
           <p className="muted">
             {readOnly
               ? "Review role permissions and assignment details."

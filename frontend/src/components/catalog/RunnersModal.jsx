@@ -10,6 +10,7 @@ import AgentEnrolment from "./AgentEnrolment.jsx";
 import AgentInstallHelp from "./AgentInstallHelp.jsx";
 import BuildCachePanel from "./BuildCachePanel.jsx";
 import { RUNNER_TYPES, StatusPill, useEscapeToClose } from "./ciShared.jsx";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 /**
  * The build fleet — where an operator turns a runner on.
@@ -104,13 +105,18 @@ export default function RunnersModal({ canManage, onClose }) {
 
   // The token on screen exists nowhere else, so closing over it asks first —
   // a stray click on the backdrop used to lose it for good.
-  const close = () => {
+  const close = async () => {
     if (
       issued &&
-      !window.confirm(
-        `The token for ${issued.name} is shown only once. Close without copying it? ` +
-          "You can issue a new one later with New token."
-      )
+      !(await confirmDialog({
+        title: "Close without the token",
+        message:
+          `The token for ${issued.name} is shown only once. Close without copying it? ` +
+          "You can issue a new one later with New token.",
+        confirmLabel: "Close",
+        cancelLabel: "Stay",
+        tone: "danger",
+      }))
     )
       return;
     onClose();
@@ -127,6 +133,7 @@ export default function RunnersModal({ canManage, onClose }) {
       <div
         className="modal-card sg-ci-runners"
         role="dialog"
+        aria-modal="true"
         aria-label="Build runners"
         onClick={(event) => event.stopPropagation()}
       >
@@ -301,10 +308,14 @@ export default function RunnersModal({ canManage, onClose }) {
                                 disabled={busy}
                                 onClick={async () => {
                                   if (
-                                    !window.confirm(
-                                      `Remove "${runner.name}"? Its token stops working and ` +
-                                        "stages pinned to it will queue until another agent matches."
-                                    )
+                                    !(await confirmDialog({
+                                      title: "Remove runner",
+                                      message:
+                                        `Remove "${runner.name}"? Its token stops working and ` +
+                                        "stages pinned to it will queue until another agent matches.",
+                                      confirmLabel: "Remove",
+                                      tone: "danger",
+                                    }))
                                   )
                                     return;
                                   setBusyId(runner.id);

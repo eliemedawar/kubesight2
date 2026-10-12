@@ -6,6 +6,7 @@ import { buildRoute } from "../../routes/routeUrl.js";
 import SearchableSelect from "../common/SearchableSelect.jsx";
 import { StatusPill, applicationTypeLabel, formatRelative } from "./ciShared.jsx";
 import { PlIcon } from "./pipeline/icons.jsx";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 /**
  * "Used by": the CI services that build with this pipeline.
@@ -56,9 +57,11 @@ export default function SharedPipelineUsedBy({ pipeline, canAttach, onChanged })
         ? "the KubeSight starter pipeline"
         : "its own pipeline";
     if (
-      !window.confirm(
-        `${pickedService.name} builds with ${today} today. From its next build it builds with “${pipeline.name}” instead. Its own stages are kept and come back if it stops using this one.`
-      )
+      !(await confirmDialog({
+        title: "Use this pipeline",
+        message: `${pickedService.name} builds with ${today} today. From its next build it builds with “${pipeline.name}” instead. Its own stages are kept and come back if it stops using this one.`,
+        confirmLabel: "Use pipeline",
+      }))
     ) {
       return;
     }

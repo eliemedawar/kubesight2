@@ -7,6 +7,7 @@ import {
   parameterProblems,
   stagesUsingParameter,
 } from "./pipeline/stageModel.js";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 const TYPES = [
   { value: "text", label: "Text", hint: "One line" },
@@ -60,15 +61,18 @@ export default function BuildParameters({ parameters, stages = [], canEdit, onCh
   const mutate = (index, patch) =>
     onChange(items.map((item, position) => (position === index ? { ...item, ...patch } : item)));
 
-  const remove = (index) => {
+  const remove = async (index) => {
     const used = stagesUsingParameter(items[index].name, stages);
     if (
       used.length &&
-      !window.confirm(
-        `${used.map(({ stage }) => `“${stage.name}”`).join(", ")} ${
+      !(await confirmDialog({
+        title: "Remove input",
+        message: `${used.map(({ stage }) => `“${stage.name}”`).join(", ")} ${
           used.length === 1 ? "runs" : "run"
-        } only when this input matches. Remove it anyway? Those stages will keep a condition on a name that no longer exists.`
-      )
+        } only when this input matches. Remove it anyway? Those stages will keep a condition on a name that no longer exists.`,
+        confirmLabel: "Remove",
+        tone: "danger",
+      }))
     ) {
       return;
     }

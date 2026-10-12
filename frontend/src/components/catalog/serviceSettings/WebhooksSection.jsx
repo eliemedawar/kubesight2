@@ -38,6 +38,7 @@ import {
   toForm,
   toPayload,
 } from "./webhookModel.js";
+import { confirmDialog } from "../../../lib/dialogs.js";
 
 // The last delivery moves on its own (somebody pushes, a release tool calls),
 // so the list re-reads itself while it is on screen.
@@ -142,7 +143,12 @@ export default function WebhooksSection({ service, canEdit, canRun, onError, onN
 
   const remove = async (hook) => {
     const extra = hook.kind === "bitbucket_push" ? " Remove it from the repository's webhooks in Bitbucket too, or Bitbucket keeps calling a URL that answers 404." : "";
-    if (!window.confirm(`Delete the webhook “${hook.name}”? Its URL stops working at once; builds it started are kept.${extra}`)) return;
+    if (!(await confirmDialog({
+      title: "Delete webhook",
+      message: `Delete the webhook “${hook.name}”? Its URL stops working at once; builds it started are kept.${extra}`,
+      confirmLabel: "Delete",
+      tone: "danger",
+    }))) return;
     try {
       await deleteCiWebhook(service.id, hook.id);
       onNotice(`Webhook “${hook.name}” deleted.`);
@@ -424,7 +430,12 @@ function WebhookDetails({ hook, service, repository, pipelines, defaultBranch, c
 
   const rotate = async () => {
     const where = isPush ? "Press Resync in Bitbucket afterwards" : "Every sender has to be given the new one";
-    if (!window.confirm(`Make a new secret for “${hook.name}”? The current one stops working immediately. ${where}.`)) return;
+    if (!(await confirmDialog({
+      title: "Generate new secret",
+      message: `Make a new secret for “${hook.name}”? The current one stops working immediately. ${where}.`,
+      confirmLabel: "Generate",
+      tone: "danger",
+    }))) return;
     setSecretBusy(true);
     try {
       const result = await rotateCiWebhookSecret(service.id, hook.id);

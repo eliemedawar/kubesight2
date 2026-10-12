@@ -55,6 +55,7 @@ import {
   startClusterBuild,
 } from "../../api/clusterBuildsApi.js";
 import { setVisibleInterval } from "../../lib/visibleInterval";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 const DETAIL_POLL_INTERVAL_MS = 2500;
 const LOG_REFRESH_MS = 2500;
@@ -647,13 +648,15 @@ export default function BuildDetail({
     0
   );
 
-  const startReviewedBuild = () => {
+  const startReviewedBuild = async () => {
     if (
       warningCount
-      && !window.confirm(
-        `Preflight has ${warningCount} warning${warningCount === 1 ? "" : "s"}. `
-        + "Acknowledge them and start this build?"
-      )
+      && !(await confirmDialog({
+        title: "Start with warnings",
+        message: `Preflight has ${warningCount} warning${warningCount === 1 ? "" : "s"}. `
+          + "Acknowledge them and start this build?",
+        confirmLabel: "Start build",
+      }))
     ) return;
     act(() => startClusterBuild(
       build.id,
@@ -700,10 +703,14 @@ export default function BuildDetail({
               className="btn-outline"
               type="button"
               disabled={busy}
-              onClick={() => {
-                if (!window.confirm(
-                  `Cancel the build "${build.name}"? Completed phases are kept; you can resume or delete it afterwards.`
-                )) return;
+              onClick={async () => {
+                if (!(await confirmDialog({
+                  title: "Cancel build",
+                  message: `Cancel the build "${build.name}"? Completed phases are kept; you can resume or delete it afterwards.`,
+                  confirmLabel: "Cancel build",
+                  cancelLabel: "Keep building",
+                  tone: "danger",
+                }))) return;
                 act(() => cancelClusterBuild(build.id));
               }}
             >
@@ -1109,12 +1116,15 @@ export default function BuildDetail({
                   className="btn-ghost btn-sm"
                   type="button"
                   disabled={busy}
-                  onClick={() => {
+                  onClick={async () => {
                     const name = addonDisplayName(addon, addonCatalog);
-                    if (!window.confirm(
-                      `Withdraw ${name}? Nothing is removed from the cluster — the request `
-                      + "is dropped, and retry will no longer try to install it."
-                    )) return;
+                    if (!(await confirmDialog({
+                      title: "Withdraw plugin",
+                      message: `Withdraw ${name}? Nothing is removed from the cluster — the request `
+                        + "is dropped, and retry will no longer try to install it.",
+                      confirmLabel: "Withdraw",
+                      tone: "danger",
+                    }))) return;
                     act(() => removeClusterBuildAddon(build.id, addon.id), () => {
                       failureOpened.current = false;
                       load();

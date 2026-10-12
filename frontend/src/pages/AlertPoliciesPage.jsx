@@ -27,6 +27,7 @@ import {
 } from "../lib/logPolicyDefaults.js";
 import { setVisibleInterval } from "../lib/visibleInterval";
 import { useEscapeToClose } from "../hooks/useEscapeToClose.js";
+import { confirmDialog } from "../lib/dialogs.js";
 
 const RECEIVER_TYPE_LABELS = {
   user: "User",
@@ -1004,7 +1005,7 @@ export default function AlertPoliciesPage({
   };
 
   const handleDelete = async (policy) => {
-    if (!window.confirm(`Delete policy "${policy.name}"?`)) {
+    if (!(await confirmDialog({ title: "Delete policy", message: `Delete policy "${policy.name}"?`, confirmLabel: "Delete", tone: "danger" }))) {
       return;
     }
     setActionError("");

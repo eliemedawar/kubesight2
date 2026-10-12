@@ -221,6 +221,7 @@ export default function BuildDetailDrawer({
       <aside
         className="sg-ci-drawer"
         role="dialog"
+        aria-modal="true"
         aria-label="Build details"
         onClick={(event) => event.stopPropagation()}
       >

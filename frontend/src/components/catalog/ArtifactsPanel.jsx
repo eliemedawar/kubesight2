@@ -9,6 +9,7 @@ import {
 import EmptyState from "../common/EmptyState.jsx";
 import LoadingState from "../common/LoadingState.jsx";
 import { formatBytes, formatRelative, shortSha } from "./ciShared.jsx";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 /**
  * Artifacts tab.
@@ -191,13 +192,17 @@ export default function ArtifactsPanel({ service, canManage, refreshToken }) {
                 type="button"
                 className="btn-outline btn-compact danger"
                 disabled={Boolean(busy)}
-                onClick={() => {
+                onClick={async () => {
                   if (
-                    !window.confirm(
-                      `Delete every stored artifact for ${service.name}? Downloads stop ` +
+                    !(await confirmDialog({
+                      title: "Delete all artifacts",
+                      message:
+                        `Delete every stored artifact for ${service.name}? Downloads stop ` +
                         "working for those builds. Container images in the registry are " +
-                        "not affected."
-                    )
+                        "not affected.",
+                      confirmLabel: "Delete all",
+                      tone: "danger",
+                    }))
                   )
                     return;
                   // keepLast 0 with no age bound is the only way to say "all of
@@ -298,14 +303,18 @@ export default function ArtifactsPanel({ service, canManage, refreshToken }) {
                             ? "Delete this file"
                             : "Remove this record — the image stays in its registry"
                         }
-                        onClick={() => {
+                        onClick={async () => {
                           if (
-                            !window.confirm(
-                              `Delete "${artifact.name}"?` +
+                            !(await confirmDialog({
+                              title: artifact.downloadable ? "Delete artifact" : "Remove artifact record",
+                              message:
+                                `Delete "${artifact.name}"?` +
                                 (artifact.downloadable
                                   ? " The file is removed and can no longer be downloaded."
-                                  : " The image itself stays in its registry; only KubeSight's record goes.")
-                            )
+                                  : " The image itself stays in its registry; only KubeSight's record goes."),
+                              confirmLabel: "Delete",
+                              tone: "danger",
+                            }))
                           )
                             return;
                           run(

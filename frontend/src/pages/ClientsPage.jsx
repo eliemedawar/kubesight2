@@ -15,6 +15,7 @@ import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import ClientDetailModal from "../components/clients/ClientDetailModal.jsx";
 import { useEntityRoute } from "../routes/RouterContext.jsx";
+import { confirmDialog } from "../lib/dialogs.js";
 
 /** URL ids are strings; record ids usually are not. Compare through this. */
 const sameId = (a, b) => a !== null && a !== undefined && String(a) === String(b);
@@ -66,9 +67,15 @@ function ClientModal({ client, allServices, onClose, onSave, saving, error }) {
 
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <div className="modal-card modal-card--wide" role="dialog" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal-card modal-card--wide"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="client-form-title"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-card__header">
-          <h3>{isEdit ? "Edit Client" : "New Client"}</h3>
+          <h3 id="client-form-title">{isEdit ? "Edit Client" : "New Client"}</h3>
           <p className="muted">
             {isEdit ? "Update client details and assigned services." : "Add a business client and assign application services."}
           </p>
@@ -248,7 +255,7 @@ export default function ClientsPage({ clusters = [] }) {
 
   const handleDelete = async (client) => {
     if (deleting) return;
-    if (!window.confirm(`Delete "${client.name}"? This cannot be undone.`)) return;
+    if (!(await confirmDialog({ title: "Delete client", message: `Delete "${client.name}"? This cannot be undone.`, confirmLabel: "Delete", tone: "danger" }))) return;
     setDeleting(true);
     try {
       await deleteClient(client.id);

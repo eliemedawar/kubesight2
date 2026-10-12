@@ -16,6 +16,7 @@ import { usePermission } from "../hooks/usePermission.js";
 import { useRouteParam, useRouter } from "../routes/RouterContext.jsx";
 import { useChangeBundle } from "../context/ChangeBundleContext";
 import { setVisibleInterval } from "../lib/visibleInterval";
+import { confirmDialog, promptDialog } from "../lib/dialogs.js";
 
 const STATUS_STYLE = {
   draft: { bg: "var(--bg-interactive)", fg: "var(--text-muted)", label: "Draft" },
@@ -336,7 +337,12 @@ export default function ChangeBundlesPage() {
   };
 
   const reject = async (bundle) => {
-    const reason = window.prompt("Reason for rejecting this bundle (optional):", "");
+    const reason = await promptDialog({
+      title: `Reject bundle #${bundle.id}`,
+      label: "Reason for rejecting this bundle (optional)",
+      confirmLabel: "Reject",
+      tone: "danger",
+    });
     // Cancel on the prompt means "don't reject", not "reject without a reason".
     if (reason === null) return;
     setBusyId(bundle.id);
@@ -352,7 +358,12 @@ export default function ChangeBundlesPage() {
   };
 
   const remove = async (bundle) => {
-    if (!window.confirm(`Delete bundle #${bundle.id}? This cannot be undone.`)) return;
+    if (!(await confirmDialog({
+      title: "Delete bundle",
+      message: `Delete bundle #${bundle.id}? This cannot be undone.`,
+      confirmLabel: "Delete",
+      tone: "danger",
+    }))) return;
     setBusyId(bundle.id);
     setActionError("");
     try {

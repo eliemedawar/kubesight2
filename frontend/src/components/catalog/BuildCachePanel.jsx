@@ -8,6 +8,7 @@ import {
   setCiCacheEnabled,
   setCiCacheShared,
 } from "../../api/ciApi.js";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 /**
  * The build cache, as one card on the Runners page.
@@ -438,12 +439,16 @@ export default function BuildCachePanel({ canManage }) {
             type="button"
             className="btn-outline btn-compact danger"
             disabled={Boolean(busy) || cache.maintenance?.phase === "running"}
-            onClick={() => {
+            onClick={async () => {
               if (
-                !window.confirm(
-                  "Empty the cache for every service? The next build of each one re-downloads " +
-                    "its dependencies and is slow once. Artifacts and logs are not touched."
-                )
+                !(await confirmDialog({
+                  title: "Clean every cache",
+                  message:
+                    "Empty the cache for every service? The next build of each one re-downloads " +
+                    "its dependencies and is slow once. Artifacts and logs are not touched.",
+                  confirmLabel: "Clean all",
+                  tone: "danger",
+                }))
               )
                 return;
               run("clean", () => cleanCiCache({ all: true }));
@@ -491,12 +496,16 @@ export default function BuildCachePanel({ canManage }) {
                           type="button"
                           className="btn-outline btn-compact"
                           disabled={Boolean(busy) || cache.maintenance?.phase === "running"}
-                          onClick={() => {
+                          onClick={async () => {
                             if (
-                              !window.confirm(
-                                "Empty the shared cache? The next build of every service " +
-                                  "re-downloads the NVD database and its shared packages once."
-                              )
+                              !(await confirmDialog({
+                                title: "Clean shared cache",
+                                message:
+                                  "Empty the shared cache? The next build of every service " +
+                                  "re-downloads the NVD database and its shared packages once.",
+                                confirmLabel: "Clean",
+                                tone: "danger",
+                              }))
                             )
                               return;
                             run("clean", () => cleanCiCache({ shared: true }));
@@ -509,12 +518,16 @@ export default function BuildCachePanel({ canManage }) {
                           type="button"
                           className="btn-outline btn-compact"
                           disabled={Boolean(busy) || cache.maintenance?.phase === "running"}
-                          onClick={() => {
+                          onClick={async () => {
                             if (
-                              !window.confirm(
-                                `Empty the cache for ${service.name}? Its next build ` +
-                                  "re-downloads its dependencies and is slow once."
-                              )
+                              !(await confirmDialog({
+                                title: "Clean cache",
+                                message:
+                                  `Empty the cache for ${service.name}? Its next build ` +
+                                  "re-downloads its dependencies and is slow once.",
+                                confirmLabel: "Clean",
+                                tone: "danger",
+                              }))
                             )
                               return;
                             run("clean", () => cleanCiCache({ serviceId: service.id }));

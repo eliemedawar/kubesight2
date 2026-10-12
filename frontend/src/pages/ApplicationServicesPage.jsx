@@ -23,6 +23,7 @@ import TopologyViewer, {
 import { useEntityRoute, useRouteParam } from "../routes/RouterContext.jsx";
 import { setVisibleInterval } from "../lib/visibleInterval";
 import { useEscapeToClose } from "../hooks/useEscapeToClose.js";
+import { confirmDialog } from "../lib/dialogs.js";
 
 /** URL ids are strings; record ids usually are not. Compare through this. */
 const sameId = (a, b) => a !== null && a !== undefined && String(a) === String(b);
@@ -1248,10 +1249,16 @@ function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }
 
   // A stray backdrop click or Escape must not silently throw away a drawn
   // topology: ask first when anything changed.
-  const requestClose = () => {
+  const requestClose = async () => {
     if (saving) return;
     const dirty = draftFingerprint(name, description, deployments, topology) !== initial.fingerprint;
-    if (dirty && !window.confirm("Discard your unsaved changes to this service?")) return;
+    if (dirty && !(await confirmDialog({
+      title: "Discard changes",
+      message: "Discard your unsaved changes to this service?",
+      confirmLabel: "Discard",
+      cancelLabel: "Keep editing",
+      tone: "danger",
+    }))) return;
     onClose();
   };
 
@@ -1703,7 +1710,7 @@ export default function ApplicationServicesPage({ clusters: clustersProp = [] })
 
   const handleDelete = async (svc) => {
     if (deleting) return;
-    if (!window.confirm(`Delete "${svc.name}"? This cannot be undone.`)) return;
+    if (!(await confirmDialog({ title: "Delete service", message: `Delete "${svc.name}"? This cannot be undone.`, confirmLabel: "Delete", tone: "danger" }))) return;
     setDeleting(true);
     try {
       await deleteApplicationService(svc.id);

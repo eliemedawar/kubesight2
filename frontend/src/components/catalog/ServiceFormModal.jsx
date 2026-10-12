@@ -70,6 +70,7 @@ export default function ServiceFormModal({ service, onClose, onSave, saving, err
       <div
         className="modal-card"
         role="dialog"
+        aria-modal="true"
         aria-label={isEdit ? "Edit service" : "Register service"}
         onClick={(event) => event.stopPropagation()}
       >

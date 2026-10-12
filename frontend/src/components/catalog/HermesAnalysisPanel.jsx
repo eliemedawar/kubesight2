@@ -10,6 +10,7 @@ import {
 import ApplicationProfileCard from "./ApplicationProfileCard.jsx";
 import GeneratedPipelineReview from "./GeneratedPipelineReview.jsx";
 import RequiredConfigForm from "./RequiredConfigForm.jsx";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 /**
  * Watching an analysis, and deciding what to do with what it found.
@@ -136,12 +137,20 @@ export default function HermesAnalysisPanel({
     "This service's pipeline has been configured by hand. Accepting the " +
     "proposal replaces those stages. Replace them?";
 
+  const confirmReplace = () =>
+    confirmDialog({
+      title: "Replace pipeline",
+      message: REPLACE_QUESTION,
+      confirmLabel: "Replace",
+      tone: "danger",
+    });
+
   const accept = async () => {
     // Asked up front when the backend already said so; a 409 below covers the
     // pipeline being edited in another tab after this screen loaded.
     let replaceExisting = false;
     if (analysis.replacesCustomPipeline) {
-      if (!window.confirm(REPLACE_QUESTION)) return;
+      if (!(await confirmReplace())) return;
       replaceExisting = true;
     }
     setBusy(true);
@@ -151,7 +160,7 @@ export default function HermesAnalysisPanel({
       try {
         result = await acceptCiAnalysis(analysis.id, { inputs, replaceExisting });
       } catch (err) {
-        if (err.status !== 409 || replaceExisting || !window.confirm(REPLACE_QUESTION)) {
+        if (err.status !== 409 || replaceExisting || !(await confirmReplace())) {
           throw err;
         }
         result = await acceptCiAnalysis(analysis.id, { inputs, replaceExisting: true });
@@ -166,7 +175,12 @@ export default function HermesAnalysisPanel({
   };
 
   const discard = async () => {
-    if (!window.confirm("Discard this proposal? The service's pipeline is not changed.")) {
+    if (!(await confirmDialog({
+      title: "Discard proposal",
+      message: "Discard this proposal? The service's pipeline is not changed.",
+      confirmLabel: "Discard",
+      tone: "danger",
+    }))) {
       return;
     }
     setBusy(true);

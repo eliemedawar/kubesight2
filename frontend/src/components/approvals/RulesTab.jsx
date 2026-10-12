@@ -17,6 +17,7 @@ import {
   getApprovalRules,
   updateApproverGroup,
 } from "../../api/approvalsApi.js";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 const SOURCE_LABELS = {
   configuredGroups: "the approver groups marked “Approves deploys”",
@@ -169,7 +170,12 @@ function ApproverGroups({ groups, canEdit, onChanged, notify }) {
   };
   const remove = async (group) => {
     const used = group.alertPolicies?.length ? ` It also receives alerts for: ${group.alertPolicies.join(", ")}.` : "";
-    if (!window.confirm(`Delete the group ${group.name}?${used}`)) return;
+    if (!(await confirmDialog({
+      title: "Delete approver group",
+      message: `Delete the group ${group.name}?${used}`,
+      confirmLabel: "Delete",
+      tone: "danger",
+    }))) return;
     setDeletingId(group.id);
     try {
       await deleteApproverGroup(group.id);

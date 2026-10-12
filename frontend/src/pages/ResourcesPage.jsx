@@ -17,6 +17,7 @@ import { EMPTY_MESSAGES, formatAccessError } from "../utils/authz.js";
 import { usePermission } from "../hooks/usePermission.js";
 import { isPendingApproval, pendingApprovalMessage } from "../utils/pendingApproval.js";
 import { secretValuesHiddenNote } from "../utils/sensitiveResponses.js";
+import { confirmDialog } from "../lib/dialogs.js";
 
 const ResourceInspectModal = lazy(() => import("../components/resources/ResourceInspectModal.jsx"));
 const EditResourceModal = lazy(() => import("../components/resources/EditResourceModal.jsx"));
@@ -329,7 +330,7 @@ export default function ResourcesPage({
   }, []);
 
   const handleResourceAction = useCallback(
-    (actionId, resource, resourceKind) => {
+    async (actionId, resource, resourceKind) => {
       const resolvedCluster = resource.cluster || resource.clusterId || clusterId;
       const resolvedNamespace = resource.namespace || namespace;
       const resourceName = resource.name;
@@ -407,9 +408,12 @@ export default function ResourcesPage({
       if (actionId === "restart") {
         const verb =
           resourceKind === "pod" ? "Restart (delete & recreate)" : "Rollout restart";
-        const confirmed = window.confirm(
-          `${verb} ${resourceKind} "${resourceName}"?`
-        );
+        const confirmed = await confirmDialog({
+          title: resourceKind === "pod" ? "Restart pod" : "Rollout restart",
+          message: `${verb} ${resourceKind} "${resourceName}"?`,
+          confirmLabel: "Restart",
+          tone: "danger",
+        });
         if (!confirmed) {
           return;
         }

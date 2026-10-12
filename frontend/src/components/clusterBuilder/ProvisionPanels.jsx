@@ -37,6 +37,7 @@ import {
   requestClusterDestroy,
   retryProvisionConnect,
 } from "../../api/clusterBuildsApi.js";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 /** The server's own words when it refused (a 403 otherwise reads as a bare
     "no access"): an approval rule or a second-person rule explains itself. */
@@ -307,10 +308,13 @@ function DestroyDecision({ build, job, currentUserId, canExecute, busy, act, ref
                 Reject
               </button>
               <button className="btn-danger" type="button" disabled={busy}
-                      onClick={() => {
-                        if (!window.confirm(
-                          `Destroy ${build.name}? Its VMs are deleted from vCenter and this cannot be undone.`
-                        )) return;
+                      onClick={async () => {
+                        if (!(await confirmDialog({
+                          title: "Destroy VMs",
+                          message: `Destroy ${build.name}? Its VMs are deleted from vCenter and this cannot be undone.`,
+                          confirmLabel: "Destroy",
+                          tone: "danger",
+                        }))) return;
                         act(() => approveClusterDestroy(build.id, job.id, note));
                       }}>
                 {busy ? "Working…" : "Approve and destroy"}

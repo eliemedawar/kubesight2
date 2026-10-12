@@ -3,6 +3,7 @@ import { createCiSecret, deleteCiSecret, listCiSecrets, updateCiSecret } from ".
 import { applicationTypeLabel, formatRelative } from "../ciShared.jsx";
 import { Field, Segmented } from "../pipeline/controls.jsx";
 import { PlIcon } from "../pipeline/icons.jsx";
+import { confirmDialog } from "../../../lib/dialogs.js";
 
 // What the backend accepts (services/ci/secrets.py _clean_key).
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
@@ -108,7 +109,12 @@ export default function SecretsSection({ service, expectedSecrets, canManage, on
       scope === "global"
         ? `Make "${secret.key}" global? Every service in the catalog will be able to reference it, and its value stays as it is.`
         : `Make "${secret.key}" this service's only? Other services referencing it lose it, and their next build fails on the reference.`;
-    if (!window.confirm(message)) return;
+    if (!(await confirmDialog({
+      title: scope === "global" ? "Make secret global" : "Limit secret to this service",
+      message,
+      confirmLabel: scope === "global" ? "Make global" : "Limit to this service",
+      tone: scope === "global" ? "default" : "danger",
+    }))) return;
     try {
       await updateCiSecret(secret.id, { scope, serviceId: service.id });
       onNotice(
@@ -127,7 +133,12 @@ export default function SecretsSection({ service, expectedSecrets, canManage, on
       secret.scope === "global"
         ? "It is global: pipelines in every service that reference it will fail."
         : "Pipelines referencing it will fail.";
-    if (!window.confirm(`Delete secret "${secret.key}"? ${note}`)) return;
+    if (!(await confirmDialog({
+      title: "Delete secret",
+      message: `Delete secret "${secret.key}"? ${note}`,
+      confirmLabel: "Delete",
+      tone: "danger",
+    }))) return;
     try {
       await deleteCiSecret(secret.id);
       onNotice(`Secret ${secret.key} deleted.`);

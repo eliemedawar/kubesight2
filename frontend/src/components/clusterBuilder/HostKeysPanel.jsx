@@ -24,6 +24,7 @@ import {
   sourceTone,
 } from "../../utils/sshHostKeys.js";
 import { timeAgo } from "../../utils/clusterBuilder.js";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 const EMPTY_SCAN = { host: "", port: 22, profileId: "" };
 const EMPTY_MANUAL = { host: "", port: 22, keyType: "ssh-ed25519", fingerprint: "" };
@@ -78,13 +79,16 @@ export default function HostKeysPanel({ profiles = [], notify }) {
     setScan(result);
   });
 
-  const pinScanned = () => {
+  const pinScanned = async () => {
     if (!scan) return;
     const replace = scan.status === "changed";
-    if (replace && !window.confirm(
-      `Replace the recorded ${scan.keyType} key for ${scan.host}:${scan.port}? `
-      + "Only do this if the machine was legitimately rebuilt."
-    )) return;
+    if (replace && !(await confirmDialog({
+      title: "Replace host key",
+      message: `Replace the recorded ${scan.keyType} key for ${scan.host}:${scan.port}? `
+        + "Only do this if the machine was legitimately rebuilt.",
+      confirmLabel: "Replace key",
+      tone: "danger",
+    }))) return;
     act(
       () => pinSshHostKey({
         host: scan.host,
@@ -244,11 +248,14 @@ export default function HostKeysPanel({ profiles = [], notify }) {
                 </button>
               ) : null}
               <button className="btn-ghost btn-sm" type="button" disabled={busy}
-                      onClick={() => {
-                        if (window.confirm(
-                          `Forget the ${row.keyType} key for ${row.host}:${row.port}? `
-                          + "Strict and pinned routes will refuse the host until it is pinned again."
-                        )) act(() => deleteSshHostKey(row.id));
+                      onClick={async () => {
+                        if (await confirmDialog({
+                          title: "Forget host key",
+                          message: `Forget the ${row.keyType} key for ${row.host}:${row.port}? `
+                            + "Strict and pinned routes will refuse the host until it is pinned again.",
+                          confirmLabel: "Forget",
+                          tone: "danger",
+                        })) act(() => deleteSshHostKey(row.id));
                       }}>
                 Remove
               </button>

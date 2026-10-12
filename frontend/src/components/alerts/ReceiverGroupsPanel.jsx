@@ -6,6 +6,7 @@ import {
   deleteReceiverGroup,
   updateReceiverGroup,
 } from "../../api/alertRoutingApi.js";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 const EMPTY_GROUP = {
   name: "",
@@ -57,9 +58,9 @@ function ReceiverGroupModal({ open, mode, initial, receivers, onClose, onSave, s
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <section className="card modal-panel routing-modal" role="dialog" aria-modal="true">
+      <section className="card modal-panel routing-modal" role="dialog" aria-modal="true" aria-labelledby="receiver-group-form-title">
         <header className="modal-header">
-          <h3>{mode === "edit" ? "Edit receiver group" : "Add receiver group"}</h3>
+          <h3 id="receiver-group-form-title">{mode === "edit" ? "Edit receiver group" : "Add receiver group"}</h3>
           <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
             <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
           </button>
@@ -195,7 +196,7 @@ export default function ReceiverGroupsPanel({ groups, receivers, onChanged }) {
   const [removeError, setRemoveError] = useState("");
 
   const remove = async (id) => {
-    if (!window.confirm("Delete this receiver group?")) {
+    if (!(await confirmDialog({ title: "Delete receiver group", message: "Delete this receiver group?", confirmLabel: "Delete", tone: "danger" }))) {
       return;
     }
     setRemoveError("");

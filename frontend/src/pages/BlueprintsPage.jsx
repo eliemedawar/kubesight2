@@ -14,6 +14,7 @@ import EmptyState from "../components/common/EmptyState.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import BlueprintEditorModal from "../components/catalog/BlueprintEditorModal.jsx";
 import DeployFromBlueprintWizard from "../components/catalog/DeployFromBlueprintWizard.jsx";
+import { confirmDialog } from "../lib/dialogs.js";
 
 // Real blueprint states → existing status-pill tones (Signal: certified=ok / caution=warn / new=muted)
 const STATUS_PILL_TONE = {
@@ -359,7 +360,7 @@ export default function BlueprintsPage({ clusters = [] }) {
 
   const handleDelete = async () => {
     if (!detail || deleting) return;
-    if (!window.confirm(`Delete blueprint "${detail.name}"? This cannot be undone.`)) return;
+    if (!(await confirmDialog({ title: "Delete blueprint", message: `Delete blueprint "${detail.name}"? This cannot be undone.`, confirmLabel: "Delete", tone: "danger" }))) return;
     setDeleting(true);
     try {
       await deleteServiceBlueprint(detail.id);

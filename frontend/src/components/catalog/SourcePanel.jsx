@@ -9,6 +9,7 @@ import {
   updateCiSourceCredential,
 } from "../../api/ciApi.js";
 import { useEscapeToClose } from "./ciShared.jsx";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 const WRITE_ACCESS_HINT =
   "Write access is needed only for merge checks and build statuses: KubeSight " +
@@ -109,10 +110,14 @@ export default function SourcePanel({ service, onSaved, canEdit, canManageSecret
   const removeCredential = async () => {
     if (!selectedCredential) return;
     if (
-      !window.confirm(
-        `Delete the credential "${selectedCredential.name}"? It is shared across ` +
-          "services; one still in use cannot be deleted."
-      )
+      !(await confirmDialog({
+        title: "Delete credential",
+        message:
+          `Delete the credential "${selectedCredential.name}"? It is shared across ` +
+          "services; one still in use cannot be deleted.",
+        confirmLabel: "Delete",
+        tone: "danger",
+      }))
     ) {
       return;
     }
@@ -370,6 +375,7 @@ function CredentialModal({ credential = null, onClose, onCreated }) {
       <div
         className="modal-card"
         role="dialog"
+        aria-modal="true"
         aria-label={editing ? "Edit source credential" : "Add source credential"}
         onClick={(event) => event.stopPropagation()}
       >

@@ -17,6 +17,7 @@ import {
   updateVSphereConnection,
   updateVSphereNetwork,
 } from "../../api/clusterBuildsApi.js";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 // What a missing privilege means for creating VMs.
 const NEED_TEXT = {
@@ -243,7 +244,12 @@ export function NetworkRanges({ connections, notify }) {
   };
 
   const remove = async (connectionId, range) => {
-    if (!window.confirm(`Remove the address range for ${range.networkName}?`)) return;
+    if (!(await confirmDialog({
+      title: "Remove address range",
+      message: `Remove the address range for ${range.networkName}?`,
+      confirmLabel: "Remove",
+      tone: "danger",
+    }))) return;
     try {
       await deleteVSphereNetwork(connectionId, range.id);
       await load();
@@ -312,10 +318,13 @@ export function OpenTofuStatus({ notify, canRelease }) {
   if (!data) return <p className="muted">Loading…</p>;
   const { engine, states } = data;
   const release = async (state) => {
-    if (!window.confirm(
-      `Release the lock on ${state.name}? Only do this when no OpenTofu job for it is running — `
-      + "the release is recorded in the audit log."
-    )) return;
+    if (!(await confirmDialog({
+      title: "Release state lock",
+      message: `Release the lock on ${state.name}? Only do this when no OpenTofu job for it is running — `
+        + "the release is recorded in the audit log.",
+      confirmLabel: "Release lock",
+      tone: "danger",
+    }))) return;
     try {
       await releaseProvisionLock(state.buildId);
       notify(`Lock on ${state.name} released.`);

@@ -1843,6 +1843,7 @@ export default function SchemaDeployWizard({
           <section
             className="card modal-panel wizard-close-confirm__panel"
             role="alertdialog"
+            aria-modal="true"
             aria-labelledby="wizard-close-confirm-title"
             onClick={(e) => e.stopPropagation()}
           >

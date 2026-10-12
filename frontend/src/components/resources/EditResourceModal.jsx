@@ -14,6 +14,7 @@ import AddToBundleButton from "../changes/AddToBundleButton.jsx";
 import { approvalNotice, isPendingApproval, pendingApprovalMessage } from "../../utils/pendingApproval.js";
 import { secretValuesHiddenNote } from "../../utils/sensitiveResponses.js";
 import useEscapeKey from "../../hooks/useEscapeKey.js";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 // kubectl kind -> human label / YAML Kind casing for the editable resource kinds.
 const KIND_META = {
@@ -152,9 +153,15 @@ export default function EditResourceModal({
 
   // Overlay click, Escape and the close button all land here: never mid-apply,
   // and never silently throwing away an edited manifest.
-  const requestClose = () => {
+  const requestClose = async () => {
     if (busy) return;
-    if (step !== "queued" && yaml !== loadedYaml && !window.confirm("Discard your YAML changes?")) {
+    if (step !== "queued" && yaml !== loadedYaml && !(await confirmDialog({
+      title: "Discard changes",
+      message: "Discard your YAML changes?",
+      confirmLabel: "Discard",
+      cancelLabel: "Keep editing",
+      tone: "danger",
+    }))) {
       return;
     }
     onClose();

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { useEscapeToClose } from "./ciShared.jsx";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 // Mirrors the backend VALID_* sets (service_blueprint_service.py).
 const COMPONENT_TYPES = [
@@ -234,10 +235,16 @@ export default function BlueprintEditorModal({ blueprint, categories = [], onClo
 
   // A stray backdrop click or Escape must not silently throw away a design:
   // ask first when anything changed. Nothing closes while a save is in flight.
-  const requestClose = () => {
+  const requestClose = async () => {
     if (saving) return;
     const dirty = JSON.stringify(form) !== initial.snapshot;
-    if (dirty && !window.confirm("Discard your unsaved changes to this blueprint?")) return;
+    if (dirty && !(await confirmDialog({
+      title: "Discard changes",
+      message: "Discard your unsaved changes to this blueprint?",
+      confirmLabel: "Discard",
+      cancelLabel: "Keep editing",
+      tone: "danger",
+    }))) return;
     onClose();
   };
   useEscapeToClose(requestClose, !saving);

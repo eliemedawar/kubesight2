@@ -26,6 +26,7 @@ import {
   runStartedAt,
   timeAgo,
 } from "../../utils/clusterBuilder.js";
+import { confirmDialog, promptDialog } from "../../lib/dialogs.js";
 
 function shapeSummary(build) {
   const counts = build.nodeCounts || {};
@@ -45,17 +46,28 @@ export async function confirmAndDelete(build, notify) {
   }
   let confirmName;
   if (policy.needsName) {
-    confirmName = window.prompt(
-      `${build.name} made a cluster. Deleting removes this build's record only — the cluster `
-      + "stays in Clusters, and the audit log keeps what the build was.\n\n"
-      + `Type ${build.name} to delete it:`
-    );
+    confirmName = await promptDialog({
+      title: "Delete build",
+      message: `${build.name} made a cluster. Deleting removes this build's record only — the cluster `
+        + "stays in Clusters, and the audit log keeps what the build was.",
+      label: `Type ${build.name} to delete it`,
+      placeholder: build.name,
+      required: true,
+      validate: (value) => (value.trim() === build.name ? "" : `Type ${build.name} exactly.`),
+      confirmLabel: "Delete",
+      tone: "danger",
+    });
     if (confirmName === null) return false;
     if (confirmName.trim() !== build.name) {
       notify("The name did not match; nothing was deleted.", true);
       return false;
     }
-  } else if (!window.confirm(`Delete build "${build.name}"? This cannot be undone.`)) {
+  } else if (!(await confirmDialog({
+    title: "Delete build",
+    message: `Delete build "${build.name}"? This cannot be undone.`,
+    confirmLabel: "Delete",
+    tone: "danger",
+  }))) {
     return false;
   }
   try {
@@ -71,7 +83,13 @@ export async function confirmAndDelete(build, notify) {
 function InFlightStrip({ build, now, onOpen, canExecute, notify, onChanged }) {
   const [busy, setBusy] = useState(false);
   const cancel = async () => {
-    if (!window.confirm(`Cancel the build "${build.name}"? You can delete or retry it afterwards.`)) return;
+    if (!(await confirmDialog({
+      title: "Cancel build",
+      message: `Cancel the build "${build.name}"? You can delete or retry it afterwards.`,
+      confirmLabel: "Cancel build",
+      cancelLabel: "Keep building",
+      tone: "danger",
+    }))) return;
     setBusy(true);
     try {
       await cancelClusterBuild(build.id);
@@ -88,7 +106,12 @@ function InFlightStrip({ build, now, onOpen, canExecute, notify, onChanged }) {
   const job = build.provisioning?.job;
   if (["provisioning", "destroying"].includes(build.status)) {
     const stopWait = async () => {
-      if (!window.confirm(`Stop waiting for ${build.name}'s VMs to answer SSH? The VMs stay; you can try SSH again later.`)) return;
+      if (!(await confirmDialog({
+        title: "Stop waiting for SSH",
+        message: `Stop waiting for ${build.name}'s VMs to answer SSH? The VMs stay; you can try SSH again later.`,
+        confirmLabel: "Stop waiting",
+        cancelLabel: "Keep waiting",
+      }))) return;
       setBusy(true);
       try {
         await stopProvisionWait(build.id, job.id);

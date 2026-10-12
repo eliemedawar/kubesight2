@@ -13,6 +13,7 @@ import {
 } from "../api/registriesApi.js";
 import { listClusters } from "../api/clustersApi.js";
 import useEscapeKey from "../hooks/useEscapeKey.js";
+import { confirmDialog } from "../lib/dialogs.js";
 
 const EMPTY_FORM = {
   name: "",
@@ -211,7 +212,7 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
   };
 
   const remove = async (row) => {
-    if (!window.confirm(`Remove linked registry "${row.name}"?`)) {
+    if (!(await confirmDialog({ title: "Remove registry", message: `Remove linked registry "${row.name}"?`, confirmLabel: "Remove", tone: "danger" }))) {
       return;
     }
     setError("");

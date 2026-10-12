@@ -18,6 +18,7 @@ import {
 } from "../../lib/integrations.js";
 import ICONS from "./settingsIcons.jsx";
 import ConfigurationPanel from "./integrationConfigPanels.jsx";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 /**
  * One integration, four rooms.
@@ -245,9 +246,12 @@ export default function IntegrationDetail({
     // Turning a connection off stops everything listed under Used by.
     if (
       !next &&
-      !window.confirm(
-        `Disable ${integration.name}? Everything that uses it stops until it is enabled again.`
-      )
+      !(await confirmDialog({
+        title: "Disable integration",
+        message: `Disable ${integration.name}? Everything that uses it stops until it is enabled again.`,
+        confirmLabel: "Disable",
+        tone: "danger",
+      }))
     ) {
       return;
     }

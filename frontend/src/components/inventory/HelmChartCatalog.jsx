@@ -9,6 +9,7 @@ import {
 import HelmChartContents, { helmSourceLabel } from "./HelmChartContents.jsx";
 import HelmChartDeployModal from "./HelmChartDeployModal.jsx";
 import HelmChartImportModal from "./HelmChartImportModal.jsx";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 export default function HelmChartCatalog({
   canDeploy = false,
@@ -46,9 +47,12 @@ export default function HelmChartCatalog({
 
   const remove = async (template) => {
     if (
-      !window.confirm(
-        `Delete the reusable Helm chart “${template.name}”? Existing deployed releases are not affected.`,
-      )
+      !(await confirmDialog({
+        title: "Delete Helm chart",
+        message: `Delete the reusable Helm chart “${template.name}”? Existing deployed releases are not affected.`,
+        confirmLabel: "Delete",
+        tone: "danger",
+      }))
     ) {
       return;
     }
@@ -79,9 +83,12 @@ export default function HelmChartCatalog({
 
   const removeVersion = async (template, version) => {
     if (
-      !window.confirm(
-        `Delete version ${version.version} of “${template.name}”? Releases already deployed from it are not affected.`,
-      )
+      !(await confirmDialog({
+        title: "Delete chart version",
+        message: `Delete version ${version.version} of “${template.name}”? Releases already deployed from it are not affected.`,
+        confirmLabel: "Delete",
+        tone: "danger",
+      }))
     ) {
       return;
     }

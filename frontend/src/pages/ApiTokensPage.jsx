@@ -5,6 +5,7 @@ import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import { parseApiTime } from "../lib/apiTime.js";
+import { confirmDialog } from "../lib/dialogs.js";
 
 /**
  * API tokens — how a machine authenticates as a person.
@@ -128,10 +129,14 @@ export default function ApiTokensPage() {
 
   const revoke = async (token) => {
     if (
-      !window.confirm(
-        `Revoke "${token.name}"? Anything using it stops working immediately, and ` +
-          "this cannot be undone."
-      )
+      !(await confirmDialog({
+        title: "Revoke token",
+        message:
+          `Revoke "${token.name}"? Anything using it stops working immediately, and ` +
+          "this cannot be undone.",
+        confirmLabel: "Revoke",
+        tone: "danger",
+      }))
     )
       return;
     setRevokingId(token.id);

@@ -14,6 +14,7 @@ import { formatRelative } from "../ciShared.jsx";
 import { Field } from "../pipeline/controls.jsx";
 import { PlIcon } from "../pipeline/icons.jsx";
 import TemplatePicker from "../pipeline/TemplatePicker.jsx";
+import { confirmDialog } from "../../../lib/dialogs.js";
 
 const SOURCE_LABELS = {
   manual: "Linked by hand",
@@ -94,9 +95,12 @@ export default function DeploymentLinksSection({ service, canEdit, canDeploy, on
 
   const remove = async (link) => {
     if (
-      !window.confirm(
-        `Unlink ${link.namespace}/${link.workloadName}? Nothing changes on the cluster. The inventory stops naming this service as its builder, and a Deploy stage set to the service's linked deployment stops deploying there.`
-      )
+      !(await confirmDialog({
+        title: "Unlink deployment",
+        message: `Unlink ${link.namespace}/${link.workloadName}? Nothing changes on the cluster. The inventory stops naming this service as its builder, and a Deploy stage set to the service's linked deployment stops deploying there.`,
+        confirmLabel: "Unlink",
+        tone: "danger",
+      }))
     ) {
       return;
     }

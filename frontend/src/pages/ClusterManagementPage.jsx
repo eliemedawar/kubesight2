@@ -15,6 +15,7 @@ import { formatAccessError } from "../utils/authz.js";
 import { parseApiTime } from "../lib/apiTime.js";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import useEscapeKey from "../hooks/useEscapeKey.js";
+import { confirmDialog } from "../lib/dialogs.js";
 
 // Stable empty selection so the registries modal's reset effect doesn't loop.
 const EMPTY_IDS = [];
@@ -790,7 +791,7 @@ export default function ClusterManagementPage({
   };
 
   const handleRemove = async (cluster) => {
-    if (removingId || !window.confirm(`Remove cluster "${cluster.name}"?`)) {
+    if (removingId || !(await confirmDialog({ title: "Remove cluster", message: `Remove cluster "${cluster.name}"?`, confirmLabel: "Remove", tone: "danger" }))) {
       return;
     }
     setError("");
