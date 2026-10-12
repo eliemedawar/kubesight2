@@ -137,3 +137,78 @@ def test_forbidden_namespace_list_is_cached_as_empty():
         assert p.namespace_resource_list_from_k8s(access, "ns", "secrets")["secrets"] == []
         assert run.call_count == 1
     p._K8S_READ_CACHE.invalidate()
+
+
+# --- Helm: cached version probe + release list, timeouts ----------------------
+
+
+def test_helm_release_list_is_shared_and_dropped_on_change():
+    from api.cluster_access import ClusterAccess
+    from api.services import helm_service as h
+
+    h._HELM_CACHE.invalidate()
+    access = ClusterAccess("hc1", "ctx", None, "hc1", False)
+    calls = []
+
+    def fake_run(_access, args, **_kw):
+        calls.append(args)
+        return '[{"name": "r1", "namespace": "ns"}]'
+
+    with patch.object(h, "_helm_version_output", return_value="v3.15.0"), patch.object(
+        h, "_resolve_access", return_value=access
+    ), patch.object(h, "run_helm", side_effect=fake_run):
+        assert [r["name"] for r in h.list_releases("hc1")] == ["r1"]
+        assert [r["name"] for r in h.list_releases("hc1")] == ["r1"]
+        assert len(calls) == 1
+        h.invalidate_helm_release_cache("hc1")
+        h.list_releases("hc1")
+        assert len(calls) == 2
+    h._HELM_CACHE.invalidate()
+
+
+def test_helm_list_failure_is_not_cached():
+    from api.cluster_access import ClusterAccess
+    from api.services import helm_service as h
+
+    h._HELM_CACHE.invalidate()
+    access = ClusterAccess("hc2", "ctx", None, "hc2", False)
+    outputs = [h.HelmCommandError("boom"), '[{"name": "r1", "namespace": "ns"}]']
+
+    def fake_run(_access, args, **_kw):
+        value = outputs.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    with patch.object(h, "_helm_version_output", return_value="v3"), patch.object(
+        h, "_resolve_access", return_value=access
+    ), patch.object(h, "run_helm", side_effect=fake_run):
+        assert h.list_releases("hc2") == []
+        assert [r["name"] for r in h.list_releases("hc2")] == ["r1"]
+    h._HELM_CACHE.invalidate()
+
+
+def test_helm_subprocess_timeouts():
+    from api.services import helm_service as h
+
+    assert h._helm_subprocess_timeout(["list", "-A"]) == h._HELM_READ_TIMEOUT_SECONDS
+    assert h._helm_subprocess_timeout(["upgrade", "--install", "r", "c"]) == h._HELM_WRITE_TIMEOUT_SECONDS
+    assert h._helm_subprocess_timeout(["upgrade", "r", "c", "--timeout", "10m0s"]) == 660
+    assert h._helm_subprocess_timeout(["install", "r", "c", "--timeout=90s"]) == 150
+
+
+def test_helm_version_probe_runs_once():
+    from api.services import helm_service as h
+
+    h._HELM_CACHE.invalidate()
+
+    class Done:
+        returncode = 0
+        stdout = "v3.15.0+g1"
+        stderr = ""
+
+    with patch.object(h.subprocess, "run", return_value=Done()) as run:
+        assert h.is_helm_installed()
+        assert h.check_helm_available()["version"] == "v3.15.0+g1"
+        assert run.call_count == 1
+    h._HELM_CACHE.invalidate()

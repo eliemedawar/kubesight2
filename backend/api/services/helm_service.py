@@ -19,6 +19,7 @@ from ..audit import log_audit
 from ..cluster_access import ClusterAccess
 from ..k8s_provider import resolve_cluster_access
 from ..models import User
+from ..ttl_cache import TTLCache
 from .deployment_service import analyze_resources, check_registry_images, sanitize_yaml_preview
 
 RunHelmFn = Callable[[ClusterAccess, List[str], Optional[Dict[str, str]]], str]
@@ -61,6 +62,46 @@ def _helm_binary() -> str:
     return os.getenv("HELM_BINARY", "helm")
 
 
+# `helm version` ran before every helm call (and twice for the Helm status
+# card); the binary does not come and go, so its answer is kept 5 minutes.
+_HELM_CACHE = TTLCache("helm")
+_HELM_VERSION_TTL_SECONDS = int(os.getenv("HELM_VERSION_CACHE_SECONDS", "300"))
+# Release lists feed inventory and the Helm page for every viewer; helm reads
+# every release Secret to build one, so it is shared briefly (and served stale
+# while one background refresh runs). Installs/upgrades drop it at once.
+_HELM_LIST_TTL_SECONDS = int(os.getenv("HELM_LIST_CACHE_TTL_SECONDS", "20"))
+_HELM_LIST_STALE_SECONDS = int(os.getenv("HELM_LIST_CACHE_STALE_SECONDS", "120"))
+# Subprocess bounds: reads (list/status/get/...) fail after HELM_TIMEOUT_SECONDS;
+# changes (install/upgrade/rollback/uninstall) may run hooks for the helm
+# default of 5 minutes, so they get a longer bound (or their --timeout + 60 s).
+_HELM_READ_TIMEOUT_SECONDS = int(os.getenv("HELM_TIMEOUT_SECONDS", "60"))
+_HELM_WRITE_TIMEOUT_SECONDS = int(os.getenv("HELM_WRITE_TIMEOUT_SECONDS", "600"))
+_HELM_MUTATING_VERBS = {"install", "upgrade", "uninstall", "rollback", "delete"}
+# Reads that talk to the cluster API: they queue for the same slots as kubectl.
+_HELM_CLUSTER_READ_VERBS = {"list", "status", "get", "history"}
+
+
+def _helm_version_output() -> str:
+    """``helm version --short`` output, "" when helm is missing or broken."""
+
+    def _probe() -> str:
+        try:
+            completed = subprocess.run(
+                [_helm_binary(), "version", "--short"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        if completed.returncode != 0:
+            return ""
+        return (completed.stdout or completed.stderr or "").strip()
+
+    return _HELM_CACHE.get_or_compute("version", _HELM_VERSION_TTL_SECONDS, _probe)
+
+
 def is_helm_installed(run_version: Optional[Callable[[], str]] = None) -> bool:
     if run_version:
         try:
@@ -68,16 +109,38 @@ def is_helm_installed(run_version: Optional[Callable[[], str]] = None) -> bool:
             return True
         except (HelmCommandError, HelmNotInstalledError, OSError):
             return False
-    try:
-        completed = subprocess.run(
-            [_helm_binary(), "version", "--short"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return completed.returncode == 0 and bool((completed.stdout or completed.stderr or "").strip())
-    except OSError:
-        return False
+    return bool(_helm_version_output())
+
+
+def _duration_seconds(text: str) -> Optional[int]:
+    """Go duration ("5m0s", "300s", "1h") to seconds; None when unparseable."""
+    total = 0.0
+    matched = False
+    for amount, unit in re.findall(r"(\d+(?:\.\d+)?)(h|ms|m|s)", text or ""):
+        matched = True
+        total += float(amount) * {"h": 3600, "m": 60, "s": 1, "ms": 0.001}[unit]
+    return int(total) if matched else None
+
+
+def _helm_subprocess_timeout(args: List[str]) -> int:
+    verb = args[0] if args else ""
+    if verb not in _HELM_MUTATING_VERBS:
+        return _HELM_READ_TIMEOUT_SECONDS
+    for index, token in enumerate(args):
+        value = None
+        if token == "--timeout" and index + 1 < len(args):
+            value = args[index + 1]
+        elif token.startswith("--timeout="):
+            value = token.split("=", 1)[1]
+        if value is not None:
+            seconds = _duration_seconds(value)
+            if seconds:
+                return max(seconds + 60, _HELM_READ_TIMEOUT_SECONDS)
+    return _HELM_WRITE_TIMEOUT_SECONDS
+
+
+def invalidate_helm_release_cache(cluster_id: Optional[str] = None) -> None:
+    _HELM_CACHE.invalidate(f"releases:{cluster_id}:" if cluster_id else "releases:")
 
 
 def ensure_helm_installed() -> None:
@@ -163,6 +226,21 @@ def run_helm(
         # A flag-shaped release/namespace/chart value smuggled into the argv.
         raise HelmCommandError(f"Refusing to run helm: argument {bad[:80]!r} is not allowed.")
     ensure_helm_installed()
+    from ..k8s_provider import _K8S_READ_CACHE, _KUBECTL_SLOTS, _UNREACHABLE_BACKOFF_SECONDS
+    from ..kubeconfig_vault import kubeconfig_identity
+    from ..ttl_cache import caching_disabled
+
+    verb = args[0] if args else ""
+    # Same per-cluster breaker kubectl uses: a cluster that just timed out
+    # fails fast instead of every helm read waiting out its own timeout.
+    breaker_key = f"down:{kubeconfig_identity(access.kubeconfig_path)}:{access.context_name or ''}"
+    breaker_enabled = verb in _HELM_CLUSTER_READ_VERBS and not caching_disabled()
+    if breaker_enabled and _K8S_READ_CACHE.get(breaker_key):
+        raise HelmCommandError(
+            "Cluster API is unreachable (a recent request timed out). "
+            f"Retrying automatically within {_UNREACHABLE_BACKOFF_SECONDS}s."
+        )
+    timeout = _helm_subprocess_timeout(args)
     try:
         with materialized_kubeconfig(access.kubeconfig_path) as kubeconfig_path:
             command = [_helm_binary()]
@@ -176,28 +254,42 @@ def run_helm(
             if extra_env:
                 env.update(extra_env)
 
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                check=False,
-                env=env,
-            )
+            def _run() -> subprocess.CompletedProcess:
+                return subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=env,
+                    timeout=timeout,
+                )
+
+            if verb in _HELM_CLUSTER_READ_VERBS:
+                with _KUBECTL_SLOTS:
+                    completed = _run()
+            else:
+                completed = _run()
     except KubeconfigDecryptError as exc:
         raise HelmCommandError(str(exc)) from exc
+    except subprocess.TimeoutExpired as exc:
+        if breaker_enabled:
+            _K8S_READ_CACHE.set(breaker_key, True, _UNREACHABLE_BACKOFF_SECONDS)
+        raise HelmCommandError(
+            f"helm command timed out after {timeout}s: helm {' '.join(args[:3])}"
+        ) from exc
     if completed.returncode != 0:
         stderr = (completed.stderr or completed.stdout or "").strip()
         raise HelmCommandError(stderr or f"helm command failed: helm {' '.join(args)}")
 
     # Helm installs/upgrades/rollbacks change workloads — drop cached namespace
     # resource reads for this cluster so the UI reflects the release right away.
-    verb = args[0] if args else ""
-    if verb in {"install", "upgrade", "uninstall", "rollback", "delete"} and "--dry-run" not in args:
+    if verb in _HELM_MUTATING_VERBS and "--dry-run" not in args:
         from ..k8s_provider import invalidate_namespace_resources_cache
         from .inventory_service import invalidate_inventory_discovery_cache
 
         invalidate_namespace_resources_cache(access.cluster_id)
         invalidate_inventory_discovery_cache(access.cluster_id)
+        invalidate_helm_release_cache(access.cluster_id)
 
     return completed.stdout
 
@@ -1040,6 +1132,8 @@ def list_releases(
             return []
     if not is_helm_installed():
         return []
+    # Access is resolved here (database); the cached closure only runs helm,
+    # so it can refresh on a background thread. RBAC filtering stays below.
     access = _resolve_access(cluster_id)
     runner = run_helm_fn or run_helm
     args = ["list", "-o", "json"]
@@ -1047,14 +1141,27 @@ def list_releases(
         args.extend(["-n", namespace])
     else:
         args.append("-A")
+
+    def _fetch() -> List[Dict[str, Any]]:
+        # Failures raise so they are never cached as "no releases".
+        releases = json.loads(runner(access, args) or "[]")
+        if not isinstance(releases, list):
+            raise ValueError("helm list returned an unexpected document")
+        return releases
+
     try:
-        output = runner(access, args)
-        releases = json.loads(output or "[]")
-    except (HelmCommandError, json.JSONDecodeError):
+        if run_helm_fn is not None:
+            releases = _fetch()  # an injected runner is never shared via the cache
+        else:
+            releases = _HELM_CACHE.get_or_compute(
+                f"releases:{cluster_id}:{namespace or '*'}",
+                _HELM_LIST_TTL_SECONDS,
+                _fetch,
+                stale_ttl=_HELM_LIST_STALE_SECONDS,
+            )
+    except (HelmCommandError, ValueError):
         return []
-    if not isinstance(releases, list):
-        return []
-    return filter_releases_for_user(user, cluster_id, releases)
+    return filter_releases_for_user(user, cluster_id, list(releases))
 
 
 def _parse_chart_label(chart_label: str) -> Tuple[str, str]:
@@ -1284,17 +1391,6 @@ def _audit_unauthorized(user: Optional[User], payload: Dict[str, Any], action: s
 
 
 def check_helm_available() -> Dict[str, Any]:
-    installed = is_helm_installed()
-    version = ""
-    if installed:
-        try:
-            completed = subprocess.run(
-                [_helm_binary(), "version", "--short"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            version = (completed.stdout or completed.stderr or "").strip()
-        except OSError:
-            installed = False
+    version = _helm_version_output()
+    installed = bool(version)
     return {"installed": installed, "version": version, "message": HELM_MISSING_MESSAGE if not installed else None}
