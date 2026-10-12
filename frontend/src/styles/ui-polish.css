@@ -140,7 +140,9 @@ button:not(.btn-ghost):not(.icon-button):not(.nav-link):not(.nav-group-head):not
   font-weight: 500;
 }
 
-button.primary {
+/* :not(.btn-danger) keeps "btn-primary btn-danger" (ConfirmActionModal) red. */
+button.primary,
+button.btn-primary:not(.btn-danger) {
   font-weight: 600;
   background: var(--accent);
   border-color: var(--accent);
@@ -149,20 +151,23 @@ button.primary {
   transition: background var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
 
-button.primary:hover {
+button.primary:hover,
+button.btn-primary:not(.btn-danger):hover {
   background: var(--accent-hover);
   border-color: var(--accent-hover);
   box-shadow: 0 0 16px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
-.btn-outline {
+.btn-outline,
+.btn-secondary {
   font-weight: 500;
   border-color: var(--border);
   color: var(--text-subtle);
   background: transparent;
 }
 
-.btn-outline:hover {
+.btn-outline:hover,
+.btn-secondary:hover {
   border-color: var(--border-strong);
   background: var(--bg-interactive);
   color: var(--text-main);
@@ -463,8 +468,10 @@ td:last-child button,
   gap: var(--space-4);
 }
 
+/* Direct children only: a bare `span` also hit the SearchableSelect's value
+   and shrank the chosen cluster/namespace to a 9px uppercase caption. */
 .topbar-field label,
-.topbar-field span {
+.topbar-field > span {
   font-size: 0.5625rem;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -1199,7 +1206,7 @@ kbd {
   font-size: 0.625rem;
   font-weight: 600;
   letter-spacing: 0.05em;
-  text-transform: uppercase;
+  text-transform: none; /* "v1.0.0", not "V1.0.0" */
   color: var(--sidebar-footer-text);
   opacity: 0.6;
 }
@@ -1381,6 +1388,39 @@ body.has-bundle-fab .page-content.ops-layout {
   border-color: var(--danger-border);
   background: var(--danger-soft);
   color: var(--danger);
+}
+
+/* Informational notes (queue reasons, setup hints) — not success-green. */
+.banner-message.info {
+  border-color: var(--info-border);
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+/* ErrorBanner with onDismiss: text grows, a small × sits at the end. */
+.banner-message__text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.banner-message__dismiss.btn-ghost {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  min-height: 0;
+  margin: -0.15rem -0.4rem -0.15rem 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  opacity: 0.75;
+}
+
+.banner-message__dismiss.btn-ghost:hover {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 12%, transparent);
 }
 
 /* ── Sidebar width – accommodate icons ─── */

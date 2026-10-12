@@ -216,6 +216,17 @@ export default function CoachMarks({
     return () => document.removeEventListener("keydown", onKey, true);
   }, []);
 
+  // Give focus back (e.g. to the "?" button that replayed the tips) when the
+  // tour closes, instead of leaving it on <body>.
+  useEffect(() => {
+    const returnTo = document.activeElement;
+    return () => {
+      if (returnTo instanceof HTMLElement && returnTo !== document.body && returnTo.isConnected) {
+        returnTo.focus({ preventScroll: true });
+      }
+    };
+  }, []);
+
   const ready = Boolean(rect);
   useEffect(() => {
     if (ready) {

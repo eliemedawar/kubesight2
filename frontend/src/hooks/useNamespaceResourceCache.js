@@ -171,12 +171,15 @@ export function useNamespaceResourceCache({
     [clusterId, namespace, applyListKey, syncFromCache, setKeyLoading, setKeyRefreshing]
   );
 
+  // fetchListKey records failures in tabErrors (shown on the tab) before it
+  // rethrows, so fire-and-forget callers swallow the rejection rather than
+  // leave it unhandled (a bad namespace in a deep link threw page errors).
   const ensureLoaded = useCallback(
     (listKey) => {
       if (!listKey) {
         return;
       }
-      void fetchListKey(listKey, { force: false, silent: false });
+      fetchListKey(listKey, { force: false, silent: false }).catch(() => {});
     },
     [fetchListKey]
   );
@@ -187,10 +190,10 @@ export function useNamespaceResourceCache({
         return;
       }
       const cached = resourceCache.get(clusterId, namespace, listKey);
-      void fetchListKey(listKey, {
+      fetchListKey(listKey, {
         force: true,
         silent: Boolean(cached?.items?.length),
-      });
+      }).catch(() => {});
     },
     [clusterId, namespace, fetchListKey]
   );
@@ -229,10 +232,10 @@ export function useNamespaceResourceCache({
     const stopPolling = setVisibleInterval(() => {
       const cached = resourceCache.get(clusterId, namespace, activeListKey);
       if (!cached || resourceCache.isStale(cached, RESOURCE_CACHE_TTL_MS)) {
-        void fetchListKey(activeListKey, {
+        fetchListKey(activeListKey, {
           force: false,
           silent: Boolean(cached?.items?.length),
-        });
+        }).catch(() => {});
       }
     }, RESOURCE_CACHE_TTL_MS);
 

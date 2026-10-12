@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useEscapeToClose } from "../../hooks/useEscapeToClose.js";
 import { navIcon } from "./navIcons.jsx";
 
 function score(target, query) {
@@ -20,13 +21,22 @@ export default function JumpPalette({ open, targets, onClose, onSelect }) {
   const [cursor, setCursor] = useState(0);
   const inputRef = useRef(null);
   const listRef = useRef(null);
+  // On the shared stack, so Escape closes the palette even when it was opened
+  // over a dialog, and leaves that dialog open.
+  useEscapeToClose(onClose, true, open);
 
   useEffect(() => {
-    if (open) {
-      setQuery("");
-      setCursor(0);
-      window.requestAnimationFrame(() => inputRef.current?.focus());
-    }
+    if (!open) return undefined;
+    setQuery("");
+    setCursor(0);
+    // Hand focus back to whatever had it (the Jump button, a field) on close.
+    const returnTo = document.activeElement;
+    window.requestAnimationFrame(() => inputRef.current?.focus());
+    return () => {
+      if (returnTo instanceof HTMLElement && returnTo.isConnected) {
+        returnTo.focus({ preventScroll: true });
+      }
+    };
   }, [open]);
 
   const results = useMemo(() => {
@@ -65,9 +75,9 @@ export default function JumpPalette({ open, targets, onClose, onSelect }) {
     } else if (event.key === "Enter") {
       event.preventDefault();
       choose(results[cursor]);
-    } else if (event.key === "Escape") {
+    } else if (event.key === "Tab") {
+      // The search box is the dialog's only control: keep focus inside.
       event.preventDefault();
-      onClose();
     }
   };
 
@@ -78,7 +88,12 @@ export default function JumpPalette({ open, targets, onClose, onSelect }) {
         role="dialog"
         aria-modal="true"
         aria-label="Jump to a page"
-        onMouseDown={(event) => event.stopPropagation()}
+        onMouseDown={(event) => {
+          event.stopPropagation();
+          // Clicking the list or padding must not pull focus out of the search
+          // box, or arrows/Enter/Escape stop working.
+          if (event.target !== inputRef.current) event.preventDefault();
+        }}
       >
         <div className="jump-input-row">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">

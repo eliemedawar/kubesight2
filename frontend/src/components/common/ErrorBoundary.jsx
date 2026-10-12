@@ -1,5 +1,10 @@
 import { Component } from "react";
 
+/**
+ * Catches render errors. At the root it replaces the whole app; with
+ * `scope="page"` it wraps just the page content, so the sidebar and topbar stay
+ * usable and moving to another page (a new `resetKey`) clears the error.
+ */
 export default class ErrorBoundary extends Component {
   constructor(props) {
     super(props);
@@ -14,10 +19,52 @@ export default class ErrorBoundary extends Component {
     console.error("KubeSight UI error:", error, info);
   }
 
+  componentDidUpdate(prevProps) {
+    if (this.state.error && prevProps.resetKey !== this.props.resetKey) {
+      this.setState({ error: null });
+    }
+  }
+
   render() {
     const { error } = this.state;
     if (!error) {
       return this.props.children;
+    }
+
+    const details = (
+      <pre
+        style={{
+          whiteSpace: "pre-wrap",
+          fontSize: "0.85rem",
+          background: "var(--bg-interactive)",
+          padding: "0.75rem",
+          borderRadius: "0.5rem",
+        }}
+      >
+        {error?.message || String(error)}
+      </pre>
+    );
+
+    if (this.props.scope === "page") {
+      return (
+        <section className="card" role="alert" style={{ maxWidth: "40rem" }}>
+          <h2 style={{ marginTop: 0 }}>This page could not be displayed</h2>
+          <p className="muted">
+            Something on this page failed while rendering. The rest of KubeSight still works:
+            pick another page, try this one again, or reload. If it keeps happening, send the
+            message below to your administrator.
+          </p>
+          {details}
+          <div style={{ display: "flex", gap: "0.5rem" }}>
+            <button type="button" className="primary" onClick={() => this.setState({ error: null })}>
+              Try again
+            </button>
+            <button type="button" className="btn-outline" onClick={() => window.location.reload()}>
+              Reload
+            </button>
+          </div>
+        </section>
+      );
     }
 
     return (
@@ -25,26 +72,11 @@ export default class ErrorBoundary extends Component {
         <div className="card" style={{ maxWidth: "32rem", margin: "2rem auto" }}>
           <h1 style={{ marginTop: 0 }}>Something went wrong</h1>
           <p className="muted">
-            The app hit a JavaScript error and could not render. This often happens when the page
-            is opened from a saved HTML file or the dev server is not running.
+            KubeSight hit an unexpected error and could not render. Reload the page; if it keeps
+            happening, send the message below to your administrator.
           </p>
-          <p>
-            <strong>Use:</strong> start the backend (<code>python app.py</code>), then open{" "}
-            <code>http://127.0.0.1:5000</code> or the Vite dev URL{" "}
-            <code>http://localhost:5173</code>.
-          </p>
-          <pre
-            style={{
-              whiteSpace: "pre-wrap",
-              fontSize: "0.85rem",
-              background: "var(--bg-interactive)",
-              padding: "0.75rem",
-              borderRadius: "0.5rem",
-            }}
-          >
-            {error?.message || String(error)}
-          </pre>
-          <button type="button" className="primary-btn" onClick={() => window.location.reload()}>
+          {details}
+          <button type="button" className="primary" onClick={() => window.location.reload()}>
             Reload
           </button>
         </div>

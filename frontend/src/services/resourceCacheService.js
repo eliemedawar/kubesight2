@@ -96,11 +96,16 @@ class ResourceCacheService {
   setInflight(clusterId, namespace, listKey, promise) {
     const key = entryKey(clusterId, namespace, listKey);
     this.inflight.set(key, promise);
-    promise.finally(() => {
-      if (this.inflight.get(key) === promise) {
-        this.inflight.delete(key);
-      }
-    });
+    // .finally() returns a new promise that rejects with the request; catch it
+    // here (callers still see the rejection on `promise`) so a failed fetch
+    // is not also reported as an unhandled rejection.
+    promise
+      .finally(() => {
+        if (this.inflight.get(key) === promise) {
+          this.inflight.delete(key);
+        }
+      })
+      .catch(() => {});
     return promise;
   }
 

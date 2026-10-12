@@ -338,6 +338,9 @@ th.numeric {
   background: var(--danger-soft);
   color: var(--text-main);
   border-radius: var(--radius-md);
+  /* Same inset as .banner-message; without it the text sat on the border. */
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--font-size-sm);
 }
 
 /* ─── Code & log wells ─── */
@@ -384,6 +387,34 @@ kbd {
 .fab:hover {
   background: var(--accent-hover);
   border-color: var(--accent-hover);
+}
+
+.fab__icon {
+  display: inline-grid;
+  place-items: center;
+}
+
+.fab__icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Empty bundle: icon only, a 44px square instead of a ~170px-wide button. */
+.fab.fab--compact {
+  width: 2.75rem;
+  height: 2.75rem;
+  min-height: 0;
+  padding: 0;
+  justify-content: center;
+}
+
+.fab--compact .fab__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 
 /* ─── Section headings inside pages ─── */

@@ -80,7 +80,12 @@ export function RouterProvider({ children }) {
         window.scrollTo(0, 0);
       }
     }
-    setRoute(parseRoute(nextHash) || DEFAULT_ROUTE);
+    const resolved = parseRoute(nextHash) || DEFAULT_ROUTE;
+    // Update the ref now, not on the next render: a handler that navigates
+    // twice (switch tab, then set a query param) builds the second address on
+    // this one instead of on the stale route, which silently dropped the first.
+    routeRef.current = resolved;
+    setRoute(resolved);
   }, []);
 
   /** Navigate by bare page key — what the sidebar and cross-page links use. */
@@ -109,6 +114,7 @@ export function RouterProvider({ children }) {
         // did not come from the table, and do not leave it in history.
         const fallback = DEFAULT_ROUTE;
         window.history.replaceState(null, "", urlFor(buildRoute(fallback)));
+        routeRef.current = fallback;
         setRoute(fallback);
         return;
       }
@@ -122,6 +128,7 @@ export function RouterProvider({ children }) {
         }
         return;
       }
+      routeRef.current = parsed;
       setRoute(parsed);
     };
     window.addEventListener("hashchange", sync);

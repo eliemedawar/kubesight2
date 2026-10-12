@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 
 /**
  * Password input with a show/hide toggle and a Caps Lock warning — the two
@@ -15,16 +15,21 @@ export default function PasswordField({
 }) {
   const [visible, setVisible] = useState(false);
   const [capsOn, setCapsOn] = useState(false);
+  // The label names only the input: wrapping the whole field in a <label>
+  // would also make it the label of the show/hide button inside it.
+  const inputId = useId();
+  const capsId = `${inputId}-caps`;
 
   const syncCaps = (event) => {
     setCapsOn(Boolean(event.getModifierState && event.getModifierState("CapsLock")));
   };
 
   return (
-    <label className="sg-lg-field">
-      {label}
+    <div className="sg-lg-field">
+      <label htmlFor={inputId}>{label}</label>
       <span className="sg-lg-inputwrap">
         <input
+          id={inputId}
           type={visible ? "text" : "password"}
           value={value}
           onChange={onChange}
@@ -32,6 +37,7 @@ export default function PasswordField({
           autoFocus={autoFocus}
           required={required}
           disabled={disabled}
+          aria-describedby={capsOn ? capsId : undefined}
           onKeyDown={syncCaps}
           onKeyUp={syncCaps}
           onFocus={syncCaps}
@@ -41,9 +47,11 @@ export default function PasswordField({
           type="button"
           className="sg-lg-eye"
           aria-pressed={visible}
-          aria-label={visible ? "Hide password" : "Show password"}
+          title={visible ? "Hide password" : "Show password"}
           onClick={() => setVisible((v) => !v)}
         >
+          {/* Named by text, not aria-label, so "Password" labels only the input. */}
+          <span className="sg-lg-sr">{visible ? "Hide password" : "Show password"}</span>
           {visible ? (
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" />
@@ -59,13 +67,13 @@ export default function PasswordField({
         </button>
       </span>
       {capsOn ? (
-        <span className="sg-lg-caps">
+        <span className="sg-lg-caps" id={capsId}>
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d="M12 4 4 13h5v7h6v-7h5L12 4Z" />
           </svg>
           Caps Lock is on
         </span>
       ) : null}
-    </label>
+    </div>
   );
 }

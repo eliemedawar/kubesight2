@@ -91,28 +91,31 @@ export default function Topbar({
       }
     };
 
+    // Capture phase, and the key is claimed, so the app-wide dialog stack
+    // leaves whatever is open underneath alone.
     const handleKeyDown = (event) => {
       if (event.key === "Escape") {
+        event.preventDefault();
         setNotificationsOpen(false);
       }
     };
 
     document.addEventListener("mousedown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("keydown", handleKeyDown, true);
     return () => {
       document.removeEventListener("mousedown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("keydown", handleKeyDown, true);
     };
   }, [notificationsOpen]);
 
+  // Tell App outside the state updater: updaters run during render, and
+  // setting App state from there is a React error.
   const toggleNotifications = () => {
-    setNotificationsOpen((open) => {
-      const next = !open;
-      if (next) {
-        onNotificationsOpen?.();
-      }
-      return next;
-    });
+    const next = !notificationsOpen;
+    setNotificationsOpen(next);
+    if (next) {
+      onNotificationsOpen?.();
+    }
   };
 
   const handleViewAllAlerts = () => {
@@ -219,8 +222,8 @@ export default function Topbar({
         <div className="topbar-user">
           <div className="user-avatar">{userInitials || "U"}</div>
           <div className="user-meta">
-            <strong>{displayUser.name}</strong>
-            <span>{displayUser.role}</span>
+            <strong title={displayUser.name}>{displayUser.name}</strong>
+            <span title={displayUser.role}>{displayUser.role}</span>
           </div>
         </div>
       </div>

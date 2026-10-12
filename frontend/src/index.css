@@ -310,25 +310,32 @@ button svg {
   flex-shrink: 0;
 }
 
-.primary {
+/* .btn-primary / .btn-secondary are older spellings still used by the
+   inventory/helm/resource modals; they had no CSS at all and rendered as
+   plain grey buttons. They alias .primary / .btn-outline. */
+.primary,
+.btn-primary {
   background: var(--accent);
   border-color: var(--accent);
   color: #ffffff;
   box-shadow: 0 2px 10px -2px rgba(255, 41, 41, 0.45);
 }
 
-.primary:hover {
+.primary:hover,
+.btn-primary:hover {
   background: var(--accent-hover);
   border-color: var(--accent-hover);
 }
 
-.btn-outline {
+.btn-outline,
+.btn-secondary {
   background: transparent;
   border-color: var(--accent-border);
   color: var(--accent-strong);
 }
 
-.btn-outline:hover {
+.btn-outline:hover,
+.btn-secondary:hover {
   background: var(--accent-soft);
   border-color: var(--accent);
 }
@@ -595,6 +602,14 @@ button svg {
   min-width: 13.5rem;
 }
 
+/* The scope pickers are SearchableSelects now: same floor as the old select,
+   and a ceiling so a long cluster name ellipsizes instead of pushing the
+   topbar actions off screen. */
+.topbar-field .ss-wrap {
+  min-width: 13.5rem;
+  max-width: 22rem;
+}
+
 .topbar-actions {
   display: flex;
   align-items: center;
@@ -843,6 +858,21 @@ button svg {
   color: var(--text-muted);
 }
 
+/* A long full name or role ellipsizes (full text in the title) instead of
+   widening the topbar. */
+.topbar-user .user-meta {
+  min-width: 0;
+  max-width: 14rem;
+}
+
+.topbar-user .user-meta strong,
+.topbar-user .user-meta span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .page-content {
   display: flex;
   flex-direction: column;
@@ -1055,9 +1085,18 @@ button svg {
   margin: var(--space-2) 0;
 }
 
-.loading-state-hint {
+/* The label leads, the hint is the small print under it (the hint used to
+   render larger than "Loading…"). */
+.loading-state p:not(.loading-state-hint) {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--text-subtle);
+}
+
+.loading-state .loading-state-hint {
   margin-top: 0.35rem;
-  font-size: 0.9rem;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
 }
 
 .stat-card-clickable {
@@ -1595,8 +1634,13 @@ tr:last-child td {
   color: var(--accent);
 }
 
+/* Toggles are options, not field captions: drop the uppercase micro-label style. */
 .log-filters-toggles .checkbox-label {
   margin-top: 0;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  letter-spacing: normal;
+  text-transform: none;
 }
 
 .checkbox-label {
@@ -2140,7 +2184,9 @@ tr:last-child td {
   padding: 0 var(--space-1);
 }
 
-.cluster-radio {
+/* .cluster-form label (grid) would otherwise stack the radio above its text. */
+.cluster-radio,
+.cluster-form .cluster-radio {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -2195,7 +2241,8 @@ tr:last-child td {
   margin-top: var(--space-3);
 }
 
-.cluster-checkbox {
+.cluster-checkbox,
+.cluster-form .cluster-checkbox {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -2805,8 +2852,10 @@ button:focus-visible {
     padding: var(--space-3);
   }
 
-  .topbar select {
+  .topbar select,
+  .topbar-field .ss-wrap {
     min-width: 0;
+    max-width: none;
     width: 100%;
   }
 
@@ -2894,6 +2943,9 @@ button:focus-visible {
 
 .form-grid label {
   display: grid;
+  /* Pack label + control at the top: a taller neighbour in the same grid row
+     must not stretch this one's input. */
+  align-content: start;
   gap: var(--space-1);
   font-size: var(--font-size-sm);
   color: var(--text-muted);
@@ -4543,6 +4595,31 @@ button:focus-visible {
   width: 100%;
 }
 
+/* The card is a <button>, so the base button rule in ui-polish owns its padding.
+   Reserve room for the absolutely positioned overlays instead: the "Form" pill
+   bottom-right and the edit/delete pair top-right, so neither covers the
+   workload badge or the description. */
+.template-card-slot:has(.template-card__form-btn) .template-card::after {
+  content: "";
+  display: block;
+  flex: none;
+  height: 1.9rem;
+}
+
+.template-card-slot:has(.template-card__edit) .template-card__header {
+  padding-right: 3.6rem;
+}
+
+.template-card-slot .template-card__description {
+  overflow-wrap: anywhere;
+}
+
+/* Wizard step errors: .error-banner only sets colours, so give it room. */
+.wizard-modal__body .error-banner {
+  padding: var(--space-2) var(--space-3);
+  margin: 0 0 var(--space-3);
+}
+
 .template-card__delete {
   position: absolute;
   top: var(--space-2);
@@ -4993,6 +5070,26 @@ button:focus-visible {
 
 .add-app-form-grid .full-width {
   grid-column: 1 / -1;
+}
+
+/* Text inputs sat inline beside their label text (selects stacked, inputs did
+   not); stack every direct field label and let its control fill the row. */
+.add-app-form > label:not(.checkbox-row) {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.add-app-form > label:not(.checkbox-row) > input:not([type="checkbox"]):not([type="radio"]),
+.add-app-form > label:not(.checkbox-row) > textarea {
+  width: 100%;
+}
+
+/* The subtitle on a filled (red) choice button: muted grey was unreadable. */
+.add-app-choice.btn-primary .muted {
+  color: inherit;
+  opacity: 0.85;
 }
 
 .yaml-editor,
@@ -6247,6 +6344,8 @@ tbody tr:hover {
 
 .info-card header {
   padding: var(--space-4) var(--space-5);
+  /* The body below carries its own padding now (InfoCard's .info-card-body). */
+  margin-bottom: 0;
   border-bottom: 1px solid var(--border-soft);
   background: var(--bg-panel);
 }
@@ -6463,7 +6562,8 @@ kbd {
   padding: 0; margin: 0; border: 0; opacity: 0; pointer-events: none;
 }
 .ss-option--disabled { opacity: 0.45; cursor: not-allowed; }
-.ss-option--disabled:hover { background: transparent; }
+/* Two classes so it outranks the later .ss-option:hover rule. */
+.ss-option.ss-option--disabled:hover { background: transparent; }
 /* Let the wrapper shrink inside grid/flex rows that previously sized a <select>. */
 .template-envsrc-row > .ss-wrap,
 .schema-wire-row > .ss-wrap,
@@ -6503,8 +6603,11 @@ kbd {
   padding: 0.42rem 0.75rem; font-size: 0.875rem; cursor: pointer;
   color: var(--text-main); white-space: nowrap;
 }
-.ss-option:hover { background: var(--bg-interactive); }
+.ss-option:hover,
+.ss-option--active { background: var(--bg-interactive); }
 .ss-option--selected { background: var(--accent-soft); font-weight: 500; }
+/* Keyboard highlight on the selected row: keep its tint, add an edge. */
+.ss-option--selected.ss-option--active { box-shadow: inset 2px 0 0 var(--accent); }
 .ss-empty { padding: 0.5rem 0.75rem; font-size: 0.85rem; color: var(--text-muted); }
 
 /* ─── Deployment picker list with search ─── */
@@ -6698,6 +6801,14 @@ kbd {
 .topo-canvas--preview {
   overflow: hidden;
   cursor: pointer;
+}
+/* Out of flow in the preview: the surface keeps its full unscaled width (the
+   scale is only a transform), and in flow that width became the modal grid's
+   min-content — widening every section past the card's right edge. */
+.topo-canvas--preview .topo-canvas-surface {
+  position: absolute;
+  top: 0;
+  left: 0;
 }
 .topo-preview-cta {
   position: absolute;
@@ -6918,6 +7029,7 @@ kbd {
 .topo-node-del {
   width: 18px;
   height: 18px;
+  padding: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -7231,6 +7343,8 @@ kbd {
 }
 .row-actions-menu__panel button {
   text-align: left;
+  /* Buttons are inline-flex + centred app-wide; menu items read left. */
+  justify-content: flex-start;
   padding: var(--space-2) var(--space-3);
   background: none;
   border: none;
@@ -7572,6 +7686,7 @@ kbd {
 .helm-chart-card__actions {
   display: flex;
   justify-content: flex-end;
+  gap: var(--space-2);
   margin-top: auto;
   padding-top: var(--space-2);
 }

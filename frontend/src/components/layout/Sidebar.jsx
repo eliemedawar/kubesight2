@@ -120,12 +120,14 @@ export default function Sidebar({
     });
   }, []);
 
-  const renderLink = ({ key, label, pageKey, iconKey, isActive, className = "" }) => (
+  // `isCurrent` defaults to `isActive`; a workspace entry whose tab is listed
+  // underneath is styled active but leaves aria-current="page" to that tab.
+  const renderLink = ({ key, label, pageKey, iconKey, isActive, isCurrent = isActive, className = "" }) => (
     <a
       key={key}
       href={pageHref(pageKey)}
       className={`nav-link${isActive ? " active" : ""}${className ? ` ${className}` : ""}`}
-      aria-current={isActive ? "page" : undefined}
+      aria-current={isCurrent ? "page" : undefined}
       onClick={(event) => {
         if (!isPlainClick(event)) return;
         event.preventDefault();
@@ -205,6 +207,7 @@ export default function Sidebar({
                   // A workspace: the entry itself opens the first tab; while it
                   // is the current area its tabs show as a nested list.
                   const activeTab = item.tabs.find((tab) => tab.pageKey === activePage)?.pageKey;
+                  const showTabs = isActive && item.tabs.length > 1;
                   return (
                     <div key={item.key} className={`nav-ws${isActive ? " is-active" : ""}`}>
                       {renderLink({
@@ -213,9 +216,10 @@ export default function Sidebar({
                         pageKey: activeTab || item.pageKey,
                         iconKey: item.key,
                         isActive,
+                        isCurrent: isActive && !(showTabs && activeTab),
                         className: "nav-ws-link",
                       })}
-                      {isActive && item.tabs.length > 1 ? (
+                      {showTabs ? (
                         <div className="nav-ws-tabs" role="group" aria-label={`${item.label} sections`}>
                           {item.tabs.map((tab) =>
                             renderLink({

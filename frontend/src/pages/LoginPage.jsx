@@ -111,7 +111,7 @@ function AdminLockedScene({ onBack }) {
 export default function LoginPage() {
   const {
     login,
-    loading,
+    signingIn,
     error,
     setError,
     needsMfaChallenge,
@@ -247,8 +247,8 @@ export default function LoginPage() {
           onChange={(e) => setPassword(e.target.value)}
           autoComplete="current-password"
         />
-        <button type="submit" className="primary sg-lg-submit" disabled={loading}>
-          {loading ? "Signing in..." : "Sign In"}
+        <button type="submit" className="primary sg-lg-submit" disabled={signingIn}>
+          {signingIn ? "Signing in..." : "Sign In"}
         </button>
       </form>
     </AuthShell>

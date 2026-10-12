@@ -2,6 +2,7 @@ import {
   Children,
   isValidElement,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -90,9 +91,12 @@ export default function SearchableSelect({
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [dropPos, setDropPos] = useState(null);
+  // Keyboard highlight within the visible options (-1 = none).
+  const [activeIndex, setActiveIndex] = useState(-1);
   const triggerRef = useRef(null);
   const dropRef = useRef(null);
   const searchRef = useRef(null);
+  const listId = useId();
 
   const items = useMemo(() => buildOptions(options, children), [options, children]);
   const showSearch = allowCustom || items.length > searchThreshold;
@@ -159,14 +163,20 @@ export default function SearchableSelect({
         dropRef.current && !dropRef.current.contains(e.target)
       ) setOpen(false);
     };
+    // Escape pressed inside the select is handled (and stopped) by
+    // handleOpenKeyDown; this catches it when focus has wandered elsewhere.
+    // Capture phase, and the key is claimed, so the app-wide dialog stack
+    // (listening on document) leaves the dialog around the select open.
     const onKey = (e) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      setOpen(false);
     };
     document.addEventListener("mousedown", handler);
-    document.addEventListener("keydown", onKey);
+    document.addEventListener("keydown", onKey, true);
     return () => {
       document.removeEventListener("mousedown", handler);
-      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("keydown", onKey, true);
     };
   }, [open]);
 
@@ -203,10 +213,88 @@ export default function SearchableSelect({
     : null;
   const visibleItems = customItem ? [...filtered, customItem] : filtered;
 
+  // Opening (or changing the search) highlights the current value, else the
+  // first option, so arrows and Enter work straight away.
+  useEffect(() => {
+    if (!open) {
+      setActiveIndex(-1);
+      return;
+    }
+    const current = visibleItems.findIndex((o) => sameValue(o.value, value) && !o.disabled);
+    setActiveIndex(current >= 0 ? current : visibleItems.findIndex((o) => !o.disabled));
+    // visibleItems is derived from search; re-running on it every render would
+    // undo arrow-key moves.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, search]);
+
+  useEffect(() => {
+    if (!open || activeIndex < 0) return;
+    dropRef.current
+      ?.querySelector(`[data-ss-index="${activeIndex}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [open, activeIndex, positioned]);
+
+  const closeAndRefocus = () => {
+    setOpen(false);
+    triggerRef.current?.focus({ preventScroll: true });
+  };
+
   const choose = (opt) => {
     if (opt.disabled) return;
-    setOpen(false);
+    closeAndRefocus();
     onChange?.({ target: { value: opt.value, name } });
+  };
+
+  const moveActive = (step) => {
+    if (!visibleItems.length) return;
+    let next = activeIndex;
+    for (let i = 0; i < visibleItems.length; i += 1) {
+      next = next < 0 ? (step > 0 ? 0 : visibleItems.length - 1) : next + step;
+      next = Math.min(Math.max(next, 0), visibleItems.length - 1);
+      if (!visibleItems[next].disabled) break;
+    }
+    if (!visibleItems[next]?.disabled) setActiveIndex(next);
+  };
+
+  // Keys while the panel is open — from the search box, or from the trigger
+  // when the list is short enough to have no search box.
+  const handleOpenKeyDown = (e) => {
+    if (!open) return;
+    switch (e.key) {
+      case "ArrowDown":
+        e.preventDefault();
+        moveActive(1);
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        moveActive(-1);
+        break;
+      case "Home":
+      case "End":
+        if (e.target === searchRef.current) return; // caret moves in the search box
+        e.preventDefault();
+        setActiveIndex(e.key === "Home" ? 0 : visibleItems.length - 1);
+        break;
+      case "Enter":
+        e.preventDefault();
+        if (visibleItems[activeIndex]) choose(visibleItems[activeIndex]);
+        break;
+      case " ":
+        if (e.target === searchRef.current) return; // a space is part of the search
+        e.preventDefault();
+        if (visibleItems[activeIndex]) choose(visibleItems[activeIndex]);
+        break;
+      case "Escape":
+        // Stop here so a dialog around the select does not close as well.
+        e.preventDefault();
+        e.stopPropagation();
+        closeAndRefocus();
+        break;
+      case "Tab":
+        setOpen(false);
+        break;
+      default:
+    }
   };
 
   return (
@@ -217,8 +305,18 @@ export default function SearchableSelect({
         className={`ss-trigger${open ? " ss-trigger--open" : ""}${disabled ? " ss-trigger--disabled" : ""}`}
         onClick={() => !disabled && setOpen((v) => !v)}
         onKeyDown={(e) => {
+          if (disabled) return;
+          if (open) {
+            handleOpenKeyDown(e);
+            return;
+          }
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            setOpen(true);
+            return;
+          }
           // Typing on the closed trigger opens it with that letter already searched.
-          if (disabled || open || !showSearch) return;
+          if (!showSearch) return;
           if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey || e.key === " ") return;
           e.preventDefault();
           setSearch(e.key);
@@ -228,6 +326,10 @@ export default function SearchableSelect({
         aria-label={ariaLabel}
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-controls={open ? listId : undefined}
+        aria-activedescendant={
+          open && !showSearch && activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined
+        }
       >
         <span className={hasValue ? "ss-value" : "ss-placeholder"}>{triggerLabel}</span>
         <span className="ss-arrow">▾</span>
@@ -245,6 +347,7 @@ export default function SearchableSelect({
       {open && (
         <div
           ref={dropRef}
+          id={listId}
           className="ss-dropdown"
           role="listbox"
           style={{
@@ -265,7 +368,13 @@ export default function SearchableSelect({
                 placeholder={searchPlaceholder}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
+                onKeyDown={handleOpenKeyDown}
                 onMouseDown={(e) => e.stopPropagation()}
+                role="combobox"
+                aria-expanded="true"
+                aria-controls={listId}
+                aria-activedescendant={activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined}
+                aria-label={searchPlaceholder}
               />
             </div>
           )}
@@ -276,9 +385,13 @@ export default function SearchableSelect({
               visibleItems.map((opt, i) => (
                 <div
                   key={`${opt.custom ? "custom-" : ""}${String(opt.value)}-${i}`}
+                  id={`${listId}-${i}`}
+                  data-ss-index={i}
                   role="option"
                   aria-selected={sameValue(opt.value, value)}
-                  className={`ss-option${sameValue(opt.value, value) ? " ss-option--selected" : ""}${opt.disabled ? " ss-option--disabled" : ""}`}
+                  aria-disabled={opt.disabled || undefined}
+                  className={`ss-option${sameValue(opt.value, value) ? " ss-option--selected" : ""}${i === activeIndex ? " ss-option--active" : ""}${opt.disabled ? " ss-option--disabled" : ""}`}
+                  onMouseEnter={() => !opt.disabled && setActiveIndex(i)}
                   onMouseDown={(e) => {
                     e.preventDefault();
                     choose(opt);

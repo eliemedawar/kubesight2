@@ -22,7 +22,9 @@ import { useChangeBundle } from "./context/ChangeBundleContext";
 import { useRouter } from "./routes/RouterContext.jsx";
 import ChangeBundleDrawer from "./components/changes/ChangeBundleDrawer.jsx";
 import AppShell from "./components/layout/AppShell.jsx";
+import { navIcon } from "./components/layout/navIcons.jsx";
 import RouteLoadingFallback from "./components/common/RouteLoadingFallback.jsx";
+import ErrorBoundary from "./components/common/ErrorBoundary.jsx";
 import { emptyNamespaceResources, listKeyForTab } from "./lib/resourceTypes.js";
 import { useNamespaceResourceCache } from "./hooks/useNamespaceResourceCache.js";
 import { resourceCache } from "./services/resourceCacheService.js";
@@ -184,8 +186,14 @@ export default function App() {
         return;
       }
       setStickyClusterId(next || "");
-      // The old namespace belonged to the old cluster.
-      setStickyNamespace("");
+      // Switching clusters drops the namespace: it belonged to the old one.
+      // Filling an empty cluster (a cold load of `#/resources?ns=x` with no
+      // `cluster=`) keeps it; the namespace check below corrects it if the
+      // default cluster does not have it.
+      const switching = Boolean(snap.clusterId);
+      if (switching) {
+        setStickyNamespace("");
+      }
       if (snap.carriesCluster) {
         const query = { ...snap.query };
         if (next) {
@@ -193,7 +201,9 @@ export default function App() {
         } else {
           delete query.cluster;
         }
-        delete query.ns;
+        if (switching) {
+          delete query.ns;
+        }
         navigate(
           { key: snap.routeKey, params: snap.params, query },
           { replace: !push }
@@ -694,6 +704,8 @@ export default function App() {
 
   useEffect(() => {
     if (!isAuthenticated) {
+      // Signed out: the next session must not inherit "clusters loaded".
+      setClustersLoaded(false);
       return undefined;
     }
     let cancelled = false;
@@ -2002,10 +2014,15 @@ export default function App() {
       </Suspense>
     );
   } else {
+    // A page that throws while rendering (or whose chunk fails to load) shows
+    // an error in the content area instead of blanking the whole app; leaving
+    // the page clears it.
     pageNode = (
-      <Suspense fallback={<RouteLoadingFallback pageKey={resolvedActivePage} />}>
-        {renderPage(resolvedActivePage)}
-      </Suspense>
+      <ErrorBoundary scope="page" resetKey={resolvedActivePage}>
+        <Suspense fallback={<RouteLoadingFallback pageKey={resolvedActivePage} />}>
+          {renderPage(resolvedActivePage)}
+        </Suspense>
+      </ErrorBoundary>
     );
   }
 
@@ -2053,9 +2070,13 @@ export default function App() {
     resourcesLoading,
   });
 
+  // Only once the cluster list has actually arrived: before the first load
+  // starts (one paint after sign-in) and when it fails, "no clusters" is
+  // not the truth and flashed even for admins.
   const clusterBanner =
     !deferGlobalMessages &&
     isAuthenticated &&
+    clustersLoaded &&
     !hasClusters &&
     activePage !== "userManagement" &&
     activePage !== "auditLogs" &&
@@ -2131,13 +2152,18 @@ export default function App() {
     {changeBundle.enabled ? (
       <>
         {!changeBundle.isOpen && activePage !== "resources" ? (
+        // Empty bundle: a small round icon button, so it covers as little of
+        // the bottom-right page content (table rows, panel buttons) as
+        // possible. It grows its label back once something is queued.
         <button
           type="button"
           aria-label="Open change bundle"
+          title={changeBundle.itemCount > 0 ? undefined : "Change Bundle (empty)"}
           onClick={changeBundle.openDrawer}
-          className="fab"
+          className={`fab${changeBundle.itemCount > 0 ? "" : " fab--compact"}`}
         >
-          Change Bundle
+          <span className="fab__icon" aria-hidden="true">{navIcon("changeBundles")}</span>
+          <span className="fab__label">Change Bundle</span>
           {changeBundle.itemCount > 0 ? (
             <span
               style={{

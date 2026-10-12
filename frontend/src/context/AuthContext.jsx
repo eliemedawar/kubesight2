@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   changeTemporaryPassword as apiChangePassword,
@@ -27,6 +27,10 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(getStoredUser);
   const [token, setToken] = useState(getStoredToken);
   const [loading, setLoading] = useState(Boolean(getStoredToken()));
+  // A credentials submit in flight. Kept apart from `loading` (restoring a
+  // stored session), which swaps the whole app for the boot splash: driving it
+  // from login() unmounted the sign-in form and wiped what the user had typed.
+  const [signingIn, setSigningIn] = useState(false);
   const [error, setError] = useState("");
   // Interim login state: the multi-step onboarding / MFA challenge that runs
   // between submitting credentials and receiving a full session. `null` once the
@@ -36,6 +40,10 @@ export function AuthProvider({ children }) {
   // Lives here (not in LoginPage) because the page remounts around the global
   // loading splash and would lose local state before it could render the scene.
   const [accountLock, setAccountLock] = useState(null);
+  // Read by the 401 handler (registered once) to tell "a live session just
+  // expired" from a failed interim MFA/onboarding call, which has no session.
+  const tokenRef = useRef(token);
+  tokenRef.current = token;
 
   // Returns true when the error is an account lock; switches the auth UI to the
   // lock scene and abandons any interim (onboarding / MFA) session.
@@ -80,6 +88,11 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
+      // Say why the sign-in screen is back instead of dropping the user there
+      // without a word.
+      if (tokenRef.current) {
+        setError("Your session has expired. Sign in again to continue.");
+      }
       clearStoredSession();
       setUser(null);
       setToken("");
@@ -104,7 +117,7 @@ export function AuthProvider({ children }) {
   // to an interim stage (first-login onboarding or an MFA challenge).
   const login = async (username, password) => {
     setError("");
-    setLoading(true);
+    setSigningIn(true);
     try {
       const data = await apiLogin(username, password);
       if (data.stage === "authenticated") {
@@ -118,7 +131,7 @@ export function AuthProvider({ children }) {
       }
       throw err;
     } finally {
-      setLoading(false);
+      setSigningIn(false);
     }
   };
 
@@ -184,6 +197,9 @@ export function AuthProvider({ children }) {
     setUser(null);
     setToken("");
     setPendingAuth(null);
+    // A logout call that 401s (token already expired) must not greet a
+    // deliberate sign-out with "session expired".
+    setError("");
   };
 
   const hasPermission = useCallback(
@@ -198,6 +214,7 @@ export function AuthProvider({ children }) {
       user,
       token,
       loading,
+      signingIn,
       error,
       setError,
       login,
@@ -245,7 +262,7 @@ export function AuthProvider({ children }) {
       formatAccessError: access.formatAccessError,
       shouldShowAccessError: access.shouldShowAccessError,
     }),
-    [user, token, loading, error, pendingAuth, accountLock, clearAccountLock, refreshUser, hasPermission, access]
+    [user, token, loading, signingIn, error, pendingAuth, accountLock, clearAccountLock, refreshUser, hasPermission, access]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

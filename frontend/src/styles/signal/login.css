@@ -155,6 +155,11 @@
   transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
 
+/* Keep typed characters clear of the show/hide toggle. */
+.sg-lg-inputwrap:has(.sg-lg-eye) input {
+  padding-right: 2.5rem;
+}
+
 .sg-lg-field input:focus {
   outline: none;
   border-color: var(--accent);
@@ -174,6 +179,24 @@
   cursor: pointer;
   padding: 0.35rem;
   border-radius: var(--radius-sm);
+}
+
+/* Edge draws its own reveal eye next to ours — keep just one. */
+.sg-lg-field input::-ms-reveal,
+.sg-lg-field input::-ms-clear {
+  display: none;
+}
+
+.sg-lg-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .sg-lg-eye:hover {

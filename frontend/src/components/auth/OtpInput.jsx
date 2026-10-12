@@ -25,6 +25,19 @@ export default function OtpInput({
     }
   }, [autoFocus]);
 
+  // Disabling the cells while a code is verified drops focus to <body>; when a
+  // rejected code clears them, put the caret back so the retry is just typing.
+  const wasDisabled = useRef(disabled);
+  useEffect(() => {
+    if (wasDisabled.current && !disabled && !value && refs.current[0]) {
+      const active = document.activeElement;
+      if (!active || active === document.body) {
+        refs.current[0].focus();
+      }
+    }
+    wasDisabled.current = disabled;
+  }, [disabled, value]);
+
   const commit = (next) => {
     const clean = next.replace(/\D/g, "").slice(0, LENGTH);
     onChange(clean);

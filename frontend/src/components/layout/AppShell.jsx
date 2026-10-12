@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import ErrorBanner from "../common/ErrorBanner";
+import { useEscapeToClose } from "../../hooks/useEscapeToClose.js";
 import LoadingState from "../common/LoadingState";
 import { buildJumpTargets, buildNavGroups, workspaceOfPage } from "../../lib/navigation.js";
 import JumpPalette from "./JumpPalette";
@@ -96,18 +97,7 @@ export default function AppShell({
     return () => document.body.classList.remove("sidebar-drawer-open");
   }, [sidebarOpen]);
 
-  useEffect(() => {
-    if (!sidebarOpen) {
-      return undefined;
-    }
-    const handleKeyDown = (event) => {
-      if (event.key === "Escape") {
-        closeSidebar();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [closeSidebar, sidebarOpen]);
+  useEscapeToClose(closeSidebar, true, sidebarOpen);
 
   return (
     <div className={`shell${sidebarOpen ? " shell--sidebar-open" : ""}`}>
@@ -172,7 +162,10 @@ export default function AppShell({
           <LoadingState label={loadingOverlayLabel} hint={loadingOverlayHint} />
         ) : null}
         <ErrorBanner message={errorMessage} />
-        {clusterBannerMessage ? <p className="banner-message">{clusterBannerMessage}</p> : null}
+        {/* "No clusters assigned" is a heads-up, not a success: warning tone. */}
+        {clusterBannerMessage ? (
+          <p className="banner-message warning-banner" role="status">{clusterBannerMessage}</p>
+        ) : null}
         <main className="page-content ops-layout">
           {workspaceTabs ? (
             <WorkspaceTabs
