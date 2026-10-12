@@ -7,6 +7,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "../routes/RouterContext.jsx";
+import { leavesPage } from "../routes/leaveGuard.js";
+import useUnsavedChanges from "../hooks/useUnsavedChanges.js";
+import { confirmDialog } from "../lib/dialogs.js";
 import PageTitle from "../components/common/PageTitle.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import BuildDetail from "../components/clusterBuilder/BuildDetail.jsx";
@@ -14,6 +17,13 @@ import BuildsFloor from "../components/clusterBuilder/BuildsFloor.jsx";
 import SourcesTab from "../components/clusterBuilder/SourcesTab.jsx";
 import Wizard from "../components/clusterBuilder/Wizard.jsx";
 import { deriveReadiness } from "../utils/clusterBuilder.js";
+import {
+  describeDraft,
+  draftStorageKey,
+  readStoredDraft,
+  sessionStore,
+  writeStoredDraft,
+} from "../utils/wizardDraft.js";
 import {
   getBuilderOptions,
   listBuildProfiles,
@@ -67,6 +77,54 @@ export default function ClusterBuilderPage({
   // when they have actually arrived rather than read the empty placeholder.
   const [infraReady, setInfraReady] = useState(false);
   const previousStatuses = useRef(null);
+
+  // The wizard's unfinished draft lives here, not in the wizard: switching to
+  // Builds or Sources unmounts the wizard, and a reload remounts the page.
+  // Only a draft the user actually changed is kept (see Wizard's "dirty").
+  const draftKey = draftStorageKey(currentUserId);
+  const [wizardDraft, setWizardDraft] = useState(() => readStoredDraft(sessionStore(), draftKey));
+  // Remounts the wizard for a fresh start.
+  const [wizardSession, setWizardSession] = useState(0);
+  // Opening "New build" while a draft exists offers Continue draft or Start
+  // over; this is the draft it names, cleared once the user has chosen.
+  const [resumedFrom, setResumedFrom] = useState(() => (wizardDraft ? describeDraft(wizardDraft) : ""));
+  const draftKeyRef = useRef(draftKey);
+  draftKeyRef.current = draftKey;
+  const onDraftChange = useCallback((snapshot) => {
+    setWizardDraft(snapshot?.dirty ? snapshot : null);
+  }, []);
+  const storedKeyRef = useRef(draftKey);
+  useEffect(() => {
+    if (storedKeyRef.current !== draftKey) {
+      // The user id arrived after mount: read that user's draft rather than
+      // overwrite it with the empty one this page started with.
+      storedKeyRef.current = draftKey;
+      const stored = readStoredDraft(sessionStore(), draftKey);
+      if (stored) {
+        setWizardDraft(stored);
+        return;
+      }
+    }
+    writeStoredDraft(sessionStore(), draftKey, wizardDraft);
+  }, [draftKey, wizardDraft]);
+  const discardDraft = useCallback(() => {
+    // Storage is cleared now, not by the effect above: on "leave" the page
+    // unmounts before that effect would run.
+    writeStoredDraft(sessionStore(), draftKeyRef.current, null);
+    setWizardDraft(null);
+    setResumedFrom("");
+    setWizardSession((value) => value + 1);
+  }, []);
+  // The draft survives this page's own tabs and a reload, so only leaving the
+  // page asks, and "leave" drops it for good. Closing the browser tab does
+  // not ask: the browser gives sessionStorage back to a reopened tab.
+  const draftName = wizardDraft?.basics?.name?.trim() || "";
+  const { release: releaseDraftGuard } = useUnsavedChanges(Boolean(wizardDraft), {
+    message: `Your new cluster build${draftName ? ` “${draftName}”` : ""} is not finished. Leave and discard the draft?`,
+    blocks: leavesPage,
+    onDiscard: discardDraft,
+    unload: false,
+  });
   // Ticks so elapsed clocks advance between polls.
   const [now, setNow] = useState(() => Date.now());
 
@@ -209,6 +267,69 @@ export default function ClusterBuilderPage({
     openBuildId(id);
   };
 
+  // Coming back to "New build" with a draft waiting: the wizard opens on the
+  // draft (state survives the trip) and asks Continue draft or Start over
+  // above it, rather than blocking the way in.
+  const previousTab = useRef(tab);
+  useEffect(() => {
+    if (tab === "new" && previousTab.current !== "new" && wizardDraft) {
+      setResumedFrom(describeDraft(wizardDraft));
+    }
+    previousTab.current = tab;
+  }, [tab, wizardDraft]);
+
+  const continueDraft = () => setResumedFrom("");
+  const startOver = () => {
+    releaseDraftGuard();
+    discardDraft();
+  };
+
+  const cancelWizard = async () => {
+    if (wizardDraft) {
+      const discard = await confirmDialog({
+        title: "Discard this build?",
+        message: `Everything entered for ${draftName ? `“${draftName}”` : "this build"} will be lost.`,
+        confirmLabel: "Discard",
+        cancelLabel: "Keep editing",
+        tone: "danger",
+      });
+      if (!discard) return;
+    }
+    releaseDraftGuard();
+    discardDraft();
+    setEditingBuild(null);
+    setTab("floor");
+  };
+
+  // The wizard handed its work to the server: the local draft is done with.
+  const finishDraft = () => {
+    releaseDraftGuard();
+    discardDraft();
+  };
+
+  const editBuild = async (build) => {
+    // Already the draft being edited: carry on with it.
+    if (wizardDraft && String(wizardDraft.buildId) === String(build.id)) {
+      setTab("new");
+      return;
+    }
+    if (wizardDraft) {
+      const discard = await confirmDialog({
+        title: "Discard the unfinished build?",
+        message: `${draftName ? `“${draftName}”` : "The build in the wizard"} has changes that are not saved. Discard them and edit “${build.name}” instead?`,
+        confirmLabel: "Discard and edit",
+        cancelLabel: "Keep it",
+        tone: "danger",
+      });
+      if (!discard) return;
+      releaseDraftGuard();
+      discardDraft();
+    }
+    setResumedFrom("");
+    setEditingBuild(build);
+    setTab("new");
+  };
+
   return (
     <div className="sg-cb-page">
       <PageTitle
@@ -227,6 +348,9 @@ export default function ClusterBuilderPage({
             onClick={() => setTab(entry.id)}
           >
             {entry.label}
+            {entry.id === "new" && wizardDraft ? (
+              <span className="sg-cb-tab-dot" aria-label="unsaved draft" title="Unsaved draft" />
+            ) : null}
           </button>
         ))}
       </div>
@@ -244,10 +368,7 @@ export default function ClusterBuilderPage({
           notify={notify}
           onBack={() => { closeBuild(); reloadBuilds(); }}
           onDeleted={() => { closeBuild(); reloadBuilds(); }}
-          onEdit={(build) => {
-            setEditingBuild(build);
-            setTab("new");
-          }}
+          onEdit={editBuild}
           addonCatalog={options?.addons || []}
           templateCatalog={options?.clusterTemplates}
           k8sVersions={options?.k8sVersions || []}
@@ -276,8 +397,22 @@ export default function ClusterBuilderPage({
         )
       ) : null}
 
+      {tab === "new" && canCreate && wizardDraft && resumedFrom ? (
+        <div className="sg-cb-notice sg-cb-draft-notice" role="region" aria-label="Unfinished build">
+          <span>
+            <strong>You have an unfinished build:</strong> {resumedFrom}. Its changes are not
+            saved.
+          </span>
+          <span className="sg-cb-draft-actions">
+            <button className="btn-outline" type="button" onClick={startOver}>Start over</button>
+            <button className="primary" type="button" onClick={continueDraft}>Continue draft</button>
+          </span>
+        </div>
+      ) : null}
+
       {tab === "new" && canCreate ? (
         <Wizard
+          key={wizardSession}
           options={options}
           infra={infra}
           infraReady={infraReady}
@@ -286,17 +421,17 @@ export default function ClusterBuilderPage({
           currentUserId={currentUserId}
           onOptionsChanged={reloadOptions}
           initialBuild={editingBuild}
+          draft={wizardDraft}
+          onDraftChange={onDraftChange}
           notify={notify}
-          onCancel={() => {
-            setEditingBuild(null);
-            setTab("floor");
-          }}
+          onCancel={cancelWizard}
           onBuildSaved={(id) => {
+            finishDraft();
             setEditingBuild(null);
             reloadBuilds();
             openBuild(id);
           }}
-          onBuildLaunched={(id) => { reloadBuilds(); openBuild(id); }}
+          onBuildLaunched={(id) => { finishDraft(); reloadBuilds(); openBuild(id); }}
         />
       ) : null}
 

@@ -9,6 +9,16 @@ import {
 } from "react";
 import { DEFAULT_ROUTE, buildRoute, hashForPage, parseRoute } from "./routeUrl.js";
 import { navKeyOf, pageKeyOf, routeByKey, routeForPageKey } from "./routeTable.js";
+import {
+  blockingGuards,
+  discardGuards,
+  hasUnloadGuards,
+  historyDelta,
+  historyIndex,
+  historyState,
+  leaveMessage,
+} from "./leaveGuard.js";
+import { askToLeave } from "./leavePrompt.js";
 
 /**
  * Hash router.
@@ -23,7 +33,19 @@ import { navKeyOf, pageKeyOf, routeByKey, routeForPageKey } from "./routeTable.j
  * exists only for user-driven back/forward and manual address-bar edits. Both
  * paths compare the serialised address first and no-op when it is unchanged,
  * which is the echo guard.
+ *
+ * Leave guards (routes/leaveGuard.js): before any move, the router asks the
+ * pages with unsaved edits. `navigate` simply waits for the answer. Back and
+ * Forward have already moved the address when we hear of them, so the router
+ * steps back by the same distance (every entry it writes carries its history
+ * index for that), asks, and only on "leave" steps forward again.
  */
+
+const SETTLED_TRUE = Promise.resolve(true);
+const SETTLED_FALSE = Promise.resolve(false);
+// A traversal we started that never landed (history changed under it) must
+// not leave the listener deaf for good.
+const TRAVERSAL_TIMEOUT_MS = 1500;
 
 const RouterContext = createContext(null);
 
@@ -50,7 +72,34 @@ export function RouterProvider({ children }) {
   const routeRef = useRef(route);
   routeRef.current = route;
 
-  const navigate = useCallback((target, { replace = false } = {}) => {
+  // Where the current entry sits in this tab's history. Seeded from the entry
+  // itself, which keeps its state across a reload.
+  const indexRef = useRef(null);
+  if (indexRef.current === null) {
+    indexRef.current =
+      (typeof window !== "undefined" && historyIndex(window.history.state)) || 0;
+  }
+  // A leave question is open: further guarded moves wait for its answer.
+  const promptingRef = useRef(false);
+  // A history step we started ourselves: { hash, undo, done }.
+  const traversalRef = useRef(null);
+
+  /** Write the address; push moves the history index one forward. */
+  const writeHistory = useCallback((hash, replace) => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const index = replace ? indexRef.current : indexRef.current + 1;
+    const url = urlFor(hash);
+    if (replace) {
+      window.history.replaceState(historyState(index), "", url);
+    } else {
+      window.history.pushState(historyState(index), "", url);
+    }
+    indexRef.current = index;
+  }, []);
+
+  const navigate = useCallback((target, { replace = false, force = false } = {}) => {
     const key = target?.key || routeRef.current?.key || DEFAULT_ROUTE.key;
     const next = {
       key,
@@ -62,40 +111,62 @@ export function RouterProvider({ children }) {
     const unchanged = current && buildRoute(current) === nextHash;
 
     if (unchanged && readHash() === nextHash) {
-      return;
+      return SETTLED_TRUE;
     }
 
-    // Navigating to where we already are never stacks a history entry — that
-    // is what stops a double-clicked nav item costing two Back presses.
-    const useReplace = replace || unchanged;
-    if (typeof window !== "undefined") {
-      const url = urlFor(nextHash);
-      if (useReplace) {
-        window.history.replaceState(null, "", url);
-      } else {
-        window.history.pushState(null, "", url);
+    const resolved = parseRoute(nextHash) || DEFAULT_ROUTE;
+    const commit = () => {
+      // Navigating to where we already are never stacks a history entry —
+      // that is what stops a double-clicked nav item costing two Back presses.
+      const stillUnchanged = buildRoute(routeRef.current) === nextHash;
+      const useReplace = replace || stillUnchanged;
+      writeHistory(nextHash, useReplace);
+      if (!useReplace && typeof window !== "undefined") {
         // Arriving somewhere new starts at the top. On Back the browser
         // restores the previous scroll itself (scrollRestoration is "auto"),
         // which is why only the push branch scrolls.
         window.scrollTo(0, 0);
       }
+      // Update the ref now, not on the next render: a handler that navigates
+      // twice (switch tab, then set a query param) builds the second address
+      // on this one instead of on the stale route, which silently dropped the
+      // first.
+      routeRef.current = resolved;
+      setRoute(resolved);
+    };
+
+    const blocking = force || unchanged ? [] : blockingGuards(resolved, current);
+    if (!blocking.length) {
+      commit();
+      return SETTLED_TRUE;
     }
-    const resolved = parseRoute(nextHash) || DEFAULT_ROUTE;
-    // Update the ref now, not on the next render: a handler that navigates
-    // twice (switch tab, then set a query param) builds the second address on
-    // this one instead of on the stale route, which silently dropped the first.
-    routeRef.current = resolved;
-    setRoute(resolved);
-  }, []);
+    // One question at a time: a second guarded move while the first is open
+    // is dropped rather than stacked behind it.
+    if (promptingRef.current) {
+      return SETTLED_FALSE;
+    }
+    promptingRef.current = true;
+    return Promise.resolve(askToLeave(leaveMessage(blocking)))
+      .catch(() => false)
+      .then((leave) => {
+        promptingRef.current = false;
+        if (!leave) {
+          return false;
+        }
+        discardGuards(blocking);
+        commit();
+        return true;
+      });
+  }, [writeHistory]);
 
   /** Navigate by bare page key — what the sidebar and cross-page links use. */
   const navigateToPage = useCallback(
     (pageKey, { params, query, replace = false } = {}) => {
       const row = routeForPageKey(pageKey);
       if (!row) {
-        return;
+        return SETTLED_FALSE;
       }
-      navigate({ key: row.key, params, query }, { replace });
+      return navigate({ key: row.key, params, query }, { replace });
     },
     [navigate]
   );
@@ -107,47 +178,153 @@ export function RouterProvider({ children }) {
     if (typeof window === "undefined") {
       return undefined;
     }
+    let traversalTimer = null;
+    // Step through history ourselves and recognise the arrival. `undo`
+    // undoes a guarded Back/Forward; the redo after "leave" is not an undo.
+    const traverse = (delta, hash, undo) =>
+      new Promise((resolve) => {
+        window.clearTimeout(traversalTimer);
+        traversalRef.current = { hash, undo, done: resolve };
+        traversalTimer = window.setTimeout(() => {
+          if (traversalRef.current?.hash === hash) {
+            traversalRef.current = null;
+            resolve();
+          }
+        }, TRAVERSAL_TIMEOUT_MS);
+        window.history.go(delta);
+      });
+
+    const apply = (parsed) => {
+      const arrived = historyIndex(window.history.state);
+      if (arrived === null) {
+        // A link or a typed address made this entry: stamp it with its place.
+        indexRef.current += 1;
+        window.history.replaceState(historyState(indexRef.current), "", window.location.href);
+      } else {
+        indexRef.current = arrived;
+      }
+      routeRef.current = parsed;
+      setRoute(parsed);
+    };
+
     const sync = () => {
-      const parsed = parseRoute(readHash());
+      const hash = readHash();
+      const pending = traversalRef.current;
+      if (pending) {
+        // While our own step is in flight, the only event that matters is its
+        // arrival; the hashchange twin of the move we just undid is ignored.
+        if (hash !== pending.hash) {
+          return;
+        }
+        traversalRef.current = null;
+        window.clearTimeout(traversalTimer);
+        if (pending.undo) {
+          indexRef.current = historyIndex(window.history.state) ?? indexRef.current;
+          pending.done();
+          return;
+        }
+        pending.done();
+        const parsed = parseRoute(hash);
+        if (parsed && buildRoute(parsed) !== buildRoute(routeRef.current)) {
+          apply(parsed);
+        }
+        return;
+      }
+
+      const parsed = parseRoute(hash);
       if (!parsed) {
         // Unrecognised address: replace it rather than render something that
         // did not come from the table, and do not leave it in history.
         const fallback = DEFAULT_ROUTE;
-        window.history.replaceState(null, "", urlFor(buildRoute(fallback)));
+        window.history.replaceState(historyState(indexRef.current), "", urlFor(buildRoute(fallback)));
         routeRef.current = fallback;
         setRoute(fallback);
         return;
       }
       const canonical = buildRoute(parsed);
-      if (canonical === buildRoute(routeRef.current)) {
+      const currentHash = buildRoute(routeRef.current);
+      if (canonical === currentHash) {
         // Same destination, possibly spelled differently (#audit-logs for
         // #/audit-logs, or a default tab written out in full). Tidy the
         // address bar without adding a history entry, and do not re-render.
-        if (readHash() !== canonical) {
-          window.history.replaceState(null, "", urlFor(canonical));
+        if (hash !== canonical) {
+          const arrived = historyIndex(window.history.state);
+          window.history.replaceState(historyState(arrived ?? indexRef.current), "", urlFor(canonical));
         }
         return;
       }
-      routeRef.current = parsed;
-      setRoute(parsed);
+
+      const blocking = blockingGuards(parsed, routeRef.current);
+      if (!blocking.length) {
+        apply(parsed);
+        return;
+      }
+
+      // The browser has already moved. Put the address back where the page
+      // still is, then ask; on "leave", step forward again.
+      const delta = historyDelta(indexRef.current, historyIndex(window.history.state));
+      const restored = delta
+        ? traverse(-delta, currentHash, true)
+        : Promise.resolve(window.history.replaceState(historyState(indexRef.current), "", urlFor(currentHash)));
+      if (promptingRef.current) {
+        // A question is already open (Back pressed again while it shows).
+        return;
+      }
+      promptingRef.current = true;
+      Promise.resolve(askToLeave(leaveMessage(blocking)))
+        .catch(() => false)
+        .then(async (leave) => {
+          await restored;
+          promptingRef.current = false;
+          if (!leave) {
+            return;
+          }
+          discardGuards(blocking);
+          if (delta) {
+            await traverse(delta, hash, false);
+          } else {
+            writeHistory(canonical, false);
+            routeRef.current = parsed;
+            setRoute(parsed);
+          }
+        });
     };
     window.addEventListener("hashchange", sync);
     window.addEventListener("popstate", sync);
     return () => {
+      window.clearTimeout(traversalTimer);
       window.removeEventListener("hashchange", sync);
       window.removeEventListener("popstate", sync);
     };
+  }, [writeHistory]);
+
+  // Closing or reloading the tab with edits pending: the browser's own
+  // question, the only one allowed there.
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+    const warn = (event) => {
+      if (!hasUnloadGuards()) {
+        return;
+      }
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
   }, []);
 
   // Canonicalise the address bar once: a bare "/" or a stale form becomes the
-  // route we actually resolved to, without adding a history entry.
+  // route we actually resolved to, without adding a history entry. Also
+  // stamps the entry with its history index.
   useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
     const canonical = buildRoute(routeRef.current);
-    if (readHash() !== canonical) {
-      window.history.replaceState(null, "", urlFor(canonical));
+    if (readHash() !== canonical || historyIndex(window.history.state) !== indexRef.current) {
+      window.history.replaceState(historyState(indexRef.current), "", urlFor(canonical));
     }
     // Runs on every route change: cheap, and keeps the bar honest after a
     // default-filling navigation.

@@ -5,6 +5,19 @@ import {
 } from "../../api/mergeChecksApi.js";
 import LoadingState from "../../components/common/LoadingState.jsx";
 import QualityGateFields from "../../components/catalog/QualityGateFields.jsx";
+import useUnsavedChanges from "../../hooks/useUnsavedChanges.js";
+
+/** The form as saved, for telling whether the panel holds unsaved edits. */
+function formFromPolicy(data) {
+  return { ...data.gate, enabledByDefault: Boolean(data.enabledByDefault) };
+}
+
+// Inputs hand back strings ("5") where the server sent numbers (5), and blank
+// where it sent null; neither is an edit.
+function sameForm(a, b) {
+  const keys = new Set([...Object.keys(a || {}), ...Object.keys(b || {})]);
+  return [...keys].every((key) => String(a?.[key] ?? "") === String(b?.[key] ?? ""));
+}
 
 /**
  * Settings → Merge checks: the installation's quality gate.
@@ -33,7 +46,7 @@ export default function MergeChecksPolicyPanel({ canManage = false }) {
       .then((data) => {
         if (!live) return;
         setPolicy(data);
-        setForm({ ...data.gate, enabledByDefault: Boolean(data.enabledByDefault) });
+        setForm(formFromPolicy(data));
       })
       .catch((err) => live && setError(err.message || "Could not load the quality gate."))
       .finally(() => live && setLoading(false));
@@ -53,7 +66,7 @@ export default function MergeChecksPolicyPanel({ canManage = false }) {
     try {
       const data = await updateMergeCheckPolicy(form);
       setPolicy(data);
-      setForm({ ...data.gate, enabledByDefault: Boolean(data.enabledByDefault) });
+      setForm(formFromPolicy(data));
       setSaved(true);
     } catch (err) {
       setError(err.message || "Could not save the quality gate.");
@@ -61,6 +74,13 @@ export default function MergeChecksPolicyPanel({ canManage = false }) {
       setSaving(false);
     }
   };
+
+  // Switching to another Settings section unmounts this panel, so an unsaved
+  // gate would be lost; the leave guard asks first.
+  const dirty = Boolean(canManage && policy && form && !sameForm(form, formFromPolicy(policy)));
+  useUnsavedChanges(dirty, {
+    message: "Your quality gate changes are not saved. Leave and discard them?",
+  });
 
   if (loading || !form) {
     return <LoadingState label="Loading the quality gate..." />;
@@ -122,7 +142,8 @@ export default function MergeChecksPolicyPanel({ canManage = false }) {
 
       {canManage && (
         <div className="modal-actions">
-          {saved && <span className="muted">Saved.</span>}
+          {saved && !dirty && <span className="muted">Saved.</span>}
+          {dirty && <span className="muted">Unsaved changes.</span>}
           <button type="button" className="primary" disabled={saving} onClick={save}>
             {saving ? "Saving…" : "Save quality gate"}
           </button>

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { getMcpAccess, updateMcpAccess } from "../../api/mcpAccessApi.js";
 import LoadingState from "../../components/common/LoadingState.jsx";
+import useUnsavedChanges from "../../hooks/useUnsavedChanges.js";
 import McpClusterRules, {
   rulesFromPayload,
   rulesKey,
@@ -165,6 +166,11 @@ export default function McpToolsPanel({ canManage = false }) {
   }, [rules, savedRules]);
   const dirty =
     masterChanged || changedTools.length > 0 || changedClusters.length > 0;
+  // The draft lives in this panel, so another Settings section, another page
+  // or Back would drop it; the leave guard asks first.
+  useUnsavedChanges(canManage && dirty, {
+    message: "Your MCP tool changes are not saved. Leave and discard them?",
+  });
   const restricted = Object.values(rules).filter(
     (rule) => rule && rule.mode !== "full",
   ).length;

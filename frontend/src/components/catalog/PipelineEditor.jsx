@@ -62,6 +62,7 @@ import {
   renameGroup,
   setGroupFailFast,
 } from "./pipeline/parallelModel.js";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 const clone = (value) => (value == null ? value : structuredClone(value));
 const clip = (text, max) => {
@@ -328,15 +329,8 @@ export default function PipelineEditor({
     [getRoute, navigate]
   );
 
-  useEffect(() => {
-    if (!dirty) return undefined;
-    const warn = (event) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
-  }, [dirty]);
+  // Closing or reloading the tab with this draft open is asked about by the
+  // page's leave guard (ServiceDetailPage, via onDirtyChange).
 
   useEffect(() => {
     if (!removed) return undefined;
@@ -408,16 +402,20 @@ export default function PipelineEditor({
   const mutate = (index, patch) =>
     setStages((prev) => prev.map((stage, position) => (position === index ? { ...stage, ...patch } : stage)));
 
-  const changeKind = (index, stageType) => {
+  const changeKind = async (index, stageType) => {
     const stage = stages[index];
     if (stage.stageType === stageType) return;
     const lost = fieldsLostOnKindChange(stage, stageType);
     if (
       lost.length &&
-      !window.confirm(
-        `Making this a “${kindOf(stageType)?.label}” stage clears its ${lost.join(", ")} — ` +
-          "that kind has nowhere to use them. Continue?"
-      )
+      !(await confirmDialog({
+        title: "Change stage kind",
+        message:
+          `Making this a “${kindOf(stageType)?.label}” stage clears its ${lost.join(", ")} — ` +
+          "that kind has nowhere to use them. Continue?",
+        confirmLabel: "Change kind",
+        tone: "danger",
+      }))
     ) {
       return;
     }
@@ -560,7 +558,7 @@ export default function PipelineEditor({
   const mutatePost = (index, patch) =>
     setPostActions((prev) => prev.map((action, position) => (position === index ? { ...action, ...patch } : action)));
 
-  const changePostKind = (index, type) => {
+  const changePostKind = async (index, type) => {
     const action = postActions[index];
     if (!action || action.type === type) return;
     const hasContent =
@@ -569,7 +567,12 @@ export default function PipelineEditor({
       (action.commands || []).some((line) => String(line).trim()) ||
       action.subject ||
       action.message;
-    if (hasContent && !window.confirm("Changing what this post action does clears its settings. Continue?")) return;
+    if (hasContent && !(await confirmDialog({
+      title: "Change post action",
+      message: "Changing what this post action does clears its settings. Continue?",
+      confirmLabel: "Change",
+      tone: "danger",
+    }))) return;
     setPostActions((prev) => prev.map((item, position) => (position === index ? changePostType(item, type) : item)));
   };
 
@@ -656,9 +659,15 @@ export default function PipelineEditor({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const discard = () => {
+  const discard = async () => {
     if (!saved) return;
-    if (diff.count > 2 && !window.confirm("Throw away every unsaved change to this pipeline?")) return;
+    if (diff.count > 2 && !(await confirmDialog({
+      title: "Discard changes",
+      message: "Throw away every unsaved change to this pipeline?",
+      confirmLabel: "Discard",
+      cancelLabel: "Keep editing",
+      tone: "danger",
+    }))) return;
     if (forcedDirty) {
       // Taking ownership of the starter pipeline, or an imported draft, is
       // undone by reading the saved pipeline back rather than patching state.
@@ -690,9 +699,12 @@ export default function PipelineEditor({
   const resetToTemplate = async () => {
     setMenuOpen(false);
     if (
-      !window.confirm(
-        `Replace every stage and build input with the ${applicationTypeLabel(service.applicationType)} starter pipeline? This saves immediately.`
-      )
+      !(await confirmDialog({
+        title: "Reset to starter pipeline",
+        message: `Replace every stage and build input with the ${applicationTypeLabel(service.applicationType)} starter pipeline? This saves immediately.`,
+        confirmLabel: "Replace",
+        tone: "danger",
+      }))
     ) {
       return;
     }
@@ -748,7 +760,12 @@ export default function PipelineEditor({
       mode === "copy"
         ? `Copy the stages of “${linked?.name}” into ${service.name} and stop using the shared pipeline? The copy becomes this service's own to edit, and later changes to the shared pipeline no longer reach it. This saves immediately.`
         : `Stop using “${linked?.name}”? ${service.name} goes back to its own pipeline as it was before${pipeline?.ownStageCount ? "" : " (the KubeSight starter, since it never had stages of its own)"}. This saves immediately.`;
-    if (!window.confirm(message)) return;
+    if (!(await confirmDialog({
+      title: mode === "copy" ? "Copy and stop sharing" : "Stop using shared pipeline",
+      message,
+      confirmLabel: mode === "copy" ? "Copy stages" : "Stop using",
+      tone: "danger",
+    }))) return;
     setSaving(true);
     setError("");
     try {

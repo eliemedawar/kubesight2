@@ -3,6 +3,7 @@ import { getCiServiceSummary, listCiPipelines, updateCiService } from "../api/ci
 import { getCiAssistAvailability } from "../api/ciAssistApi.js";
 import { useAuth } from "../context/AuthContext";
 import { useRouteParam, useRouteQuery, useRouter } from "../routes/RouterContext.jsx";
+import useUnsavedChanges from "../hooks/useUnsavedChanges.js";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
 import ArtifactsPanel from "../components/catalog/ArtifactsPanel.jsx";
@@ -87,6 +88,7 @@ export default function ServiceDetailPage({
     viewIntelligence: hasPermission("applications:view"),
     manageIntelligence: hasPermission("applications:manage"),
     analyzeIntelligence: hasPermission("applications:analyze"),
+    viewRegistries: hasPermission("registries:view"),
   };
 
   const [summary, setSummary] = useState(null);
@@ -95,9 +97,10 @@ export default function ServiceDetailPage({
   // Application tab can show a reason instead of a control that fails.
   const [assist, setAssist] = useState(null);
   const [tab, changeTab] = useRouteParam("tab", initialTab || (isPipeline ? "pipeline" : "overview"));
-  // The Pipeline, Merge Checks and Settings tabs are drafts until saved. Leaving one —
-  // another tab, or back to the catalog — asks first, because the draft does
-  // not survive the trip.
+  // The Pipeline, Merge Checks, Dockerfile and Settings tabs are drafts until
+  // saved. Leaving one — another tab, back to the catalog, the sidebar, Back —
+  // asks first, because the draft does not survive the trip. One leave guard
+  // covers all of it: tab switches are route changes too, so the router asks.
   const [pipelineDirty, setPipelineDirty] = useState(false);
   const [mergeChecksDirty, setMergeChecksDirty] = useState(false);
   const [settingsDirty, setSettingsDirty] = useState(false);
@@ -112,16 +115,18 @@ export default function ServiceDetailPage({
           : tab === "dockerfile" && dockerfileDirty
             ? "Dockerfile"
             : null;
-  const confirmLeaveDraft = () =>
-    !draftLabel ||
-    window.confirm(`Your ${draftLabel} changes are not saved. Leave and discard them?`);
-  const setTab = (next) => {
-    if (next === tab) return;
-    if (!confirmLeaveDraft()) return;
+  const forgetDrafts = useCallback(() => {
     setPipelineDirty(false);
     setMergeChecksDirty(false);
     setSettingsDirty(false);
     setDockerfileDirty(false);
+  }, []);
+  useUnsavedChanges(Boolean(draftLabel), {
+    message: `Your ${draftLabel} changes are not saved. Leave and discard them?`,
+    onDiscard: forgetDrafts,
+  });
+  const setTab = (next) => {
+    if (next === tab) return;
     changeTab(next);
   };
   const [loading, setLoading] = useState(true);
@@ -183,20 +188,16 @@ export default function ServiceDetailPage({
     // One navigation for the tab and the build together. Two in a row each
     // start from the address as last rendered, so the second wiped the first
     // and the page stayed on Overview behind the drawer.
-    if (confirmLeaveDraft()) {
-      setPipelineDirty(false);
-      setMergeChecksDirty(false);
-      setSettingsDirty(false);
-      setDockerfileDirty(false);
-      const active = getRoute();
-      navigate({
-        key: active.key,
-        params: { ...active.params, tab: "builds" },
-        query: { ...active.query, build: String(build.id) },
-      });
-    } else {
-      openBuild(build.id);
-    }
+    // With a draft open the router asks first; staying keeps the draft and
+    // opens the build over the current tab instead.
+    const active = getRoute();
+    navigate({
+      key: active.key,
+      params: { ...active.params, tab: "builds" },
+      query: { ...active.query, build: String(build.id) },
+    }).then((moved) => {
+      if (!moved) openBuild(build.id);
+    });
     load();
   };
 
@@ -237,7 +238,7 @@ export default function ServiceDetailPage({
           <button
             type="button"
             className="sg-ci-back"
-            onClick={() => confirmLeaveDraft() && onBack()}
+            onClick={onBack}
           >
             {isPipeline ? "← Pipelines" : "← CI Services"}
           </button>
@@ -418,6 +419,7 @@ export default function ServiceDetailPage({
             canEditSchedules={can.editPipeline && can.run}
             canRunSchedules={can.run}
             canDeploy={can.deploy}
+            canListRegistries={can.viewRegistries}
             onOpenBuild={(id) => openBuild(id)}
             onSaved={() => load()}
             onDeleted={onDeleted}

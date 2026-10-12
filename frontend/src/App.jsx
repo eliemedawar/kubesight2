@@ -20,6 +20,8 @@ import {
 import { useAuth } from "./context/AuthContext";
 import { useChangeBundle } from "./context/ChangeBundleContext";
 import { useRouter } from "./routes/RouterContext.jsx";
+import { discardGuards, exitGuards, leaveMessage } from "./routes/leaveGuard.js";
+import { askToLeave } from "./routes/leavePrompt.js";
 import ChangeBundleDrawer from "./components/changes/ChangeBundleDrawer.jsx";
 import AppShell from "./components/layout/AppShell.jsx";
 import { navIcon } from "./components/layout/navIcons.jsx";
@@ -58,6 +60,7 @@ import CoachMarks from "./components/tour/CoachMarks.jsx";
 import { getTourSteps, getWelcomeSteps, WELCOME_TOUR_KEY } from "./tours/tourDefinitions.js";
 import { markTourSeen, readTourState, setToursMuted } from "./utils/tourStorage.js";
 import { setVisibleInterval } from "./lib/visibleInterval";
+import { confirmDialog } from "./lib/dialogs.js";
 
 // Theme is a per-browser preference: the locally stored choice always wins
 // over the workspace value returned by the API, so one user's theme never
@@ -158,8 +161,11 @@ export default function App() {
   const routeCarriesNamespace = routeQueryKeys.includes("ns");
   const [stickyClusterId, setStickyClusterId] = useState("");
   const [stickyNamespace, setStickyNamespace] = useState("");
+  // Cluster Overview names its cluster in the path (#/clusters/<id>/overview).
+  const routeClusterParam =
+    route.key === "clusterOverview" ? routeParams.clusterId || "" : "";
   const selectedClusterId =
-    (routeCarriesCluster ? routeQuery.cluster : "") || stickyClusterId;
+    routeClusterParam || (routeCarriesCluster ? routeQuery.cluster : "") || stickyClusterId;
   const selectedNamespace =
     (routeCarriesNamespace ? routeQuery.ns : "") || stickyNamespace;
 
@@ -178,6 +184,17 @@ export default function App() {
   // Corrections replace (an effect fixing invalid state is not a place you
   // navigated to); the topbar passes { push: true } because changing cluster
   // is a move Back should undo.
+  // Signing out drops every unsaved draft the same way closing the tab would,
+  // so it asks the same question first.
+  const handleLogout = useCallback(async () => {
+    const blocking = exitGuards();
+    if (blocking.length) {
+      if (!(await askToLeave(leaveMessage(blocking)))) return;
+      discardGuards(blocking);
+    }
+    logout();
+  }, [logout]);
+
   const setSelectedClusterId = useCallback(
     (value, { push = false } = {}) => {
       const snap = scopeRef.current;
@@ -194,7 +211,15 @@ export default function App() {
       if (switching) {
         setStickyNamespace("");
       }
-      if (snap.carriesCluster) {
+      if (snap.routeKey === "clusterOverview") {
+        // The cluster is the page: follow it, or with none left go to the list.
+        navigate(
+          next
+            ? { key: snap.routeKey, params: { ...snap.params, clusterId: next }, query: snap.query }
+            : { key: "clusters" },
+          { replace: !push }
+        );
+      } else if (snap.carriesCluster) {
         const query = { ...snap.query };
         if (next) {
           query.cluster = next;
@@ -263,6 +288,9 @@ export default function App() {
   const applicationDetailsTab =
     routePageKey === "applicationDetails" ? routeParams.tab || "overview" : "overview";
   const [applicationDetail, setApplicationDetail] = useState(null);
+  // The inventory id whose detail read failed: the page shows "not found / no
+  // access" for it instead of "Loading…" forever.
+  const [applicationDetailFailedId, setApplicationDetailFailedId] = useState("");
   const [editCatalogOpen, setEditCatalogOpen] = useState(false);
   const [editCatalogSaving, setEditCatalogSaving] = useState(false);
   const [editCatalogError, setEditCatalogError] = useState("");
@@ -646,13 +674,16 @@ export default function App() {
   // Keep the sticky memory in step with a scope that arrived via the URL, so
   // leaving for a page with no scope in its address does not lose it.
   useEffect(() => {
-    if (routeCarriesCluster && routeQuery.cluster && routeQuery.cluster !== stickyClusterId) {
+    if (routeClusterParam && routeClusterParam !== stickyClusterId) {
+      setStickyClusterId(routeClusterParam);
+    } else if (routeCarriesCluster && routeQuery.cluster && routeQuery.cluster !== stickyClusterId) {
       setStickyClusterId(routeQuery.cluster);
     }
     if (routeCarriesNamespace && routeQuery.ns && routeQuery.ns !== stickyNamespace) {
       setStickyNamespace(routeQuery.ns);
     }
   }, [
+    routeClusterParam,
     routeCarriesCluster,
     routeCarriesNamespace,
     routeQuery.cluster,
@@ -819,6 +850,10 @@ export default function App() {
         // merged in next; metrics (CPU/memory) is merged in silently whenever it
         // arrives — a slow or missing metrics-server no longer holds up numbers.
         const countsPromise = listNamespacesByCluster(selectedClusterId, { counts: true });
+        // Handled below on every path that reads it; this keeps a run that is
+        // cancelled first (a bad cluster id being corrected) from leaving an
+        // unhandled rejection behind.
+        countsPromise.catch(() => {});
         const [namespacesResult, overviewResult] = await Promise.allSettled([
           listNamespacesByCluster(selectedClusterId, { lite: true }),
           needsOverview ? getClusterOverview(selectedClusterId) : Promise.resolve(null),
@@ -1338,6 +1373,7 @@ export default function App() {
     }
     const requestId = ++applicationDetailRequestRef.current;
     setApplicationDetail(null);
+    setApplicationDetailFailedId("");
     setLoadingState((prev) => ({ ...prev, page: true }));
     setErrorState((prev) => ({ ...prev, page: "" }));
     try {
@@ -1346,11 +1382,14 @@ export default function App() {
         return;
       }
       setApplicationDetail(detail);
-    } catch (detailError) {
+    } catch {
       if (requestId !== applicationDetailRequestRef.current) {
         return;
       }
-      applyPageError(detailError.message);
+      // Not a page-wide error: the detail page says it in place, and a page
+      // error would outlive this page (a typed #/dashboard then showed
+      // "Access restricted" to a user with no clusters).
+      setApplicationDetailFailedId(inventoryId);
       setApplicationDetail(null);
     } finally {
       if (requestId === applicationDetailRequestRef.current) {
@@ -1410,9 +1449,13 @@ export default function App() {
   const handleRemoveFromInventory = async (detail) => {
     const entryId = detail?.summary?.catalogEntryId || detail?.catalog?.id;
     if (!entryId) return;
-    const confirmed = window.confirm(
-      "This removes the app from KubeSight inventory metadata only.\nIt will not delete anything from the Kubernetes cluster."
-    );
+    const confirmed = await confirmDialog({
+      title: "Remove from inventory",
+      message:
+        "This removes the app from KubeSight inventory metadata only.\nIt will not delete anything from the Kubernetes cluster.",
+      confirmLabel: "Remove",
+      tone: "danger",
+    });
     if (!confirmed) return;
     try {
       await removeFromInventory(entryId);
@@ -1490,9 +1533,12 @@ export default function App() {
     const willRunAutomatically = upgradeResult?.provider?.executionMode === "execute-with-cli";
     if (willRunAutomatically) {
       const clusterLabel = allowedClusters.find((c) => c.id === selectedClusterId)?.name || selectedClusterId;
-      const confirmed = window.confirm(
-        `Start automatic upgrade of cluster "${clusterLabel}" to ${targetVersion}?\n\nKubeSight will drain nodes, run kubeadm upgrade steps, and restart kubelet on each node.\n\nThis operation modifies your cluster. Continue?`
-      );
+      const confirmed = await confirmDialog({
+        title: "Start cluster upgrade",
+        message: `Start automatic upgrade of cluster "${clusterLabel}" to ${targetVersion}?\n\nKubeSight will drain nodes, run kubeadm upgrade steps, and restart kubelet on each node.\n\nThis operation modifies your cluster. Continue?`,
+        confirmLabel: "Start upgrade",
+        tone: "danger",
+      });
       if (!confirmed) return;
     }
 
@@ -1709,6 +1755,7 @@ export default function App() {
             coreLoading={loadingState.core}
             namespacesLoading={namespacesLoading}
             accessError={pageAccessError}
+            canOpenPage={isPageAllowed}
           />
         );
       case "inventory":
@@ -1735,6 +1782,10 @@ export default function App() {
               detail={applicationDetail}
               selectedApplicationId={selectedApplicationId}
               loading={loadingState.page}
+              loadFailed={
+                Boolean(applicationDetailFailedId) &&
+                applicationDetailFailedId === selectedApplicationId
+              }
               user={authUser}
               activeTab={applicationDetailsTab}
               onTabChange={(nextTab) =>
@@ -2135,7 +2186,7 @@ export default function App() {
       onClearRequestUpdates={clearRequestUpdates}
       displayUser={displayUser}
       userInitials={userInitials}
-      onLogout={logout}
+      onLogout={handleLogout}
       onStartTour={startPageTour}
     >
       {pageNode}

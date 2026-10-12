@@ -120,6 +120,8 @@ export default function ServiceSettingsPanel({
   // Whether the viewer may deploy — offered "Deploy as me" on a link a build
   // cannot deploy through.
   canDeploy = false,
+  // Without registries:view the list call is a guaranteed 403; skip it.
+  canListRegistries = true,
   onOpenBuild,
 }) {
   // A pipeline from the Pipelines page uses this same panel: no deployments of
@@ -149,14 +151,19 @@ export default function ServiceSettingsPanel({
   // Best effort: a user who cannot list registries still sees the choice,
   // with whatever is already linked preserved on save.
   useEffect(() => {
+    const unreadable = () => {
+      // Not "none exist": this user may simply not be allowed to list them.
+      setRegistries([]);
+      setRegistriesUnreadable(true);
+    };
+    if (!canListRegistries) {
+      unreadable();
+      return;
+    }
     listRegistries()
       .then((data) => setRegistries(data.items || []))
-      .catch(() => {
-        // Not "none exist": this user may simply not be allowed to list them.
-        setRegistries([]);
-        setRegistriesUnreadable(true);
-      });
-  }, []);
+      .catch(unreadable);
+  }, [canListRegistries]);
 
   useEffect(() => {
     if (!notice) return undefined;
@@ -187,15 +194,8 @@ export default function ServiceSettingsPanel({
     onDirtyChange?.(dirty);
   }, [dirty, onDirtyChange]);
 
-  useEffect(() => {
-    if (!dirty) return undefined;
-    const warn = (event) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
-  }, [dirty]);
+  // Closing or reloading the tab with this draft open is asked about by the
+  // page's leave guard (ServiceDetailPage, via onDirtyChange).
 
   // A section that succeeds after a failure takes the stale error with it.
   const announce = (message) => {

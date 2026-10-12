@@ -4,6 +4,8 @@ import LoadingState from "../components/common/LoadingState.jsx";
 import { normalizeSettings } from "../utils/formatters.js";
 import { isAdminUser } from "../utils/authz.js";
 import { useRouteParam } from "../routes/RouterContext.jsx";
+import { leavesPage } from "../routes/leaveGuard.js";
+import useUnsavedChanges from "../hooks/useUnsavedChanges.js";
 import {
   groupSettingsSections,
   PREFERENCE_ANCHORS,
@@ -172,6 +174,15 @@ export default function SettingsPage({
   // The bar stays up while an integration panel is open: the draft survives the
   // panel switch, and hiding the only way to save it would read as discarded.
   const showSaveBar = canManage && dirtySections.length > 0;
+
+  // That draft outlives a section switch but not the page: leaving Settings
+  // (or closing the tab) with it unsaved asks first, and "leave" puts the
+  // saved values back so nothing half-edited lingers in the app.
+  useUnsavedChanges(showSaveBar, {
+    message: `Your ${dirtySections.join(" and ").toLowerCase()} settings are not saved. Leave and discard them?`,
+    blocks: leavesPage,
+    onDiscard,
+  });
 
   const renderPanel = () => {
     if (!active) {

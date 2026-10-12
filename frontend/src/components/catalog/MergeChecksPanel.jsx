@@ -31,6 +31,7 @@ import {
   watchedBranches,
 } from "./mergeChecks/mergeCheckModel.js";
 import { setVisibleInterval } from "../../lib/visibleInterval";
+import { confirmDialog } from "../../lib/dialogs.js";
 
 const SECTIONS = ["checks", "gate", "connection", "history"];
 
@@ -158,15 +159,8 @@ export default function MergeChecksPanel({ service, canEdit, canView = true, onD
     onDirtyChange?.(dirty);
   }, [dirty, onDirtyChange]);
 
-  useEffect(() => {
-    if (!dirty) return undefined;
-    const warn = (event) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
-  }, [dirty]);
+  // Closing or reloading the tab with this draft open is asked about by the
+  // page's leave guard (ServiceDetailPage, via onDirtyChange).
 
   // Leaving the tab takes its own query key with it. Only when the tab really
   // changed: StrictMode's mount-unmount-mount in development ran this on
@@ -346,10 +340,14 @@ export default function MergeChecksPanel({ service, canEdit, canView = true, onD
   const rotate = async () => {
     if (secretBusy) return;
     if (
-      !window.confirm(
-        "Generate a new secret? The current one stops working immediately, and Bitbucket " +
-          "is refused until the webhook has the new one."
-      )
+      !(await confirmDialog({
+        title: "Generate new secret",
+        message:
+          "Generate a new secret? The current one stops working immediately, and Bitbucket " +
+          "is refused until the webhook has the new one.",
+        confirmLabel: "Generate",
+        tone: "danger",
+      }))
     ) {
       return;
     }
