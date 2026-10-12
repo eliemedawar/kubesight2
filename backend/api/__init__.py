@@ -296,6 +296,38 @@ def _default_engine_options(database_url: str) -> dict:
     return options
 
 
+def _is_sqlite_file(database_url: str) -> bool:
+    if not database_url.startswith("sqlite"):
+        return False
+    path = database_url.split("://", 1)[-1].lstrip("/")
+    return bool(path) and ":memory:" not in database_url and "mode=memory" not in database_url
+
+
+def _configure_sqlite_file(app: Flask) -> None:
+    """WAL + a 30 s busy timeout for a file-based SQLite database (dev only).
+
+    The default rollback journal makes every writer block every reader, and the
+    scheduler lanes, CI ticker and request threads all write: without a busy
+    timeout the loser fails at once with "database is locked". WAL lets readers
+    run alongside the one writer. PostgreSQL and in-memory SQLite are untouched.
+    """
+    if not _is_sqlite_file(app.config["SQLALCHEMY_DATABASE_URI"]):
+        return
+    from sqlalchemy import event
+
+    with app.app_context():
+        engine = db.engine
+
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_connection, _record):
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA busy_timeout = 30000")
+            cursor.execute("PRAGMA journal_mode = WAL")
+        finally:
+            cursor.close()
+
+
 def _configure_cors(app: Flask) -> None:
     raw = os.getenv("CORS_ORIGINS", "*").strip()
     if not raw or raw == "*":
@@ -345,6 +377,7 @@ def create_app(config_object=None) -> Flask:
     app.json.sort_keys = False
 
     db.init_app(app)
+    _configure_sqlite_file(app)
     _configure_cors(app)
     _configure_response_compression(app)
     _configure_access_log_filters()
