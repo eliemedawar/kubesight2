@@ -3289,7 +3289,11 @@ class KubernetesJobRunnerAdapter:
 
         cursor = _log_cursors.get(key)
         lines: Optional[List[str]] = None
-        if cursor is not None and cursor.seq == after_seq:
+        if (
+            cursor is not None
+            and cursor.seq == after_seq
+            and (cursor.pod is None or cursor.pod == _pod_identity(pod))
+        ):
             lines = self._read_increment(job_name, container, pod, cursor, observation)
         if lines is None:
             _log_cursors.pop(key, None)
@@ -3340,6 +3344,7 @@ class KubernetesJobRunnerAdapter:
             return None, None
         records, capped = read
         cursor = _LogCursor()
+        cursor.pod = _pod_identity(pod)
         own = _record_lines(records)
         cursor.stage.settle(records)
         cursor.tail = own[-5:]
@@ -3415,7 +3420,7 @@ class KubernetesJobRunnerAdapter:
             return None
         records, capped = read
         known = len(stream.window)
-        if [record[0] for record in records[:known]] != stream.window:
+        if [_record_key(record) for record in records[:known]] != stream.window:
             return _MISALIGNED
         if stream.since is not None and any(record[1] is None for record in records):
             return _MISALIGNED
@@ -3503,8 +3508,9 @@ class _LogStream:
     """Where one container's log has been read up to.
 
     ``since`` is the epoch second the next read starts at (None: from the
-    start), and ``window`` the timestamps of the entries already taken that a
-    read from ``since`` returns again - skipped by count, checked by value.
+    start), and ``window`` the entries already taken that a read from
+    ``since`` returns again (timestamp and content) - skipped by count,
+    checked by value.
     kubelet filters entries one by one (timestamp >= since), so the entries
     already taken are always the prefix of the next read.
     """
@@ -3523,16 +3529,19 @@ class _LogStream:
             # Entries without a timestamp cannot be resumed from a time, so
             # this stream keeps reading from the start, skipping by count.
             self.since = None
-            self.window = [record[0] for record in records]
+            self.window = [_record_key(record) for record in records]
             return
         top = max(seconds + ([self.since] if self.since is not None else []))
         self.since = top
-        self.window = [record[0] for record in records if record[1] >= top]
+        self.window = [_record_key(record) for record in records if record[1] >= top]
 
 
 class _LogCursor:
     def __init__(self) -> None:
         self.seq = 0
+        # The pod the cursor read. A Job that replaced its pod starts a new
+        # log, which only a full read numbers correctly.
+        self.pod: Optional[str] = None
         self.stage = _LogStream()
         self.collector: Optional[_LogStream] = None
         self.tail: List[str] = []
@@ -3595,6 +3604,15 @@ def _log_records(out: str) -> List[Tuple[Optional[str], Optional[int], List[str]
             content, stamp = piece, None
         records.append((stamp, second, content.splitlines() or [""]))
     return records
+
+
+def _record_key(record) -> Tuple[Optional[str], Tuple[str, ...]]:
+    return record[0], tuple(record[2])
+
+
+def _pod_identity(pod: Optional[dict]) -> Optional[str]:
+    meta = (pod or {}).get("metadata") or {}
+    return meta.get("uid") or meta.get("name") or None
 
 
 def _record_lines(records) -> List[str]:

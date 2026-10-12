@@ -189,6 +189,18 @@ def requeue(build: CiBuild, reason: str = "", *, commit: bool = True) -> None:
         db.session.commit()
 
 
+def newest_queued():
+    """``(id, queued_at)`` of the most recently queued build, or None. One
+    index read: how the engine notices that a new build has arrived."""
+    row = (
+        db.session.query(CiBuild.id, CiBuild.queued_at)
+        .filter(CiBuild.status == "queued")
+        .order_by(CiBuild.id.desc())
+        .first()
+    )
+    return (int(row[0]), str(row[1])) if row is not None else None
+
+
 def depth(service_id: Optional[int] = None) -> int:
     query = CiBuild.query.filter(CiBuild.status == "queued")
     if service_id is not None:

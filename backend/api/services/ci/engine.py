@@ -117,6 +117,8 @@ _pass_lock = threading.Lock()
 # it keeps its own slower cadence instead of running on every fast pass.
 _BOOKKEEPING_SECONDS = float(os.getenv("CI_BOOKKEEPING_SECONDS", "5"))
 _last_bookkeeping = 0.0
+# The newest queued build the last bookkeeping ran for (see _run_pass).
+_bookkept_for = None
 # The reaper answers "has this build been silent for an hour?" - a question
 # that does not need asking every second.
 _REAP_SECONDS = float(os.getenv("CI_REAP_SECONDS", "30"))
@@ -608,13 +610,18 @@ def advance_ci_builds() -> bool:
 
 
 def _run_pass() -> bool:
-    global _last_bookkeeping
+    global _last_bookkeeping, _bookkept_for
     now = time.monotonic()
     # On its own interval even while builds queue: at one pass a second, a
-    # queue that cannot drain used to rerun all three every second. Five
-    # seconds is the most "no runner is online" can be stale by.
-    if now - _last_bookkeeping >= _BOOKKEEPING_SECONDS:
+    # queue that cannot drain used to rerun all three every second. But a
+    # build that has just been queued gets fresh runner statuses at once:
+    # "no runner is online" must not be the stale answer it starts with.
+    newest = queue_service.newest_queued()
+    if now - _last_bookkeeping >= _BOOKKEEPING_SECONDS or (
+        newest is not None and newest != _bookkept_for
+    ):
         _last_bookkeeping = now
+        _bookkept_for = newest
         try:
             # Runners KubeSight manages in-process have nothing to heartbeat
             # from; their status is derived (enabled + adapter registered).
