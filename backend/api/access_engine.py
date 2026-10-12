@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set, Tuple
+import os
+import threading
+import time
+from itertools import chain
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
-from flask import g
+from flask import current_app, g
+from sqlalchemy import event
 from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.orm import Session
 
-from .models import AccessRule, User
+from .models import AccessRule, Permission, Role, User, role_permissions
 
 RESOURCE_SPECIFICITY = {
     "cluster": 10,
@@ -79,8 +85,6 @@ def _request_memo(name: str) -> Optional[Dict[int, Any]]:
     Disabled under TESTING so tests that mutate roles inside one app context
     never observe stale permission sets."""
     try:
-        from flask import current_app
-
         if current_app.config.get("TESTING"):
             return None
         cache = getattr(g, name, None)
@@ -104,12 +108,98 @@ def is_admin(user: User) -> bool:
     return result
 
 
+# --- Role permission cache ----------------------------------------------------
+# Every authenticated request used to load the user's role joined to all its
+# permissions (100+ rows) just to answer "is this an admin / may they do X".
+# Roles change rarely, so (name, keys) per role id is kept process-wide for a
+# short TTL. Any ORM write to a Role or Permission (which is how roles are
+# edited: role_service, seed, migrations) drops the whole cache at flush, so
+# this process never serves a stale answer for its own edits; another replica's
+# edit is seen within the TTL. ROLE_PERMISSION_CACHE_SECONDS=0 turns it off.
+_role_cache: Dict[int, Tuple[float, Optional[str], FrozenSet[str]]] = {}
+_role_cache_lock = threading.Lock()
+_role_cache_generation = 0
+
+
+def _role_cache_ttl() -> float:
+    try:
+        return max(0.0, float(os.getenv("ROLE_PERMISSION_CACHE_SECONDS", "30")))
+    except ValueError:
+        return 30.0
+
+
+def invalidate_role_permission_cache() -> None:
+    global _role_cache_generation
+    with _role_cache_lock:
+        _role_cache.clear()
+        _role_cache_generation += 1
+
+
+@event.listens_for(Session, "after_flush")
+def _drop_role_cache_on_role_writes(session, _flush_context) -> None:
+    for obj in chain(session.new, session.dirty, session.deleted):
+        if isinstance(obj, (Role, Permission)):
+            invalidate_role_permission_cache()
+            return
+
+
+@event.listens_for(Session, "do_orm_execute")
+def _drop_role_cache_on_bulk_role_writes(state) -> None:
+    # Query.update()/delete() and update()/delete() statements skip the flush.
+    if not (state.is_update or state.is_delete):
+        return
+    mapper = state.bind_mapper
+    if mapper is not None and mapper.class_ in (Role, Permission):
+        invalidate_role_permission_cache()
+
+
+def _role_snapshot(user: User) -> Tuple[Optional[str], FrozenSet[str]]:
+    """(role name, permission keys) of the user's role; (None, empty) without one.
+
+    A role already loaded on the user is read in memory, exactly as before (it
+    may carry changes not flushed yet). Otherwise the answer comes from the
+    role cache, filled by one narrow SELECT instead of the role's joined load.
+    """
+    state = sa_inspect(user, raiseerr=False)
+    role_id = getattr(user, "role_id", None)
+    ttl = _role_cache_ttl()
+    if state is None or "role" not in state.unloaded or role_id is None or ttl <= 0:
+        role = user.role
+        if not role:
+            return None, frozenset()
+        return role.name, frozenset(perm.key for perm in role.permissions)
+
+    now = time.monotonic()
+    entry = _role_cache.get(role_id)
+    if entry is not None and entry[0] > now:
+        return entry[1], entry[2]
+    generation = _role_cache_generation
+    from .db import db
+
+    rows = db.session.execute(
+        db.select(Role.name, Permission.key)
+        .select_from(Role)
+        .outerjoin(role_permissions, role_permissions.c.role_id == Role.id)
+        .outerjoin(Permission, Permission.id == role_permissions.c.permission_id)
+        .where(Role.id == role_id)
+    ).all()
+    if not rows:
+        name, keys = None, frozenset()
+    else:
+        name = rows[0][0]
+        keys = frozenset(key for _, key in rows if key is not None)
+    with _role_cache_lock:
+        if generation == _role_cache_generation:
+            _role_cache[role_id] = (now + ttl, name, keys)
+    return name, keys
+
+
 def _compute_is_admin(user: User) -> bool:
-    if not user.role:
+    name, granted = _role_snapshot(user)
+    if name is None:
         return False
-    if user.role.name == "admin":
+    if name == "admin":
         return True
-    granted = get_user_permission_keys(user)
     from .rbac_data import ALL_PERMISSION_KEYS
 
     return set(ALL_PERMISSION_KEYS).issubset(granted)
@@ -119,7 +209,7 @@ def get_user_permission_keys(user: User) -> Set[str]:
     memo = _request_memo("_perm_keys_by_user_id")
     if memo is not None and user.id in memo:
         return memo[user.id]
-    keys = {perm.key for perm in user.role.permissions} if user.role else set()
+    keys = set(_role_snapshot(user)[1])
     if memo is not None:
         memo[user.id] = keys
     return keys
@@ -128,6 +218,11 @@ def get_user_permission_keys(user: User) -> Set[str]:
 def user_has_permission(user: User, permission_key: str) -> bool:
     if is_admin(user):
         return True
+    return _role_grants(user, permission_key)
+
+
+def _role_grants(user: User, permission_key: str) -> bool:
+    """``user_has_permission`` for a user already known not to be an admin."""
     keys = get_user_permission_keys(user)
     if permission_key in keys:
         return True
@@ -155,15 +250,19 @@ def _access_rules_cache() -> Dict[int, List[AccessRule]]:
 def invalidate_access_rules_cache(user_id: Optional[int] = None) -> None:
     """Drop cached AccessRule rows after mutations or for all users in this request."""
     try:
-        cache = getattr(g, "_access_rules_by_user_id", None)
+        caches = (
+            getattr(g, "_access_rules_by_user_id", None),
+            getattr(g, "_access_rule_index_by_user_id", None),
+        )
     except RuntimeError:
         return
-    if cache is None:
-        return
-    if user_id is None:
-        cache.clear()
-    else:
-        cache.pop(user_id, None)
+    for cache in caches:
+        if cache is None:
+            continue
+        if user_id is None:
+            cache.clear()
+        else:
+            cache.pop(user_id, None)
 
 
 def _load_rules(user: User) -> List[AccessRule]:
@@ -209,6 +308,195 @@ def rule_specificity(rule: AccessRule) -> int:
     if rule.namespace:
         base += 1
     return base
+
+
+class _PreparedRule:
+    """One AccessRule with the normalisation ``_rule_matches`` does per call
+    done once: stripped namespace/type/name and the specificity score."""
+
+    __slots__ = (
+        "cluster_id",
+        "permission_key",
+        "ns",
+        "rt",
+        "name",
+        "container",
+        "port",
+        "effect",
+        "specificity",
+        "raw_ns",
+        "raw_rt",
+        "is_cluster_type",
+    )
+
+    def __init__(self, rule: AccessRule):
+        self.cluster_id = rule.cluster_id
+        self.permission_key = rule.permission_key
+        self.ns = (rule.namespace or "").strip() or None
+        self.rt = (rule.resource_type or "cluster").strip()
+        self.name = (rule.resource_name or "").strip() or None
+        self.container = rule.container_name
+        self.port = rule.port
+        self.effect = rule.effect
+        self.specificity = rule_specificity(rule)
+        # Unstripped forms, for the comparisons that have always used them.
+        self.raw_ns = rule.namespace or ""
+        self.raw_rt = rule.resource_type or ""
+        self.is_cluster_type = (rule.resource_type or "cluster") == "cluster"
+
+
+class _RuleIndex:
+    """A user's rules bucketed by cluster, plus a per-request memo of answers.
+
+    Lives on flask.g beside the rule list it was built from (and is rebuilt
+    when that list changes), so ``invalidate_access_rules_cache`` drops both.
+    Filtering a namespace's pods or a page of alerts asks the same question
+    many times over; each distinct question is now answered once.
+    """
+
+    __slots__ = ("rules", "by_cluster", "answers", "scoped_namespaces")
+
+    def __init__(self, rules: List[AccessRule]):
+        self.rules = rules
+        self.by_cluster: Dict[str, List[_PreparedRule]] = {}
+        for rule in rules:
+            self.by_cluster.setdefault(rule.cluster_id, []).append(_PreparedRule(rule))
+        self.answers: Dict[tuple, bool] = {}
+        self.scoped_namespaces: Dict[str, Set[str]] = {}
+
+    def cluster(self, cluster_id: str) -> List[_PreparedRule]:
+        return self.by_cluster.get(cluster_id) or []
+
+
+def _rule_index(user: User, rules: Optional[List[AccessRule]] = None) -> _RuleIndex:
+    if rules is None:
+        rules = _load_rules(user)
+    try:
+        cache = getattr(g, "_access_rule_index_by_user_id", None)
+        if cache is None:
+            cache = {}
+            g._access_rule_index_by_user_id = cache
+    except RuntimeError:
+        return _RuleIndex(rules)
+    index = cache.get(user.id)
+    if index is None or index.rules is not rules:
+        index = _RuleIndex(rules)
+        cache[user.id] = index
+    return index
+
+
+def _scoped_namespaces(index: _RuleIndex, cluster_id: str) -> Set[str]:
+    """Namespaces a user's allow rules single out on a cluster (may be empty)."""
+    scoped = index.scoped_namespaces.get(cluster_id)
+    if scoped is None:
+        scoped = {
+            p.ns
+            for p in index.cluster(cluster_id)
+            if p.effect == "allow"
+            and p.permission_key in ("namespaces:view", "resources:view")
+            and (p.raw_rt or "cluster") in ("namespace", "pod", "deployment", "service")
+            and p.ns
+        }
+        index.scoped_namespaces[cluster_id] = scoped
+    return scoped
+
+
+def _prepared_matches(
+    p: _PreparedRule,
+    *,
+    req_ns: Optional[str],
+    req_rt: Optional[str],
+    req_name: Optional[str],
+    container_name: Optional[str],
+    port: Optional[int],
+    permission_key: str,
+) -> bool:
+    """``_rule_matches`` over a prepared rule already known to be on the cluster."""
+    if not _rule_permission_matches(p.permission_key, permission_key):
+        return False
+    rule_ns = p.ns
+    if rule_ns and req_ns and rule_ns != req_ns:
+        return False
+    if rule_ns and not req_ns and p.rt not in ("cluster",):
+        return False
+    rule_rt = p.rt
+    if rule_rt == "cluster":
+        return True
+    if rule_rt == "namespace":
+        return req_ns == rule_ns if rule_ns else bool(req_ns)
+    if not req_rt:
+        return False
+    if rule_rt != req_rt:
+        return False
+    if p.name and req_name and p.name != req_name:
+        return False
+    if p.name and not req_name:
+        return False
+    if rule_rt in ("pod", "container") and p.container:
+        req_container = (container_name or "").strip() or None
+        if req_container and p.container != req_container:
+            return False
+    if rule_rt == "service_port":
+        if p.port is not None and port is not None and int(p.port) != int(port):
+            return False
+        if p.port is not None and port is None:
+            return False
+    return True
+
+
+def _evaluate_rules(
+    index: _RuleIndex,
+    *,
+    cluster_id: str,
+    permission_key: str,
+    namespace: Optional[str],
+    resource_type: Optional[str],
+    resource_name: Optional[str],
+    container_name: Optional[str],
+    port: Optional[int],
+) -> bool:
+    """The rule half of ``evaluate_access``: the most specific matching rules
+    decide, deny over allow among equals. Same answer as matching every rule
+    with ``_rule_matches`` and sorting by ``rule_specificity``."""
+    key = (cluster_id, permission_key, namespace, resource_type, resource_name, container_name, port)
+    cached = index.answers.get(key)
+    if cached is not None:
+        return cached
+
+    bucket = index.cluster(cluster_id)
+    # _rules_for_evaluation: a namespace with named grants of this type ignores
+    # broad (cluster-type, unnamed) rules there.
+    if namespace and resource_type and any(
+        p.raw_ns == namespace and p.raw_rt == resource_type and p.name and p.effect == "allow"
+        for p in bucket
+    ):
+        bucket = [p for p in bucket if not p.is_cluster_type or p.name]
+
+    req_ns = (namespace or "").strip() or None
+    req_rt = (resource_type or "").strip() or None
+    req_name = (resource_name or "").strip() or None
+    best = None
+    deny = allow = False
+    for p in bucket:
+        if not _prepared_matches(
+            p,
+            req_ns=req_ns,
+            req_rt=req_rt,
+            req_name=req_name,
+            container_name=container_name,
+            port=port,
+            permission_key=permission_key,
+        ):
+            continue
+        score = p.specificity
+        if best is None or score > best:
+            best, deny, allow = score, p.effect == "deny", p.effect == "allow"
+        elif score == best:
+            deny = deny or p.effect == "deny"
+            allow = allow or p.effect == "allow"
+    result = best is not None and not deny and allow
+    index.answers[key] = result
+    return result
 
 
 def _rule_permission_matches(rule_key: str, requested_key: str) -> bool:
@@ -316,7 +604,7 @@ def evaluate_access(
 ) -> bool:
     if is_admin(user):
         return True
-    if not _role_allows_permission(user, permission_key):
+    if not _role_grants(user, permission_key):
         return False
 
     rules = _load_rules(user)
@@ -330,35 +618,16 @@ def evaluate_access(
             resource_name=resource_name,
         )
 
-    scoped_rules = _rules_for_evaluation(
-        rules,
+    return _evaluate_rules(
+        _rule_index(user, rules),
         cluster_id=cluster_id,
+        permission_key=permission_key,
         namespace=namespace,
         resource_type=resource_type,
+        resource_name=resource_name,
+        container_name=container_name,
+        port=port,
     )
-    matching = [
-        r
-        for r in scoped_rules
-        if _rule_matches(
-            r,
-            cluster_id=cluster_id,
-            namespace=namespace,
-            resource_type=resource_type,
-            resource_name=resource_name,
-            container_name=container_name,
-            port=port,
-            permission_key=permission_key,
-        )
-    ]
-    if not matching:
-        return False
-
-    matching.sort(key=rule_specificity, reverse=True)
-    top_score = rule_specificity(matching[0])
-    top = [r for r in matching if rule_specificity(r) == top_score]
-    if any(r.effect == "deny" for r in top):
-        return False
-    return any(r.effect == "allow" for r in top)
 
 
 def _legacy_evaluate(
@@ -395,15 +664,7 @@ def can_access_namespace(user: User, cluster_id: str, namespace: str) -> bool:
         return True
     rules = _load_rules(user)
     if rules:
-        scoped_namespaces = {
-            (rule.namespace or "").strip()
-            for rule in rules
-            if rule.cluster_id == cluster_id
-            and rule.effect == "allow"
-            and rule.permission_key in ("namespaces:view", "resources:view")
-            and (rule.resource_type or "cluster") in ("namespace", "pod", "deployment", "service")
-            and (rule.namespace or "").strip()
-        }
+        scoped_namespaces = _scoped_namespaces(_rule_index(user, rules), cluster_id)
         if scoped_namespaces:
             return namespace in scoped_namespaces
     return evaluate_access(
@@ -454,14 +715,12 @@ def can_access_resource(
     if resource_type != "pod":
         return False
 
-    for rule in _load_rules(user):
-        if rule.effect != "allow":
+    for p in _rule_index(user).cluster(cluster_id):
+        if p.effect != "allow" or p.raw_ns != namespace:
             continue
-        if rule.cluster_id != cluster_id or (rule.namespace or "") != namespace:
+        if p.raw_rt != "deployment" or not p.name:
             continue
-        if (rule.resource_type or "") != "deployment" or not (rule.resource_name or "").strip():
-            continue
-        if not _pod_matches_deployment_name(resource_name, rule.resource_name.strip()):
+        if not _pod_matches_deployment_name(resource_name, p.name):
             continue
         if evaluate_access(
             user,
@@ -469,7 +728,7 @@ def can_access_resource(
             namespace=namespace,
             permission_key="deployments:view",
             resource_type="deployment",
-            resource_name=rule.resource_name.strip(),
+            resource_name=p.name,
         ):
             return True
     return False
@@ -559,18 +818,10 @@ def allowed_namespace_names_for_cluster(user: User, cluster_id: str) -> Optional
         cluster_ns = {ns for cid, ns in _legacy_namespace_pairs(user) if cid == cluster_id}
         return None if not cluster_ns else cluster_ns
 
-    scoped = {
-        (rule.namespace or "").strip()
-        for rule in rules
-        if rule.cluster_id == cluster_id
-        and rule.effect == "allow"
-        and rule.permission_key in ("namespaces:view", "resources:view")
-        and (rule.resource_type or "cluster") in ("namespace", "pod", "deployment", "service")
-        and (rule.namespace or "").strip()
-    }
+    scoped = _scoped_namespaces(_rule_index(user, rules), cluster_id)
     if not scoped:
         return None
-    return scoped
+    return set(scoped)
 
 
 def filter_namespaces_for_user(user: User, cluster_id: str, namespaces: List) -> List:
@@ -714,13 +965,11 @@ def filter_namespace_events(
     if is_admin(user):
         return events_payload
     if can_access_namespace(user, cluster_id, namespace):
-        rules = _load_rules(user)
         resource_scoped = any(
-            rule.cluster_id == cluster_id
-            and (rule.namespace or "") == namespace
-            and (rule.resource_type or "") in ("pod", "deployment", "service")
-            and (rule.resource_name or "").strip()
-            for rule in rules
+            p.raw_ns == namespace
+            and p.raw_rt in ("pod", "deployment", "service")
+            and p.name
+            for p in _rule_index(user).cluster(cluster_id)
         )
         if not resource_scoped:
             return events_payload

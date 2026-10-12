@@ -233,6 +233,16 @@ def _register_error_handlers(app: Flask) -> None:
 
 
 _GZIP_MIN_BYTES = int(os.getenv("RESPONSE_GZIP_MIN_BYTES", "1024"))
+# 4, not 6: on a 1.3 MB resource table level 6 costs ~50% more CPU (GIL held)
+# for ~10% smaller output, which a LAN never notices.
+def _gzip_level_from_env() -> int:
+    try:
+        return min(9, max(1, int(os.getenv("RESPONSE_GZIP_LEVEL", "4"))))
+    except ValueError:
+        return 4
+
+
+_GZIP_LEVEL = _gzip_level_from_env()
 _GZIP_MIMETYPES = ("application/json", "text/", "application/javascript")
 
 
@@ -262,7 +272,7 @@ def _configure_response_compression(app: Flask) -> None:
         body = response.get_data()
         if len(body) < _GZIP_MIN_BYTES:
             return response
-        response.set_data(gzip.compress(body, compresslevel=6))
+        response.set_data(gzip.compress(body, compresslevel=_GZIP_LEVEL))
         response.headers["Content-Encoding"] = "gzip"
         response.headers["Content-Length"] = str(len(response.get_data()))
         vary = response.headers.get("Vary", "")
@@ -278,12 +288,47 @@ def _default_engine_options(database_url: str) -> dict:
         options.update(
             {
                 "pool_recycle": int(os.getenv("DB_POOL_RECYCLE_SECONDS", "280")),
-                "pool_size": int(os.getenv("DB_POOL_SIZE", "10")),
+                # 16 = gunicorn's default request threads (k8s_entrypoint.sh), so
+                # a busy worker reuses pooled connections instead of opening and
+                # closing overflow ones; the overflow absorbs background loops.
+                "pool_size": int(os.getenv("DB_POOL_SIZE", "16")),
                 "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "20")),
                 "pool_timeout": int(os.getenv("DB_POOL_TIMEOUT_SECONDS", "30")),
             }
         )
     return options
+
+
+def _is_sqlite_file(database_url: str) -> bool:
+    if not database_url.startswith("sqlite"):
+        return False
+    path = database_url.split("://", 1)[-1].lstrip("/")
+    return bool(path) and ":memory:" not in database_url and "mode=memory" not in database_url
+
+
+def _configure_sqlite_file(app: Flask) -> None:
+    """WAL + a 30 s busy timeout for a file-based SQLite database (dev only).
+
+    The default rollback journal makes every writer block every reader, and the
+    scheduler lanes, CI ticker and request threads all write: without a busy
+    timeout the loser fails at once with "database is locked". WAL lets readers
+    run alongside the one writer. PostgreSQL and in-memory SQLite are untouched.
+    """
+    if not _is_sqlite_file(app.config["SQLALCHEMY_DATABASE_URI"]):
+        return
+    from sqlalchemy import event
+
+    with app.app_context():
+        engine = db.engine
+
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_connection, _record):
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA busy_timeout = 30000")
+            cursor.execute("PRAGMA journal_mode = WAL")
+        finally:
+            cursor.close()
 
 
 def _configure_cors(app: Flask) -> None:
@@ -330,7 +375,12 @@ def create_app(config_object=None) -> Flask:
         _default_engine_options(app.config["SQLALCHEMY_DATABASE_URI"]),
     )
 
+    # Flask sorts JSON keys by default: ~35% of the encode time on big payloads,
+    # for an order no client relies on (JSON objects are unordered).
+    app.json.sort_keys = False
+
     db.init_app(app)
+    _configure_sqlite_file(app)
     _configure_cors(app)
     _configure_response_compression(app)
     _configure_access_log_filters()

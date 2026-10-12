@@ -84,3 +84,46 @@ def test_export_requires_permission(client, viewer_token, app):
     _seed()
     resp = client.get("/api/audit-logs/export", headers=auth_headers(viewer_token))
     assert resp.status_code == 403
+
+
+def test_audit_list_reports_more_without_counting_short_pages(client, admin_token):
+    from api.db import db
+    from api.models import AuditLog
+
+    for index in range(5):
+        db.session.add(AuditLog(action="paging_probe", target_type="cluster", target_id=str(index)))
+    db.session.commit()
+    total_rows = AuditLog.query.count()
+
+    resp = client.get("/api/audit-logs?limit=2", headers=auth_headers(admin_token))
+    page = resp.get_json()["data"]
+    assert page["count"] == 2
+    assert page["hasMore"] is True
+    assert page["total"] == total_rows
+
+    resp = client.get(
+        f"/api/audit-logs?limit=2&offset={total_rows - 1}", headers=auth_headers(admin_token)
+    )
+    tail = resp.get_json()["data"]
+    assert tail["count"] == 1
+    assert tail["hasMore"] is False
+    assert tail["total"] == total_rows
+
+
+def test_mcp_audit_listing_names_actors(app, admin_token):
+    from api.services.audit_service import list_audit_logs
+
+    result = list_audit_logs(limit=5)
+    assert result["count"] >= 1
+    assert any(item.get("actorUsername") == "admin" for item in result["items"])
+
+
+def test_audit_list_past_the_end_still_reports_the_total(client, admin_token):
+    from api.models import AuditLog
+
+    total_rows = AuditLog.query.count()
+    resp = client.get("/api/audit-logs?limit=5&offset=100000", headers=auth_headers(admin_token))
+    page = resp.get_json()["data"]
+    assert page["count"] == 0
+    assert page["hasMore"] is False
+    assert page["total"] == total_rows

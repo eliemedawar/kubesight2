@@ -115,27 +115,30 @@ class User(db.Model):
     interactive_login_enabled = db.Column(db.Boolean, nullable=False, default=True)
 
     role = db.relationship("Role", back_populates="users")
-    # Loaded eagerly with every User (RBAC reads them on each request), each in
-    # its own SELECT ... IN. As joined loads the three collections multiplied:
-    # 6 cluster entries x 100 rules came back as 600 rows for every request's
-    # current-user load, half of the API's CPU under load.
+    # Loaded on first touch, not with every User. As joined loads the three
+    # collections multiplied (6 cluster entries x 100 rules = 600 rows per
+    # current-user load); as selectin loads they still cost three SELECTs on
+    # every authenticated request, admins included, who never read them.
+    # access_engine._load_rules fetches the rules once per request for the
+    # non-admins that need them; the legacy two are read only for users with no
+    # rules. Lists that show them (user_service.list_users) ask for selectinload.
     cluster_access_entries = db.relationship(
         "UserClusterAccess",
         back_populates="user",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="select",
     )
     namespace_access_entries = db.relationship(
         "UserNamespaceAccess",
         back_populates="user",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="select",
     )
     access_rules = db.relationship(
         "AccessRule",
         back_populates="user",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="select",
     )
 
 
@@ -222,6 +225,9 @@ class AuditLog(db.Model):
     __table_args__ = (
         db.Index("ix_audit_log_actor_created", "actor_user_id", "created_at"),
         db.Index("ix_audit_log_action_created", "action", "created_at"),
+        # Integration activity feeds (target_type IN ...) and the dashboard's
+        # last pre-check per cluster (target_type + target_id), newest first.
+        db.Index("ix_audit_log_target_created", "target_type", "target_id", "created_at"),
     )
 
     id = db.Column(db.Integer, primary_key=True)
@@ -500,7 +506,7 @@ class AlertRoutingReceiverGroup(db.Model):
     members = db.relationship(
         "AlertRoutingReceiver",
         secondary=alert_receiver_group_members,
-        lazy="joined",
+        lazy="selectin",
         back_populates="receiver_groups",
     )
     policies = db.relationship(
@@ -670,13 +676,13 @@ class AlertPolicy(db.Model):
     notification_receivers = db.relationship(
         "AlertRoutingReceiver",
         secondary=alert_policy_receivers,
-        lazy="joined",
+        lazy="selectin",
         back_populates="policies",
     )
     notification_receiver_groups = db.relationship(
         "AlertRoutingReceiverGroup",
         secondary=alert_policy_receiver_groups,
-        lazy="joined",
+        lazy="selectin",
         back_populates="policies",
     )
     history_entries = db.relationship(
@@ -745,19 +751,19 @@ class ApplicationService(db.Model):
         "ApplicationServiceDeployment",
         back_populates="service",
         cascade="all, delete-orphan",
-        lazy="joined",
+        lazy="selectin",
     )
     topology_nodes = db.relationship(
         "ApplicationServiceTopologyNode",
         back_populates="service",
         cascade="all, delete-orphan",
-        lazy="joined",
+        lazy="selectin",
     )
     topology_edges = db.relationship(
         "ApplicationServiceTopologyEdge",
         back_populates="service",
         cascade="all, delete-orphan",
-        lazy="joined",
+        lazy="selectin",
     )
     client_links = db.relationship(
         "ClientApplicationService",
@@ -1530,20 +1536,20 @@ class ServiceBlueprint(db.Model):
         "ServiceBlueprintComponent",
         back_populates="blueprint",
         cascade="all, delete-orphan",
-        lazy="joined",
+        lazy="selectin",
         order_by="ServiceBlueprintComponent.position",
     )
     connections = db.relationship(
         "ServiceBlueprintConnection",
         back_populates="blueprint",
         cascade="all, delete-orphan",
-        lazy="joined",
+        lazy="selectin",
     )
     requirements = db.relationship(
         "ServiceBlueprintRequirement",
         back_populates="blueprint",
         cascade="all, delete-orphan",
-        lazy="joined",
+        lazy="selectin",
     )
     app_services = db.relationship(
         "AppService",

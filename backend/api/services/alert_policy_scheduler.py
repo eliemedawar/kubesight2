@@ -64,18 +64,30 @@ def _should_start_in_process() -> bool:
     return True
 
 
-def _scheduler_loop(app: Flask) -> None:
+def _scheduler_lanes() -> int:
+    """2 (default): alerts on their own thread; 1: every job on one thread."""
+    raw = os.getenv("SCHEDULER_LANES", "2").strip()
+    return 1 if raw == "1" else 2
+
+
+def _scheduler_loop(app: Flask, run_pass=None, elector=None, stop=None) -> None:
     """Every process runs this loop; only the elected leader does the work.
 
     The others keep asking each tick, so when the leader dies (its database
     session closes and Postgres drops the lock) a standby takes over within
     one tick. See :mod:`.leader_election` for why this is an advisory lock.
+
+    ``run_pass`` is one lane (default: every job, ``run_scheduler_tick``).
+    Lanes on separate threads share one ``elector``, so they all run only
+    while this process leads and all stop when it loses the lock. ``stop``
+    (a threading.Event) ends the loop; the running scheduler never sets it.
     """
     from .leader_election import SCHEDULER_LOCK, LeaderElector, database_url_for
 
     tick = _scheduler_tick_seconds()
-    elector = LeaderElector(SCHEDULER_LOCK, database_url_for(app))
-    while True:
+    if elector is None:
+        elector = LeaderElector(SCHEDULER_LOCK, database_url_for(app))
+    while stop is None or not stop.is_set():
         time.sleep(tick)
         try:
             leading = elector.is_leader()
@@ -84,11 +96,24 @@ def _scheduler_loop(app: Flask) -> None:
             leading = False
         if not leading:
             continue
-        run_scheduler_tick(app)
+        (run_pass or run_scheduler_tick)(app)
 
 
 def run_scheduler_tick(app: Flask) -> None:
-    """One pass of every scheduled job. Call only while holding leadership."""
+    """One pass of every scheduled job, both lanes in order. Call only while
+    holding leadership. The running scheduler drives the two lanes from two
+    threads; this sequential form is the single-lane mode and what tests use."""
+    run_alert_lane(app)
+    run_background_lane(app)
+
+
+def run_alert_lane(app: Flask) -> None:
+    """Lane A: component health -> policy evaluation -> notifications.
+
+    On its own thread so a slow network job in the other lane (a registry
+    probe, a Jenkins poll, a ticketing sync) can no longer hold alert
+    evaluation back by minutes.
+    """
     # Auto-refresh component health first so the policy evaluation below
     # (and the UI) sees current statuses without manual "Check now" clicks.
     # Self-gating: only components whose last check is stale are re-checked.
@@ -118,6 +143,10 @@ def run_scheduler_tick(app: Flask) -> None:
             dispatch_active_alert_notifications()
     except Exception:
         logger.exception("Alert notification sweep tick failed")
+
+
+def run_background_lane(app: Flask) -> None:
+    """Lane B: every other scheduled job, in the order they always ran."""
     try:
         with app.app_context():
             from .deployment_request_service import auto_decline_overdue_requests
@@ -250,6 +279,15 @@ def run_scheduler_tick(app: Flask) -> None:
             advance_provision_jobs()
     except Exception:
         logger.exception("Cluster provisioning tick failed")
+    try:
+        with app.app_context():
+            from .retention import run_due_retention
+
+            # Opt-in history retention (audit, CI logs, alert deliveries):
+            # each kind only when its *_RETENTION_DAYS is set; at most hourly.
+            run_due_retention()
+    except Exception:
+        logger.exception("Retention tick failed")
 
 
 _scheduler_started = False
@@ -269,11 +307,30 @@ def start_alert_policy_scheduler(app: Flask) -> None:
 
     _scheduler_started = True
 
-    thread = threading.Thread(
-        target=_scheduler_loop,
-        args=(app,),
-        daemon=True,
-        name="alert-policy-scheduler",
+    if _scheduler_lanes() == 1:
+        thread = threading.Thread(
+            target=_scheduler_loop,
+            args=(app,),
+            daemon=True,
+            name="alert-policy-scheduler",
+        )
+        thread.start()
+        logger.info("Alert policy scheduler started (tick=%ss, one lane)", _scheduler_tick_seconds())
+        return
+
+    from .leader_election import SCHEDULER_LOCK, LeaderElector, database_url_for
+
+    elector = LeaderElector(SCHEDULER_LOCK, database_url_for(app))
+    for name, lane in (
+        ("alert-policy-scheduler", run_alert_lane),
+        ("scheduler-background", run_background_lane),
+    ):
+        threading.Thread(
+            target=_scheduler_loop,
+            args=(app, lane, elector),
+            daemon=True,
+            name=name,
+        ).start()
+    logger.info(
+        "Scheduler started (tick=%ss, alerts lane + background lane)", _scheduler_tick_seconds()
     )
-    thread.start()
-    logger.info("Alert policy scheduler started (tick=%ss)", _scheduler_tick_seconds())

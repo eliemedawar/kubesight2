@@ -55,6 +55,10 @@ def _statements():
 
 
 def _get(client, token, path):
+    # Steady state: the caller's role permissions come from a process cache
+    # (access_engine), so warm it first -- otherwise the first of two compared
+    # requests pays one extra statement to fill it.
+    client.get("/api/auth/me", headers=auth_headers(token))
     with _statements() as statements:
         response = client.get(path, headers=auth_headers(token))
     assert response.status_code == 200, response.get_json()

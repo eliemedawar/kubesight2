@@ -30,7 +30,7 @@ KubeSight from local development to a production Kubernetes deployment.
 
 **Runtime command (production):**
 ```sh
-gunicorn -w "${GUNICORN_WORKERS:-1}" --threads "${GUNICORN_THREADS:-8}" -b 0.0.0.0:5000 --timeout 300 "api:create_app()"
+gunicorn -w "${GUNICORN_WORKERS:-1}" --threads "${GUNICORN_THREADS:-16}" -b 0.0.0.0:5000 --timeout 300 "api:create_app()"
 ```
 Background loops elect a leader through a Postgres advisory lock, so extra workers/replicas
 are safe for them; the default stays at 1 worker until upgrade jobs stop living in process
@@ -214,9 +214,16 @@ Process model (all optional):
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `GUNICORN_WORKERS` | `1` | Background loops elect a leader (Postgres advisory lock), so >1 worker or >1 replica no longer double-runs them. Upgrade jobs are persisted, so polls work on any worker. Kept at 1 because TTL read caches are per process and only the writing worker clears them — with more workers a list can lag a change by up to its TTL (10–30 s). |
-| `GUNICORN_THREADS` / `GUNICORN_TIMEOUT` | `8` / `300` | |
+| `GUNICORN_THREADS` / `GUNICORN_TIMEOUT` | `16` / `300` | |
 | `SCHEDULER_LEADER_ELECTION` | `auto` | `off` makes every process act as leader — single-process deployments only. |
 | `STARTUP_LOCK_TIMEOUT_SECONDS` | `600` | How long a booting worker waits for another's migrations. |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | `16` / `20` | Per worker. Postgres needs `max_connections` ≥ workers × replicas × 36, plus a few. |
+| `DB_INDEX_BOOT_MODE` | `concurrently` (Postgres) | Boot creates any model-declared index the database lacks. `plain` builds without CONCURRENTLY, `off` skips the step. |
+| `DB_INDEX_LOCK_TIMEOUT_SECONDS` | `60` | How long one boot-time index build waits on other sessions before it is skipped (and retried next boot). |
+| `SCHEDULER_LANES` | `2` | `2`: alert health/evaluation/notifications run on their own thread beside the other jobs. `1`: every job on one thread. |
+| `ROLE_PERMISSION_CACHE_SECONDS` | `30` | Role → permission keys cache per process. A role edit in this process applies at once; another replica sees it within this time. `0` turns it off. |
+| `RESPONSE_GZIP_LEVEL` | `4` | 1–9. |
+| `AUDIT_LOG_RETENTION_DAYS` | unset (keep all) | When set, audit entries older than this are deleted hourly by the scheduler. `CI_LOG_RETENTION_DAYS` and `ALERT_DELIVERY_LOG_RETENTION_DAYS` work the same way for their histories. |
 
 ## 5. Building Images
 

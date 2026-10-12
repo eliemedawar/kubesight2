@@ -1,10 +1,15 @@
 import csv
 import io
 import json
+import os
+import threading
+import time
+import weakref
 
 from flask import Blueprint, Response, request
 from sqlalchemy import func
 
+from ..db import db
 from ..decorators import require_permission
 from ..models import AuditLog, user_display_loader
 from ..response import success_response
@@ -26,19 +31,52 @@ _EXPORT_SCAN_LIMIT = 10000
 _ACTOR_LOADER = user_display_loader(AuditLog.actor)
 
 
+# COUNT(*) over the whole audit table is a full scan on PostgreSQL, and it ran
+# on every page. It is now needed only when a page comes back full (a short page
+# says exactly where the end is), and then kept briefly per database.
+_TOTAL_TTL_SECONDS = float(os.getenv("AUDIT_LOG_TOTAL_CACHE_SECONDS", "30"))
+_total_cache: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_total_lock = threading.Lock()
+
+
+def _cached_total() -> int:
+    engine = db.engine
+    now = time.monotonic()
+    with _total_lock:
+        hit = _total_cache.get(engine)
+    if hit is not None and hit[0] > now:
+        return hit[1]
+    total = AuditLog.query.count()
+    with _total_lock:
+        _total_cache[engine] = (now + _TOTAL_TTL_SECONDS, total)
+    return total
+
+
 @audit_bp.route("", methods=["GET"])
 @require_permission("audit:view")
 def list_audit_logs():
     limit = min(int(request.args.get("limit", 100)), 500)
     offset = max(int(request.args.get("offset", 0)), 0)
     query = AuditLog.query.order_by(AuditLog.created_at.desc())
-    total = query.count()
-    entries = query.options(_ACTOR_LOADER).offset(offset).limit(limit).all()
+    # One row past the page answers "is there more?" without counting.
+    rows = query.options(_ACTOR_LOADER).offset(offset).limit(limit + 1).all()
+    has_more = len(rows) > limit
+    entries = rows[:limit]
+    if has_more:
+        # Approximate for up to the cache TTL; never below what was just seen.
+        total = max(_cached_total(), offset + len(rows))
+    elif entries or offset == 0:
+        # A short page ends the list: everything is accounted for.
+        total = offset + len(entries)
+    else:
+        # Paged past the end: the offset says nothing about the size.
+        total = _cached_total()
     return success_response(
         {
             "items": [audit_log_to_dict(e) for e in entries],
             "count": len(entries),
             "total": total,
+            "hasMore": has_more,
             "offset": offset,
             "limit": limit,
         }

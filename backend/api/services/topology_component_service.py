@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import secrets
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -304,6 +305,41 @@ def _execute_check(
     return "unknown", "No health check configured."
 
 
+# One bounded pool for the scheduler's health probes, created on first use (in
+# the process that probes: never inherited across a fork) and kept, instead of
+# a new pool -- and new threads -- every 60 seconds.
+_PROBE_WORKERS = 8
+_probe_pool: Optional[ThreadPoolExecutor] = None
+_probe_pool_pid: Optional[int] = None
+_probe_pool_lock = threading.Lock()
+
+
+def _probe_executor() -> ThreadPoolExecutor:
+    global _probe_pool, _probe_pool_pid
+    with _probe_pool_lock:
+        if _probe_pool is None or _probe_pool_pid != os.getpid():
+            _probe_pool = ThreadPoolExecutor(
+                max_workers=_PROBE_WORKERS, thread_name_prefix="component-health"
+            )
+            _probe_pool_pid = os.getpid()
+        return _probe_pool
+
+
+def _refresh_jitter_fraction() -> float:
+    """Spread of the per-component staleness threshold (0.2 = up to +20%)."""
+    try:
+        return min(1.0, max(0.0, float(os.getenv("COMPONENT_HEALTH_REFRESH_JITTER", "0.2"))))
+    except ValueError:
+        return 0.2
+
+
+def _jittered_threshold(component_id: int, threshold: float, fraction: float) -> float:
+    # Stable per component, so each keeps its own slightly different period
+    # and the probes drift apart instead of all firing on the same tick.
+    spread = ((component_id * 2654435761) % 1000) / 1000.0
+    return threshold * (1.0 + fraction * spread)
+
+
 def refresh_stale_component_healths(
     component_ids: Optional[List[int]] = None,
     older_than_seconds: Optional[int] = None,
@@ -315,19 +351,37 @@ def refresh_stale_component_healths(
     evaluator before reading component statuses, so component health no longer
     depends on someone pressing "Check now" in the UI. Network probes run in
     worker threads; ORM access stays on the calling thread.
+
+    Staleness is filtered in SQL, so a tick with nothing due reads no rows. On
+    the default threshold each component gets a stable jitter (up to
+    ``COMPONENT_HEALTH_REFRESH_JITTER``). A component whose result did not
+    change only has its ``last_checked_at`` moved (one UPDATE for all of them),
+    since that timestamp is what decides when it is next due.
     """
     threshold = older_than_seconds if older_than_seconds is not None else component_health_refresh_seconds()
-    query = TopologyComponent.query.filter(TopologyComponent.check_type.in_(("http", "tcp", "webhook")))
+    jitter = _refresh_jitter_fraction() if older_than_seconds is None else 0.0
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=threshold)
+    query = TopologyComponent.query.filter(
+        TopologyComponent.check_type.in_(("http", "tcp", "webhook")),
+        db.or_(
+            TopologyComponent.last_checked_at.is_(None),
+            TopologyComponent.last_checked_at <= cutoff,
+        ),
+    )
     if component_ids:
         query = query.filter(TopologyComponent.id.in_(component_ids))
-    now = datetime.now(timezone.utc)
 
     stale: List[TopologyComponent] = []
     for component in query.all():
         checked_at = component.last_checked_at
         if checked_at is not None and checked_at.tzinfo is None:
             checked_at = checked_at.replace(tzinfo=timezone.utc)
-        if checked_at is None or (now - checked_at).total_seconds() >= threshold:
+        if checked_at is None:
+            stale.append(component)
+            continue
+        limit = _jittered_threshold(component.id, threshold, jitter) if jitter else threshold
+        if (now - checked_at).total_seconds() >= limit:
             stale.append(component)
     if not stale:
         return 0
@@ -349,23 +403,34 @@ def refresh_stale_component_healths(
     ]
 
     results: Dict[int, Tuple[str, str]] = {}
-    with ThreadPoolExecutor(max_workers=min(len(tasks), 8)) as pool:
-        futures = {
-            pool.submit(_execute_check, spec.pop("check_type"), **spec): component_id
-            for component_id, spec in tasks
-        }
-        for future, component_id in futures.items():
-            try:
-                results[component_id] = future.result()
-            except Exception as exc:
-                results[component_id] = ("unhealthy", f"Health check failed: {exc}.")
+    pool = _probe_executor()
+    futures = {
+        pool.submit(_execute_check, spec.pop("check_type"), **spec): component_id
+        for component_id, spec in tasks
+    }
+    for future, component_id in futures.items():
+        try:
+            results[component_id] = future.result()
+        except Exception as exc:
+            results[component_id] = ("unhealthy", f"Health check failed: {exc}.")
 
     checked_at = datetime.now(timezone.utc)
+    unchanged: List[int] = []
     for component in stale:
         status, message = results.get(component.id, ("unknown", "Health check did not run."))
+        if component.last_status == status and component.last_message == message:
+            unchanged.append(component.id)
+            continue
         component.last_status = status
         component.last_message = message
         component.last_checked_at = checked_at
+    if unchanged:
+        db.session.execute(
+            db.update(TopologyComponent)
+            .where(TopologyComponent.id.in_(unchanged))
+            .values(last_checked_at=checked_at)
+            .execution_options(synchronize_session=False)
+        )
     db.session.commit()
     return len(stale)
 

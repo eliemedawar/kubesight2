@@ -12,15 +12,14 @@ from flask import Blueprint, Response, request
 from ..auth_utils import get_current_user
 from ..decorators import require_permission
 from ..response import error_response, success_response
-from ..services.deployment_form_service import (
-    add_import_to_bundle,
-    build_wizard_state,
-    generate_form,
-    get_import,
-    import_form,
-    revalidate_import,
-    send_import_for_approval,
-)
+
+
+def _service():
+    """The form service, imported on first use: it pulls in openpyxl, seconds
+    of cold import that every process paid at boot for a rarely used page."""
+    from ..services import deployment_form_service
+
+    return deployment_form_service
 
 deployment_forms_bp = Blueprint("deployment_forms", __name__, url_prefix="/api/deployment-forms")
 
@@ -41,7 +40,7 @@ def generate():
     cluster_id = (body.get("clusterId") or body.get("cluster_id") or "").strip() or None
     namespace = (body.get("namespace") or "").strip() or None
 
-    data, error, status = generate_form(
+    data, error, status = _service().generate_form(
         get_current_user(), template_id, cluster_id=cluster_id, namespace=namespace
     )
     if error:
@@ -63,7 +62,7 @@ def import_deployment_form():
     if not file_bytes:
         return error_response("The uploaded file is empty.", 400)
 
-    data, error, status = import_form(get_current_user(), file_bytes)
+    data, error, status = _service().import_form(get_current_user(), file_bytes)
     if error:
         return error_response(error, status)
     return success_response(data)
@@ -72,7 +71,7 @@ def import_deployment_form():
 @deployment_forms_bp.route("/imports/<int:import_id>", methods=["GET"])
 @require_permission("apps:dryrun")
 def get_form_import(import_id: int):
-    data, error, status = get_import(get_current_user(), import_id)
+    data, error, status = _service().get_import(get_current_user(), import_id)
     if error:
         return error_response(error, status)
     return success_response(data)
@@ -81,7 +80,7 @@ def get_form_import(import_id: int):
 @deployment_forms_bp.route("/imports/<int:import_id>/validate", methods=["POST"])
 @require_permission("apps:dryrun")
 def validate_form_import(import_id: int):
-    data, error, status = revalidate_import(get_current_user(), import_id)
+    data, error, status = _service().revalidate_import(get_current_user(), import_id)
     if error:
         return error_response(error, status)
     return success_response(data)
@@ -90,7 +89,7 @@ def validate_form_import(import_id: int):
 @deployment_forms_bp.route("/imports/<int:import_id>/apply-to-wizard", methods=["POST"])
 @require_permission("apps:dryrun")
 def apply_import_to_wizard(import_id: int):
-    data, error, status = build_wizard_state(get_current_user(), import_id)
+    data, error, status = _service().build_wizard_state(get_current_user(), import_id)
     if error:
         return error_response(error, status)
     return success_response(data)
@@ -99,7 +98,7 @@ def apply_import_to_wizard(import_id: int):
 @deployment_forms_bp.route("/imports/<int:import_id>/add-to-bundle", methods=["POST"])
 @require_permission("change_bundles:create")
 def add_form_import_to_bundle(import_id: int):
-    data, error, status = add_import_to_bundle(get_current_user(), import_id)
+    data, error, status = _service().add_import_to_bundle(get_current_user(), import_id)
     if error:
         return error_response(error, status)
     return success_response(data)
@@ -109,7 +108,7 @@ def add_form_import_to_bundle(import_id: int):
 @require_permission("change_bundles:create")
 def send_form_import_for_approval(import_id: int):
     body = _body()
-    data, error, status = send_import_for_approval(
+    data, error, status = _service().send_import_for_approval(
         get_current_user(),
         import_id,
         note=str(body.get("note") or ""),

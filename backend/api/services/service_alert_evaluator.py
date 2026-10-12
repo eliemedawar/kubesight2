@@ -57,9 +57,15 @@ def list_alertable_services() -> List[Dict[str, Any]]:
     Prefers DB-backed services; falls back to the demo/mock list when the DB has
     none and no live cluster is configured (mirrors the Application Services API).
     """
-    rows = ApplicationService.query.order_by(ApplicationService.name.asc()).all()
+    # Two columns, not the entities: an ApplicationService drags its
+    # deployments, topology nodes and edges along with it.
+    rows = (
+        db.session.query(ApplicationService.id, ApplicationService.name)
+        .order_by(ApplicationService.name.asc())
+        .all()
+    )
     if rows:
-        return [{"id": row.id, "name": row.name} for row in rows]
+        return [{"id": row_id, "name": name} for row_id, name in rows]
     from ..k8s_provider import should_use_real_k8s
 
     if should_use_real_k8s():
