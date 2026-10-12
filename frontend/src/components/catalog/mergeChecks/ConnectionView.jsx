@@ -16,7 +16,11 @@ export default function ConnectionView({
   webhook,
   service,
   canEdit,
+  // Whether the status card above shows the "Set up in Bitbucket" button —
+  // the copy only points at it when it is there.
+  setupOffered = false,
   secret,
+  secretBusy = false,
   onReveal,
   onRotate,
   onCopy,
@@ -37,7 +41,11 @@ export default function ConnectionView({
             What makes a check run, and what KubeSight sends back.{" "}
             {webhook?.exists
               ? `The webhook in ${webhook.repository} delivers here.`
-              : "Use Set up in Bitbucket above, or wire it by hand below."}
+              : setupOffered
+                ? "Use Set up in Bitbucket above, or wire it by hand below."
+                : !config.sourceReady
+                  ? "Connect a repository on the Source tab first; then it can be set up from here, or wired by hand below."
+                  : "Wire it by hand below."}
           </p>
         </div>
       </header>
@@ -152,7 +160,7 @@ export default function ConnectionView({
                 onFocus={(event) => event.target.select()}
               />
               {canEdit && !secret && (
-                <button type="button" className="btn-outline btn-compact" onClick={onReveal}>
+                <button type="button" className="btn-outline btn-compact" onClick={onReveal} disabled={secretBusy}>
                   <PlIcon name="eye" /> Reveal
                 </button>
               )}
@@ -162,8 +170,14 @@ export default function ConnectionView({
                 </button>
               )}
               {canEdit && (
-                <button type="button" className="btn-outline btn-compact danger" onClick={onRotate}>
-                  <PlIcon name="refresh" /> Rotate
+                <button
+                  type="button"
+                  className="btn-outline btn-compact danger"
+                  onClick={onRotate}
+                  disabled={secretBusy}
+                  aria-busy={secretBusy || undefined}
+                >
+                  <PlIcon name="refresh" /> {secretBusy ? "Working…" : "Rotate"}
                 </button>
               )}
             </div>

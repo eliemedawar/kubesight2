@@ -15,7 +15,7 @@ import { applicationTypeLabel } from "./ciShared.jsx";
  * Gradle service wanting the Maven recipe is a wrong application type rather
  * than a Dockerfile to go shopping for.
  */
-export default function DockerfilePanel({ service, canEdit, onSaved }) {
+export default function DockerfilePanel({ service, canEdit, onSaved, onDirtyChange }) {
   const [text, setText] = useState(service.dockerfile || "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -65,6 +65,14 @@ export default function DockerfilePanel({ service, canEdit, onSaved }) {
   const dirty = (service.dockerfile || "") !== text;
   const filled = Boolean(text.trim());
 
+  // Only an edit somebody typed counts as a draft worth asking about: the
+  // prefilled template is "unsaved" too, but leaving it loses nothing.
+  const typedDraft = dirty && !prefilled;
+  useEffect(() => {
+    onDirtyChange?.(typedDraft);
+  }, [typedDraft, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+
   const save = async () => {
     setSaving(true);
     setError("");
@@ -99,6 +107,7 @@ export default function DockerfilePanel({ service, canEdit, onSaved }) {
         <label className="form-grid__full">
           <textarea
             className="sg-ci-dockerfile"
+            aria-label="Dockerfile"
             rows={18}
             spellCheck={false}
             value={text}

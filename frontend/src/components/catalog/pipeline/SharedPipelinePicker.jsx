@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { attachSharedPipeline, getSharedPipelineCopyFrom, listCiServices, listSharedPipelines } from "../../../api/ciApi.js";
 import SearchableSelect from "../../common/SearchableSelect.jsx";
-import { applicationTypeLabel } from "../ciShared.jsx";
+import { applicationTypeLabel, useEscapeToClose } from "../ciShared.jsx";
 import { PlIcon } from "./icons.jsx";
 
 /**
@@ -15,6 +15,7 @@ export function SharedPipelinePicker({ service, currentId, onClose, onAttached }
   const [picked, setPicked] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  useEscapeToClose(onClose, !busy);
 
   useEffect(() => {
     listSharedPipelines()
@@ -39,10 +40,11 @@ export function SharedPipelinePicker({ service, currentId, onClose, onAttached }
   };
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <div className="modal-backdrop" role="presentation" onClick={busy ? undefined : onClose}>
       <div
         className="modal-card sp-picker"
         role="dialog"
+        aria-modal="true"
         aria-label="Use a shared pipeline"
         onClick={(event) => event.stopPropagation()}
       >
@@ -131,6 +133,7 @@ export function CopyFromServiceModal({ pipeline, onClose, onDraft }) {
   const [picked, setPicked] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  useEscapeToClose(onClose, !busy);
 
   useEffect(() => {
     listCiServices()
@@ -153,10 +156,11 @@ export function CopyFromServiceModal({ pipeline, onClose, onDraft }) {
   };
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <div className="modal-backdrop" role="presentation" onClick={busy ? undefined : onClose}>
       <div
         className="modal-card sp-picker"
         role="dialog"
+        aria-modal="true"
         aria-label="Copy stages from a CI service"
         onClick={(event) => event.stopPropagation()}
       >

@@ -8,7 +8,13 @@ import {
 import { getCiAssistAvailability } from "../../api/ciAssistApi.js";
 import SearchableSelect from "../common/SearchableSelect.jsx";
 import HermesAnalysisPanel from "./HermesAnalysisPanel.jsx";
-import { APPLICATION_TYPES, BranchIcon, CRITICALITIES, TagIcon } from "./ciShared.jsx";
+import {
+  APPLICATION_TYPES,
+  BranchIcon,
+  CRITICALITIES,
+  TagIcon,
+  useEscapeToClose,
+} from "./ciShared.jsx";
 
 /**
  * Register a service in one flow instead of three tabs.
@@ -210,8 +216,16 @@ export default function RegisterServiceWizard({ onClose, onCreated, onOpenServic
     if (service) onOpenService?.(service, "pipeline");
   };
 
+  // Like the backdrop: only the first screen closes on Escape. Once the service
+  // exists, "Done" is the way out, so the analysis is never abandoned by a key.
+  useEscapeToClose(onClose, step === 0 && !saving);
+
   return (
-    <div className="modal-backdrop" role="presentation" onClick={step === 0 ? onClose : undefined}>
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onClick={step === 0 && !saving ? onClose : undefined}
+    >
       <div
         className="modal-card sg-ci-wizard"
         role="dialog"

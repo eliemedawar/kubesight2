@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getCiServiceParameters, listCiBranches, runCiBuild } from "../../api/ciApi.js";
-import { BranchIcon, PlayIcon, TagIcon } from "./ciShared.jsx";
+import { BranchIcon, PlayIcon, TagIcon, useEscapeToClose } from "./ciShared.jsx";
 
 /**
  * Jenkins-style "build with parameters", reduced to the one parameter that
@@ -153,8 +153,14 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
   }, [pool, term]);
   const exact = pool.some((item) => item.value === value.trim());
 
-  const submit = async () => {
-    const ref = noRepository ? service.defaultBranch || "main" : value.trim();
+  useEscapeToClose(onClose, !starting);
+
+  // `picked` is a ref chosen with a double-click: it is passed in rather than
+  // read back from state, which still holds the previous value at that moment.
+  const submit = async (picked) => {
+    const ref = noRepository
+      ? service.defaultBranch || "main"
+      : (typeof picked === "string" ? picked : value).trim();
     if (!ref || starting) return;
     setStarting(true);
     setError("");
@@ -182,7 +188,7 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
       : "Pick a branch, or type one.";
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <div className="modal-backdrop" role="presentation" onClick={starting ? undefined : onClose}>
       <div
         className="modal-card sg-ci-run-modal"
         role="dialog"
@@ -270,7 +276,7 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
                 onClick={() => setValue(item.value)}
                 onDoubleClick={() => {
                   setValue(item.value);
-                  submit();
+                  submit(item.value);
                 }}
               >
                 {refType === "tag" ? <TagIcon /> : <BranchIcon />}
@@ -324,6 +330,13 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
                   {asSelect ? (
                     <select value={value} onChange={(event) => set(event.target.value)}>
                       {!param.required && <option value="">(none)</option>}
+                      {/* A required choice with no default would otherwise show
+                          the first option while sending an empty value. */}
+                      {param.required && !choices.includes(value) && (
+                        <option value="" disabled>
+                          Select…
+                        </option>
+                      )}
                       {choices.map((choice) => (
                         <option key={choice} value={choice}>
                           {choice}
@@ -373,7 +386,7 @@ export default function RunBuildModal({ service, onClose, onStarted }) {
           <button
             type="button"
             className="primary sg-cat-new"
-            onClick={submit}
+            onClick={() => submit()}
             disabled={starting || (!noRepository && !value.trim())}
             title={
               !exact && value.trim() && !loadingRefs && !refsError

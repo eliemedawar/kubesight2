@@ -614,3 +614,14 @@
     padding-left: var(--space-4);
   }
 }
+
+/* An error in the dock (Settings shows section errors there, where they are
+   seen from anywhere on the page). */
+.pl-root .pl-toast.is-error {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+
+.pl-root .pl-toast.is-error > svg {
+  color: var(--danger);
+}

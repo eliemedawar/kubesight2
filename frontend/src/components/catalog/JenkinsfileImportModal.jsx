@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { importCiJenkinsfile, readCiSourceFile } from "../../api/ciApi.js";
-import { CheckIcon } from "./ciShared.jsx";
+import { CheckIcon, useEscapeToClose } from "./ciShared.jsx";
 
 /**
  * Import a Jenkinsfile as a pipeline draft.
@@ -54,13 +54,13 @@ export default function JenkinsfileImportModal({ service, onApply, onClose }) {
   const [path, setPath] = useState("Jenkinsfile");
   const fileInput = useRef(null);
 
-  useEffect(() => {
-    const onKey = (event) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Mid-read, Escape and a backdrop click leave the dialog open: closing it
+  // would throw the answer away the moment it arrives.
+  const working = reading || fetching;
+  useEscapeToClose(onClose, !working);
+  const requestClose = () => {
+    if (!working) onClose();
+  };
 
   // Re-reading on every keystroke would be a request per character for no gain:
   // a Jenkinsfile arrives pasted or loaded, whole.
@@ -110,15 +110,16 @@ export default function JenkinsfileImportModal({ service, onApply, onClose }) {
   const blocked = (draft?.blocking || []).length > 0;
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <div className="modal-backdrop" role="presentation" onClick={requestClose}>
       <div
         className="modal-card sg-ci-import"
         role="dialog"
-        aria-label="Import a Jenkinsfile"
+        aria-modal="true"
+        aria-labelledby="ci-import-title"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="modal-card__header">
-          <h3>Import a Jenkinsfile</h3>
+          <h3 id="ci-import-title">Import a Jenkinsfile</h3>
           <p className="muted">
             Reads the stages, their commands, and the build inputs with their names and
             types. Nothing is saved — the draft lands in the editor for you to finish and
@@ -294,7 +295,7 @@ export default function JenkinsfileImportModal({ service, onApply, onClose }) {
                 : "Replaces the stages and build inputs in the editor. Nothing is saved until you press Save pipeline."
               : ""}
           </span>
-          <button type="button" className="btn-outline" onClick={onClose}>
+          <button type="button" className="btn-outline" onClick={onClose} disabled={working}>
             Cancel
           </button>
           <button

@@ -8,6 +8,7 @@ import {
   pickNamespaces,
   pickNamespacedResources,
 } from "../../api/serviceBlueprintsApi.js";
+import { useEscapeToClose } from "./ciShared.jsx";
 
 const ENVIRONMENTS = ["dev", "staging", "production", "custom"];
 
@@ -59,6 +60,7 @@ export default function DeployFromBlueprintWizard({ blueprintId, blueprintName, 
     clientId: "", environment: "production", customEnvironment: "",
     clusterId: clusters[0]?.id || "", namespace: "", name: "",
   });
+  const openingTarget = useRef(target);
   const [namespaceOptions, setNamespaceOptions] = useState([]);
   const [creatingNamespace, setCreatingNamespace] = useState(false);
   const [nameEdited, setNameEdited] = useState(false);
@@ -666,12 +668,24 @@ export default function DeployFromBlueprintWizard({ blueprintId, blueprintName, 
 
   const canNext = step === 0 ? Boolean(target.clusterId) : true;
 
+  // A stray backdrop click or Escape must not silently throw away the
+  // mapping and values: ask first once anything was chosen. Nothing closes
+  // while a request is in flight, and the finished step closes freely.
+  const requestClose = () => {
+    if (busy) return;
+    const dirty = step < 4 && (step > 0 || JSON.stringify(target) !== JSON.stringify(openingTarget.current));
+    if (dirty && !window.confirm("Discard this registration? What you entered will be lost.")) return;
+    onClose();
+  };
+  useEscapeToClose(requestClose, !busy);
+
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <div className="modal-card modal-card--wide" role="dialog" onClick={(e) => e.stopPropagation()}
+    <div className="modal-backdrop" role="presentation" onClick={requestClose}>
+      <div className="modal-card modal-card--wide" role="dialog" aria-modal="true"
+        aria-labelledby="blueprint-deploy-title" onClick={(e) => e.stopPropagation()}
         style={{ maxHeight: "90vh", overflowY: "auto" }}>
         <div className="modal-card__header">
-          <h3>Register instance</h3>
+          <h3 id="blueprint-deploy-title">Register instance</h3>
           <p className="muted">{blueprintName}</p>
           <p className="muted" style={{ fontSize: "0.78rem" }}>
             Registering records the instance and its components in KubeSight. It does not apply anything to the cluster.

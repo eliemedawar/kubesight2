@@ -25,7 +25,9 @@ import {
   formatDuration,
   formatRelative,
   isBuildActive,
+  retryDelay,
   shortSha,
+  useEscapeToClose,
 } from "./ciShared.jsx";
 
 // The drawer is open on one build the user is watching stage by stage, and it
@@ -48,6 +50,9 @@ export default function BuildDetailDrawer({
   initialStageId,
   onClose,
   onChanged,
+  // Given, a retry lands on the build it started; without it the drawer says
+  // which build that was and stays where it is.
+  onOpenBuild,
   canCancel,
   canRetry,
 }) {
@@ -58,6 +63,7 @@ export default function BuildDetailDrawer({
   const [artifactTotal, setArtifactTotal] = useState(0);
   const [selectedStageId, setSelectedStageId] = useState(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   // The workspace replaces the log pane rather than sitting beside it: both
   // answer "what is this build doing", and the drawer has one pane.
@@ -77,11 +83,18 @@ export default function BuildDetailDrawer({
     userPickedRef.current = Boolean(initialStageId);
     setSelectedStageId(initialStageId || null);
     setBuild(null);
+    // Everything else read for the previous build goes too, or a retry opened
+    // in place shows the old build's artifacts under the new number.
+    setArtifacts([]);
+    setArtifactTotal(0);
+    setShowWorkspace(false);
+    setError("");
   }, [buildId, initialStageId]);
 
   useEffect(() => {
     let cancelled = false;
     let artifactsLoaded = false;
+    let failures = 0;
 
     const load = async () => {
       await whenVisible(); // A hidden tab stops polling until it is looked at.
@@ -89,6 +102,7 @@ export default function BuildDetailDrawer({
       try {
         const data = await getCiBuild(buildId);
         if (cancelled) return;
+        failures = 0;
         setBuild(data);
         setError("");
 
@@ -117,7 +131,12 @@ export default function BuildDetailDrawer({
         }
         timerRef.current = window.setTimeout(load, REFRESH_MS);
       } catch (err) {
-        if (!cancelled) setError(err.message || "Could not load the build.");
+        if (cancelled) return;
+        setError(err.message || "Could not load the build.");
+        // A failed read is a blip, not the end of the build: keep trying with
+        // a backoff instead of freezing the drawer on its last state.
+        failures += 1;
+        timerRef.current = window.setTimeout(load, retryDelay(failures));
       }
     };
     load();
@@ -139,17 +158,43 @@ export default function BuildDetailDrawer({
   const act = async (action) => {
     setBusy(true);
     setError("");
+    setNotice("");
     try {
       await action();
       const refreshed = await getCiBuild(buildId);
       setBuild(refreshed);
       onChanged?.();
+      return true;
     } catch (err) {
       setError(err.message || "That action failed.");
+      return false;
     } finally {
       setBusy(false);
     }
   };
+
+  // A retry is a NEW build. Re-reading this one (finished, unchanged) made the
+  // button look like it did nothing.
+  const retry = async () => {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const started = await retryCiBuild(build.id);
+      onChanged?.();
+      if (onOpenBuild && started?.id) {
+        onOpenBuild(started.id);
+      } else {
+        setNotice(`Started build #${started?.number ?? "?"} — it is on the Builds tab.`);
+      }
+    } catch (err) {
+      setError(err.message || "Could not retry the build.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEscapeToClose(onClose);
 
   const selectStage = (stage) => {
     userPickedRef.current = true;
@@ -278,9 +323,10 @@ export default function BuildDetailDrawer({
                 type="button"
                 className="btn-outline btn-compact"
                 disabled={busy}
-                onClick={() => act(() => retryCiBuild(build.id))}
+                title="Run this build again as a new build, from the same pipeline snapshot"
+                onClick={retry}
               >
-                Retry
+                {busy ? "Starting…" : "Retry"}
               </button>
             )}
             <button type="button" className="btn-outline btn-compact" onClick={onClose}>
@@ -290,6 +336,7 @@ export default function BuildDetailDrawer({
         </header>
 
         {error && <p className="banner-message error">{error}</p>}
+        {notice && <p className="banner-message success">{notice}</p>}
         {build?.error && <p className="banner-message error">{build.error}</p>}
         {build?.status === "queued" && build.queueReason && (
           <p className="banner-message info">{build.queueReason}</p>
@@ -460,7 +507,27 @@ export default function BuildDetailDrawer({
             <p className="field-hint">
               Queued {formatRelative(build.queuedAt)}
               {build.runnerName ? ` · runner ${build.runnerName}` : ""}
-              {build.retryOfBuildId ? ` · retry of build ${build.retryOfBuildId}` : ""}
+              {/* retryOfBuildId is a row id, not the #number people see, so
+                  printing it named the wrong build. Offer the way there. */}
+              {build.retryOfBuildId ? (
+                <>
+                  {" · a retry"}
+                  {onOpenBuild && (
+                    <>
+                      {" · "}
+                      <button
+                        type="button"
+                        className="btn-ghost sg-ci-linkbtn"
+                        onClick={() => onOpenBuild(build.retryOfBuildId)}
+                      >
+                        open the build it re-ran
+                      </button>
+                    </>
+                  )}
+                </>
+              ) : (
+                ""
+              )}
             </p>
           </>
         )}

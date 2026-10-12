@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { downloadCiCodeScanReport, getCiCodeScan, sendCiCodeScanReport } from "../../api/ciApi.js";
+import { useEscapeToClose } from "./ciShared.jsx";
 
 const EMAIL_RE = /^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]+$/;
 
@@ -162,11 +163,9 @@ function SendReportDialog({ buildId, stage, data, onClose, onSent, onDownload })
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    const onKey = (event) => event.key === "Escape" && !busy && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [busy, onClose]);
+  // Through the shared stack, so Escape closes this dialog and not the build
+  // drawer it sits on.
+  useEscapeToClose(onClose, !busy);
 
   const chosen = new Set(recipients.map((item) => item.toLowerCase()));
   const query = text.trim().toLowerCase();
@@ -250,7 +249,7 @@ function SendReportDialog({ buildId, stage, data, onClose, onSent, onDownload })
         </div>
 
         {!data.emailConfigured && (
-          <p className="banner-message warning">
+          <p className="banner-message warning-banner">
             Email is not set up on this KubeSight, so the report cannot be sent from here.{" "}
             <button type="button" className="btn-ghost sg-ci-linkbtn" onClick={onDownload}>
               Download the PDF

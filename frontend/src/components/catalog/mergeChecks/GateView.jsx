@@ -105,7 +105,7 @@ export default function GateView({ config, form, active, canEdit, onMode, onFiel
           {canEdit && (
             <p className="pl-field-hint">
               Need different numbers for this service?{" "}
-              <button type="button" className="pl-link" onClick={() => onMode("override")}>
+              <button type="button" className="btn-ghost pl-link" onClick={() => onMode("override")}>
                 Set this service's own limits
               </button>
             </p>

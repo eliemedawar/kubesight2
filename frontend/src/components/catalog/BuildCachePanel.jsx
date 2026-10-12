@@ -111,8 +111,10 @@ export default function BuildCachePanel({ canManage }) {
       await action();
       const next = await load();
       if (successText && next) setNotice(successText);
+      return true;
     } catch (err) {
       setError(err.message || "That did not work.");
+      return false;
     } finally {
       setBusy("");
     }
@@ -238,8 +240,10 @@ export default function BuildCachePanel({ canManage }) {
           onSubmit={(event) => {
             event.preventDefault();
             setCreating(true);
+            // Only a volume that was actually created closes the form: a
+            // refusal (wrong node, bad export) must leave the answers to fix.
             run("create", () => createCiCacheVolume(form), "Volume created.")
-              .then(() => setForm(null))
+              .then((ok) => ok && setForm(null))
               .finally(() => setCreating(false));
           }}
         >

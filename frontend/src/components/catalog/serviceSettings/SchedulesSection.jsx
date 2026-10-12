@@ -48,6 +48,10 @@ export default function SchedulesSection({ service, canEdit, canRun, onError, on
   const [running, setRunning] = useState(null);
   const summaryRef = useRef(onSummary);
   summaryRef.current = onSummary;
+  // The last load error reported. The 30 s refresh raises an error only when
+  // it differs from this, so a dismissed one does not come back every tick;
+  // a successful load clears it.
+  const loadErrorRef = useRef("");
 
   const load = useCallback(
     () =>
@@ -55,10 +59,14 @@ export default function SchedulesSection({ service, canEdit, canRun, onError, on
         .then((next) => {
           setData(next);
           summaryRef.current?.(next.items || []);
+          loadErrorRef.current = "";
         })
         .catch((err) => {
           setData((prev) => prev || { items: [], pipelines: [], limits: {} });
-          onError(err.message || "Could not load schedules.");
+          const message = err.message || "Could not load schedules.";
+          if (message === loadErrorRef.current) return;
+          loadErrorRef.current = message;
+          onError(message);
         }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [service.id]

@@ -293,7 +293,9 @@ export default function StageMatrix({
         {error && <p className="banner-message error">{error}</p>}
         <EmptyState
           message={
-            status === "all" ? "No builds yet." : `No builds with status “${status}”.`
+            status === "all"
+              ? "No builds yet."
+              : `No builds with status “${status.replace(/_/g, " ")}”.`
           }
           hint="Run a build to see its stages line up here."
         />

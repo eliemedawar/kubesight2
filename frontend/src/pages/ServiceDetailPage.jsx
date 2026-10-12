@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { getCiServiceSummary, listCiPipelines, updateCiService } from "../api/ciApi.js";
 import { getCiAssistAvailability } from "../api/ciAssistApi.js";
 import { useAuth } from "../context/AuthContext";
-import { useRouteParam, useRouteQuery } from "../routes/RouterContext.jsx";
+import { useRouteParam, useRouteQuery, useRouter } from "../routes/RouterContext.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
 import ArtifactsPanel from "../components/catalog/ArtifactsPanel.jsx";
@@ -101,6 +101,7 @@ export default function ServiceDetailPage({
   const [pipelineDirty, setPipelineDirty] = useState(false);
   const [mergeChecksDirty, setMergeChecksDirty] = useState(false);
   const [settingsDirty, setSettingsDirty] = useState(false);
+  const [dockerfileDirty, setDockerfileDirty] = useState(false);
   const draftLabel =
     tab === "pipeline" && pipelineDirty
       ? "pipeline"
@@ -108,7 +109,9 @@ export default function ServiceDetailPage({
         ? "merge check"
         : tab === "settings" && settingsDirty
           ? "settings"
-          : null;
+          : tab === "dockerfile" && dockerfileDirty
+            ? "Dockerfile"
+            : null;
   const confirmLeaveDraft = () =>
     !draftLabel ||
     window.confirm(`Your ${draftLabel} changes are not saved. Leave and discard them?`);
@@ -118,6 +121,7 @@ export default function ServiceDetailPage({
     setPipelineDirty(false);
     setMergeChecksDirty(false);
     setSettingsDirty(false);
+    setDockerfileDirty(false);
     changeTab(next);
   };
   const [loading, setLoading] = useState(true);
@@ -129,6 +133,14 @@ export default function ServiceDetailPage({
   // Replace, not push: the build drawer opens over the Builds tab rather
   // than being a place of its own, so Back leaves the service in one press.
   const [openBuildId, setOpenBuildId] = useRouteQuery("build", initialBuildId || null);
+  // The stage a matrix cell asked for. Not part of the address: it only picks
+  // which log the drawer opens on.
+  const [openStageId, setOpenStageId] = useState(null);
+  const openBuild = (buildId, stageId = null) => {
+    setOpenStageId(stageId);
+    setOpenBuildId(buildId == null ? null : String(buildId));
+  };
+  const { getRoute, navigate } = useRouter();
   // Bumped after a build is triggered so the Builds and Artifacts tabs reload.
   const [refreshToken, setRefreshToken] = useState(0);
 
@@ -168,8 +180,23 @@ export default function ServiceDetailPage({
   const buildStarted = (build) => {
     setRunOpen(false);
     setRefreshToken((value) => value + 1);
-    setTab("builds");
-    setOpenBuildId(String(build.id));
+    // One navigation for the tab and the build together. Two in a row each
+    // start from the address as last rendered, so the second wiped the first
+    // and the page stayed on Overview behind the drawer.
+    if (confirmLeaveDraft()) {
+      setPipelineDirty(false);
+      setMergeChecksDirty(false);
+      setSettingsDirty(false);
+      setDockerfileDirty(false);
+      const active = getRoute();
+      navigate({
+        key: active.key,
+        params: { ...active.params, tab: "builds" },
+        query: { ...active.query, build: String(build.id) },
+      });
+    } else {
+      openBuild(build.id);
+    }
     load();
   };
 
@@ -185,16 +212,6 @@ export default function ServiceDetailPage({
     } finally {
       setSavingEdit(false);
     }
-  };
-
-  // Deploying hands the exact image reference to the existing deploy flow. CI
-  // never applies anything to a cluster itself.
-  const deployArtifact = (artifact) => {
-    window.alert(
-      `Deploy ${artifact.uri}\n\n` +
-        "Container image builds land in Phase 4 (BuildKit + Nexus); this button " +
-        "will then hand this exact reference to the existing deploy flow."
-    );
   };
 
   if (loading) return <LoadingState label={isPipeline ? "Loading pipeline…" : "Loading service…"} />;
@@ -308,7 +325,7 @@ export default function ServiceDetailPage({
           <ServiceOverview
             summary={summary}
             stages={stages}
-            onOpenBuild={setOpenBuildId}
+            onOpenBuild={(id) => openBuild(id)}
             onGoToTab={setTab}
           />
         )}
@@ -346,6 +363,7 @@ export default function ServiceDetailPage({
           <PipelineEditor
             service={service}
             canEdit={can.editPipeline}
+            canViewSecrets={can.viewSecrets}
             onChanged={load}
             onDirtyChange={setPipelineDirty}
             onGoToTab={setTab}
@@ -358,11 +376,16 @@ export default function ServiceDetailPage({
             canView={can.viewMergeChecks}
             onDirtyChange={setMergeChecksDirty}
             onGoToTab={setTab}
-            onOpenBuild={setOpenBuildId}
+            onOpenBuild={(id) => openBuild(id)}
           />
         )}
         {tab === "dockerfile" && (
-          <DockerfilePanel service={service} canEdit={can.edit} onSaved={() => load()} />
+          <DockerfilePanel
+            service={service}
+            canEdit={can.edit}
+            onSaved={() => load()}
+            onDirtyChange={setDockerfileDirty}
+          />
         )}
         {tab === "builds" && (
           <BuildsPanel
@@ -370,14 +393,13 @@ export default function ServiceDetailPage({
             canCancel={can.cancel}
             canRetry={can.retry}
             refreshToken={refreshToken}
+            onOpenBuild={openBuild}
           />
         )}
         {tab === "artifacts" && (
           <ArtifactsPanel
             service={service}
-            canDeploy={can.deploy}
             canManage={can.manageArtifacts}
-            onDeploy={deployArtifact}
             refreshToken={refreshToken}
           />
         )}
@@ -396,7 +418,7 @@ export default function ServiceDetailPage({
             canEditSchedules={can.editPipeline && can.run}
             canRunSchedules={can.run}
             canDeploy={can.deploy}
-            onOpenBuild={(id) => setOpenBuildId(String(id))}
+            onOpenBuild={(id) => openBuild(id)}
             onSaved={() => load()}
             onDeleted={onDeleted}
             onDirtyChange={setSettingsDirty}
@@ -425,7 +447,9 @@ export default function ServiceDetailPage({
       {openBuildId && (
         <BuildDetailDrawer
           buildId={openBuildId}
-          onClose={() => setOpenBuildId(null)}
+          initialStageId={openStageId}
+          onClose={() => openBuild(null)}
+          onOpenBuild={(id) => openBuild(id)}
           onChanged={() => {
             setRefreshToken((value) => value + 1);
             load();

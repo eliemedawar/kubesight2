@@ -111,6 +111,11 @@ export default function SecretsSection({ service, expectedSecrets, canManage, on
     if (!window.confirm(message)) return;
     try {
       await updateCiSecret(secret.id, { scope, serviceId: service.id });
+      onNotice(
+        scope === "global"
+          ? `${secret.key} is global now — every service can reference it.`
+          : `${secret.key} belongs to ${service.name} only now.`
+      );
       load();
     } catch (err) {
       onError(err.message || "Could not change the scope.");

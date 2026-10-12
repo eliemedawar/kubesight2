@@ -134,6 +134,7 @@ export default function ServiceSettingsPanel({
   // type in rather than snapping back to Default.
   const [modes, setModes] = useState(() => modesFor(service.buildResources));
   const [registries, setRegistries] = useState(null);
+  const [registriesUnreadable, setRegistriesUnreadable] = useState(false);
   const [secretCount, setSecretCount] = useState(null);
   const [schedules, setSchedules] = useState(null);
   const [webhooks, setWebhooks] = useState(null);
@@ -150,7 +151,11 @@ export default function ServiceSettingsPanel({
   useEffect(() => {
     listRegistries()
       .then((data) => setRegistries(data.items || []))
-      .catch(() => setRegistries([]));
+      .catch(() => {
+        // Not "none exist": this user may simply not be allowed to list them.
+        setRegistries([]);
+        setRegistriesUnreadable(true);
+      });
   }, []);
 
   useEffect(() => {
@@ -191,6 +196,12 @@ export default function ServiceSettingsPanel({
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
+
+  // A section that succeeds after a failure takes the stale error with it.
+  const announce = (message) => {
+    setError("");
+    setNotice(message);
+  };
 
   const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
 
@@ -356,16 +367,6 @@ export default function ServiceSettingsPanel({
         </div>
       </header>
 
-      {error && (
-        <div className="pl-banner is-error" role="alert">
-          <PlIcon name="alert" />
-          <p>{error}</p>
-          <button type="button" className="btn-ghost pl-banner-close" aria-label="Dismiss" onClick={() => setError("")}>
-            <PlIcon name="x" />
-          </button>
-        </div>
-      )}
-
       <div className="st-layout">
         <nav className="st-rail" aria-label="Settings sections">
           {sections.map((item) => (
@@ -467,7 +468,7 @@ export default function ServiceSettingsPanel({
                   canEdit={canEdit}
                   canDeploy={canDeploy}
                   onError={setError}
-                  onNotice={setNotice}
+                  onNotice={announce}
                   onCount={setLinkCount}
                 />
               </div>
@@ -603,7 +604,7 @@ export default function ServiceSettingsPanel({
                   canEdit={canEditSchedules}
                   canRun={canRunSchedules && service.status === "active"}
                   onError={setError}
-                  onNotice={setNotice}
+                  onNotice={announce}
                   onSummary={setSchedules}
                   onOpenBuild={onOpenBuild}
                 />
@@ -628,7 +629,7 @@ export default function ServiceSettingsPanel({
                   canEdit={canEditSchedules}
                   canRun={canRunSchedules && service.status === "active"}
                   onError={setError}
-                  onNotice={setNotice}
+                  onNotice={announce}
                   onSummary={setWebhooks}
                   onOpenBuild={onOpenBuild}
                 />
@@ -674,7 +675,15 @@ export default function ServiceSettingsPanel({
                   })}
                 </div>
               )}
-              {registries && registries.length === 0 && (
+              {registriesUnreadable ? (
+                <p className="pl-note">
+                  <PlIcon name="lock" />
+                  <span>
+                    The registries could not be listed with your access
+                    {form.registryConnectionId ? " — the one linked to this service is kept as it is" : ""}.
+                  </span>
+                </p>
+              ) : registries && registries.length === 0 && (
                 <p className="pl-note">
                   <PlIcon name="image" />
                   <span>
@@ -722,7 +731,7 @@ export default function ServiceSettingsPanel({
                   expectedSecrets={expectedSecrets}
                   canManage={canManageSecrets}
                   onError={setError}
-                  onNotice={setNotice}
+                  onNotice={announce}
                   onCount={setSecretCount}
                 />
               </div>
@@ -775,6 +784,18 @@ export default function ServiceSettingsPanel({
       </div>
 
       <div className="pl-dock">
+        {/* Errors live in the dock, not above the sections: most come from a
+            secret, schedule, webhook or link far down the page, where a banner
+            at the top was never seen. */}
+        {error && (
+          <div className="pl-toast is-error" role="alert">
+            <PlIcon name="alert" />
+            <span>{error}</span>
+            <button type="button" className="btn-ghost" aria-label="Dismiss" onClick={() => setError("")}>
+              <PlIcon name="x" />
+            </button>
+          </div>
+        )}
         {notice && (
           <div className="pl-toast" role="status">
             <PlIcon name="check" />

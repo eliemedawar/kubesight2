@@ -664,6 +664,13 @@
   scrollbar-width: thin;
 }
 
+/* A flow taller than its max-height scrolls; without this its children
+   shrink instead and "Add a stage" (min-height: 0) collapses into
+   "Build finishes". */
+.pl-root .pl-flow > * {
+  flex-shrink: 0;
+}
+
 .pl-root .pl-flow-head {
   display: flex;
   align-items: baseline;

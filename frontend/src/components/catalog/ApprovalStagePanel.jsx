@@ -19,9 +19,12 @@ export default function ApprovalStagePanel({ stage, busy, onDecide }) {
   const waiting = stage.status === "running" && state.phase === "waiting_approval";
   const approvals = approvalsSoFar(state);
   const decisions = state.decisions || [];
-  const decide = (action) => {
-    onDecide?.(action, comment.trim());
-    setComment("");
+  // The comment is kept when the decision is refused (not an approver, the
+  // stage moved on): retyping a reason because a request failed is the worst
+  // moment to lose it.
+  const decide = async (action) => {
+    const ok = await onDecide?.(action, comment.trim());
+    if (ok !== false) setComment("");
   };
 
   return (
@@ -78,7 +81,7 @@ export default function ApprovalStagePanel({ stage, busy, onDecide }) {
           <div className="sg-ci-approval-buttons">
             <button
               type="button"
-              className="btn-primary btn-compact"
+              className="primary btn-compact"
               disabled={busy || !viewer.canApprove}
               title={viewer.canApprove ? undefined : viewer.reason}
               onClick={() => decide("approve")}

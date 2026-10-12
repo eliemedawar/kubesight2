@@ -64,6 +64,10 @@ import {
 } from "./pipeline/parallelModel.js";
 
 const clone = (value) => (value == null ? value : structuredClone(value));
+const clip = (text, max) => {
+  const value = String(text || "");
+  return value.length > max ? `${value.slice(0, max - 1).trimEnd()}…` : value;
+};
 
 /**
  * Pipeline tab: the stages a build runs, and the inputs it asks for.
@@ -75,7 +79,16 @@ const clone = (value) => (value == null ? value : structuredClone(value));
  * derived from the saved copy, so the save bar can say what changed and the
  * flow can mark which stages.
  */
-export default function PipelineEditor({ service, onChanged, canEdit, onDirtyChange, onGoToTab }) {
+export default function PipelineEditor({
+  service,
+  onChanged,
+  canEdit,
+  // Without ci_secrets:view the list call is a guaranteed 403; secret names
+  // are then simply not offered (they only feed pickers and hints).
+  canViewSecrets = true,
+  onDirtyChange,
+  onGoToTab,
+}) {
   const { route, getRoute, navigate } = useRouter();
   const [pipeline, setPipeline] = useState(null);
   // The pipeline as last loaded or saved — the baseline every change is
@@ -143,6 +156,15 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
   // shown read-only here and edited there (the API refuses an edit here too).
   const linked = pipeline?.linkedPipeline || null;
   const isHome = service.kind === "pipeline";
+  // A pipeline from the Pipelines page has a Repository tab, not Source, and
+  // no Dockerfile tab: an unknown tab in the address does not parse, and the
+  // app fell back to the Dashboard.
+  const goToTab = (tab) => {
+    if (!isHome) return onGoToTab?.(tab);
+    if (tab === "source") return onGoToTab?.("repository");
+    if (tab === "dockerfile" || tab === "mergeChecks") return undefined;
+    return onGoToTab?.(tab);
+  };
   const editable = canEdit && !generated && !linked && !saving;
 
   const diff = useMemo(() => pipelineDiff(stages, parameters, saved), [stages, parameters, saved]);
@@ -245,6 +267,10 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
     setError("");
     setImportNotes(null);
     load();
+    if (!canViewSecrets) {
+      setSecretKeys([]);
+      return;
+    }
     listCiSecrets(service.id)
       // The list is this service's secrets plus every global one, so a service
       // secret shadowing a global of the same name arrives twice. One row per
@@ -259,7 +285,7 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
         setSecretKeys([...byKey].map(([key, scope]) => ({ key, scope })));
       })
       .catch(() => setSecretKeys([]));
-  }, [service.id, load]);
+  }, [service.id, load, canViewSecrets]);
 
   // --- Page-level wiring -----------------------------------------------------
 
@@ -284,12 +310,15 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
   }, [loading]);
 
   // Leaving the tab clears its own query keys, so ?stage=5 does not ride
-  // along to the Builds tab.
+  // along to the Builds tab. Only when the tab really changed: StrictMode's
+  // mount-unmount-mount in development ran this on arrival and dropped the
+  // ?stage= a deep link had just asked for.
   useEffect(
     () => () => {
       const active = getRoute();
       if (
         (active.key === "serviceDetail" || active.key === "pipelineDetail") &&
+        active.params?.tab !== "pipeline" &&
         (active.query?.stage || active.query?.view)
       ) {
         const { stage: _stage, view: _view, ...rest } = active.query;
@@ -326,13 +355,15 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
     const close = (event) => {
       if (event.type === "keydown" && event.key !== "Escape") return;
       if (event.type === "mousedown" && menuRef.current?.contains(event.target)) return;
+      // Claim the key, so the app-wide dialog stack leaves the layer below open.
+      if (event.type === "keydown") event.preventDefault();
       setMenuOpen(false);
     };
     document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", close);
+    document.addEventListener("keydown", close, true);
     return () => {
       document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", close);
+      document.removeEventListener("keydown", close, true);
     };
   }, [menuOpen]);
 
@@ -1043,7 +1074,13 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
               {pipeline.defaultMetadata?.applicationTypeLabel || applicationTypeLabel(service.applicationType)}
               {pipeline.defaultMetadata?.detectedCommand && (
                 <>
-                  {" "}— it runs <code>{pipeline.defaultMetadata.detectedCommand}</code>
+                  {" "}— it runs{" "}
+                  {/* Some starters detect a whole shell script (Node's lockfile
+                      probe); in a sentence it became a paragraph of code. The
+                      full script is in the stages below and in the tooltip. */}
+                  <code title={pipeline.defaultMetadata.detectedCommand}>
+                    {clip(pipeline.defaultMetadata.detectedCommand, 80)}
+                  </code>
                 </>
               )}
               {pipeline.defaultMetadata?.detectedFiles?.length > 0 && (
@@ -1199,7 +1236,7 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
                 onChangeType={(type) => changePostKind(selectedPost, type)}
                 onMove={(delta) => movePost(selectedPost, selectedPost + delta)}
                 onRemove={() => removePost(selectedPost)}
-                onGoToTab={onGoToTab}
+                onGoToTab={goToTab}
               />
             ) : mode === "add" && editable ? (
               <>
@@ -1251,7 +1288,7 @@ export default function PipelineEditor({ service, onChanged, canEdit, onDirtyCha
                 onDuplicate={() => copyOf(selectedIndex, selectedIndex + 1)}
                 onMove={(delta) => move(selectedIndex, selectedIndex + delta)}
                 onRemove={() => remove(selectedIndex)}
-                onGoToTab={onGoToTab}
+                onGoToTab={goToTab}
                 onOpenInputs={() => setView("inputs")}
                 onGroupChange={editable ? (action, value) => changeGroup(selectedIndex, action, value) : undefined}
                 parallelCapability={lint?.parallel || null}

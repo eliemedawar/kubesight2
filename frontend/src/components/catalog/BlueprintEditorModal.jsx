@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useEscapeToClose } from "./ciShared.jsx";
 
 // Mirrors the backend VALID_* sets (service_blueprint_service.py).
 const COMPONENT_TYPES = [
@@ -81,7 +82,13 @@ function fromBlueprint(detail) {
 
 export default function BlueprintEditorModal({ blueprint, categories = [], onClose, onSave, saving, error }) {
   const isEdit = Boolean(blueprint?.id);
-  const [form, setForm] = useState(() => fromBlueprint(blueprint));
+  // The opening form, kept as a snapshot so closing can tell whether anything
+  // was typed. Built once: fromBlueprint hands out fresh temp ids every call.
+  const [initial] = useState(() => {
+    const opening = fromBlueprint(blueprint);
+    return { form: opening, snapshot: JSON.stringify(opening) };
+  });
+  const [form, setForm] = useState(initial.form);
   // Start in "create" mode if editing a blueprint whose category isn't a known one.
   const [creatingCategory, setCreatingCategory] = useState(false);
 
@@ -225,19 +232,31 @@ export default function BlueprintEditorModal({ blueprint, categories = [], onClo
     });
   };
 
+  // A stray backdrop click or Escape must not silently throw away a design:
+  // ask first when anything changed. Nothing closes while a save is in flight.
+  const requestClose = () => {
+    if (saving) return;
+    const dirty = JSON.stringify(form) !== initial.snapshot;
+    if (dirty && !window.confirm("Discard your unsaved changes to this blueprint?")) return;
+    onClose();
+  };
+  useEscapeToClose(requestClose, !saving);
+
   const componentLabel = (tempId) =>
     componentOptions.find((c) => c.tempId === tempId)?.name || "—";
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <div className="modal-backdrop" role="presentation" onClick={requestClose}>
       <div
         className="modal-card modal-card--wide"
         role="dialog"
+        aria-modal="true"
+        aria-labelledby="blueprint-editor-title"
         onClick={(e) => e.stopPropagation()}
         style={{ maxHeight: "90vh", overflowY: "auto" }}
       >
         <div className="modal-card__header">
-          <h3>{isEdit ? "Edit Service Blueprint" : "New Service Blueprint"}</h3>
+          <h3 id="blueprint-editor-title">{isEdit ? "Edit Service Blueprint" : "New Service Blueprint"}</h3>
           <p className="muted">
             Define the logical service design — components, topology, and requirements.
             Real Kubernetes resources are chosen later when you register an instance.

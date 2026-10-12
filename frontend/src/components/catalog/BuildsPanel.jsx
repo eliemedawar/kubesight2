@@ -73,14 +73,28 @@ function initialView(service) {
  * pipeline keep breaking". Both share the status filter and the same drawer, so
  * switching never loses the user's place.
  */
-export default function BuildsPanel({ service, canCancel, canRetry, refreshToken }) {
+export default function BuildsPanel({
+  service,
+  canCancel,
+  canRetry,
+  refreshToken,
+  // Given by the service page, which keeps the open build in the address
+  // (?build=) so a link or Back reproduces it. Without it the panel keeps its
+  // own drawer, as before.
+  onOpenBuild,
+}) {
   const [view, setView] = useState(() => initialView(service));
   const [builds, setBuilds] = useState([]);
   const [queueDepth, setQueueDepth] = useState(0);
   const [status, setStatus] = useState("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [openBuild, setOpenBuild] = useState(null);
+  const [localOpen, setLocalOpen] = useState(null);
+  const setOpenBuild = (next) => {
+    if (onOpenBuild) onOpenBuild(next.buildId, next.stageId);
+    else setLocalOpen(next);
+  };
+  const openBuild = onOpenBuild ? null : localOpen;
   const timerRef = useRef(null);
 
   const failuresRef = useRef(0);
@@ -208,7 +222,8 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
     <BuildDetailDrawer
       buildId={openBuild.buildId}
       initialStageId={openBuild.stageId}
-      onClose={() => setOpenBuild(null)}
+      onClose={() => setLocalOpen(null)}
+      onOpenBuild={(buildId) => setLocalOpen({ buildId, stageId: null })}
       onChanged={load}
       canCancel={canCancel}
       canRetry={canRetry}
@@ -243,8 +258,16 @@ export default function BuildsPanel({ service, canCancel, canRetry, refreshToken
 
       {builds.length === 0 ? (
         <EmptyState
-          message="No builds yet."
-          hint="Run a build to see it here with its stages and logs."
+          message={
+            status === "all"
+              ? "No builds yet."
+              : `No builds match “${(STATUS_FILTERS.find(([value]) => value === status) || [status, status])[1]}”.`
+          }
+          hint={
+            status === "all"
+              ? "Run a build to see it here with its stages and logs."
+              : "Choose All to see every build."
+          }
         />
       ) : (
         <div className="table-wrap">

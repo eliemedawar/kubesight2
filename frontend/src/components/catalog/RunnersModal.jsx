@@ -9,7 +9,7 @@ import {
 import AgentEnrolment from "./AgentEnrolment.jsx";
 import AgentInstallHelp from "./AgentInstallHelp.jsx";
 import BuildCachePanel from "./BuildCachePanel.jsx";
-import { RUNNER_TYPES, StatusPill } from "./ciShared.jsx";
+import { RUNNER_TYPES, StatusPill, useEscapeToClose } from "./ciShared.jsx";
 
 /**
  * The build fleet — where an operator turns a runner on.
@@ -37,9 +37,12 @@ function blockedReason(runner) {
     return "Disabled — the engine will never assign a build here.";
   }
   if (runner.status === "offline") {
-    return runner.isBuiltin
-      ? "No adapter registered in this backend — builds cannot be dispatched."
-      : "Offline — the agent has not checked in.";
+    if (!runner.isBuiltin) return "Offline — the agent has not checked in.";
+    // Both built-in adapters are always registered, so "no adapter" was never
+    // the reason. The backend names a policy reason when one applies.
+    return runner.statusReason
+      ? `Offline — ${runner.statusReason}`
+      : "Offline — KubeSight has not marked it ready; this updates on the engine's next check.";
   }
   if (runner.status === "draining") {
     return "Draining — finishing its current builds, taking no new ones.";
@@ -99,13 +102,28 @@ export default function RunnersModal({ canManage, onClose }) {
     }
   };
 
+  // The token on screen exists nowhere else, so closing over it asks first —
+  // a stray click on the backdrop used to lose it for good.
+  const close = () => {
+    if (
+      issued &&
+      !window.confirm(
+        `The token for ${issued.name} is shown only once. Close without copying it? ` +
+          "You can issue a new one later with New token."
+      )
+    )
+      return;
+    onClose();
+  };
+  useEscapeToClose(close);
+
   const summary = loading
     ? "Reading the fleet…"
     : `${meta.eligible} runner${meta.eligible === 1 ? "" : "s"} can take work` +
       (meta.queueDepth ? ` · ${meta.queueDepth} build(s) waiting` : "");
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <div className="modal-backdrop" role="presentation" onClick={close}>
       <div
         className="modal-card sg-ci-runners"
         role="dialog"
@@ -337,7 +355,14 @@ export default function RunnersModal({ canManage, onClose }) {
                               aria-label={`Maximum concurrent builds for ${runner.name}`}
                               onBlur={(event) => {
                                 const next = Number(event.target.value);
-                                if (!Number.isFinite(next) || next === runner.maxConcurrent) return;
+                                if (next === runner.maxConcurrent) return;
+                                // An emptied box reads as 0; say so and put the
+                                // saved value back rather than send it.
+                                if (!Number.isInteger(next) || next < 1 || next > 100) {
+                                  event.target.value = runner.maxConcurrent;
+                                  setError("Max concurrent must be a whole number from 1 to 100.");
+                                  return;
+                                }
                                 save(runner, { maxConcurrent: next });
                               }}
                             />
@@ -363,7 +388,7 @@ export default function RunnersModal({ canManage, onClose }) {
         )}
 
         <div className="modal-actions">
-          <button type="button" className="btn-outline" onClick={onClose}>
+          <button type="button" className="btn-outline" onClick={close}>
             Close
           </button>
         </div>

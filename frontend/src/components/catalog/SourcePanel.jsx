@@ -8,6 +8,7 @@ import {
   updateCiSource,
   updateCiSourceCredential,
 } from "../../api/ciApi.js";
+import { useEscapeToClose } from "./ciShared.jsx";
 
 const WRITE_ACCESS_HINT =
   "Write access is needed only for merge checks and build statuses: KubeSight " +
@@ -37,6 +38,7 @@ export default function SourcePanel({ service, onSaved, canEdit, canManageSecret
   const [addingCredential, setAddingCredential] = useState(false);
   const [editingCredential, setEditingCredential] = useState(null);
   const [notice, setNotice] = useState("");
+  const [deleting, setDeleting] = useState(false);
 
   const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
 
@@ -73,9 +75,12 @@ export default function SourcePanel({ service, onSaved, canEdit, canManageSecret
   const save = async () => {
     setSaving(true);
     setError("");
+    setNotice("");
     setTestResult(null);
     try {
       const updated = await updateCiSource(service.id, form);
+      // The form stays as typed, so without this nothing on screen changes.
+      setNotice("Source saved.");
       onSaved(updated);
     } catch (err) {
       setError(err.message || "Could not save the source configuration.");
@@ -113,6 +118,7 @@ export default function SourcePanel({ service, onSaved, canEdit, canManageSecret
     }
     setError("");
     setNotice("");
+    setDeleting(true);
     try {
       await deleteCiSourceCredential(selectedCredential.id);
       set("credentialProfileId", "");
@@ -121,6 +127,8 @@ export default function SourcePanel({ service, onSaved, canEdit, canManageSecret
     } catch (err) {
       // 409 names what still uses it — reassigning those is the fix.
       setError(err.message || "Could not delete the credential.");
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -219,10 +227,11 @@ export default function SourcePanel({ service, onSaved, canEdit, canManageSecret
                   </button>
                   <button
                     type="button"
-                    className="btn-outline btn-compact"
+                    className="btn-outline btn-compact danger"
+                    disabled={deleting}
                     onClick={removeCredential}
                   >
-                    Delete
+                    {deleting ? "Deleting…" : "Delete"}
                   </button>
                 </>
               )}
@@ -354,8 +363,10 @@ function CredentialModal({ credential = null, onClose, onCreated }) {
 
   const needsPrincipal = form.credentialType === "api_token";
 
+  useEscapeToClose(onClose, !saving);
+
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <div className="modal-backdrop" role="presentation" onClick={saving ? undefined : onClose}>
       <div
         className="modal-card"
         role="dialog"

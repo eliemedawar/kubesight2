@@ -13,9 +13,10 @@ import { formatBytes, formatRelative, shortSha } from "./ciShared.jsx";
 /**
  * Artifacts tab.
  *
- * A container image gets a Deploy action that hands its exact reference to the
- * existing KubeSight deploy flow — CI never deploys anything itself, so the
- * button is gated on the deploy permission, not on any CI permission.
+ * A container image gets a "Copy image" action: its exact reference is what
+ * Inventory's deploy flow or a Deploy stage takes. There is no one-click deploy
+ * from here — the button used to promise one and then only explain that it did
+ * not exist yet.
  *
  * Artifacts are also the one part of CI that grows without bound, so the
  * retention rule in force is stated here rather than left in a ConfigMap, next
@@ -23,13 +24,7 @@ import { formatBytes, formatRelative, shortSha } from "./ciShared.jsx";
  * are excluded from both, because their bytes live in a registry and the row is
  * the only record of what was built.
  */
-export default function ArtifactsPanel({
-  service,
-  canDeploy,
-  canManage,
-  onDeploy,
-  refreshToken,
-}) {
+export default function ArtifactsPanel({ service, canManage, refreshToken }) {
   const [artifacts, setArtifacts] = useState([]);
   const [policy, setPolicy] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -93,6 +88,21 @@ export default function ArtifactsPanel({
       setError(err.message || `${artifact.name} could not be downloaded.`);
     } finally {
       setBusy("");
+    }
+  };
+
+  const copyReference = async (artifact) => {
+    setError("");
+    try {
+      await navigator.clipboard.writeText(artifact.uri);
+      setNotice(
+        `Copied ${artifact.uri}. Deploy it from Inventory, or add a Deploy stage to the ` +
+          "pipeline so every build rolls out its own image."
+      );
+    } catch {
+      // Clipboard access is refused outside a secure context; the reference
+      // is printed in the row either way.
+      setNotice(`Copy the reference from the row: ${artifact.uri}`);
     }
   };
 
@@ -268,13 +278,14 @@ export default function ArtifactsPanel({
                         {busy === `download-${artifact.id}` ? "Starting…" : "Download"}
                       </button>
                     )}
-                    {artifact.deployable && canDeploy && (
+                    {artifact.deployable && artifact.uri && (
                       <button
                         type="button"
-                        className="primary btn-compact"
-                        onClick={() => onDeploy(artifact)}
+                        className="btn-outline btn-compact"
+                        title="Copy the exact image reference, to deploy it"
+                        onClick={() => copyReference(artifact)}
                       >
-                        Deploy
+                        Copy image
                       </button>
                     )}
                     {canManage && (

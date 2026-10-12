@@ -74,8 +74,10 @@ export default function HermesAnalysisPanel({
     const tick = async () => {
       const data = await load();
       if (cancelled) return;
-      if (data?.latestAnalysis && ACTIVE.has(data.latestAnalysis.state)) {
-        timer.current = window.setTimeout(tick, POLL_MS);
+      // A failed read (null) is not "finished": keep watching, or one blip
+      // would leave the progress bar frozen until the page is reloaded.
+      if (!data || (data.latestAnalysis && ACTIVE.has(data.latestAnalysis.state))) {
+        timer.current = window.setTimeout(tick, data ? POLL_MS : POLL_MS * 4);
       }
     };
     timer.current = window.setTimeout(tick, POLL_MS);

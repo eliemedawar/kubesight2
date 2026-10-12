@@ -87,7 +87,7 @@ export default function GateStatus({
           <h3>{headline.title}</h3>
           <p>{headline.text}</p>
         </div>
-        <div className="mc-status-meter" aria-label={`${done} of ${total} steps done`}>
+        <div className="mc-status-meter" role="img" aria-label={`${done} of ${total} steps done`}>
           {steps.map((step) => (
             <i key={step.key} className={`is-${step.state}`} />
           ))}

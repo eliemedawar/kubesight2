@@ -189,6 +189,10 @@ export const describeError = (err, fallback) =>
     ? "Lost contact with the backend. Retrying..."
     : err?.message || fallback;
 
+// Escape closes the top dialog. The stack is app-wide (a confirm can open over
+// a CI drawer), so it lives in hooks/; re-exported for the CI and Zoho dialogs.
+export { useEscapeToClose } from "../../hooks/useEscapeToClose.js";
+
 export function StatusPill({ status, children }) {
   if (!status) return null;
   return (
@@ -222,7 +226,9 @@ export function formatRelative(iso) {
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
-  return new Date(iso).toLocaleDateString();
+  // From the parsed instant, not the raw string, for the same reason as above:
+  // near midnight the bare string lands on the wrong calendar day.
+  return new Date(then).toLocaleDateString();
 }
 
 export function formatBytes(bytes) {

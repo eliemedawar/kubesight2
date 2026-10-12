@@ -3862,3 +3862,35 @@ label.sg-mc-check {
 .sg-mx-col.is-grouped {
   background: color-mix(in srgb, var(--info) 5%, transparent);
 }
+
+/* `.form-grid label` is a two-row grid. In a row where the neighbouring field
+   carries a hint, those rows stretched and the input grew taller than the one
+   beside it (Source tab: Default branch next to Working directory). */
+.sg-ci-panel .form-grid > label,
+.sg-ci-wizard .form-grid > label,
+.sg-ci-service-form > label {
+  align-content: start;
+}
+
+/* The catalog search: wide enough for its own placeholder, and its input bare
+   inside the pill — the global input padding made the pill taller than the
+   type filter beside it. */
+.sg-ci-type-filter ~ .sg-cat-search {
+  min-width: min(22rem, 100%);
+}
+
+.sg-ci-type-filter ~ .sg-cat-search input {
+  padding: 0;
+  min-height: 0;
+  height: auto;
+  box-shadow: none;
+}
+
+/* `banner-message info` has no rule of its own app-wide, so it fell back to the
+   base banner — success green. A queue reason ("No CI runner is online") read
+   as good news. Scoped to the CI surfaces that use it. */
+:is(.sg-ci-drawer, .sg-ci-panel, .sg-ci-runners, .sg-ci-wizard, .sg-ci-assist) .banner-message.info {
+  border-color: var(--info-border);
+  background: var(--info-soft);
+  color: var(--info);
+}

@@ -63,6 +63,8 @@ export default function MergeChecksPanel({ service, canEdit, canView = true, onD
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [secret, setSecret] = useState("");
+  // Reveal or Rotate in flight: a second Rotate would issue yet another secret.
+  const [secretBusy, setSecretBusy] = useState(false);
   const [busyCheckId, setBusyCheckId] = useState(null);
   // Unsaved script text, per tool. A script saves on its own button — it is
   // long enough that tying it to the rest of the form would lose work.
@@ -166,11 +168,17 @@ export default function MergeChecksPanel({ service, canEdit, canView = true, onD
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
 
-  // Leaving the tab takes its own query key with it.
+  // Leaving the tab takes its own query key with it. Only when the tab really
+  // changed: StrictMode's mount-unmount-mount in development ran this on
+  // arrival and threw away the ?section= a link had just asked for.
   useEffect(
     () => () => {
       const active = getRoute();
-      if (active.key === "serviceDetail" && active.query?.section) {
+      if (
+        active.key === "serviceDetail" &&
+        String(active.params?.tab || "").toLowerCase() !== "mergechecks" &&
+        active.query?.section
+      ) {
         const { section: _section, ...rest } = active.query;
         navigate({ key: active.key, params: active.params, query: rest }, { replace: true });
       }
@@ -323,15 +331,20 @@ export default function MergeChecksPanel({ service, canEdit, canView = true, onD
   };
 
   const reveal = async () => {
+    if (secretBusy) return;
+    setSecretBusy(true);
     try {
       const data = await revealMergeCheckSecret(service.id);
       setSecret(data.secret);
     } catch (err) {
       setError(err.message || "Could not read the webhook secret.");
+    } finally {
+      setSecretBusy(false);
     }
   };
 
   const rotate = async () => {
+    if (secretBusy) return;
     if (
       !window.confirm(
         "Generate a new secret? The current one stops working immediately, and Bitbucket " +
@@ -340,6 +353,7 @@ export default function MergeChecksPanel({ service, canEdit, canView = true, onD
     ) {
       return;
     }
+    setSecretBusy(true);
     try {
       const data = await rotateMergeCheckSecret(service.id);
       setSecret(data.secret);
@@ -349,6 +363,8 @@ export default function MergeChecksPanel({ service, canEdit, canView = true, onD
       if (webhook?.exists) setupInSource({ quiet: true });
     } catch (err) {
       setError(err.message || "Could not rotate the webhook secret.");
+    } finally {
+      setSecretBusy(false);
     }
   };
 
@@ -374,7 +390,29 @@ export default function MergeChecksPanel({ service, canEdit, canView = true, onD
   };
 
   if (!canView) return null;
-  if (loading || !form) return <LoadingState label="Loading merge checks…" />;
+  if (loading) return <LoadingState label="Loading merge checks…" />;
+  // A failed first load has nothing to render but the reason — without this
+  // the tab sat on "Loading…" forever and the error was never shown.
+  if (!form) {
+    return (
+      <div className="pl-root mc-root">
+        <div className="pl-banner is-error" role="alert">
+          <PlIcon name="alert" />
+          <p>{error || "Could not load the merge check configuration."}</p>
+          <button
+            type="button"
+            className="btn-outline btn-compact"
+            onClick={() => {
+              setLoading(true);
+              load();
+            }}
+          >
+            <PlIcon name="refresh" /> Try again
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const active = activeTools(config, form);
   const branches = watchedBranches(config, service);
@@ -541,7 +579,9 @@ export default function MergeChecksPanel({ service, canEdit, canView = true, onD
               webhook={webhook}
               service={service}
               canEdit={canEdit}
+              setupOffered={canEdit && status.steps.some((step) => step.action === "setup")}
               secret={secret}
+              secretBusy={secretBusy}
               onReveal={reveal}
               onRotate={rotate}
               onCopy={copy}

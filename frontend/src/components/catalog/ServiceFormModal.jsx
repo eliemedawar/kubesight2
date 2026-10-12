@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { listCiPipelineTemplates } from "../../api/ciApi.js";
-import { APPLICATION_TYPES, CRITICALITIES, applicationTypeLabel } from "./ciShared.jsx";
+import {
+  APPLICATION_TYPES,
+  CRITICALITIES,
+  applicationTypeLabel,
+  useEscapeToClose,
+} from "./ciShared.jsx";
 
 /**
  * Register or rename a service.
@@ -51,14 +56,17 @@ export default function ServiceFormModal({ service, onClose, onSave, saving, err
   const derivedSlug =
     form.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "service";
 
-  const submit = () => {
-    if (!form.name.trim()) return;
+  useEscapeToClose(onClose, !saving);
+
+  const submit = (event) => {
+    event?.preventDefault();
+    if (!form.name.trim() || saving) return;
     // Empty slug means "derive from the name" on create and "keep" on edit.
     onSave({ ...form, slug: form.slug.trim() });
   };
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <div className="modal-backdrop" role="presentation" onClick={saving ? undefined : onClose}>
       <div
         className="modal-card"
         role="dialog"
@@ -76,7 +84,8 @@ export default function ServiceFormModal({ service, onClose, onSave, saving, err
 
         {error && <p className="banner-message error">{error}</p>}
 
-        <div className="form-grid">
+        {/* A form, so Enter in any field saves — the dialog has one action. */}
+        <form id="ci-service-form" className="form-grid sg-ci-service-form" onSubmit={submit}>
           <label className="form-grid__full">
             Name *
             <input
@@ -191,16 +200,16 @@ export default function ServiceFormModal({ service, onClose, onSave, saving, err
               onChange={(event) => set("ownerTeam", event.target.value)}
             />
           </label>
-        </div>
+        </form>
 
         <div className="modal-actions">
           <button type="button" className="btn-outline" onClick={onClose} disabled={saving}>
             Cancel
           </button>
           <button
-            type="button"
+            type="submit"
+            form="ci-service-form"
             className="primary"
-            onClick={submit}
             disabled={saving || !form.name.trim()}
           >
             {saving ? "Saving…" : isEdit ? "Save changes" : "Register service"}

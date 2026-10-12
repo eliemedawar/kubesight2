@@ -527,6 +527,12 @@ def artifact_to_dict(row: CiArtifact) -> Dict[str, Any]:
 
 
 def runner_to_dict(row: CiRunner) -> Dict[str, Any]:
+    # Imported here: the scheduler reads models this module also serializes.
+    from .scheduler import runner_usable_here, MOCK_RUNNER_REFUSED
+
+    # Why the engine will not dispatch here even when the row says it could —
+    # today only the mock runner on an installation with real clusters.
+    status_reason = None if runner_usable_here(row) else MOCK_RUNNER_REFUSED
     return {
         "id": row.id,
         "name": row.name,
@@ -549,6 +555,7 @@ def runner_to_dict(row: CiRunner) -> Dict[str, Any]:
         "lastHeartbeatAt": _iso(row.last_heartbeat_at),
         "lastAssignedAt": _iso(row.last_assigned_at),
         "lastError": row.last_error,
+        "statusReason": status_reason,
         "createdAt": _iso(row.created_at),
     }
 

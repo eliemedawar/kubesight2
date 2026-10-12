@@ -57,6 +57,18 @@ const IMAGE_SUGGESTIONS = {
   generic: ["alpine:3.20", "debian:bookworm-slim", "ubuntu:24.04"],
 };
 
+// The commands box's example, in the service's own toolchain - a Maven
+// example on a Node service read as a suggestion to run Maven.
+const COMMAND_PLACEHOLDERS = {
+  java_maven: "mvn -B clean package\nmvn -B test",
+  java_gradle: "./gradlew build",
+  java: "mvn -B clean package\nmvn -B test",
+  node: "npm ci\nnpm test",
+  python: "pip install -r requirements.txt\npytest",
+  android: "./gradlew assembleRelease",
+  flutter: "flutter pub get\nflutter build apk",
+};
+
 const TIMEOUT_PRESETS = [
   [600, "10 min"],
   [1800, "30 min"],
@@ -291,13 +303,13 @@ export default function StageSheet({
                   : "No repository connected yet"}
               </strong>
               <p>
-                Cloned into <code>$KUBESIGH_SOURCE</code> at the branch or tag the build was
-                started for. The repository, default branch and credentials live on the Source
-                tab — there is nothing to set here.
+                Cloned into <code>$KUBESIGHT_SOURCE</code> at the branch or tag the build was
+                started for. The repository, default branch and credentials live on the{" "}
+                {service.kind === "pipeline" ? "Repository" : "Source"} tab — there is nothing to set here.
               </p>
             </div>
             <button type="button" className="btn-outline btn-compact" onClick={() => onGoToTab?.("source")}>
-              Open Source
+              Open {service.kind === "pipeline" ? "Repository" : "Source"}
             </button>
           </div>
         )}
@@ -360,8 +372,8 @@ export default function StageSheet({
               error={problemFor("commands")}
               hint={
                 <>
-                  Runs in the checkout. For absolute paths use <code>$KUBESIGH_WORKSPACE</code> and{" "}
-                  <code>$KUBESIGH_SOURCE</code> — a literal <code>/workspace</code> exists only on
+                  Runs in the checkout. For absolute paths use <code>$KUBESIGHT_WORKSPACE</code> and{" "}
+                  <code>$KUBESIGHT_SOURCE</code> — a literal <code>/workspace</code> exists only on
                   the Kubernetes runner. Never paste a secret here; attach it under Secrets.
                 </>
               }
@@ -371,7 +383,7 @@ export default function StageSheet({
                 lines={stage.commands}
                 disabled={!editable}
                 invalid={Boolean(problemFor("commands"))}
-                placeholder={"mvn -B clean package\nmvn -B test"}
+                placeholder={COMMAND_PLACEHOLDERS[service.applicationType] || "make build\nmake test"}
                 onChange={(commands) => onChange({ commands })}
               />
             </Field>
@@ -699,13 +711,19 @@ function ImageStageFields({ ids, service, stage, editable, onChange, onGoToTab }
           htmlFor={`${ids}-dockerfile`}
           optional
           hint={
-            <>
-              Path inside the build context. An inline Dockerfile saved on the{" "}
-              <button type="button" className="btn-ghost pl-link" onClick={() => onGoToTab?.("dockerfile")}>
-                Dockerfile tab
-              </button>{" "}
-              is used instead when there is one.
-            </>
+            service.kind === "pipeline" ? (
+              // A pipeline has no Dockerfile tab of its own; each service
+              // that builds with it brings its own.
+              "Path inside the build context. A service that builds with this pipeline uses its own inline Dockerfile instead when it has one."
+            ) : (
+              <>
+                Path inside the build context. An inline Dockerfile saved on the{" "}
+                <button type="button" className="btn-ghost pl-link" onClick={() => onGoToTab?.("dockerfile")}>
+                  Dockerfile tab
+                </button>{" "}
+                is used instead when there is one.
+              </>
+            )
           }
         >
           <input
@@ -1152,7 +1170,16 @@ function FailureSettings({ ids, stage, editable, onChange, error }) {
               min={0.5}
               max={1440}
               step={0.5}
-              value={stage.timeoutSeconds === "" ? "" : Math.round((seconds / 60) * 100) / 100}
+              // The typed value, not the fallback: a 0 shown as "30" (the
+              // default) while the field says it is out of range read as a
+              // bug, and typing "0.5" was impossible because "0" snapped back.
+              value={
+                stage.timeoutSeconds === ""
+                  ? ""
+                  : stage.timeoutSeconds == null
+                    ? DEFAULT_TIMEOUT_SECONDS / 60
+                    : Math.round((Number(stage.timeoutSeconds) / 60) * 100) / 100
+              }
               disabled={!editable}
               onChange={(event) =>
                 onChange({

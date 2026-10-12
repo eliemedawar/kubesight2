@@ -25,6 +25,7 @@ import {
   formatRelative,
   isBuildActive,
   retryDelay,
+  useEscapeToClose,
 } from "../components/catalog/ciShared.jsx";
 import { PlIcon } from "../components/catalog/pipeline/icons.jsx";
 
@@ -204,7 +205,7 @@ export default function PipelinesPage() {
             <SearchIcon />
             <input
               type="search"
-              placeholder="Search by name, description or stage…"
+              placeholder="Search pipelines or stages…"
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               aria-label="Search pipelines"
@@ -431,6 +432,10 @@ function NewPipelineModal({ onClose, onCreated }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
+  // Escape closes, as every other dialog does — but not mid-create, when the
+  // pipeline may already exist and closing would hide where it went.
+  useEscapeToClose(onClose, !saving);
+
   useEffect(() => {
     if (start !== "service" || services !== null) return;
     listCiServices()
@@ -465,10 +470,11 @@ function NewPipelineModal({ onClose, onCreated }) {
   };
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <div className="modal-backdrop" role="presentation" onClick={saving ? undefined : onClose}>
       <form
         className="modal-card sp-new"
         role="dialog"
+        aria-modal="true"
         aria-label="New pipeline"
         onClick={(event) => event.stopPropagation()}
         onSubmit={submit}

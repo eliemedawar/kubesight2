@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { whenVisible } from "../../lib/visibleInterval";
 import { getCiStageLogs } from "../../api/ciApi.js";
-import { formatDuration } from "./ciShared.jsx";
+import { formatDuration, retryDelay } from "./ciShared.jsx";
 import { downloadCiStageLog } from "../../api/ciApi.js";
 import { parseApiTime } from "../../lib/apiTime.js";
 import DeployStageSummary from "./DeployStageSummary.jsx";
@@ -52,6 +52,8 @@ export default function StageLogViewer({ buildId, stage }) {
     return () => window.clearInterval(id);
   }, [stage?.status]);
 
+  const failuresRef = useRef(0);
+
   const poll = useCallback(async () => {
     if (!buildId || !stage?.id) return true;
     try {
@@ -68,9 +70,11 @@ export default function StageLogViewer({ buildId, stage }) {
         });
       }
       setError("");
+      failuresRef.current = 0;
       return Boolean(data.complete);
     } catch (err) {
       setError(err.message || "Could not load logs.");
+      failuresRef.current += 1;
       return false;
     } finally {
       setLoading(false);
@@ -80,12 +84,16 @@ export default function StageLogViewer({ buildId, stage }) {
   useEffect(() => {
     let cancelled = false;
 
+    failuresRef.current = 0;
     const tick = async () => {
       await whenVisible(); // A hidden tab stops polling until it is looked at.
       if (cancelled) return;
       const done = await poll();
       if (cancelled || done) return;
-      timerRef.current = window.setTimeout(tick, POLL_MS);
+      // A failing read backs off (8s, 16s, ... 60s) instead of hammering the
+      // API every second for as long as the drawer stays open.
+      const delay = failuresRef.current ? retryDelay(failuresRef.current) : POLL_MS;
+      timerRef.current = window.setTimeout(tick, delay);
     };
     tick();
 
@@ -198,7 +206,9 @@ export default function StageLogViewer({ buildId, stage }) {
           : stage.status === "pending"
           ? "This stage has not started yet."
           : stage.status === "skipped"
-          ? "This stage was skipped because an earlier stage failed."
+          ? // Not always an earlier failure: a run condition, or a stage this
+            // runner cannot execute, skips too — and says why in the log.
+            "This stage was skipped and did not run."
           : "No output."}
       </pre>
 

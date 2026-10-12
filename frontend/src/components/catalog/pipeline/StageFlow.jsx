@@ -251,7 +251,7 @@ export default function StageFlow({
             errors ? " has-errors" : warnings ? " has-warnings" : ""
           }`}
           aria-current={selected ? "step" : undefined}
-          aria-describedby={`pl-flow-meta-${index}`}
+          aria-describedby={flags.length > 0 || change ? `pl-flow-meta-${index}` : undefined}
           onClick={() => onSelect(index)}
           onKeyDown={(event) => onItemKey(event, index)}
         >
