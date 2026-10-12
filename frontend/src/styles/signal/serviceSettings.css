@@ -2,7 +2,7 @@
    A rail of sections (each saying its current state) beside one card per
    section. The root also carries .pl-root, so the pipeline editor's controls,
    save bar and banners (pipelineWorkspace.css) are the same here; custom-drawn
-   buttons carry .btn-ghost to escape ui-polish.css's (0,8,1) button rule.
+   buttons carry .btn-ghost to skip ui-polish.css's default button size.
    ═════════════════════════════════════════════════════════════════════════ */
 
 .st-root .st-layout {

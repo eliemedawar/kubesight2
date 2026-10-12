@@ -4,7 +4,7 @@
    the cron preview and the scan recipe are drawn here. Every rule is scoped
    under .st-root so nothing leaks onto other pages, and colours are tokens
    only, so the light and dark themes both come for free. Buttons drawn here
-   carry .btn-ghost to stay clear of ui-polish.css's (0,8,1) button rule.
+   carry .btn-ghost to skip ui-polish.css's default button size.
    ═════════════════════════════════════════════════════════════════════════ */
 
 .st-root .sc-root {

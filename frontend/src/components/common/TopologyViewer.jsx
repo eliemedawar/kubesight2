@@ -766,7 +766,7 @@ export default function TopologyViewer({
       {allowFullscreen ? (
         <button
           type="button"
-          className="btn-ghost topo-fs-btn"
+          className="topo-fs-btn"
           onClick={toggleFullscreen}
           aria-label={fullscreen ? "Exit fullscreen" : "View topology fullscreen"}
           title={fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"}
@@ -787,19 +787,19 @@ export default function TopologyViewer({
           <output className="topo-zoom-level" aria-live="polite">
             ×{view.k < 10 ? view.k.toFixed(1) : Math.round(view.k)}
           </output>
-          <button type="button" className="btn-ghost topo-fs-btn" onClick={() => zoomBy(1.4)}
+          <button type="button" className="topo-fs-btn" onClick={() => zoomBy(1.4)}
             disabled={view.k >= MAX_ZOOM - 0.001} aria-label="Zoom in" title="Zoom in">
             <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><path d="M10 5v10M5 10h10" /></svg>
           </button>
-          <button type="button" className="btn-ghost topo-fs-btn" onClick={() => zoomBy(1 / 1.4)}
+          <button type="button" className="topo-fs-btn" onClick={() => zoomBy(1 / 1.4)}
             disabled={view.k <= MIN_ZOOM + 0.001} aria-label="Zoom out" title="Zoom out">
             <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><path d="M5 10h10" /></svg>
           </button>
-          <button type="button" className="btn-ghost topo-fs-btn topo-actual-btn" onClick={zoomToActualSize}
+          <button type="button" className="topo-fs-btn topo-actual-btn" onClick={zoomToActualSize}
             aria-label="Show at actual size" title="Actual size">
             1:1
           </button>
-          <button type="button" className="btn-ghost topo-fs-btn" onClick={resetView} aria-label="Fit graph" title="Fit graph">
+          <button type="button" className="topo-fs-btn" onClick={resetView} aria-label="Fit graph" title="Fit graph">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v4h4" /></svg>
           </button>
         </div>

@@ -2,7 +2,7 @@
    Same vocabulary as clusterBuilder.css (sg-cb-*): Cardinal accent for choice,
    status colours only for state, the dark log well in both themes.
    Custom-drawn buttons (template cards, VM template rows, steppers) carry
-   .btn-ghost to escape ui-polish.css's (0,8,1) button rule, and are restyled
+   .btn-ghost to skip ui-polish.css's default button size, and are restyled
    here with two-class selectors so .btn-ghost's own look does not win either. */
 
 /* ── Pills this feature adds ─────────────────────────────────────────── */

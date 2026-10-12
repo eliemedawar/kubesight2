@@ -4,7 +4,7 @@
    The root carries .pl-root as well as .mc-root, so the pipeline editor's
    controls, dock, banners and tags (pipelineWorkspace.css) look and behave the
    same here. Same rule as there: custom-drawn buttons carry .btn-ghost to
-   escape ui-polish.css's (0,8,1) button selector.
+   skip ui-polish.css's default button size.
 
    Check categories take a colour each from the chart palette — identity only:
      code lint → chart-3 · scripts/Dockerfiles → chart-2 · static analysis →

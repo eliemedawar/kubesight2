@@ -1,6 +1,6 @@
 /* Operations Dashboard (triage-first redesign). Cardinal tokens only.
-   Custom-drawn buttons carry .btn-ghost to escape ui-polish.css's (0,8,1)
-   button rule and are restyled here at (0,3,0), above .btn-ghost's (0,1,0). */
+   Custom-drawn buttons carry .btn-ghost to skip ui-polish.css's default
+   button size and are restyled here at (0,3,0), above .btn-ghost's (0,1,0). */
 
 .db-root {
   display: flex;

@@ -2,10 +2,9 @@
    The pipeline as a flow (left) and the one stage being read (right).
 
    Tokens only, so both themes come for free. Every rule is scoped under
-   .pl-root: ui-polish.css styles every <button> through an eight-:not()
-   selector (0,8,1) that no single class can beat, so the custom-drawn buttons
-   here carry .btn-ghost (which that rule exempts) and are restyled from this
-   file at (0,2,0), above .btn-ghost's own (0,1,0).
+   .pl-root: the custom-drawn buttons here carry .btn-ghost, which ui-polish.css's
+   default button size (min-height, padding) exempts, and are restyled from
+   this file at (0,2,0), above .btn-ghost's own (0,1,0).
 
    Stage kinds have a colour each, taken from the validated chart palette so
    they stay distinguishable in both themes — identity, never status:
@@ -3399,7 +3398,7 @@
 
 /* ── Scan stage ─────────────────────────────────────────────────────────
    Tool cards are buttons, so they carry .btn-ghost and are restyled here at
-   (0,2,0) — see the note at the top about ui-polish's (0,8,1) button rule. */
+   (0,2,0) — see the note at the top about .btn-ghost. */
 .pl-root .pl-scan-tools {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3646,7 +3645,7 @@
   white-space: nowrap;
 }
 
-/* btn-ghost keeps ui-polish's (0,8,1) button rule off it; restyled here. */
+/* btn-ghost keeps ui-polish's default button size off it; restyled here. */
 .pl-root .pl-approval-chips .btn-ghost.pl-approval-remove {
   display: inline-grid;
   place-items: center;

@@ -1,8 +1,8 @@
 /* ══ Settings → MCP tools ═════════════════════════════════════════════════
    A master switch, a toolbar (search · show · presets), then one card per
    domain with a row per tool. Reuses .settings-switch from settings.css; the
-   filter buttons carry .btn-ghost to escape ui-polish.css's (0,8,1) button
-   selector.
+   filter buttons carry .btn-ghost to skip ui-polish.css's default button
+   size.
    ═════════════════════════════════════════════════════════════════════════ */
 
 .mcp-panel {

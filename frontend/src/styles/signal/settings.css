@@ -571,6 +571,7 @@
   flex: none;
   width: 36px;
   height: 21px;
+  min-height: 0;
   border-radius: var(--radius-full);
   border: 1px solid var(--border-strong);
   background: var(--bg-inset);
@@ -754,10 +755,4 @@
 }
 .theme-tile-preview {
   flex: none;
-}
-/* !important: ui-polish's global button rule (0,8,1) pads every button,
-   which left a gap before the sentence's full stop. */
-.settings-card-footnote .link-button {
-  padding: 0 !important;
-  min-height: 0 !important;
 }

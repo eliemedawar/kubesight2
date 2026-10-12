@@ -132,7 +132,12 @@
 
 /* ── Buttons ──────────────────────────────────────────────── */
 
-button:not(.btn-ghost):not(.icon-button):not(.nav-link):not(.nav-group-head):not(.nav-jump):not(.inventory-icon-btn):not(.inventory-app-card__title):not(.inventory-app-card__link) {
+/* The default size of every button. The exemption list sits inside :where(),
+   so the rule weighs no more than a bare `button` (0,0,1): any component
+   class (`.tab-bar button`, `.settings-switch`, `.btn-sm`, …) wins over it
+   without .btn-ghost, !important or extra classes. A component that draws a
+   button shorter than --btn-height must reset min-height itself. */
+button:where(:not(.btn-ghost):not(.icon-button):not(.nav-link):not(.nav-group-head):not(.nav-jump):not(.inventory-icon-btn):not(.inventory-app-card__title):not(.inventory-app-card__link)) {
   min-height: var(--btn-height);
   padding: 0.4rem 0.875rem;
   font-size: var(--font-size-sm);
@@ -267,8 +272,8 @@ tbody tr:hover {
   background: var(--table-row-hover) !important;
 }
 
-td:last-child button,
-.policy-table-actions button {
+/* :where() keeps this a default (0,0,1), so a component's own font-size wins. */
+:where(td:last-child, .policy-table-actions) button {
   font-size: 0.8125rem;
 }
 

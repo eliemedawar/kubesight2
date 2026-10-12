@@ -928,7 +928,7 @@ button.sg-ci-strip-node:hover {
   flex-shrink: 0;
 }
 
-/* Runners | Build cache. .btn-ghost keeps ui-polish's (0,8,1) button rule
+/* Runners | Build cache. .btn-ghost keeps ui-polish's default button size
    off the tabs; restyled here. */
 .sg-ci-runners-tabs {
   display: flex;
