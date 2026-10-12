@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import SearchableSelect from "../common/SearchableSelect.jsx";
+import useEscapeKey from "../../hooks/useEscapeKey.js";
 
 const WORKLOAD_TYPES = ["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"];
 const PULL_POLICIES = ["IfNotPresent", "Always", "Never"];
@@ -245,6 +246,9 @@ export default function CreateTemplateModal({
   const [pendingAction, setPendingAction] = useState("");
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const isEditing = Boolean(template);
+  // The form as it was opened, so closing an untouched form needs no confirm.
+  const initialFormRef = useRef("");
+  const errorRef = useRef(null);
 
   const categoryOptions = useMemo(() => {
     const seen = new Set();
@@ -259,18 +263,35 @@ export default function CreateTemplateModal({
     return ordered;
   }, [existingCategories]);
 
+  // Read through a ref so a parent re-render that rebuilds the category list
+  // does not re-run the reset below and wipe what the user has typed.
+  const categoryOptionsRef = useRef(categoryOptions);
+  useEffect(() => {
+    categoryOptionsRef.current = categoryOptions;
+  }, [categoryOptions]);
+
   useEffect(() => {
     if (open) {
       // `template` => edit/update an existing template; `draft` => prefill a brand
       // new template (e.g. parsed from imported YAML) while staying in create mode.
       const prefill = template || draft;
-      setForm(prefill ? formFromTemplate(prefill) : freshForm(categoryOptions[0] || NEW_CATEGORY));
+      const next = prefill
+        ? formFromTemplate(prefill)
+        : freshForm(categoryOptionsRef.current[0] || NEW_CATEGORY);
+      setForm(next);
+      initialFormRef.current = JSON.stringify(next);
       setError("");
       setSaving(false);
       setPendingAction("");
       setShowCloseConfirm(false);
     }
-  }, [open, template, draft, categoryOptions]);
+  }, [open, template, draft]);
+
+  // Errors render at the top of a long form; bring them into view when they
+  // appear after a click on the footer buttons.
+  useEffect(() => {
+    if (error) errorRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [error]);
 
   // --- env schema handlers ---
   const setEnvKind = (index, kind) =>
@@ -313,13 +334,16 @@ export default function CreateTemplateModal({
   const removeDependency = (index) =>
     setForm((prev) => ({ ...prev, dependencies: prev.dependencies.filter((_, i) => i !== index) }));
 
-  if (!open) return null;
-
   // Closing discards the in-progress template, so a user-initiated dismissal
-  // (backdrop click or Cancel) asks for confirmation first. Programmatic closes
-  // after a successful save call onClose directly and skip this.
+  // (backdrop click, Escape or Cancel) asks for confirmation first when anything
+  // was changed. Programmatic closes after a successful save call onClose
+  // directly and skip this.
   const requestClose = () => {
     if (saving) return;
+    if (JSON.stringify(form) === initialFormRef.current) {
+      onClose();
+      return;
+    }
     setShowCloseConfirm(true);
   };
   const confirmClose = () => {
@@ -327,6 +351,10 @@ export default function CreateTemplateModal({
     onClose();
   };
   const cancelClose = () => setShowCloseConfirm(false);
+
+  useEscapeKey(open, () => (showCloseConfirm ? cancelClose() : requestClose()));
+
+  if (!open) return null;
 
   const update = (key) => (event) => setForm((prev) => ({ ...prev, [key]: event.target.value }));
   const toggle = (key) => (event) => setForm((prev) => ({ ...prev, [key]: event.target.checked }));
@@ -573,16 +601,26 @@ export default function CreateTemplateModal({
 
   return (
     <div className="modal-backdrop" role="presentation" onClick={requestClose}>
-      <div className="modal-card modal-card--wide" role="dialog" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal-card modal-card--wide"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="create-template-title"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-card__header">
-          <h3>{isEditing ? "Edit Template" : "Create Template"}</h3>
+          <h3 id="create-template-title">{isEditing ? "Edit Template" : "Create Template"}</h3>
           <p className="muted">
             Define a reusable <strong>schema</strong> — what a deployment requires, what it may override, and what stays
             locked. Actual values are supplied at deploy time, never stored here.
           </p>
         </div>
 
-        {error ? <p className="banner-message error">{error}</p> : null}
+        {error ? (
+          <p ref={errorRef} className="banner-message error" role="alert">
+            {error}
+          </p>
+        ) : null}
 
         <section className="form-section">
           <h4>Details</h4>

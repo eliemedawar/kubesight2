@@ -294,7 +294,20 @@ function PvcFields({
 export function StepBasics({ state, setState, clusterOptions, nameValidation }) {
   const basics = state.basics;
   const setBasics = (patch) => setState((s) => ({ ...s, basics: { ...s.basics, ...patch } }));
-  const labelRows = Object.entries(basics.labels || {}).map(([key, value]) => ({ key, value }));
+  // Labels are stored as an object, which cannot hold a half-typed row (no key
+  // yet) or a fresh empty one, so the editor keeps its own rows.
+  const [labelRows, setLabelRows] = useState(() => {
+    const rows = Object.entries(basics.labels || {}).map(([key, value]) => ({ key, value }));
+    return rows.length ? rows : [{ key: "", value: "" }];
+  });
+  const changeLabels = (rows) => {
+    setLabelRows(rows);
+    setBasics({
+      labels: Object.fromEntries(
+        rows.filter((r) => r.key.trim()).map((r) => [r.key.trim(), r.value]),
+      ),
+    });
+  };
 
   return (
     <div className="wizard-step-panel">
@@ -314,8 +327,12 @@ export function StepBasics({ state, setState, clusterOptions, nameValidation }) 
         <Field label="Version">
           <input value={basics.version} onChange={(e) => setBasics({ version: e.target.value })} placeholder="1.0.0" />
         </Field>
+        {/* Namespaces belong to a cluster: never carry one across. */}
         <Field label="Cluster *">
-          <SearchableSelect value={basics.clusterId} onChange={(e) => setBasics({ clusterId: e.target.value })}>
+          <SearchableSelect
+            value={basics.clusterId}
+            onChange={(e) => setBasics({ clusterId: e.target.value, namespace: "" })}
+          >
             <option value="">Select cluster</option>
             {clusterOptions.map((c) => (
               <option key={c.id} value={c.id}>
@@ -356,12 +373,8 @@ export function StepBasics({ state, setState, clusterOptions, nameValidation }) 
       </div>
       <Field label="Labels">
         <KeyValueEditor
-          items={labelRows.length ? labelRows : [{ key: "", value: "" }]}
-          onChange={(rows) =>
-            setBasics({
-              labels: Object.fromEntries(rows.filter((r) => r.key).map((r) => [r.key, r.value])),
-            })
-          }
+          items={labelRows}
+          onChange={changeLabels}
           keyPlaceholder="label key"
           valuePlaceholder="label value"
         />

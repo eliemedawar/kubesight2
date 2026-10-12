@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listClusterNodes, listStorageClasses } from "../../../api/clustersApi.js";
 import { getClusterDeployEligibility } from "../../../api/deploymentRequestsApi.js";
 import {
@@ -20,6 +20,7 @@ import { useAuth } from "../../../context/AuthContext.jsx";
 import { formatAccessError, isAccessDeniedError } from "../../../utils/authz.js";
 import { normalizeClusterOptions } from "../../../utils/clusterOptions.js";
 import YamlPreviewPanel from "./YamlPreviewPanel.jsx";
+import useEscapeKey from "../../../hooks/useEscapeKey.js";
 import { approvalNotice, isPendingApproval, pendingApprovalMessage } from "../../../utils/pendingApproval.js";
 import AddToBundleButton from "../../changes/AddToBundleButton.jsx";
 import {
@@ -85,14 +86,20 @@ export default function ApplicationBuilderWizard({
   const [storageWarnings, setStorageWarnings] = useState([]);
   const [manifestWarnings, setManifestWarnings] = useState([]);
   const [eligibility, setEligibility] = useState(null);
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+  // The state the wizard opened with, so closing an untouched wizard needs no confirm.
+  const initialStateRef = useRef("");
 
   const currentStep = stepIndex >= 0 ? WIZARD_STEPS[stepIndex] : null;
   const payload = useMemo(() => buildWizardPayload(state), [state]);
   const confirmationPhrase = state.basics.namespace ? `APPLY ${state.basics.namespace}` : "";
 
   const reset = useCallback(() => {
+    const next = initialState || createEmptyWizardState(resolvedDefaultClusterId);
+    initialStateRef.current = JSON.stringify(next);
+    setShowCloseConfirm(false);
     setStepIndex(showTemplatePicker ? -1 : 0);
-    setState(initialState || createEmptyWizardState(resolvedDefaultClusterId));
+    setState(next);
     setGeneratedYaml("");
     setPreviousYaml("");
     setValidation(null);
@@ -424,6 +431,21 @@ export default function ApplicationBuilderWizard({
     }
   };
 
+  // Closing discards everything entered, so a user-initiated dismissal (overlay
+  // click, ×, Escape, Cancel) asks first once something was changed — the same
+  // guard the template deploy wizard uses.
+  const requestClose = () => {
+    if (busy) return;
+    // Nothing left to lose once the deploy was sent for approval.
+    if (queuedMessage || JSON.stringify(state) === initialStateRef.current) {
+      onClose();
+      return;
+    }
+    setShowCloseConfirm(true);
+  };
+
+  useEscapeKey(open, () => (showCloseConfirm ? setShowCloseConfirm(false) : requestClose()));
+
   if (!open) return null;
 
   const displayYaml = state.advancedYamlEdit ? state.editedYaml : generatedYaml;
@@ -541,10 +563,11 @@ export default function ApplicationBuilderWizard({
   };
 
   return (
-    <div className="modal-overlay wizard-overlay" role="presentation" onClick={onClose}>
+    <div className="modal-overlay wizard-overlay" role="presentation" onClick={requestClose}>
       <section
         className="card modal-panel wizard-modal"
         role="dialog"
+        aria-modal="true"
         aria-labelledby="app-builder-title"
         onClick={(e) => e.stopPropagation()}
       >
@@ -553,7 +576,7 @@ export default function ApplicationBuilderWizard({
             <h3 id="app-builder-title">Application Builder</h3>
             <p className="muted">Deploy Kubernetes applications without writing YAML manually</p>
           </div>
-          <button type="button" className="modal-close" onClick={onClose} aria-label="Close"><svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" /></svg></button>
+          <button type="button" className="modal-close" onClick={requestClose} aria-label="Close"><svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" /></svg></button>
         </header>
 
         {stepIndex >= 0 ? (
@@ -582,7 +605,7 @@ export default function ApplicationBuilderWizard({
         <footer className="wizard-modal__footer modal-actions">
           {stepIndex < 0 ? (
             <>
-              <button type="button" className="btn-outline" onClick={onClose}>Cancel</button>
+              <button type="button" className="btn-outline" onClick={requestClose}>Cancel</button>
               <button type="button" className="btn-primary" onClick={skipTemplates}>Start from scratch</button>
             </>
           ) : (
@@ -600,7 +623,7 @@ export default function ApplicationBuilderWizard({
                   <AddToBundleButton
                     className="btn-outline"
                     label="Add to Bundle"
-                    disabled={busy}
+                    disabled={busy || Boolean(queuedMessage)}
                     buildDescriptor={async () => {
                       const yaml = displayYaml || generatedYaml || (await generateYaml());
                       return {
@@ -614,18 +637,20 @@ export default function ApplicationBuilderWizard({
                     }}
                     onAdded={onClose}
                   />
-                  <button
-                    type="button"
-                    className="btn-primary"
-                    onClick={applyDeploy}
-                    disabled={busy || confirmation !== confirmationPhrase || Boolean(queuedMessage)}
-                  >
-                    {queuedMessage
-                  ? "Sent for approval"
-                  : busy
-                    ? "Deploying…"
-                    : approvalMessage ? "Send for approval" : "Deploy Application"}
-                  </button>
+                  {queuedMessage ? (
+                    <button type="button" className="btn-primary" onClick={onClose}>
+                      Done
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      onClick={applyDeploy}
+                      disabled={busy || confirmation !== confirmationPhrase}
+                    >
+                      {busy ? "Deploying…" : approvalMessage ? "Send for approval" : "Deploy Application"}
+                    </button>
+                  )}
                 </>
               ) : (
                 <button type="button" className="btn-primary" onClick={goNext} disabled={busy || !canProceed()}>
@@ -636,6 +661,47 @@ export default function ApplicationBuilderWizard({
           )}
         </footer>
       </section>
+
+      {showCloseConfirm ? (
+        <div
+          className="modal-overlay wizard-close-confirm"
+          role="presentation"
+          onClick={(e) => {
+            e.stopPropagation();
+            setShowCloseConfirm(false);
+          }}
+        >
+          <section
+            className="card modal-panel wizard-close-confirm__panel"
+            role="alertdialog"
+            aria-labelledby="app-builder-close-confirm-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="modal-header">
+              <h3 id="app-builder-close-confirm-title">Discard this deployment?</h3>
+            </header>
+            <p className="muted" style={{ margin: "var(--space-2) 0 var(--space-4)" }}>
+              You have unsaved changes in this wizard. Closing it now will discard
+              everything you&apos;ve entered.
+            </p>
+            <footer className="modal-actions">
+              <button type="button" className="btn-outline" onClick={() => setShowCloseConfirm(false)}>
+                Keep editing
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => {
+                  setShowCloseConfirm(false);
+                  onClose();
+                }}
+              >
+                Discard &amp; close
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }

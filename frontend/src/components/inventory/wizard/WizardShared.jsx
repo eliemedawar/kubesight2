@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+
 export function WizardSectionHeader({ title, subtitle }) {
   return (
     <div className="wizard-section-header">
@@ -77,29 +79,42 @@ export function KeyValueEditor({
   );
 }
 
-export function PortListEditor({ ports = [], onChange }) {
-  const rows = ports.length ? ports : [""];
+const parsePorts = (rows) =>
+  rows.map((p) => parseInt(String(p).trim(), 10)).filter((p) => Number.isFinite(p) && p > 0);
 
-  const commitPorts = (rawRows) => {
-    const parsed = rawRows
-      .map((p) => parseInt(String(p).trim(), 10))
-      .filter((p) => Number.isFinite(p) && p > 0);
+export function PortListEditor({ ports = [], onChange }) {
+  // Raw text per row: committing only parsed numbers used to drop a row the
+  // moment it was cleared to type a new port.
+  const [rows, setRows] = useState(() => (ports.length ? ports.map(String) : [""]));
+  const portsKey = ports.join(",");
+
+  // Follow port changes made elsewhere (e.g. a template applied).
+  useEffect(() => {
+    setRows((prev) => {
+      const parsed = parsePorts(prev).join(",");
+      if (parsed === portsKey) return prev;
+      // Every row cleared mid-edit: the parent falls back to 8080; keep typing.
+      if (!parsed && portsKey === "8080") return prev;
+      return portsKey ? portsKey.split(",") : [""];
+    });
+  }, [portsKey]);
+
+  const commit = (next) => {
+    setRows(next);
+    const parsed = parsePorts(next);
     onChange(parsed.length ? parsed : [8080]);
   };
 
-  const update = (index, value) => {
-    const next = rows.map((p, i) => (i === index ? value : p));
-    commitPorts(next);
-  };
+  const update = (index, value) => commit(rows.map((p, i) => (i === index ? value : p)));
 
-  const add = () => onChange([...(ports.length ? ports : [8080]), 8080]);
+  const add = () => commit([...rows, "8080"]);
 
   const remove = (index) => {
     if (rows.length <= 1) {
-      onChange([8080]);
+      commit(["8080"]);
       return;
     }
-    onChange(ports.filter((_, i) => i !== index));
+    commit(rows.filter((_, i) => i !== index));
   };
 
   return (

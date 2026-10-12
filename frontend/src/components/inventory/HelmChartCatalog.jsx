@@ -23,6 +23,8 @@ export default function HelmChartCatalog({
   const [importOpen, setImportOpen] = useState(false);
   const [versionTarget, setVersionTarget] = useState(null);
   const [selectedTemplate, setSelectedTemplate] = useState(null);
+  // Key of the chart/version action in flight, so its button can't fire twice.
+  const [working, setWorking] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -51,21 +53,27 @@ export default function HelmChartCatalog({
       return;
     }
     setError("");
+    setWorking(`chart:${template.id}`);
     try {
       await deleteHelmChartTemplate(template.id);
       await load();
     } catch (err) {
       setError(err.message || "Failed to delete the Helm chart.");
+    } finally {
+      setWorking("");
     }
   };
 
   const useVersion = async (template, version) => {
     setError("");
+    setWorking(`version:${template.id}:${version.version}`);
     try {
       await setHelmChartVersionCurrent(template.id, version.version);
       await load();
     } catch (err) {
       setError(err.message || "Failed to switch the chart version.");
+    } finally {
+      setWorking("");
     }
   };
 
@@ -78,11 +86,14 @@ export default function HelmChartCatalog({
       return;
     }
     setError("");
+    setWorking(`version:${template.id}:${version.version}`);
     try {
       await deleteHelmChartVersion(template.id, version.version);
       await load();
     } catch (err) {
       setError(err.message || "Failed to delete the chart version.");
+    } finally {
+      setWorking("");
     }
   };
 
@@ -142,6 +153,7 @@ export default function HelmChartCatalog({
                   type="button"
                   className="helm-chart-card__delete"
                   onClick={() => remove(template)}
+                  disabled={working === `chart:${template.id}`}
                   aria-label={`Delete ${template.name}`}
                   title="Delete chart"
                 >
@@ -214,14 +226,18 @@ export default function HelmChartCatalog({
                               type="button"
                               className="btn-text"
                               onClick={() => useVersion(template, version)}
+                              disabled={working === `version:${template.id}:${version.version}`}
                             >
-                              Make current
+                              {working === `version:${template.id}:${version.version}`
+                                ? "Switching…"
+                                : "Make current"}
                             </button>
                           )}
                           <button
                             type="button"
                             className="helm-chart-card__delete"
                             onClick={() => removeVersion(template, version)}
+                            disabled={working === `version:${template.id}:${version.version}`}
                             aria-label={`Delete version ${version.version}`}
                             title="Delete version"
                           >

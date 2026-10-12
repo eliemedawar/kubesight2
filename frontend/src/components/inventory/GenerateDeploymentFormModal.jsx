@@ -4,6 +4,7 @@ import SearchableSelect from "../common/SearchableSelect.jsx";
 import NamespaceSelect from "./NamespaceSelect.jsx";
 import { normalizeClusterOptions } from "../../utils/clusterOptions.js";
 import { generateDeploymentForm } from "../../api/deploymentFormsApi.js";
+import useEscapeKey from "../../hooks/useEscapeKey.js";
 
 /**
  * Generate a fillable .xlsx deployment form from a template. Preselecting a
@@ -35,6 +36,8 @@ export default function GenerateDeploymentFormModal({
     }
   }, [open, defaultClusterId]);
 
+  useEscapeKey(open && Boolean(template), onClose, busy);
+
   if (!open || !template) return null;
 
   const handleGenerate = async () => {
@@ -56,9 +59,15 @@ export default function GenerateDeploymentFormModal({
 
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <div className="modal-card" role="dialog" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="generate-deployment-form-title"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-card__header">
-          <h3>Generate Deployment Form</h3>
+          <h3 id="generate-deployment-form-title">Generate Deployment Form</h3>
           <p className="muted">
             Export <strong>{template.name}</strong> as an Excel form. Locked fields come from the
             template; you only fill the highlighted cells. Choosing a cluster and namespace fills

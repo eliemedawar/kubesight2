@@ -12,6 +12,7 @@ import {
   updateRegistry,
 } from "../api/registriesApi.js";
 import { listClusters } from "../api/clustersApi.js";
+import useEscapeKey from "../hooks/useEscapeKey.js";
 
 const EMPTY_FORM = {
   name: "",
@@ -50,7 +51,10 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
   const [editingId, setEditingId] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Save errors belong next to the form: the page banner sits behind the modal.
+  const [formError, setFormError] = useState("");
   const [testingId, setTestingId] = useState(null);
+  const [removingId, setRemovingId] = useState(null);
 
   // Clusters a registry can be linked to. Best-effort: without clusters:view
   // the picker is simply empty and links show by id.
@@ -119,7 +123,10 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
     setShowForm(false);
     setEditingId(null);
     setForm(EMPTY_FORM);
+    setFormError("");
   };
+
+  useEscapeKey(showForm, closeForm, saving);
 
   const openCreate = () => {
     setForm(EMPTY_FORM);
@@ -152,7 +159,7 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
   const submit = async (event) => {
     event.preventDefault();
     setSaving(true);
-    setError("");
+    setFormError("");
     setNotice("");
     try {
       const payload = {
@@ -175,7 +182,7 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
       closeForm();
       await load();
     } catch (err) {
-      setError(err.message || "Failed to save the registry.");
+      setFormError(err.message || "Failed to save the registry.");
     } finally {
       setSaving(false);
     }
@@ -209,14 +216,18 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
     }
     setError("");
     setNotice("");
+    setRemovingId(row.id);
     try {
       await deleteRegistry(row.id);
       if (editingId === row.id) {
         closeForm();
       }
+      setNotice(`Registry "${row.name}" removed.`);
       await load();
     } catch (err) {
       setError(err.message || "Failed to remove the registry.");
+    } finally {
+      setRemovingId(null);
     }
   };
 
@@ -227,6 +238,7 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
     }
     setProbing(true);
     setProbeResult(null);
+    setError("");
     try {
       setProbeResult(await checkImage(image, probeCluster || undefined));
     } catch (err) {
@@ -274,6 +286,7 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
         ) : items.length === 0 ? (
           <EmptyState message="No registries linked yet. Use “Add a registry” to enable pre-deploy image checks." />
         ) : (
+          <div className="table-wrap">
           <table className="data-table">
             <thead>
               <tr>
@@ -314,7 +327,7 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
                         <span className="muted">None</span>
                       )}
                     </td>
-                    <td>{row.authMode === "basic" ? `Basic (${row.username})` : "Anonymous"}</td>
+                    <td>{row.authMode === "basic" ? (row.username ? `Basic (${row.username})` : "Basic") : "Anonymous"}</td>
                     <td>{ENFORCEMENT_LABELS[row.enforcement] || row.enforcement}</td>
                     <td>{row.enabled ? "Yes" : "No"}</td>
                     <td>
@@ -330,15 +343,20 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
                       )}
                     </td>
                     {canManage ? (
-                      <td className="actions">
+                      <td className="actions" style={{ whiteSpace: "nowrap" }}>
                         <button type="button" className="link-button" onClick={() => runTest(row.id)} disabled={testingId === row.id}>
                           {testingId === row.id ? "Testing…" : "Test"}
                         </button>
                         <button type="button" className="link-button" onClick={() => startEdit(row)}>
                           Edit
                         </button>
-                        <button type="button" className="link-button danger" onClick={() => remove(row)}>
-                          Remove
+                        <button
+                          type="button"
+                          className="link-button danger"
+                          onClick={() => remove(row)}
+                          disabled={removingId === row.id}
+                        >
+                          {removingId === row.id ? "Removing…" : "Remove"}
                         </button>
                       </td>
                     ) : null}
@@ -347,6 +365,7 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
               })}
             </tbody>
           </table>
+          </div>
         )}
       </section>
 
@@ -368,6 +387,7 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
           <input
             value={probeImage}
             onChange={(e) => setProbeImage(e.target.value)}
+            aria-label="Image reference"
             placeholder="registry.example.com/team/api:v1.2.3"
             onKeyDown={(e) => {
               if (e.key === "Enter") {
@@ -388,10 +408,11 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
       </section>
 
       {showForm && canManage ? (
-        <div className="modal-overlay" role="presentation" onClick={closeForm}>
+        <div className="modal-overlay" role="presentation" onClick={saving ? undefined : closeForm}>
           <section
             className="card modal-panel registry-modal"
             role="dialog"
+            aria-modal="true"
             aria-labelledby="registry-form-title"
             onClick={(e) => e.stopPropagation()}
           >
@@ -410,6 +431,11 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
             </header>
 
             <form className="settings-form registry-form" onSubmit={submit}>
+              {formError ? (
+                <div className="registry-form__row-full">
+                  <ErrorBanner message={formError} onDismiss={() => setFormError("")} />
+                </div>
+              ) : null}
               <label>
                 Name
                 <input value={form.name} onChange={(e) => setField("name", e.target.value)} placeholder="Nexus (prod)" required />
@@ -453,7 +479,7 @@ export default function ImageRegistriesPage({ canManage = false, embedded = fals
                 <>
                   <label>
                     Username
-                    <input value={form.username} onChange={(e) => setField("username", e.target.value)} autoComplete="off" />
+                    <input value={form.username} onChange={(e) => setField("username", e.target.value)} autoComplete="off" required />
                   </label>
                   <label>
                     Password

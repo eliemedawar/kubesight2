@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { createWizardTemplate, importTemplatesFromYaml, updateWizardTemplate } from "../../api/inventoryApi.js";
 import CreateTemplateModal from "./CreateTemplateModal.jsx";
+import useEscapeKey from "../../hooks/useEscapeKey.js";
 
 /**
  * Upload (or paste) Kubernetes YAML, parse each workload into a template draft,
@@ -41,12 +42,14 @@ export default function ImportTemplatesModal({
     }
   }, [open]);
 
-  if (!open) return null;
-
   const handleClose = () => {
     if (savedAny) onSaved?.();
     onClose?.();
   };
+
+  useEscapeKey(open, handleClose);
+
+  if (!open) return null;
 
   const handleFile = (event) => {
     const file = event.target.files?.[0];
@@ -115,9 +118,15 @@ export default function ImportTemplatesModal({
   return (
     <>
       <div className="modal-backdrop" role="presentation" onClick={handleClose}>
-        <div className="modal-card modal-card--wide" role="dialog" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="modal-card modal-card--wide"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="import-templates-title"
+          onClick={(e) => e.stopPropagation()}
+        >
           <div className="modal-card__header">
-            <h3>Import Templates from YAML</h3>
+            <h3 id="import-templates-title">Import Templates from YAML</h3>
             <p className="muted">
               Upload or paste Kubernetes YAML. Each Deployment (or other workload) becomes a draft
               you can review — choosing what a deployer may change vs. what stays locked — and save

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { importDeploymentForm, validateFormImport } from "../../api/deploymentFormsApi.js";
+import useEscapeKey from "../../hooks/useEscapeKey.js";
 
 const LEVEL_ICON = { ok: "✅", warn: "⚠️", error: "❌" };
 
@@ -27,6 +28,8 @@ export default function ImportDeploymentFormModal({ open, onClose, onContinueInW
       setNotice("");
     }
   }, [open]);
+
+  useEscapeKey(open, onClose, busy);
 
   if (!open) return null;
 
@@ -67,16 +70,33 @@ export default function ImportDeploymentFormModal({ open, onClose, onContinueInW
     }
   };
 
-  const handleContinue = () => {
+  const handleContinue = async () => {
     if (!record) return;
-    onContinueInWizard?.(record);
+    setBusy(true);
+    setAction("continue");
+    setError("");
+    setNotice("");
+    try {
+      await onContinueInWizard?.(record);
+    } catch (err) {
+      setError(err.message || "Failed to open the Deploy Wizard.");
+    } finally {
+      setBusy(false);
+      setAction("");
+    }
   };
 
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <div className="modal-card modal-card--wide" role="dialog" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal-card modal-card--wide"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="import-deployment-form-title"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-card__header">
-          <h3>Import Deployment Form</h3>
+          <h3 id="import-deployment-form-title">Import Deployment Form</h3>
           <p className="muted">
             Upload a filled Excel deployment form. Kubesight parses and validates it against the
             current template and cluster, then opens the Deploy Wizard prefilled with your values.
@@ -143,7 +163,7 @@ export default function ImportDeploymentFormModal({ open, onClose, onContinueInW
                 {action === "validate" ? "Re-validating…" : "Re-validate"}
               </button>
               <button type="button" className="primary" onClick={handleContinue} disabled={busy}>
-                Open in Deploy Wizard
+                {action === "continue" ? "Opening…" : "Open in Deploy Wizard"}
               </button>
             </>
           ) : null}

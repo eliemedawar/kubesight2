@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import useEscapeKey from "../../../hooks/useEscapeKey.js";
 
 export default function YamlPreviewPanel({
   yaml = "",
@@ -13,18 +14,9 @@ export default function YamlPreviewPanel({
   const [copied, setCopied] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
 
-  // Let Escape exit fullscreen without closing the surrounding modal.
-  useEffect(() => {
-    if (!fullscreen) return undefined;
-    const handleKey = (event) => {
-      if (event.key === "Escape") {
-        event.stopPropagation();
-        setFullscreen(false);
-      }
-    };
-    window.addEventListener("keydown", handleKey, true);
-    return () => window.removeEventListener("keydown", handleKey, true);
-  }, [fullscreen]);
+  // Let Escape exit fullscreen without closing the surrounding modal:
+  // fullscreen sits above it in the shared stack.
+  useEscapeKey(fullscreen, () => setFullscreen(false));
 
   const handleCopy = async () => {
     try {

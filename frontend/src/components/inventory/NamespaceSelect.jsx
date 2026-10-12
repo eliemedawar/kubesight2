@@ -92,7 +92,7 @@ export default function NamespaceSelect({
           disabled={disabled || !clusterId}
           autoFocus
           onChange={onChange}
-          pattern="[a-z0-9]([-a-z0-9]*[a-z0-9])?"
+          pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?"
           title="Lowercase letters, numbers and hyphens (RFC 1123)"
         />
         <button

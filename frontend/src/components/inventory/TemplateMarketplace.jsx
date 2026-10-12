@@ -269,8 +269,8 @@ export default function TemplateMarketplace({
             className="template-marketplace__search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search templates by name…"
-            aria-label="Search templates by name"
+            placeholder="Search templates by name or description…"
+            aria-label="Search templates"
           />
           <SearchableSelect
             value={categoryFilter}
@@ -317,10 +317,13 @@ export default function TemplateMarketplace({
             .map((category) => {
               const items = grouped[category] || [];
               const customCount = items.filter((t) => t.custom).length;
+              // aria-labelledby takes space-separated ids, so a category such as
+              // "Payment Services" needs a slug, not its raw name.
+              const headingId = `category-${category.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
               return (
-                <section key={category} className="template-marketplace__category" aria-labelledby={`category-${category}`}>
+                <section key={category} className="template-marketplace__category" aria-labelledby={headingId}>
                   <div className="template-marketplace__category-head">
-                    <h2 id={`category-${category}`} className="template-marketplace__category-title">
+                    <h2 id={headingId} className="template-marketplace__category-title">
                       {category}
                     </h2>
                     {canManageTemplates && isAdmin && customCount > 0 ? (

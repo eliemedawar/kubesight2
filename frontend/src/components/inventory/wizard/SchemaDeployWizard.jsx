@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { applyWizardDeploy, resolveWizardTemplate } from "../../../api/inventoryApi.js";
 import {
@@ -13,6 +13,7 @@ import { approvalNotice, isPendingApproval, pendingApprovalMessage } from "../..
 import SearchableSelect from "../../common/SearchableSelect.jsx";
 import NamespaceSelect from "../NamespaceSelect.jsx";
 import AddToBundleButton from "../../changes/AddToBundleButton.jsx";
+import useEscapeKey from "../../../hooks/useEscapeKey.js";
 
 const POD_KINDS = new Set(["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"]);
 // A Service makes sense for long-running, selector-addressable workloads. Jobs and
@@ -287,6 +288,36 @@ function validateServiceStep(svc, { ingressRequired }) {
   return "";
 }
 
+/** The required template variables still missing an answer, as display keys.
+ * Mirrors the resolver's "name is required" checks so the deployer is stopped
+ * on the Environment step instead of at the end of the wizard. */
+function missingRequiredEnv(fields, envAnswers) {
+  return (fields || [])
+    .filter((field) => field.required)
+    .filter((field) => {
+      const ans = envAnswers?.[field.key] || {};
+      const source = ans.source || (field.allowedSources || ["value"])[0];
+      const filled = (v) => String(v ?? "").trim() !== "";
+      if (source === "value") return !filled(ans.value) && !filled(field.default);
+      if (source === "existingConfigMap" || source === "createConfigMap") return !filled(ans.configMapName);
+      if (source === "existingSecret" || source === "createSecret") return !filled(ans.secretName);
+      return false;
+    })
+    .map((field) => field.key);
+}
+
+/** Volume mounts whose ConfigMap/Secret has no name yet (same rule as the resolver). */
+function missingVolumeNames(mounts, volumeAnswers) {
+  return (mounts || [])
+    .filter((vm) => vm.mountPath)
+    .filter((vm) => {
+      const ans = volumeAnswers?.[vm.mountPath] || {};
+      const name = vm.kind === "secret" ? ans.secretName : ans.configMapName;
+      return String(name ?? "").trim() === "";
+    })
+    .map((vm) => vm.mountPath);
+}
+
 /** Every distinct container image referenced in a generated manifest, pulled
  * straight from the YAML so it's independent of the payload's exact shape. */
 function imagesFromYaml(yaml) {
@@ -369,6 +400,8 @@ export default function SchemaDeployWizard({
   const [imageChecks, setImageChecks] = useState([]);
   const [imageChecking, setImageChecking] = useState(false);
   const [registries, setRegistries] = useState([]);
+  // The answers the wizard opened with, so closing an untouched wizard needs no confirm.
+  const initialAnswersRef = useRef("");
 
   const clusterId = answers.basics.clusterId;
   const namespace = answers.basics.namespace;
@@ -405,7 +438,9 @@ export default function SchemaDeployWizard({
     setStepIndex(0);
     // Merge any imported/prefilled answers over the template defaults so opening
     // the wizard from an imported deployment form keeps the filled values.
-    setAnswers(mergeAnswers(initAnswers(template, defaultClusterId), initialAnswers));
+    const next = mergeAnswers(initAnswers(template, defaultClusterId), initialAnswers);
+    initialAnswersRef.current = JSON.stringify(next);
+    setAnswers(next);
     setResolved(null);
     setConfirmation("");
     setError("");
@@ -499,17 +534,17 @@ export default function SchemaDeployWizard({
     };
   }, [open, clusterId]);
 
-  if (!open || !template) return null;
-
-  const step = steps[stepIndex];
-  const confirmationPhrase = answers.basics.namespace ? `APPLY ${answers.basics.namespace}` : "";
-
   // Closing the wizard discards everything the deployer has entered, so any
-  // user-initiated dismissal (overlay click, ×, Cancel) asks for confirmation
-  // first. Programmatic closes after a successful deploy/add-to-bundle still call
-  // onClose directly and skip this.
+  // user-initiated dismissal (overlay click, ×, Escape, Cancel) asks for
+  // confirmation first once something was changed. Programmatic closes after a
+  // successful deploy/add-to-bundle still call onClose directly and skip this.
   const requestClose = () => {
     if (busy) return;
+    // Nothing left to lose once the deploy was sent for approval.
+    if (queuedMessage || JSON.stringify(answers) === initialAnswersRef.current) {
+      onClose();
+      return;
+    }
     setShowCloseConfirm(true);
   };
   const confirmClose = () => {
@@ -517,6 +552,13 @@ export default function SchemaDeployWizard({
     onClose();
   };
   const cancelClose = () => setShowCloseConfirm(false);
+
+  useEscapeKey(open && Boolean(template), () => (showCloseConfirm ? cancelClose() : requestClose()));
+
+  if (!open || !template) return null;
+
+  const step = steps[stepIndex];
+  const confirmationPhrase = answers.basics.namespace ? `APPLY ${answers.basics.namespace}` : "";
 
   const setBasics = (key, value) =>
     setAnswers((a) => ({ ...a, basics: { ...a.basics, [key]: value } }));
@@ -744,7 +786,13 @@ export default function SchemaDeployWizard({
     setError("");
     try {
       const payload = resolved?.payload || (await resolve()).payload;
-      const result = await applyWizardDeploy({ ...payload, confirmation });
+      // The payload was resolved on entering Review; the change summary is typed
+      // on Review itself, so take its current value rather than the resolved one.
+      const result = await applyWizardDeploy({
+        ...payload,
+        changeSummary: answers.changeSummary || payload.changeSummary || "",
+        confirmation,
+      });
       if (isPendingApproval(result)) {
         // Nothing is deployed yet, so no success callback.
         setQueuedMessage(pendingApprovalMessage(result));
@@ -768,8 +816,26 @@ export default function SchemaDeployWizard({
       ? validateServiceStep(answers.serviceExposure, { ingressRequired: ingressNeedsService })
       : "";
 
+  const missingEnv = step.key === "environment" ? missingRequiredEnv(schema.env, answers.env) : [];
+  const envStepError = missingEnv.length
+    ? `Fill in the required variable${missingEnv.length > 1 ? "s" : ""}: ${missingEnv.join(", ")}.`
+    : "";
+
+  const missingVolumes = step.key === "volumes" ? missingVolumeNames(schema.volumeMounts, answers.volumes) : [];
+  const volumesStepError = missingVolumes.length
+    ? `Choose or name a ${missingVolumes.length > 1 ? "resource for each mount" : "resource for the mount"}: ${missingVolumes.join(", ")}.`
+    : "";
+
   const canProceed =
-    step.key === "basics" ? basicsValid : step.key === "service" ? !serviceStepError : true;
+    step.key === "basics"
+      ? basicsValid
+      : step.key === "service"
+        ? !serviceStepError
+        : step.key === "environment"
+          ? !envStepError
+          : step.key === "volumes"
+            ? !volumesStepError
+            : true;
 
   // Only block when the eligibility check is definitive: approval required and the
   // user has no active approval. In-flight or errored checks never disable Deploy —
@@ -790,6 +856,7 @@ export default function SchemaDeployWizard({
       <section
         className="card modal-panel wizard-modal"
         role="dialog"
+        aria-modal="true"
         aria-labelledby="schema-wizard-title"
         onClick={(e) => e.stopPropagation()}
       >
@@ -830,7 +897,14 @@ export default function SchemaDeployWizard({
                 <input value={answers.basics.appName} onChange={(e) => setBasics("appName", e.target.value)} placeholder="orders" />
               </Field>
               <Field label="Cluster">
-                <SearchableSelect value={answers.basics.clusterId} onChange={(e) => setBasics("clusterId", e.target.value)}>
+                <SearchableSelect
+                  value={answers.basics.clusterId}
+                  onChange={(e) => {
+                    // Namespaces belong to a cluster: never carry one across.
+                    const value = e.target.value;
+                    setAnswers((a) => ({ ...a, basics: { ...a.basics, clusterId: value, namespace: "" } }));
+                  }}
+                >
                   <option value="">— select cluster —</option>
                   {clusterSelectOptions.map((c) => (
                     <option key={c.id} value={c.id}>{c.name || c.id}</option>
@@ -1066,6 +1140,12 @@ export default function SchemaDeployWizard({
                   </>
                 );
               })()}
+
+              {envStepError ? (
+                <p className="error-banner" role="alert" style={{ marginTop: "var(--space-3)" }}>
+                  {envStepError}
+                </p>
+              ) : null}
 
               <div className="schema-extra-env">
                 <h5>Additional variables</h5>
@@ -1414,6 +1494,11 @@ export default function SchemaDeployWizard({
                   </div>
                 );
               })}
+              {volumesStepError ? (
+                <p className="error-banner" role="alert" style={{ marginTop: "var(--space-3)" }}>
+                  {volumesStepError}
+                </p>
+              ) : null}
             </div>
           ) : null}
 
@@ -1715,7 +1800,7 @@ export default function SchemaDeployWizard({
               <AddToBundleButton
                 className="btn-outline"
                 label="Add to Bundle"
-                disabled={busy || !resolved?.yaml || imageBlocked}
+                disabled={busy || !resolved?.yaml || imageBlocked || Boolean(queuedMessage)}
                 descriptor={{
                   actionType: "create_from_template",
                   clusterId,
@@ -1726,13 +1811,17 @@ export default function SchemaDeployWizard({
                 }}
                 onAdded={onClose}
               />
-              <button type="button" className="btn-primary" onClick={deploy} disabled={busy || confirmation !== confirmationPhrase || Boolean(queuedMessage) || imageBlocked}>
-                {queuedMessage
-                  ? "Sent for approval"
-                  : busy
+              {queuedMessage ? (
+                <button type="button" className="btn-primary" onClick={onClose}>
+                  Done
+                </button>
+              ) : (
+              <button type="button" className="btn-primary" onClick={deploy} disabled={busy || confirmation !== confirmationPhrase || imageBlocked}>
+                {busy
                     ? "Deploying…"
                     : approvalMessage ? "Send for approval" : "Deploy Application"}
               </button>
+              )}
             </>
           ) : (
             <button type="button" className="btn-primary" onClick={goNext} disabled={busy || !canProceed}>

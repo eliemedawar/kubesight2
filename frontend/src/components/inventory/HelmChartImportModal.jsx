@@ -14,6 +14,7 @@ import {
 import { listClusters, listNamespacesByCluster } from "../../api/clustersApi.js";
 import HelmChartContents, { helmSourceLabel } from "./HelmChartContents.jsx";
 import SearchableSelect from "../common/SearchableSelect.jsx";
+import useEscapeKey from "../../hooks/useEscapeKey.js";
 
 const EMPTY_GIT = {
   repositoryUrl: "",
@@ -120,6 +121,8 @@ export default function HelmChartImportModal({
     };
   }, [open, mode, clusters.length]);
 
+  useEscapeKey(open, onClose, busy);
+
   if (!open) return null;
 
   const versionMode = Boolean(targetTemplate?.id);
@@ -175,6 +178,10 @@ export default function HelmChartImportModal({
       setGit((previous) => ({ ...previous, ref: selectedRef, path: "" }));
       if (selectedRef) {
         await loadGitPaths(selectedRef, git);
+      } else {
+        // No branch or tag to load paths for: release the button.
+        setGitDiscoveryBusy("");
+        setGitDiscoveryError("The repository has no branches or tags to import from.");
       }
     } catch (err) {
       setGitDiscoveryError(err.message || "Unable to load repository branches and tags.");
@@ -346,10 +353,11 @@ export default function HelmChartImportModal({
   };
 
   return (
-    <div className="modal-overlay" role="presentation" onClick={onClose}>
+    <div className="modal-overlay" role="presentation" onClick={busy ? undefined : onClose}>
       <section
         className="card modal-panel helm-chart-import-modal"
         role="dialog"
+        aria-modal="true"
         aria-labelledby="helm-import-title"
         onClick={(event) => event.stopPropagation()}
       >
@@ -420,6 +428,8 @@ export default function HelmChartImportModal({
               <div className="helm-import-source-tabs" role="tablist" aria-label="Import source">
                 <button
                   type="button"
+                  role="tab"
+                  aria-selected={mode === "yaml"}
                   className={mode === "yaml" ? "active" : ""}
                   onClick={() => {
                     setMode("yaml");
@@ -430,6 +440,8 @@ export default function HelmChartImportModal({
                 </button>
                 <button
                   type="button"
+                  role="tab"
+                  aria-selected={mode === "archive"}
                   className={mode === "archive" ? "active" : ""}
                   onClick={() => {
                     setMode("archive");
@@ -440,6 +452,8 @@ export default function HelmChartImportModal({
                 </button>
                 <button
                   type="button"
+                  role="tab"
+                  aria-selected={mode === "git"}
                   className={mode === "git" ? "active" : ""}
                   onClick={() => {
                     setMode("git");
@@ -450,6 +464,8 @@ export default function HelmChartImportModal({
                 </button>
                 <button
                   type="button"
+                  role="tab"
+                  aria-selected={mode === "namespace"}
                   className={mode === "namespace" ? "active" : ""}
                   onClick={() => {
                     setMode("namespace");
@@ -653,6 +669,7 @@ export default function HelmChartImportModal({
                         <input
                           className="helm-namespace-filter"
                           type="search"
+                          aria-label="Filter namespace objects"
                           value={resourceFilter}
                           placeholder="Filter by name or kind…"
                           onChange={(event) => setResourceFilter(event.target.value)}

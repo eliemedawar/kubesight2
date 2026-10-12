@@ -146,7 +146,7 @@ export default function MyRequestsPage() {
           />
         ) : (
           <>
-            <div className="user-filters" style={{ marginBottom: "var(--space-3)" }}>
+            <div className="user-filters" style={{ margin: "var(--space-3) 0" }}>
               <label className="user-filters__search">
                 Search
                 <input

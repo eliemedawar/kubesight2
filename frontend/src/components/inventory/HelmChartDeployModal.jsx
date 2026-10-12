@@ -10,6 +10,7 @@ import {
 import { clusterOptionLabel, normalizeClusterOptions } from "../../utils/clusterOptions.js";
 import SearchableSelect from "../common/SearchableSelect.jsx";
 import NamespaceSelect from "./NamespaceSelect.jsx";
+import useEscapeKey from "../../hooks/useEscapeKey.js";
 import { isPendingApproval, pendingApprovalMessage } from "../../utils/pendingApproval.js";
 
 function initialFieldValue(variable) {
@@ -171,6 +172,9 @@ export default function HelmChartDeployModal({
       setPreview(null);
       setConfirmationPhrase("");
       setConfirmation("");
+      // The modal stays mounted between charts: a previous "sent for approval"
+      // must not keep Install disabled for the next one.
+      setQueuedMessage("");
       setError("");
       setBusy(false);
     }
@@ -184,6 +188,8 @@ export default function HelmChartDeployModal({
     () => (detail?.variables || []).filter((variable) => !variable.required),
     [detail],
   );
+
+  useEscapeKey(open, onClose, busy);
 
   if (!open) return null;
 
@@ -238,10 +244,11 @@ export default function HelmChartDeployModal({
   };
 
   return (
-    <div className="modal-overlay" role="presentation" onClick={onClose}>
+    <div className="modal-overlay" role="presentation" onClick={busy ? undefined : onClose}>
       <section
         className="card modal-panel helm-chart-deploy-modal"
         role="dialog"
+        aria-modal="true"
         aria-labelledby="helm-deploy-title"
         onClick={(event) => event.stopPropagation()}
       >
@@ -344,7 +351,7 @@ export default function HelmChartDeployModal({
                 <input
                   required
                   maxLength={53}
-                  pattern="[a-z0-9]([-a-z0-9]*[a-z0-9])?"
+                  pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?"
                   value={releaseName}
                   onChange={(event) =>
                     setReleaseName(event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))
@@ -440,17 +447,29 @@ export default function HelmChartDeployModal({
               />
             </label>
             <div className="modal-actions">
-              <button type="button" className="btn-text" onClick={() => setStep("configure")}>
-                Back
-              </button>
               <button
                 type="button"
-                className="btn-primary"
-                disabled={busy || confirmation !== confirmationPhrase || Boolean(queuedMessage)}
-                onClick={install}
+                className="btn-text"
+                onClick={() => setStep("configure")}
+                disabled={busy || Boolean(queuedMessage)}
               >
-                {busy ? "Installing…" : "Install Release"}
+                Back
               </button>
+              {queuedMessage ? (
+                // Sent for approval: nothing left to do here.
+                <button type="button" className="btn-primary" onClick={onClose}>
+                  Done
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={busy || confirmation !== confirmationPhrase}
+                  onClick={install}
+                >
+                  {busy ? "Installing…" : "Install Release"}
+                </button>
+              )}
             </div>
           </div>
         )}

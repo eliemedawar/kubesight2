@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   applyDeployImage,
   applyDeployYaml,
@@ -16,6 +16,7 @@ import { formatAccessError, isAccessDeniedError } from "../../utils/authz.js";
 import HelmDeployForm from "./HelmDeployForm.jsx";
 import { isPendingApproval, pendingApprovalMessage } from "../../utils/pendingApproval.js";
 import NamespaceSelect from "./NamespaceSelect.jsx";
+import useEscapeKey from "../../hooks/useEscapeKey.js";
 import PromotionBlockedNotice, { promotionRefusal } from "../promotions/PromotionBlockedNotice.jsx";
 import { clusterOptionLabel, normalizeClusterOptions } from "../../utils/clusterOptions.js";
 
@@ -165,9 +166,13 @@ export default function AddAppModal({
 
   useEffect(() => {
     if (mode !== "register" || !registerForm.clusterId || !registerForm.namespace) {
+      // Drop the previous namespace's workloads so none can be registered
+      // against the newly chosen cluster/namespace.
+      setWorkloads([]);
       return;
     }
     let cancelled = false;
+    setWorkloads([]);
     setWorkloadsLoading(true);
     listInventoryWorkloads({
       clusterId: registerForm.clusterId,
@@ -187,6 +192,8 @@ export default function AddAppModal({
     };
   }, [mode, registerForm.clusterId, registerForm.namespace]);
 
+  useEscapeKey(open, onClose, busy);
+
   if (!open) return null;
 
   const resetFlow = () => {
@@ -195,6 +202,8 @@ export default function AddAppModal({
     setPreview(null);
     setDeployDiff(null);
     setError("");
+    setQueuedMessage("");
+    setPromotionBlock(null);
     setConfirmation("");
   };
 
@@ -390,10 +399,11 @@ export default function AddAppModal({
   };
 
   return (
-    <div className="modal-overlay" role="presentation" onClick={onClose}>
+    <div className="modal-overlay" role="presentation" onClick={busy ? undefined : onClose}>
       <section
         className="card modal-panel add-app-modal"
         role="dialog"
+        aria-modal="true"
         aria-labelledby="add-app-title"
         onClick={(e) => e.stopPropagation()}
       >
@@ -403,7 +413,7 @@ export default function AddAppModal({
             <p className="muted">Register an existing workload or deploy a new application.</p>
           </div>
           <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
-            <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" /></svg>
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
           </button>
         </header>
 
@@ -556,7 +566,13 @@ export default function AddAppModal({
                 disabled={workloadsLoading}
               >
                 <option value="">
-                  {workloadsLoading ? "Loading workloads..." : "Select workload"}
+                  {workloadsLoading
+                    ? "Loading workloads..."
+                    : !registerForm.namespace
+                      ? "Select a namespace first"
+                      : workloads.length
+                        ? "Select workload"
+                        : "No workloads in this namespace"}
                 </option>
                 {workloads.map((wl) => (
                   <option key={`${wl.type}|${wl.name}`} value={`${wl.type}|${wl.name}`}>

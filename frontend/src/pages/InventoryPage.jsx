@@ -83,7 +83,9 @@ export default function InventoryPage({
   };
 
   // "Open in Deploy Wizard" from an imported form: resolve the current template +
-  // parsed answers, then open the schema wizard prefilled with them.
+  // parsed answers, then open the schema wizard prefilled with them. A failure
+  // is thrown back to the import modal, which is still open and shows it there
+  // (a page banner would sit hidden behind the modal).
   const openWizardFromImport = async (importRecord) => {
     setTemplateBusy(true);
     setTemplateError("");
@@ -93,7 +95,7 @@ export default function InventoryPage({
       setSchemaInitialAnswers(state.answers || null);
       setSchemaTemplate(state.template);
     } catch (err) {
-      setTemplateError(err.message || "Failed to open the wizard from the imported form.");
+      throw new Error(err.message || "Failed to open the wizard from the imported form.");
     } finally {
       setTemplateBusy(false);
     }

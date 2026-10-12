@@ -4,6 +4,15 @@ import ConfirmActionModal from "./ConfirmActionModal.jsx";
 import { rollbackHelmRelease, uninstallHelmRelease } from "../../api/helmApi.js";
 import { isPendingApproval, pendingApprovalMessage } from "../../utils/pendingApproval.js";
 
+// Helm reports times as ISO strings or "2026-10-11 09:12:03.1 +0000 UTC";
+// show them in the viewer's locale, and anything unparseable as-is.
+function formatDeployedAt(value) {
+  if (!value) return value;
+  const text = String(value).replace(/ \+0000 UTC$/, "Z").replace(" ", "T");
+  const time = Date.parse(text);
+  return Number.isFinite(time) ? new Date(time).toLocaleString() : value;
+}
+
 function DetailRow({ label, value }) {
   return (
     <div className="upgrade-detail-row">
@@ -29,6 +38,9 @@ export default function HelmReleasePanel({
   const [rollbackError, setRollbackError] = useState("");
   // Set when a rollback/uninstall was sent for approval instead of run.
   const [queuedMessage, setQueuedMessage] = useState("");
+  const [uninstallOpen, setUninstallOpen] = useState(false);
+  const [uninstallBusy, setUninstallBusy] = useState(false);
+  const [uninstallError, setUninstallError] = useState("");
 
   if (!helm && summary?.source !== "Helm") {
     return null;
@@ -60,26 +72,24 @@ export default function HelmReleasePanel({
   };
 
   const handleUninstall = async () => {
-    if (
-      !window.confirm(
-        `Uninstall Helm release ${data.releaseName || summary?.applicationName}? This removes Kubernetes resources.`
-      )
-    ) {
-      return;
-    }
+    setUninstallBusy(true);
+    setUninstallError("");
     try {
       const result = await uninstallHelmRelease({
         clusterId: summary.cluster,
         namespace: summary.namespace,
         releaseName: data.releaseName || summary.applicationName,
       });
+      setUninstallOpen(false);
       if (isPendingApproval(result)) {
         setQueuedMessage(pendingApprovalMessage(result));
         return;
       }
       onActionComplete?.();
     } catch (err) {
-      window.alert(err.message || "Uninstall failed");
+      setUninstallError(err.message || "Uninstall failed");
+    } finally {
+      setUninstallBusy(false);
     }
   };
 
@@ -91,7 +101,7 @@ export default function HelmReleasePanel({
       <DetailRow label="App Version" value={data.appVersion || summary?.appVersion} />
       <DetailRow label="Revision" value={data.revision ?? summary?.helmRevision} />
       <DetailRow label="Status" value={data.status || summary?.helmStatus} />
-      <DetailRow label="Last Deployed" value={data.lastDeployed || summary?.lastDeployed} />
+      <DetailRow label="Last Deployed" value={formatDeployedAt(data.lastDeployed || summary?.lastDeployed)} />
       <DetailRow label="Namespace" value={data.namespace || summary?.namespace} />
 
       {valuesKeys.length ? (
@@ -102,7 +112,8 @@ export default function HelmReleasePanel({
       ) : null}
 
       <div className="inventory-detail-actions">
-        {canViewHelm ? (
+        {/* Shown only when the host page has a manifest view to open. */}
+        {canViewHelm && onViewManifest ? (
           <button type="button" className="btn-outline" onClick={onViewManifest}>
             View Manifest
           </button>
@@ -118,7 +129,7 @@ export default function HelmReleasePanel({
           </button>
         ) : null}
         {canUninstallHelm ? (
-          <button type="button" className="btn-outline btn-danger-outline" onClick={handleUninstall}>
+          <button type="button" className="btn-outline btn-danger-outline" onClick={() => setUninstallOpen(true)}>
             Uninstall
           </button>
         ) : null}
@@ -146,6 +157,23 @@ export default function HelmReleasePanel({
           }
         }}
         onConfirm={handleRollback}
+      />
+
+      <ConfirmActionModal
+        open={uninstallOpen}
+        title="Uninstall Helm release"
+        message={`Uninstall ${data.releaseName || summary?.applicationName}? This removes every Kubernetes resource the release created.`}
+        confirmLabel="Uninstall"
+        danger
+        busy={uninstallBusy}
+        error={uninstallError}
+        onClose={() => {
+          if (!uninstallBusy) {
+            setUninstallOpen(false);
+            setUninstallError("");
+          }
+        }}
+        onConfirm={handleUninstall}
       />
     </InfoCard>
   );
