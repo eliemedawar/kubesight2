@@ -65,8 +65,12 @@ def list_audit_logs():
     if has_more:
         # Approximate for up to the cache TTL; never below what was just seen.
         total = max(_cached_total(), offset + len(rows))
-    else:
+    elif entries or offset == 0:
+        # A short page ends the list: everything is accounted for.
         total = offset + len(entries)
+    else:
+        # Paged past the end: the offset says nothing about the size.
+        total = _cached_total()
     return success_response(
         {
             "items": [audit_log_to_dict(e) for e in entries],

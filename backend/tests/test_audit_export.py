@@ -116,3 +116,14 @@ def test_mcp_audit_listing_names_actors(app, admin_token):
     result = list_audit_logs(limit=5)
     assert result["count"] >= 1
     assert any(item.get("actorUsername") == "admin" for item in result["items"])
+
+
+def test_audit_list_past_the_end_still_reports_the_total(client, admin_token):
+    from api.models import AuditLog
+
+    total_rows = AuditLog.query.count()
+    resp = client.get("/api/audit-logs?limit=5&offset=100000", headers=auth_headers(admin_token))
+    page = resp.get_json()["data"]
+    assert page["count"] == 0
+    assert page["hasMore"] is False
+    assert page["total"] == total_rows
