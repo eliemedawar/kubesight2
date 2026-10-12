@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any, Dict
 
 from .email_delivery import smtp_is_configured
@@ -9,11 +8,9 @@ from .notification_routing import serialize_notifications
 from .db import db
 from .models import AppSettings
 from .services.alert_routing_service import (
-    delivery_log_retention_days,
     destinations_for_policies,
     dispatch_policy_alert_notifications as route_policy_alert_notifications,
     load_delivery_markers,
-    prune_delivery_logs,
     prune_delivery_markers,
     send_receiver_test,
     send_smtp_test,
@@ -99,29 +96,7 @@ def dispatch_active_alert_notifications() -> Dict[str, Any]:
                 summary["errors"].extend(result.get("errors") or [])
 
     prune_delivery_markers(active_ids)
-    _maybe_prune_delivery_logs()
     return summary
-
-
-# Opt-in delivery log retention (ALERT_DELIVERY_LOG_RETENTION_DAYS): when set,
-# the sweep deletes old rows at most once an hour; unset = never deleted.
-_LOG_RETENTION_EVERY_SECONDS = 3600
-_last_log_retention_at = 0.0
-
-
-def _maybe_prune_delivery_logs() -> None:
-    global _last_log_retention_at
-    if not delivery_log_retention_days():
-        return
-    now = time.monotonic()
-    if _last_log_retention_at and now - _last_log_retention_at < _LOG_RETENTION_EVERY_SECONDS:
-        return
-    _last_log_retention_at = now
-    try:
-        prune_delivery_logs()
-    except Exception:
-        db.session.rollback()
-        logger.exception("Alert delivery log retention failed")
 
 
 def dispatch_policy_alert_notifications(alert: Dict[str, Any]) -> Dict[str, Any]:
