@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import or_
+from sqlalchemy.orm import selectinload
 
 from ...audit import log_audit
 from ...db import db
@@ -126,8 +127,52 @@ def list_homes(*, search: str = "") -> List[Dict[str, Any]]:
                 db.func.lower(db.func.coalesce(CiService.description, "")).like(like),
             )
         )
-    rows = query.order_by(CiService.name.asc()).all()
-    return [home_to_dict(row) for row in rows]
+    # Everything a card reads, for every home at once (the Pipelines page
+    # polls this every few seconds): the pipelines and their stages, the last
+    # builds per home, and every home's user count in one GROUP BY.
+    from .catalog import _latest_builds, _recent_build_statuses, recent_builds_by_service
+
+    rows = (
+        query.options(
+            selectinload(CiService.credential_profile),
+            selectinload(CiService.deployment_links),
+            selectinload(CiService.pipelines).selectinload(CiPipeline.stages),
+            selectinload(CiService.pipelines)
+            .selectinload(CiPipeline.linked_pipeline)
+            .options(selectinload(CiPipeline.stages), selectinload(CiPipeline.service)),
+        )
+        .order_by(CiService.name.asc())
+        .all()
+    )
+    ids = [row.id for row in rows]
+    recent = recent_builds_by_service(ids)
+    statuses = _recent_build_statuses(ids, recent=recent)
+    latest = _latest_builds(ids, recent=recent)
+    shared_ids = [shared.id for shared in (shared_pipeline_of(row) for row in rows) if shared]
+    counts: Dict[int, int] = {}
+    if shared_ids:
+        counts = {
+            int(pipeline_id): int(count)
+            for pipeline_id, count in db.session.query(
+                CiPipeline.linked_pipeline_id, db.func.count(CiPipeline.id)
+            )
+            .filter(CiPipeline.linked_pipeline_id.in_(shared_ids))
+            .group_by(CiPipeline.linked_pipeline_id)
+        }
+    items = []
+    for row in rows:
+        shared = shared_pipeline_of(row)
+        items.append(
+            home_to_dict(
+                row,
+                prefetched={
+                    "latestBuild": latest.get(row.id),
+                    "recentStatuses": statuses.get(row.id, []),
+                    "usedByCount": counts.get(shared.id, 0) if shared else 0,
+                },
+            )
+        )
+    return items
 
 
 def list_summary(items: List[Dict[str, Any]]) -> Dict[str, int]:
@@ -140,30 +185,43 @@ def list_summary(items: List[Dict[str, Any]]) -> Dict[str, int]:
     }
 
 
-def home_to_dict(home: CiService, *, include_used_by: bool = False) -> Dict[str, Any]:
+def home_to_dict(
+    home: CiService,
+    *,
+    include_used_by: bool = False,
+    prefetched: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """One home as the Pipelines page shows it. ``prefetched`` carries what a
+    list already loaded for every home at once (``latestBuild``,
+    ``recentStatuses``, ``usedByCount``); without it, this asks itself."""
     from .serializers import build_summary, service_to_dict
 
-    recent = (
-        CiBuild.query.filter_by(service_id=home.id)
-        .order_by(CiBuild.number.desc())
-        .limit(10)
-        .all()
-    )
-    data = service_to_dict(
-        home,
-        latest_build=recent[0] if recent else None,
-        recent_statuses=[b.status for b in recent],
-    )
+    if prefetched is not None:
+        latest = prefetched.get("latestBuild")
+        statuses = list(prefetched.get("recentStatuses") or [])
+    else:
+        recent = (
+            CiBuild.query.filter_by(service_id=home.id)
+            .order_by(CiBuild.number.desc())
+            .limit(10)
+            .all()
+        )
+        latest = recent[0] if recent else None
+        statuses = [b.status for b in recent]
     shared = shared_pipeline_of(home)
-    users = users_of(home)
+    users = users_of(home) if include_used_by or prefetched is None else None
+    used_by_count = len(users) if users is not None else int(prefetched.get("usedByCount") or 0)
+    data = service_to_dict(
+        home, latest_build=latest, recent_statuses=statuses, used_by_count=used_by_count
+    )
     stages = list(shared.stages) if shared else []
     data.update(
         {
             "pipelineVersion": shared.version if shared else None,
             "stageNames": [stage.name for stage in stages],
             "parameterCount": len(pipelines_service.parameter_definitions(shared)) if shared else 0,
-            "usedByCount": len(users),
-            "latestBuild": build_summary(recent[0]) if recent else None,
+            "usedByCount": used_by_count,
+            "latestBuild": build_summary(latest) if latest else None,
         }
     )
     if include_used_by:

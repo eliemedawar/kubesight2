@@ -17,7 +17,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import or_
+from sqlalchemy import or_, select, union_all
 from sqlalchemy.orm import selectinload
 
 from ...audit import log_audit
@@ -146,8 +146,9 @@ def list_services(
         .all()
     )
     service_ids = [row.id for row in rows]
-    statuses = _recent_build_statuses(service_ids)
-    latest_builds = _latest_builds(service_ids)
+    recent = recent_builds_by_service(service_ids)
+    statuses = _recent_build_statuses(service_ids, recent=recent)
+    latest_builds = _latest_builds(service_ids, recent=recent)
     latest_artifacts = _latest_artifacts(service_ids)
     items = []
     for row in rows:
@@ -162,84 +163,103 @@ def list_services(
     return items
 
 
-def _newest_first_rank(partition_column, *order_by):
-    """1 for each partition's first row in ``order_by``, 2 for the next..."""
-    return (
-        db.func.row_number()
-        .over(partition_by=partition_column, order_by=list(order_by))
-        .label("rank")
+# Services per statement in the per-service reads below. SQLite caps a compound
+# SELECT at 500 terms; this stays well inside it.
+_PER_SERVICE_CHUNK = 100
+
+
+def _newest_per_service(model, columns, service_ids: List[int], order_by, limit: int):
+    """Each service's newest ``limit`` rows of ``model``, as ``columns``.
+
+    One UNION ALL of per-service ``ORDER BY ... LIMIT`` reads (per chunk of
+    services), so each part is a short walk down that service's index - the
+    catalog polls this every few seconds, and the window function it replaces
+    ranked EVERY build of every listed service on each poll.
+    """
+    rows = []
+    ids = list(dict.fromkeys(int(service_id) for service_id in service_ids))
+    for start in range(0, len(ids), _PER_SERVICE_CHUNK):
+        parts = []
+        for service_id in ids[start:start + _PER_SERVICE_CHUNK]:
+            newest = (
+                select(*columns)
+                .where(model.service_id == service_id)
+                .order_by(*order_by)
+                .limit(limit)
+                .subquery()
+            )
+            parts.append(select(*newest.c))
+        statement = parts[0] if len(parts) == 1 else union_all(*parts)
+        rows.extend(db.session.execute(statement).all())
+    return rows
+
+
+def recent_builds_by_service(service_ids: List[int], limit: int = 10) -> Dict[int, List[Any]]:
+    """``{service_id: [(id, status, number), ...]}``, newest first."""
+    if not service_ids:
+        return {}
+    rows = _newest_per_service(
+        CiBuild,
+        (CiBuild.service_id, CiBuild.id, CiBuild.status, CiBuild.number),
+        service_ids,
+        (CiBuild.number.desc(),),
+        limit,
     )
+    recent: Dict[int, List[Any]] = {}
+    for service_id, build_id, status, number in sorted(rows, key=lambda r: (r[0], -r[3])):
+        recent.setdefault(service_id, []).append((build_id, status, number))
+    return recent
 
 
-def _recent_build_statuses(service_ids: List[int], limit: int = 10) -> Dict[int, List[str]]:
+def _recent_build_statuses(
+    service_ids: List[int], limit: int = 10, *, recent: Optional[Dict[int, List[Any]]] = None
+) -> Dict[int, List[str]]:
     """Each service's last ``limit`` build statuses, newest first — the card
-    sparkline — for every service in one query."""
-    if not service_ids:
-        return {}
-    ranked = (
-        db.session.query(
-            CiBuild.service_id.label("service_id"),
-            CiBuild.status.label("status"),
-            CiBuild.number.label("number"),
-            _newest_first_rank(CiBuild.service_id, CiBuild.number.desc()),
-        )
-        .filter(CiBuild.service_id.in_(service_ids))
-        .subquery()
-    )
-    statuses: Dict[int, List[str]] = {}
-    for service_id, status in (
-        db.session.query(ranked.c.service_id, ranked.c.status)
-        .filter(ranked.c.rank <= limit)
-        .order_by(ranked.c.service_id, ranked.c.number.desc())
-    ):
-        statuses.setdefault(service_id, []).append(status)
-    return statuses
+    sparkline."""
+    recent = recent if recent is not None else recent_builds_by_service(service_ids, limit)
+    return {
+        service_id: [status for _, status, _ in builds[:limit]]
+        for service_id, builds in recent.items()
+    }
 
 
-def _latest_builds(service_ids: List[int]) -> Dict[int, CiBuild]:
-    """Each service's newest build (:func:`_latest_build`), in one query, with
-    what its card summary reads: the stages and who asked for it."""
+def _latest_builds(
+    service_ids: List[int], *, recent: Optional[Dict[int, List[Any]]] = None
+) -> Dict[int, CiBuild]:
+    """Each service's newest build (:func:`_latest_build`), with what its card
+    summary reads: the stages and who asked for it."""
     if not service_ids:
         return {}
-    ranked = (
-        db.session.query(
-            CiBuild.id.label("id"),
-            _newest_first_rank(CiBuild.service_id, CiBuild.number.desc()),
-        )
-        .filter(CiBuild.service_id.in_(service_ids))
-        .subquery()
-    )
+    recent = recent if recent is not None else recent_builds_by_service(service_ids, 1)
+    newest_ids = [builds[0][0] for builds in recent.values() if builds]
+    if not newest_ids:
+        return {}
     builds = (
         CiBuild.query.options(
             selectinload(CiBuild.stages),
             user_display_loader(CiBuild.requested_by),
         )
-        .join(ranked, ranked.c.id == CiBuild.id)
-        .filter(ranked.c.rank == 1)
+        .filter(CiBuild.id.in_(newest_ids))
         .all()
     )
     return {build.service_id: build for build in builds}
 
 
 def _latest_artifacts(service_ids: List[int]) -> Dict[int, CiArtifact]:
-    """Each service's newest artifact (``artifacts.latest_for_service``), in one query."""
+    """Each service's newest artifact (``artifacts.latest_for_service``)."""
     if not service_ids:
         return {}
-    ranked = (
-        db.session.query(
-            CiArtifact.id.label("id"),
-            _newest_first_rank(
-                CiArtifact.service_id, CiArtifact.created_at.desc(), CiArtifact.id.desc()
-            ),
-        )
-        .filter(CiArtifact.service_id.in_(service_ids))
-        .subquery()
+    rows = _newest_per_service(
+        CiArtifact,
+        (CiArtifact.id,),
+        service_ids,
+        (CiArtifact.created_at.desc(), CiArtifact.id.desc()),
+        1,
     )
-    artifacts = (
-        CiArtifact.query.join(ranked, ranked.c.id == CiArtifact.id)
-        .filter(ranked.c.rank == 1)
-        .all()
-    )
+    ids = [row[0] for row in rows]
+    if not ids:
+        return {}
+    artifacts = CiArtifact.query.filter(CiArtifact.id.in_(ids)).all()
     return {artifact.service_id: artifact for artifact in artifacts}
 
 
@@ -857,12 +877,23 @@ def list_source_tree(
     """
     handler, ref = _repository_ref(row)
     chosen = (revision or "").strip() or row.default_branch or "main"
-    listing = handler.list_tree(ref, row.credential_profile, chosen)
 
     scope = (row.working_directory or "").strip("/")
     prefix = str(path_prefix or "").strip().replace("\\", "/").strip("/")
     if scope:
         prefix = f"{scope}/{prefix}" if prefix else scope
+
+    listing = None
+    if prefix:
+        # Walk only the directory asked about. A prefix that is not a directory
+        # (a file, or nothing at all) is answered by the whole walk below, as
+        # it always was: filtered to nothing rather than refused.
+        try:
+            listing = handler.list_tree(ref, row.credential_profile, chosen, path=prefix)
+        except source_port.SourceError:
+            listing = None
+    if listing is None:
+        listing = handler.list_tree(ref, row.credential_profile, chosen)
 
     paths = sorted(listing.paths)
     if prefix:
