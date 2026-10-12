@@ -458,7 +458,7 @@ export default function BuildDetail({
 
   const fetchLog = useCallback(async (step) => {
     try {
-      const data = await getClusterBuildLogs(buildId, step.nodeId || undefined);
+      const data = await getClusterBuildLogs(buildId, step.nodeId || undefined, step.id);
       const match = (data.items || []).find((item) => item.id === step.id);
       setLogs(match
         ? { ...match, phase: step.phase }

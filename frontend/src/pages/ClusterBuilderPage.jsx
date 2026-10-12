@@ -142,11 +142,12 @@ export default function ClusterBuilderPage({
       || ["planning", "applying", "connecting"].includes(build.provisioning?.job?.status)
   );
 
+  // An open build polls its own detail; the list waits until it is shown again.
   useEffect(() => {
-    if (!active) return undefined;
+    if (!active || selectedBuildId) return undefined;
     const stopPolling = setVisibleInterval(reloadBuilds, POLL_INTERVAL_MS);
     return stopPolling;
-  }, [active, reloadBuilds]);
+  }, [active, reloadBuilds, selectedBuildId]);
 
   // The Floor's live strip shows a ticking clock; nothing else needs a second hand.
   useEffect(() => {

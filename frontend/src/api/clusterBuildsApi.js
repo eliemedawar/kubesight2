@@ -33,8 +33,10 @@ export const retryClusterBuild = (id) =>
 export const cancelClusterBuild = (id) =>
   request(`/api/cluster-builds/${id}/cancel`, { method: "POST" });
 
-export const getClusterBuildLogs = (id, nodeId) =>
-  request(`/api/cluster-builds/${id}/logs`, { query: nodeId ? { node: nodeId } : {} });
+export const getClusterBuildLogs = (id, nodeId, stepId) =>
+  request(`/api/cluster-builds/${id}/logs`, {
+    query: stepId ? { step: stepId } : nodeId ? { node: nodeId } : {},
+  });
 
 // --- Day two: growing a finished cluster ------------------------------------
 

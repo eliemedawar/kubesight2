@@ -159,6 +159,7 @@ def _migrate_cluster_build_columns() -> None:
     _add_column_if_missing("cluster_builds", "provision_status", "VARCHAR(24)")
     _add_column_if_missing("cluster_builds", "vms_only", "BOOLEAN DEFAULT false")
     _add_column_if_missing("cluster_builds", "etcd_backups_json", "JSON")
+    _add_column_if_missing("cluster_infra_states", "vm_count", "INTEGER")
     for col, sql_type in [
         ("provisioning_username", "VARCHAR(255)"),
         ("provisioning_password_cipher", "TEXT"),
