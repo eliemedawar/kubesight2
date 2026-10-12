@@ -26,11 +26,13 @@ secrets already get.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import logging
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -43,6 +45,7 @@ from ..secret_encryption import decrypt_secret, encrypt_secret
 from . import ticketing_targets as targets
 from . import zoho_client
 from .zoho_client import ZohoConfig, ZohoError
+from ..ttl_cache import TTLCache
 
 # This module's provider key — which deploy-source row it reads and writes.
 PROVIDER = "zoho"
@@ -69,6 +72,51 @@ _MAX_VALUE_LEN = 120
 # Serialize outbound writes: every PATCH replaces the whole array, so two
 # concurrent syncs would clobber each other (spec guardrail §5.1).
 _sync_lock = threading.Lock()
+
+# What each field last had published, so a scheduled sync can skip a field
+# (or a cascade) whose list did not change. Per process and in memory: there
+# is no column for it, the scheduled sync runs on the one leader process, and
+# losing it (restart, leader change) only costs one full republish. Entries
+# expire so the ticketing side is re-asserted every few hours even when
+# nothing changed here (someone may have edited the picklist by hand there).
+# A manual Sync always republishes everything.
+REPUBLISH_UNCHANGED_AFTER_SECONDS = 6 * 3600
+_published: Dict[Tuple[str, ...], Tuple[str, float]] = {}
+_published_lock = threading.Lock()
+
+
+def publish_fingerprint(value: Any) -> str:
+    raw = json.dumps(value, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def published_unchanged(key: Tuple[str, ...], fingerprint: str) -> bool:
+    with _published_lock:
+        entry = _published.get(key)
+    if not entry or entry[0] != fingerprint:
+        return False
+    return (time.monotonic() - entry[1]) < REPUBLISH_UNCHANGED_AFTER_SECONDS
+
+
+def remember_published(key: Tuple[str, ...], fingerprint: str) -> None:
+    with _published_lock:
+        _published[key] = (fingerprint, time.monotonic())
+
+
+def forget_published(key: Tuple[str, ...]) -> None:
+    with _published_lock:
+        _published.pop(key, None)
+
+
+def clear_published(provider: Optional[str] = None) -> None:
+    """Drop remembered publishes (all, or one provider's) — config changed."""
+    with _published_lock:
+        for key in [k for k in _published if provider is None or k[0] == provider]:
+            _published.pop(key, None)
+
+
+def _publish_key(cfg: ZohoConfig, field_id: str) -> Tuple[str, ...]:
+    return (PROVIDER, str(getattr(cfg, "layout_id", "") or ""), str(field_id))
 
 
 def _iso(dt: Optional[datetime]) -> Optional[str]:
@@ -532,6 +580,7 @@ def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     db.session.add(row)
     db.session.commit()
+    clear_published(PROVIDER)  # the next scheduled sync republishes everything
     return serialize(row)
 
 
@@ -702,6 +751,9 @@ def list_source_deployments(cluster_id: str, namespace: str) -> List[str]:
     return _list_deployments_by_namespace(cluster_id, [namespace]).get(namespace, [])
 
 
+# Above this many namespaces the source read is ONE cluster-wide list instead.
+_CLUSTER_WIDE_READ_ABOVE = 3
+
 # Each namespace read is its own kubectl subprocess (~0.5-3s against a remote
 # cluster on a cold cache), so a serial loop makes the preview/sync cost scale
 # with the namespace count. Bounded fan-out keeps wall-clock at ~one call.
@@ -742,6 +794,11 @@ def _list_deployments_by_namespace(
     if not access:
         raise ValueError(f"Cluster '{cluster_id}' was not found.")
 
+    if len(namespaces) > _CLUSTER_WIDE_READ_ABOVE:
+        grouped = _cluster_wide_deployments(access, namespaces)
+        if grouped is not None:
+            return grouped
+
     def _fetch(ns: str) -> List[str]:
         try:
             data = namespace_resource_list_from_k8s(access, ns, "deployments", fresh=fresh)
@@ -754,6 +811,103 @@ def _list_deployments_by_namespace(
         return {namespaces[0]: _fetch(namespaces[0])}
     with ThreadPoolExecutor(max_workers=min(_SOURCE_READ_WORKERS, len(namespaces))) as pool:
         return dict(zip(namespaces, pool.map(_fetch, namespaces)))
+
+
+def _cluster_wide_deployments(access, namespaces: List[str]) -> Optional[Dict[str, List[str]]]:
+    """``{namespace: [deployment names]}`` from ONE cluster-wide list.
+
+    With more than a handful of namespaces, one ``kubectl get deployments -A``
+    is far cheaper than a subprocess per namespace. Returns None when the
+    cluster-wide read is not possible (for example a namespace-scoped
+    kubeconfig without cluster-wide list rights), so the caller falls back to
+    per-namespace reads. A failed read here is never mistaken for "no
+    deployments".
+    """
+    from ..k8s_provider import K8sCommandError, cluster_list_items
+
+    try:
+        items = cluster_list_items(access, "deployments")
+    except (K8sCommandError, ValueError) as exc:
+        logger.info("Cluster-wide deployment read failed, reading per namespace: %s", exc)
+        return None
+    wanted = set(namespaces)
+    out: Dict[str, List[str]] = {ns: [] for ns in namespaces}
+    for item in items or []:
+        meta = item.get("metadata") or {}
+        ns = meta.get("namespace")
+        name = meta.get("name")
+        if ns in wanted and name:
+            out[ns].append(name)
+    return out
+
+
+def _snapshot_ids(
+    cluster_id: str, pairs: List[Tuple[str, str]], *, touch: bool = False
+) -> Tuple[Dict[Tuple[str, str], int], bool]:
+    """Stable snapshot ids for many ``(namespace, deployment)`` pairs at once.
+
+    One SELECT per 500 namespaces, a bulk insert of the missing pairs (ids are
+    assigned once and never change), and, only when ``touch`` (a real sync),
+    one bulk UPDATE of ``last_seen_at``. Previews and the ticket catalog never
+    write unless a brand-new deployment needs its id. Returns ``(ids, wrote)``.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    wanted = list(dict.fromkeys((str(ns), str(name)) for ns, name in pairs))
+    if not wanted:
+        return {}, False
+    namespaces = sorted({ns for ns, _ in wanted})
+
+    def _load() -> Dict[Tuple[str, str], int]:
+        found: Dict[Tuple[str, str], int] = {}
+        with db.session.no_autoflush:
+            for start in range(0, len(namespaces), 500):
+                chunk = namespaces[start : start + 500]
+                rows = db.session.query(
+                    ZohoDeploymentSnapshot.id,
+                    ZohoDeploymentSnapshot.namespace,
+                    ZohoDeploymentSnapshot.deployment_name,
+                ).filter(
+                    ZohoDeploymentSnapshot.cluster_id == cluster_id,
+                    ZohoDeploymentSnapshot.namespace.in_(chunk),
+                )
+                for snap_id, ns, name in rows:
+                    found[(ns, name)] = int(snap_id)
+        return found
+
+    ids = _load()
+    wrote = False
+    now = datetime.now(timezone.utc)
+    missing = [pair for pair in wanted if pair not in ids]
+    if missing:
+        try:
+            with db.session.begin_nested():
+                db.session.add_all(
+                    [
+                        ZohoDeploymentSnapshot(
+                            cluster_id=cluster_id,
+                            namespace=ns,
+                            deployment_name=name,
+                            first_seen_at=now,
+                            last_seen_at=now,
+                        )
+                        for ns, name in missing
+                    ]
+                )
+                db.session.flush()
+        except IntegrityError:
+            # A concurrent preview/sync created some of them first; theirs win.
+            pass
+        ids = _load()
+        wrote = True
+    if touch:
+        seen = sorted({ids[pair] for pair in wanted if pair in ids})
+        for start in range(0, len(seen), 500):
+            db.session.query(ZohoDeploymentSnapshot).filter(
+                ZohoDeploymentSnapshot.id.in_(seen[start : start + 500])
+            ).update({ZohoDeploymentSnapshot.last_seen_at: now}, synchronize_session=False)
+        wrote = wrote or bool(seen)
+    return ids, wrote
 
 
 def _get_or_create_snapshot(cluster_id: str, namespace: str, name: str) -> ZohoDeploymentSnapshot:
@@ -778,7 +932,11 @@ def _get_or_create_snapshot(cluster_id: str, namespace: str, name: str) -> ZohoD
 
 
 def _source_entries(
-    row: ZohoIntegration, *, provider: str = PROVIDER, fresh: bool = False
+    row: ZohoIntegration,
+    *,
+    provider: str = PROVIDER,
+    fresh: bool = False,
+    touch: bool = False,
 ) -> List[Dict[str, Any]]:
     """The deployments to publish: [{id, namespace, name, label, custom}], snapshotted.
 
@@ -791,16 +949,20 @@ def _source_entries(
     ``provider`` selects whose source row to read. Jira reuses this builder
     verbatim (the entries are Kubernetes, not Zoho), so it MUST name itself —
     otherwise Jira would publish the namespaces Zoho selected.
+
+    Snapshot ids are batch-loaded (see :func:`_snapshot_ids`). ``touch=True``
+    (a real sync only, never a preview or the ticket catalog) also bumps every
+    published snapshot's ``last_seen_at`` in one UPDATE.
     """
     cluster_id = _source_cluster_id(provider=provider)
     customs = _custom_environment_list(row, provider)
     if not cluster_id and not customs:
         raise ValueError("No source selected. Pick a cluster and namespaces (or add custom environments) first.")
-    entries: List[Dict[str, Any]] = []
+    cluster_pairs: List[Tuple[str, str]] = []
     if cluster_id:
         selection = _deployment_selection(row, provider)
         namespaces = _namespace_list(row, provider)
-        # All cluster reads fan out up front; the DB snapshot work below stays on
+        # All cluster reads happen up front; the DB snapshot work below stays on
         # the request thread (it needs the app-context session).
         per_ns = _list_deployments_by_namespace(cluster_id, namespaces, fresh=fresh)
         # One entry per (namespace, deployment) — NOT de-duplicated here, because
@@ -816,18 +978,37 @@ def _source_entries(
             for name in per_ns.get(ns, []):
                 if explicit_names is not None and name not in explicit_names:
                     continue
-                snap = _get_or_create_snapshot(cluster_id, ns, name)
-                label = compose_deployment_label(ns, name, snap.id)
-                entries.append({"id": snap.id, "namespace": ns, "name": name, "label": label})
-    for custom in customs:
-        env_name = custom.get("name") or ""
-        for app in custom.get("applications") or []:
-            snap = _get_or_create_snapshot(CUSTOM_SOURCE_CLUSTER, env_name, app)
-            label = compose_deployment_label(env_name, app, snap.id)
-            entries.append(
-                {"id": snap.id, "namespace": env_name, "name": app, "label": label, "custom": True}
-            )
-    db.session.commit()
+                cluster_pairs.append((ns, name))
+    custom_pairs: List[Tuple[str, str]] = [
+        (custom.get("name") or "", app)
+        for custom in customs
+        for app in custom.get("applications") or []
+    ]
+
+    wrote = False
+    cluster_ids: Dict[Tuple[str, str], int] = {}
+    custom_ids: Dict[Tuple[str, str], int] = {}
+    if cluster_pairs:
+        cluster_ids, wrote_cluster = _snapshot_ids(cluster_id, cluster_pairs, touch=touch)
+        wrote = wrote or wrote_cluster
+    if custom_pairs:
+        custom_ids, wrote_custom = _snapshot_ids(CUSTOM_SOURCE_CLUSTER, custom_pairs, touch=touch)
+        wrote = wrote or wrote_custom
+
+    entries: List[Dict[str, Any]] = []
+    for ns, name in cluster_pairs:
+        snap_id = cluster_ids[(str(ns), str(name))]
+        label = compose_deployment_label(ns, name, snap_id)
+        entries.append({"id": snap_id, "namespace": ns, "name": name, "label": label})
+    for env_name, app in custom_pairs:
+        snap_id = custom_ids[(str(env_name), str(app))]
+        label = compose_deployment_label(env_name, app, snap_id)
+        entries.append(
+            {"id": snap_id, "namespace": env_name, "name": app, "label": label, "custom": True}
+        )
+    if wrote:
+        # New ids are embedded in labels people see; they must survive.
+        db.session.commit()
     return entries
 
 
@@ -1163,6 +1344,7 @@ def _maybe_sync_cascade(
     cfg: ZohoConfig,
     bindings: List[Any],
     resolved: Dict[str, Any],
+    force: bool = True,
 ) -> Dict[str, Any]:
     """Best-effort cascade sync over every parent→child pair the bindings declare.
 
@@ -1192,7 +1374,35 @@ def _maybe_sync_cascade(
             msg = "Cascade needs both the Application and Environment fields published."
         _record_dependency(row, "skipped", msg)
         return {"status": "skipped", "message": msg}
+    cascade_key = _publish_key(cfg, "__cascade__")
     try:
+        mappings = []
+        for parent, child in active:
+            child_options = resolved[child.field_id]
+            mappings.append(
+                sources.align_by_parent(
+                    child_options.by_parent, resolved[parent.field_id].canon, child_options.canon
+                )
+            )
+        fingerprint = publish_fingerprint(
+            {
+                "active": [
+                    [p.field_id, c.field_id, mapping]
+                    for (p, c), mapping in zip(active, mappings)
+                ],
+                "teardown": [[p.field_id, c.field_id] for p, c in teardown],
+            }
+        )
+        if not force and published_unchanged(cascade_key, fingerprint):
+            # Deleting and recreating identical mappings leaves the form briefly
+            # without its cascade; skip it while nothing changed.
+            return {
+                "status": "ok",
+                "message": row.last_dependency_message or "Cascade unchanged.",
+                "unchanged": True,
+            }
+        forget_published(cascade_key)
+
         # Delete EVERY managed mapping before creating any, then rebuild
         # parent-first. Recreating Environment→Application while Application
         # still parents the Application→Variable mapping trips Zoho's chain
@@ -1202,11 +1412,7 @@ def _maybe_sync_cascade(
         )
 
         parts = []
-        for parent, child in active:
-            child_options = resolved[child.field_id]
-            mapping = sources.align_by_parent(
-                child_options.by_parent, resolved[parent.field_id].canon, child_options.canon
-            )
+        for (parent, child), mapping in zip(active, mappings):
             new_id = _create_dependency_mapping(cfg, parent.field_id, child.field_id, mapping)
             _remember_mapping_id(row, child, new_id)
             parts.append(
@@ -1219,6 +1425,7 @@ def _maybe_sync_cascade(
 
         message = " ".join(parts) if parts else "Cascade mappings cleared."
         _record_dependency(row, "ok", message)
+        remember_published(cascade_key, fingerprint)
         return {"status": "ok", "message": message}
     except ZohoError as exc:
         hint = ""
@@ -1251,7 +1458,7 @@ def _preserved_field_attrs(cfg: ZohoConfig, field_id: str, new_values: List[str]
     return {"default_value": default, "is_mandatory": bool(field.get("isMandatory"))}
 
 
-def sync_now() -> Dict[str, Any]:
+def sync_now(*, force: bool = True) -> Dict[str, Any]:
     """Publish every bound picklist's option list, then wire the cascades.
 
     The Application / Environment / Variable fields are bindings like any other —
@@ -1264,99 +1471,144 @@ def sync_now() -> Dict[str, Any]:
     A stored binding that fails degrades to a warning: one operator-added
     dropdown must not stop the fields that drive production deploys. A failure
     on one of the original three is still fatal to the run.
-    """
-    from . import zoho_option_sources as sources
 
+    ``force=False`` (the scheduled sync) skips a field whose option list is
+    unchanged since this process last published it, and leaves the cascade
+    mappings alone when they are unchanged too — see
+    :func:`published_unchanged`. A manual Sync always republishes everything.
+    """
     with _sync_lock:
         row = get_or_create_config()
         if not row.enabled:
             raise ValueError("The Zoho integration is disabled. Enable it before syncing.")
-        cfg = _to_client_config(row)
-        # Resolve the live source first — a bad cluster/namespace read is an error
-        # we record without touching Zoho (rather than clobbering the picklists).
         try:
-            entries = _source_entries(row)
-        except ValueError as exc:
-            _record_sync(row, "error", str(exc), None)
-            return {"status": "error", "message": str(exc), **serialize(row)}
+            return _sync_now_locked(row, force=force)
+        except Exception as exc:
+            # Any unexpected failure still stamps last_sync_at, so the
+            # scheduler waits a full interval instead of retrying every tick.
+            db.session.rollback()
+            try:
+                _record_sync(get_or_create_config(), "error", f"Sync failed: {exc}", None)
+            except Exception:
+                db.session.rollback()
+            raise
 
-        ctx = sources.SourceContext(row, entries, PROVIDER)
-        bindings = sources.all_bindings(row, PROVIDER)
-        publishing = [b for b in bindings if b.enabled]
-        resolved: Dict[str, sources.ResolvedOptions] = {}
-        warnings: List[str] = []
 
-        def _degrade(binding, action: str, exc: Exception) -> None:
-            """Fatal for the original three, a warning for a stored binding."""
-            message = f"{action} the {binding.label} field: {exc}"
-            if binding.locked:
-                raise ValueError(message)
-            warnings.append(f"{message}.")
-            sources.record_result(binding, "error", message)
+def _sync_now_locked(row: ZohoIntegration, *, force: bool) -> Dict[str, Any]:
+    from . import zoho_option_sources as sources
 
-        try:
-            for binding in list(publishing):
-                try:
-                    resolved[binding.field_id] = sources.resolve(binding, ctx)
-                except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-                    _degrade(binding, "Resolving", exc)
-                    publishing.remove(binding)
+    cfg = _to_client_config(row)
+    # Resolve the live source first — a bad cluster/namespace read is an error
+    # we record without touching Zoho (rather than clobbering the picklists).
+    try:
+        entries = _source_entries(row, touch=True)
+    except ValueError as exc:
+        _record_sync(row, "error", str(exc), None)
+        return {"status": "error", "message": str(exc), **serialize(row)}
 
-            # Read the fields' preserved attrs up front: one cached layout GET
-            # serves them all, and each publish invalidates the layout cache.
-            attrs = {
-                b.field_id: _preserved_field_attrs(
-                    cfg, b.field_id, resolved[b.field_id].values
-                )
-                for b in publishing
-            }
+    ctx = sources.SourceContext(row, entries, PROVIDER)
+    bindings = sources.all_bindings(row, PROVIDER)
+    publishing = [b for b in bindings if b.enabled]
+    resolved: Dict[str, sources.ResolvedOptions] = {}
+    warnings: List[str] = []
 
-            parts: List[str] = []
-            counts: Dict[str, int] = {}
-            for binding in list(publishing):
-                options = resolved[binding.field_id]
-                try:
-                    # Name the failing field — "duplicate value" style rejections
-                    # are meaningless without knowing which list Zoho refused.
-                    zoho_client.set_allowed_values(
-                        cfg, options.values, field_id=binding.field_id, **attrs[binding.field_id]
-                    )
-                except ZohoError as exc:
-                    _degrade(binding, "Publishing", exc)
-                    publishing.remove(binding)
-                    resolved.pop(binding.field_id, None)
-                    continue
-                counts[binding.field_id] = options.count
-                parts.append(binding.publish_note.format(n=options.count, label=binding.label))
-                sources.record_result(
-                    binding, "ok", f"Published {options.count} value(s).", options.count
-                )
+    def _degrade(binding, action: str, exc: Exception) -> None:
+        """Fatal for the original three, a warning for a stored binding."""
+        message = f"{action} the {binding.label} field: {exc}"
+        if binding.locked:
+            raise ValueError(message)
+        warnings.append(f"{message}.")
+        sources.record_result(binding, "error", message)
 
-            if parts:
-                message = "Published " + "; ".join(parts) + " to Zoho."
-            else:
-                message = "Nothing published — all field syncs are turned off."
-            if warnings:
-                message = f"{message} {' '.join(warnings)}"
-            deployments = counts.get(str(row.app_field_id or ""), 0)
-            _record_sync(row, "ok", message, deployments)
-        except (ZohoError, ValueError) as exc:
-            _record_sync(row, "error", str(exc), None)
-            return {"status": "error", "message": str(exc), **serialize(row)}
+    try:
+        for binding in list(publishing):
+            try:
+                resolved[binding.field_id] = sources.resolve(binding, ctx)
+            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                _degrade(binding, "Resolving", exc)
+                publishing.remove(binding)
 
-        # Cascade is best-effort and layered on top of the (already published) lists.
-        cascade = _maybe_sync_cascade(row, cfg, bindings, resolved)
-        return {
-            "status": "ok",
-            "message": message,
-            "deployments": deployments,
-            "namespaces": counts.get(str(row.environment_field_id or ""), 0),
-            "variables": counts.get(str(row.variable_field_id or ""), 0),
-            "count": deployments,
-            "cascade": cascade,
-            "warnings": warnings,
-            **serialize(row),
+        # A field whose list is unchanged since the last publish is not
+        # PATCHed again on a scheduled sync (manual Sync forces).
+        fingerprints = {
+            b.field_id: publish_fingerprint(resolved[b.field_id].values) for b in publishing
         }
+        unchanged = {
+            b.field_id
+            for b in publishing
+            if not force
+            and published_unchanged(
+                _publish_key(cfg, b.field_id), fingerprints[b.field_id]
+            )
+        }
+
+        # Read the fields' preserved attrs up front: one cached layout GET
+        # serves them all, and each publish invalidates the layout cache.
+        attrs = {
+            b.field_id: _preserved_field_attrs(
+                cfg, b.field_id, resolved[b.field_id].values
+            )
+            for b in publishing
+            if b.field_id not in unchanged
+        }
+
+        parts: List[str] = []
+        counts: Dict[str, int] = {}
+        for binding in list(publishing):
+            options = resolved[binding.field_id]
+            if binding.field_id in unchanged:
+                counts[binding.field_id] = options.count
+                parts.append(
+                    binding.publish_note.format(n=options.count, label=binding.label)
+                    + " (unchanged)"
+                )
+                continue
+            forget_published(_publish_key(cfg, binding.field_id))
+            try:
+                # Name the failing field — "duplicate value" style rejections
+                # are meaningless without knowing which list Zoho refused.
+                zoho_client.set_allowed_values(
+                    cfg, options.values, field_id=binding.field_id, **attrs[binding.field_id]
+                )
+            except ZohoError as exc:
+                _degrade(binding, "Publishing", exc)
+                publishing.remove(binding)
+                resolved.pop(binding.field_id, None)
+                continue
+            remember_published(
+                _publish_key(cfg, binding.field_id), fingerprints[binding.field_id]
+            )
+            counts[binding.field_id] = options.count
+            parts.append(binding.publish_note.format(n=options.count, label=binding.label))
+            sources.record_result(
+                binding, "ok", f"Published {options.count} value(s).", options.count
+            )
+
+        if parts:
+            message = "Published " + "; ".join(parts) + " to Zoho."
+        else:
+            message = "Nothing published — all field syncs are turned off."
+        if warnings:
+            message = f"{message} {' '.join(warnings)}"
+        deployments = counts.get(str(row.app_field_id or ""), 0)
+        _record_sync(row, "ok", message, deployments)
+    except (ZohoError, ValueError) as exc:
+        _record_sync(row, "error", str(exc), None)
+        return {"status": "error", "message": str(exc), **serialize(row)}
+
+    # Cascade is best-effort and layered on top of the (already published) lists.
+    cascade = _maybe_sync_cascade(row, cfg, bindings, resolved, force=force)
+    return {
+        "status": "ok",
+        "message": message,
+        "deployments": deployments,
+        "namespaces": counts.get(str(row.environment_field_id or ""), 0),
+        "variables": counts.get(str(row.variable_field_id or ""), 0),
+        "count": deployments,
+        "cascade": cascade,
+        "warnings": warnings,
+        **serialize(row),
+    }
 
 
 def test_connection() -> Dict[str, Any]:
@@ -1414,7 +1666,8 @@ def run_due_sync() -> bool:
         elapsed_min = (datetime.now(timezone.utc) - last).total_seconds() / 60.0
         if elapsed_min < interval:
             return False
-    sync_now()
+    # Scheduled: unchanged lists and cascades are not republished.
+    sync_now(force=False)
     return True
 
 
@@ -1858,6 +2111,7 @@ def report_ticket_outcome(
                 zoho_client.add_ticket_comment(cfg, ticket_id, comment, is_public=public)
             except Exception:
                 logger.warning("Zoho ticket comment failed (%s)", ticket_id, exc_info=True)
+        invalidate_ticket_details(ticket_id)
 
     _dispatch_ticket_work(_work)
 
@@ -1885,8 +2139,22 @@ def post_ticket_comment(ticket_id: Optional[str], comment: str, public: bool = F
             zoho_client.add_ticket_comment(cfg, ticket_id, comment, is_public=public)
         except Exception:
             logger.warning("Zoho ticket comment failed (%s)", ticket_id, exc_info=True)
+        finally:
+            invalidate_ticket_details(ticket_id)
 
     _dispatch_ticket_work(_work)
+
+
+# Hermes reads a ticket's description + comments several times while working
+# on it (two context builds per decision); one Desk round trip a minute is
+# plenty. Posting a comment or receiving the comment webhook drops the entry.
+TICKET_DETAILS_TTL_SECONDS = 60
+_ticket_details_cache = TTLCache("zoho-ticket-details")
+
+
+def invalidate_ticket_details(ticket_id: Optional[str] = None) -> None:
+    """Forget cached ticket details (one ticket, or all of them)."""
+    _ticket_details_cache.invalidate(f"ticket:{ticket_id}:" if ticket_id else "ticket:")
 
 
 def fetch_ticket_details(ticket_id: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -1895,7 +2163,9 @@ def fetch_ticket_details(ticket_id: Optional[str]) -> Optional[Dict[str, Any]]:
     For the Hermes ticket agent: a webhook carries only the fields it was set
     up to send, and the description is where a free-text request lives. Needs
     OAuth (not write-back); returns None when it can't read. Synchronous —
-    called from the agent's worker thread, never from a webhook.
+    called from the agent's worker thread, never from a webhook. The ticket and
+    its comments are read in parallel and kept for a minute (see
+    :data:`TICKET_DETAILS_TTL_SECONDS`); failures are not cached.
     """
     if not ticket_id:
         return None
@@ -1903,19 +2173,35 @@ def fetch_ticket_details(ticket_id: Optional[str]) -> Optional[Dict[str, Any]]:
     if not (row.refresh_token_encrypted and row.client_id and row.org_id):
         return None
     cfg = _to_client_config(row)
-    out: Dict[str, Any] = {"description": None, "comments": []}
+    ticket_id = str(ticket_id)
+
+    def _read() -> Dict[str, Any]:
+        # Plain HTTP calls (the OAuth token is cached in-process), so they can
+        # run on pool threads.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            ticket_future = pool.submit(zoho_client.get_ticket, cfg, ticket_id)
+            comments_future = pool.submit(zoho_client.list_ticket_comments, cfg, ticket_id)
+            try:
+                ticket = ticket_future.result()
+            except Exception:
+                logger.warning("Zoho ticket read failed (%s)", ticket_id, exc_info=True)
+                raise
+            out: Dict[str, Any] = {"description": ticket.get("description"), "comments": []}
+            try:
+                out["comments"] = [
+                    c.get("content") for c in comments_future.result() if c.get("content")
+                ]
+            except Exception:
+                logger.warning("Zoho ticket comments read failed (%s)", ticket_id, exc_info=True)
+        return out
+
     try:
-        ticket = zoho_client.get_ticket(cfg, str(ticket_id))
-        out["description"] = ticket.get("description")
+        details = _ticket_details_cache.get_or_compute(
+            f"ticket:{ticket_id}:{cfg.org_id}", TICKET_DETAILS_TTL_SECONDS, _read
+        )
     except Exception:
-        logger.warning("Zoho ticket read failed (%s)", ticket_id, exc_info=True)
         return None
-    try:
-        out["comments"] = [
-            c.get("content")
-            for c in zoho_client.list_ticket_comments(cfg, str(ticket_id))
-            if c.get("content")
-        ]
-    except Exception:
-        logger.warning("Zoho ticket comments read failed (%s)", ticket_id, exc_info=True)
-    return out
+    return {
+        "description": details.get("description"),
+        "comments": list(details.get("comments") or []),
+    }

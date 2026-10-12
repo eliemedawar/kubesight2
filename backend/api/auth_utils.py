@@ -244,12 +244,42 @@ def _load_user_from_api_token(raw_token: str) -> Optional[User]:
     user = User.query.get(api_token.user_id)
     if not user or not user.is_active:
         return None
-    try:
-        api_token.last_used_at = now
-        db.session.commit()
-    except Exception:
-        db.session.rollback()
+    _touch_api_token(api_token, now)
     return user
+
+
+# ``last_used_at`` is "roughly when"; an MCP client calls many times a minute.
+API_TOKEN_TOUCH_INTERVAL = timedelta(minutes=5)
+
+
+def _touch_api_token(api_token: ApiToken, now: datetime) -> None:
+    """Record token use at most every 5 minutes, without touching the session.
+
+    A Core UPDATE on its own connection: committing the request's session here
+    would expire the just-loaded user (and reload it plus its collections in
+    ``require_auth``) on every call.
+    """
+    from .db import db
+
+    last = api_token.last_used_at
+    if last is not None:
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        if now - last < API_TOKEN_TOUCH_INTERVAL:
+            return
+    try:
+        with db.engine.begin() as conn:
+            conn.execute(
+                ApiToken.__table__.update()
+                .where(ApiToken.__table__.c.id == api_token.id)
+                .values(last_used_at=now)
+            )
+        # Keep the in-session copy in step without marking it dirty.
+        from sqlalchemy.orm.attributes import set_committed_value
+
+        set_committed_value(api_token, "last_used_at", now)
+    except Exception:
+        _logger.debug("Could not record API token use", exc_info=True)
 
 
 def get_current_user() -> Optional[User]:

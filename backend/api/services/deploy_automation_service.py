@@ -36,6 +36,7 @@ import json
 import logging
 import re
 import threading
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -338,7 +339,15 @@ def _initial_steps() -> List[Dict[str, Any]]:
 
 def _set_step(run: DeployAutomationRun, key: str, status: str, detail: str = "") -> None:
     """Update one step. Reassigns ``run.steps`` — SQLAlchemy JSON columns don't
-    track in-place mutation."""
+    track in-place mutation. A no-op when the step already has this status and
+    detail, so a run that is merely waiting is not rewritten on every tick."""
+    for existing in run.steps or ():
+        if (
+            existing.get("key") == key
+            and existing.get("status") == status
+            and (existing.get("detail") or "") == (detail or "")
+        ):
+            return
     steps = [dict(s) for s in (run.steps or _initial_steps())]
     by_key = {s.get("key"): s for s in steps}
     step = by_key.get(key)
@@ -843,28 +852,76 @@ def cancel_run(run_id: int, user=None) -> Dict[str, Any]:
     return serialize_run(run)
 
 
-def serialize_run(run: DeployAutomationRun) -> Dict[str, Any]:
+def _bundle_statuses(bundle_ids) -> Dict[int, str]:
+    """``{bundle id: status}`` in one query — never loads the bundles (or their
+    items and votes)."""
+    ids = sorted({int(b) for b in bundle_ids if b})
+    if not ids:
+        return {}
+    return {
+        int(bundle_id): status
+        for bundle_id, status in db.session.query(ChangeBundle.id, ChangeBundle.status).filter(
+            ChangeBundle.id.in_(ids)
+        )
+    }
+
+
+def _mobile_build_summaries(run_ids) -> Dict[int, Dict[str, Any]]:
+    """``{run id: {count, status}}`` for the runs' mobile ingests, in one
+    grouped query."""
+    ids = sorted({int(r) for r in run_ids if r})
+    if not ids:
+        return {}
+    from sqlalchemy import func
+
+    from ..models import MobileAppBuild
+
+    statuses: Dict[int, Dict[str, int]] = {}
+    for run_id, status, count in (
+        db.session.query(MobileAppBuild.run_id, MobileAppBuild.status, func.count(MobileAppBuild.id))
+        .filter(MobileAppBuild.run_id.in_(ids))
+        .group_by(MobileAppBuild.run_id, MobileAppBuild.status)
+    ):
+        statuses.setdefault(int(run_id), {})[status] = int(count)
+    out: Dict[int, Dict[str, Any]] = {}
+    for run_id, by_status in statuses.items():
+        present = set(by_status)
+        if "failed" in present:
+            agg = "failed"
+        elif present & {"pending", "downloading"}:
+            agg = "fetching"
+        else:
+            agg = "available"
+        out[run_id] = {"count": sum(by_status.values()), "status": agg}
+    return out
+
+
+def serialize_runs(runs: List[DeployAutomationRun]) -> List[Dict[str, Any]]:
+    """Serialize many runs with two batch queries instead of two per run."""
+    bundles = _bundle_statuses(run.bundle_id for run in runs)
+    mobile = _mobile_build_summaries(run.id for run in runs if _is_custom_run(run))
+    return [serialize_run(run, bundle_statuses=bundles, mobile_summaries=mobile) for run in runs]
+
+
+def serialize_run(
+    run: DeployAutomationRun,
+    *,
+    bundle_statuses: Optional[Dict[int, str]] = None,
+    mobile_summaries: Optional[Dict[int, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     bundle_status = None
     if run.bundle_id:
-        bundle = ChangeBundle.query.get(run.bundle_id)
-        bundle_status = bundle.status if bundle else "deleted"
+        if bundle_statuses is None:
+            bundle_statuses = _bundle_statuses([run.bundle_id])
+        bundle_status = bundle_statuses.get(int(run.bundle_id), "deleted")
     # A custom-environment run bound to a registered Mobile Application hands
     # its artifact to the mobile binary store after the build — summarise that
     # ingest so the run's pipeline strip can show the handoff as a stage.
     mobile_builds = None
     if _is_custom_run(run):
-        from ..models import MobileAppBuild
-
-        rows = MobileAppBuild.query.filter_by(run_id=run.id).all()
-        if rows:
-            statuses = {b.status for b in rows}
-            if "failed" in statuses:
-                agg = "failed"
-            elif statuses & {"pending", "downloading"}:
-                agg = "fetching"
-            else:
-                agg = "available"
-            mobile_builds = {"count": len(rows), "status": agg}
+        if mobile_summaries is None:
+            mobile_summaries = _mobile_build_summaries([run.id])
+        mobile_builds = mobile_summaries.get(int(run.id))
     return {
         "id": run.id,
         "ticketRecordId": run.ticket_record_id,
@@ -916,7 +973,7 @@ def list_runs(limit: int = 50, provider: Optional[str] = None) -> List[Dict[str,
         .limit(max(1, min(int(limit or 50), 200)))
         .all()
     )
-    return [serialize_run(r) for r in rows]
+    return serialize_runs(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -986,19 +1043,88 @@ def advance_runs() -> int:
             return 0
         jrow = get_or_create_jenkins()
         advanced = 0
-        for run in runs:
-            try:
-                _advance(run, jrow)
-                db.session.commit()
-                advanced += 1
-            except Exception as exc:  # defensive: never let one run break the tick
-                db.session.rollback()
+        _pass.unreachable = set()
+        _pass.active = True
+        try:
+            for run in runs:
                 try:
-                    _fail(run, _current_step_key(run), f"Unexpected automation error: {exc}")
+                    _advance(run, jrow)
                     db.session.commit()
-                except Exception:
+                    advanced += 1
+                except Exception as exc:  # defensive: never let one run break the tick
                     db.session.rollback()
+                    try:
+                        _fail(run, _current_step_key(run), f"Unexpected automation error: {exc}")
+                        db.session.commit()
+                    except Exception:
+                        db.session.rollback()
+        finally:
+            _pass.active = False
+            _pass.unreachable = set()
+            _forget_poll_times({run.id for run in runs})
         return advanced
+
+
+# ── Poll cadence ────────────────────────────────────────────────────────────
+# The scheduler ticks every 15 s and every outbound probe here blocks the
+# scheduler thread (Jenkins 15 s timeout, registry 10 s). Two guards keep a
+# slow or dead dependency from stretching every tick:
+#   * a Jenkins build is polled at most every JENKINS_POLL_SECONDS per run;
+#   * within one pass, once a Jenkins server or a registry host did not answer,
+#     the other runs that need the same host skip it until the next pass
+#     (no retry is counted against them — they simply were not asked).
+# Both are in memory: the scheduler runs on one leader process, and losing the
+# state only means one extra poll.
+JENKINS_POLL_SECONDS = 30
+_last_poll: Dict[int, float] = {}
+_pass = threading.local()
+# Tests advance runs back to back and expect every call to poll; they opt in.
+_CADENCE_IN_TESTS = False
+
+
+def _jenkins_poll_due(run: DeployAutomationRun) -> bool:
+    """False while this run's Jenkins build was polled less than 30 s ago."""
+    if not _CADENCE_IN_TESTS:
+        try:
+            from flask import current_app
+
+            if current_app.config.get("TESTING"):
+                return True
+        except Exception:
+            pass
+    now = time.monotonic()
+    last = _last_poll.get(run.id)
+    if last is not None and now - last < JENKINS_POLL_SECONDS:
+        return False
+    _last_poll[run.id] = now
+    return True
+
+
+def _forget_poll_times(active_ids: set) -> None:
+    for run_id in [rid for rid in _last_poll if rid not in active_ids]:
+        _last_poll.pop(run_id, None)
+
+
+def _pass_skip(key: str) -> bool:
+    """True when ``key`` (a host) already failed earlier in this advance pass."""
+    return bool(getattr(_pass, "active", False)) and key in getattr(_pass, "unreachable", set())
+
+
+def _pass_mark_unreachable(key: str) -> None:
+    if getattr(_pass, "active", False):
+        _pass.unreachable.add(key)
+
+
+def _jenkins_key(jrow: JenkinsConnection) -> str:
+    return f"jenkins:{(jrow.base_url or '').rstrip('/').lower()}"
+
+
+def _registry_key(run: DeployAutomationRun) -> str:
+    """The registry host the run's image lives on (scoped to its cluster)."""
+    repo = str(run.image_repo or "")
+    first = repo.split("/", 1)[0] if "/" in repo else ""
+    host = first if ("." in first or ":" in first or first == "localhost") else "docker.io"
+    return f"registry:{run.cluster_id}:{host.lower()}"
 
 
 def _current_step_key(run: DeployAutomationRun) -> str:
@@ -2070,9 +2196,14 @@ def _do_check(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     # the tag is enough); a cluster with no linked registry falls back to the
     # one registry that owns the image's host.
     target = _target_image(run)
+    registry_key = _registry_key(run)
+    if _pass_skip(registry_key):
+        return  # this registry already timed out this pass; ask again next tick
     result = check_image(target, preferred_connection_id=jrow.registry_connection_id, cluster_id=run.cluster_id)
     status = result.get("status")
     scoped = bool(result.get("clusterScoped"))
+    if status == "unreachable":
+        _pass_mark_unreachable(registry_key)
 
     if status == "found":
         # Already built: the deploy only swaps the tag on the live deployment.
@@ -2205,6 +2336,9 @@ def _do_poll_build(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
         # The build runs on KubeSight's own CI — no Jenkins anywhere in this path.
         _do_poll_native_build(run)
         return
+    jenkins_key = _jenkins_key(jrow)
+    if _pass_skip(jenkins_key) or not _jenkins_poll_due(run):
+        return  # Jenkins already timed out this pass / polled < 30 s ago
     cfg = _to_client_config(jrow)
     triggered = _aware(run.build_triggered_at) or datetime.now(timezone.utc)
     now = datetime.now(timezone.utc)
@@ -2231,6 +2365,10 @@ def _do_poll_build(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
 
         result = jenkins_client.build_state(cfg, run.jenkins_build_url)
     except JenkinsError as exc:
+        if getattr(exc, "status", None) is None:
+            # No HTTP answer at all (timeout / refused): the server, not this
+            # build, is the problem — spare the other runs this pass.
+            _pass_mark_unreachable(jenkins_key)
         run.retry_count = (run.retry_count or 0) + 1
         if run.retry_count > _MAX_TRANSIENT_RETRIES:
             _fail(run, "build", f"Lost contact with Jenkins while polling the build: {exc}")
@@ -2285,8 +2423,13 @@ def _do_verify(run: DeployAutomationRun, jrow: JenkinsConnection) -> None:
     from .registry_service import check_image
 
     target = _target_image(run)
+    registry_key = _registry_key(run)
+    if _pass_skip(registry_key):
+        return  # this registry already timed out this pass; ask again next tick
     result = check_image(target, preferred_connection_id=jrow.registry_connection_id, cluster_id=run.cluster_id)
     status = result.get("status")
+    if status == "unreachable":
+        _pass_mark_unreachable(registry_key)
 
     if status == "found":
         _set_step(run, "verify", "done", f"{target} confirmed in the registry")
@@ -2879,18 +3022,32 @@ def _handle_rollout_failure(
 
 
 def _admin_emails() -> List[str]:
-    """Email addresses of every active administrator (shared admin convention)."""
-    from ..access_engine import is_admin
-    from ..models import User
+    """Email addresses of every active administrator (shared admin convention).
 
-    out = set()
-    for user in User.query.filter_by(is_active=True).all():
+    Same rule as ``access_engine.is_admin`` (the ``admin`` role, or a role
+    granting every permission), decided per ROLE — there are a handful — and
+    then one column query for those roles' active users, instead of loading
+    every user with their access collections.
+    """
+    from ..models import Role, User
+    from ..rbac_data import ALL_PERMISSION_KEYS
+
+    every = set(ALL_PERMISSION_KEYS)
+    admin_role_ids = []
+    for role in Role.query.all():
         try:
-            if (user.email or "").strip() and is_admin(user):
-                out.add(user.email.strip())
+            if role.name == "admin" or every.issubset({perm.key for perm in role.permissions}):
+                admin_role_ids.append(role.id)
         except Exception:
             continue
-    return sorted(out)
+    if not admin_role_ids:
+        return []
+    rows = db.session.query(User.email).filter(
+        User.is_active.is_(True),
+        User.role_id.in_(admin_role_ids),
+        User.email.isnot(None),
+    )
+    return sorted({(email or "").strip() for (email,) in rows if (email or "").strip()})
 
 
 def _outcome_recipients() -> List[str]:
@@ -2997,11 +3154,15 @@ def _notify_run_outcome(
         app = current_app._get_current_object()
 
         def _send_all() -> None:
-            for address in recipients:
-                try:
-                    send_email(address, subject, body)
-                except Exception:
-                    continue
+            from ..email_delivery import SmtpSession
+
+            # One SMTP connection + login for every recipient.
+            with SmtpSession() as smtp:
+                for address in recipients:
+                    try:
+                        send_email(address, subject, body, session=smtp)
+                    except Exception:
+                        continue
 
         if app.config.get("TESTING"):
             _send_all()

@@ -10,18 +10,20 @@ to admins in-app.
 
 from __future__ import annotations
 
+import logging
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import jwt
-from flask import has_request_context, request
+from flask import current_app, has_request_context, request
 
 from ..audit import log_audit
 from ..auth_utils import _jwt_secret
 from ..db import db
-from ..email_delivery import EmailDeliveryError, send_email, smtp_is_configured
+from ..email_delivery import EmailDeliveryError, SmtpSession, send_email, smtp_is_configured
 from ..models import (
     AlertRoutingReceiver,
     DeploymentRequest,
@@ -30,6 +32,8 @@ from ..models import (
     User,
     user_display_loader,
 )
+
+logger = logging.getLogger(__name__)
 
 # Audit action names (kept stable so audit log filters can target them).
 ACTION_CREATED = "REQUEST_CREATED"
@@ -675,18 +679,54 @@ def _notify_management(req: DeploymentRequest, requester_name: str, recipients: 
     if not recipients:
         return {"sent": 0, "skipped": True, "reason": "No management email receivers configured."}
 
-    sent = 0
-    errors: List[str] = []
-    for address in recipients:
-        # Per-recipient token so each approver's click is attributed to them
-        # (required for quorum counting).
-        subject, body, html_body = _build_email(req, requester_name, voter_email=address)
-        try:
-            send_email(address, subject, body, html_body=html_body)
-            sent += 1
-        except EmailDeliveryError as exc:
-            errors.append(f"{address}: {exc}")
-    return {"sent": sent, "recipients": recipients, "errors": errors}
+    # Per-recipient token so each approver's click is attributed to them
+    # (required for quorum counting). Built here: the links need the request.
+    messages = [
+        (address, *_build_email(req, requester_name, voter_email=address))
+        for address in recipients
+    ]
+    request_id = req.id
+
+    def _send_all() -> Tuple[int, List[str]]:
+        sent = 0
+        errors: List[str] = []
+        with SmtpSession() as smtp:  # one connection + login for every approver
+            for address, subject, body, html_body in messages:
+                try:
+                    send_email(address, subject, body, html_body=html_body, session=smtp)
+                    sent += 1
+                except EmailDeliveryError as exc:
+                    errors.append(f"{address}: {exc}")
+        if errors:
+            logger.warning(
+                "Deployment request %s: approver emails failed: %s", request_id, "; ".join(errors)
+            )
+        return sent, errors
+
+    app = current_app._get_current_object()
+    if app.config.get("TESTING"):
+        sent, errors = _send_all()
+        return {"sent": sent, "recipients": recipients, "errors": errors}
+
+    # Off the request thread: an SMTP server that is slow (30 s timeout per
+    # connect) must not hold the POST — or a gunicorn thread — hostage.
+    def _run() -> None:
+        with app.app_context():
+            try:
+                _send_all()
+            except Exception:
+                logger.exception("Deployment request %s: approver emails failed", request_id)
+
+    threading.Thread(target=_run, name="deploy-request-mail", daemon=True).start()
+    # ``sent`` keeps the count the UI shows ("N recipients notified"); the
+    # emails are queued, and a delivery failure is logged.
+    return {
+        "status": "queued",
+        "queued": len(messages),
+        "sent": len(messages),
+        "recipients": recipients,
+        "errors": [],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -881,14 +921,16 @@ def auto_decline_overdue_requests(now: Optional[datetime] = None) -> int:
     Returns the number of requests declined. Safe to call repeatedly.
     """
     now = now or datetime.now(timezone.utc)
-    # Every request list (polled from each page) runs this first, so read just
-    # id + window start; only requests actually overdue are loaded as entities
-    # (an entity drags its requester and their access collections along).
+    # Every request list (polled from each page) runs this first, so the window
+    # test runs in SQL and returns only overdue ids (usually none); only those
+    # are loaded as entities (an entity drags its requester along). Windows
+    # are stored in UTC (see _parse_iso_datetime).
     candidates = (
         db.session.query(DeploymentRequest.id, DeploymentRequest.requested_window_start)
         .filter(
             DeploymentRequest.status == "pending",
             DeploymentRequest.requested_window_start.isnot(None),
+            DeploymentRequest.requested_window_start <= now,
         )
         .all()
     )
@@ -1031,13 +1073,18 @@ def _active_approval(user: Optional[User], cluster_id: str) -> Optional[Deployme
     if not key:
         return None
     now = datetime.now(timezone.utc)
+    # The window test runs in SQL (windows are stored in UTC); the loop below
+    # re-checks the one or two rows that come back.
     candidates = (
         DeploymentRequest.query.filter(
             DeploymentRequest.status == "approved",
             DeploymentRequest.requester_id == user.id,
             DeploymentRequest.cluster_id == key,
+            DeploymentRequest.requested_window_end.isnot(None),
+            DeploymentRequest.requested_window_end >= now,
         )
         .order_by(DeploymentRequest.requested_window_end.desc())
+        .limit(5)
         .all()
     )
     for req in candidates:

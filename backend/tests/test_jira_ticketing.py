@@ -255,7 +255,7 @@ def test_a_failed_cluster_read_does_not_touch_jira(jira, monkeypatch):
     monkeypatch.setattr(
         zoho_svc,
         "_source_entries",
-        lambda row, provider=None, fresh=False: (_ for _ in ()).throw(
+        lambda row, provider=None, fresh=False, touch=False: (_ for _ in ()).throw(
             ValueError("cluster unreachable")
         ),
     )

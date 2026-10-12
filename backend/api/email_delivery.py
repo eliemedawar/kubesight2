@@ -4,7 +4,7 @@ import os
 import smtplib
 import ssl
 from email.message import EmailMessage
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .secret_encryption import decrypt_secret
 
@@ -60,6 +60,207 @@ def smtp_is_configured() -> bool:
 
 def _smtp_settings() -> Dict[str, Any]:
     return _smtp_from_db() or _smtp_from_env()
+
+
+_NOT_CONFIGURED_MESSAGE = (
+    "SMTP is not configured. Configure SMTP in Settings → Alert Routing or set SMTP_HOST and SMTP_FROM."
+)
+
+
+def _settings_for(session: Optional["SmtpSession"]) -> Dict[str, Any]:
+    """SMTP settings for one send: the open session's, or freshly read ones."""
+    if session is not None:
+        return session.settings
+    if not smtp_is_configured():
+        raise EmailDeliveryError(_NOT_CONFIGURED_MESSAGE)
+    return _smtp_settings()
+
+
+def _open_client(settings: Dict[str, Any]):
+    """Connect, (START)TLS and log in. The caller owns closing the client."""
+    if settings["use_ssl"]:
+        client = smtplib.SMTP_SSL(settings["host"], settings["port"], timeout=30)
+    else:
+        client = smtplib.SMTP(settings["host"], settings["port"], timeout=30)
+    try:
+        if not settings["use_ssl"]:
+            client.ehlo()
+            if settings["use_tls"]:
+                client.starttls(context=ssl.create_default_context())
+                client.ehlo()
+        if settings["user"]:
+            client.login(settings["user"], settings["password"])
+    except BaseException:
+        try:
+            client.close()
+        except Exception:
+            pass
+        raise
+    return client
+
+
+def _close_client(client) -> None:
+    try:
+        client.quit()
+    except Exception:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+def _delivery_error(exc: BaseException) -> "EmailDeliveryError":
+    if isinstance(exc, EmailDeliveryError):
+        return exc
+    if isinstance(exc, smtplib.SMTPException):
+        return EmailDeliveryError(f"SMTP send failed: {exc}")
+    return EmailDeliveryError(f"Could not reach SMTP server: {exc}")
+
+
+def _deliver_message(
+    message: EmailMessage, settings: Dict[str, Any], session: Optional["SmtpSession"]
+) -> None:
+    if session is not None:
+        session.send_message(message)
+        return
+    try:
+        client = _open_client(settings)
+        try:
+            client.send_message(message)
+        finally:
+            _close_client(client)
+    except (OSError, smtplib.SMTPException) as exc:
+        raise _delivery_error(exc) from exc
+
+
+# Errors that concern one message only; the connection stays usable after them.
+_PER_MESSAGE_ERRORS = (
+    smtplib.SMTPRecipientsRefused,
+    smtplib.SMTPSenderRefused,
+    smtplib.SMTPDataError,
+)
+
+
+class SmtpSession:
+    """One SMTP connection reused for several messages.
+
+    The connection opens lazily on the first message (connect, TLS and login
+    happen once), so a session costs nothing when nothing ends up being sent.
+    When connecting fails, every later message in the session fails at once
+    with the same error instead of waiting out the socket timeout again. A
+    connection the server dropped between messages is reopened once.
+
+        with SmtpSession() as smtp:
+            for address in addresses:
+                send_alert_email(address, alert, session=smtp)
+    """
+
+    def __init__(self, settings: Optional[Dict[str, Any]] = None) -> None:
+        self._settings = settings
+        self._client = None
+        self._connect_error: Optional[EmailDeliveryError] = None
+
+    @property
+    def settings(self) -> Dict[str, Any]:
+        """Read on first use, so an unused session never touches the config."""
+        if self._settings is None:
+            if not smtp_is_configured():
+                raise EmailDeliveryError(_NOT_CONFIGURED_MESSAGE)
+            self._settings = _smtp_settings()
+        return self._settings
+
+    def __enter__(self) -> "SmtpSession":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+    def _connect(self):
+        if self._connect_error is not None:
+            raise self._connect_error
+        if self._client is None:
+            try:
+                self._client = _open_client(self.settings)
+            except (OSError, smtplib.SMTPException) as exc:
+                self._connect_error = _delivery_error(exc)
+                raise self._connect_error from exc
+        return self._client
+
+    def _drop(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def send_message(self, message: EmailMessage) -> None:
+        client = self._connect()
+        try:
+            client.send_message(message)
+            return
+        except smtplib.SMTPServerDisconnected:
+            self._drop()  # reconnect once below
+        except _PER_MESSAGE_ERRORS as exc:
+            raise _delivery_error(exc) from exc
+        except (OSError, smtplib.SMTPException) as exc:
+            self._drop()
+            raise _delivery_error(exc) from exc
+        client = self._connect()
+        try:
+            client.send_message(message)
+        except _PER_MESSAGE_ERRORS as exc:
+            raise _delivery_error(exc) from exc
+        except (OSError, smtplib.SMTPException) as exc:
+            self._drop()
+            raise _delivery_error(exc) from exc
+
+    def close(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            _close_client(client)
+
+
+def send_alert_emails(
+    addresses: List[str], alert: Dict[str, Any], *, test: bool = False
+) -> Dict[str, str]:
+    """Send one alert to several addresses over a single SMTP connection.
+
+    Returns ``{address: error}`` for the addresses that failed (empty when all
+    were delivered). Raises :class:`EmailDeliveryError` only when SMTP is not
+    configured.
+    """
+    errors: Dict[str, str] = {}
+    if not smtp_is_configured():
+        raise EmailDeliveryError(_NOT_CONFIGURED_MESSAGE)
+    with SmtpSession() as smtp:
+        for address in addresses:
+            try:
+                send_alert_email(address, alert, test=test, session=smtp)
+            except EmailDeliveryError as exc:
+                errors[address] = str(exc)
+    return errors
+
+
+def send_emails(
+    to_addresses: List[str],
+    subject: str,
+    body: str,
+    *,
+    html_body: Optional[str] = None,
+) -> Dict[str, str]:
+    """Send the same message to several addresses (one message each) over a
+    single SMTP connection. Returns ``{address: error}`` for the failures."""
+    errors: Dict[str, str] = {}
+    if not smtp_is_configured():
+        raise EmailDeliveryError(_NOT_CONFIGURED_MESSAGE)
+    with SmtpSession() as smtp:
+        for address in to_addresses:
+            try:
+                send_email(address, subject, body, html_body=html_body, session=smtp)
+            except EmailDeliveryError as exc:
+                errors[address] = str(exc)
+    return errors
 
 
 # Sentinel cluster id used by service alert policies (Application Services span
@@ -292,6 +493,7 @@ def send_email(
     *,
     html_body: Optional[str] = None,
     attachments: Optional[list] = None,
+    session: Optional[SmtpSession] = None,
 ) -> None:
     """Send an email using the configured SMTP settings.
 
@@ -300,17 +502,13 @@ def send_email(
     ``html_body`` is supplied it is attached as an HTML alternative (the plain
     ``body`` remains the fallback for text-only clients). ``attachments`` is a
     list of ``(filename, bytes, "type/subtype")``. ``to_address`` may name
-    several recipients, comma-separated — they all see each other.
+    several recipients, comma-separated — they all see each other. ``session``
+    (an open :class:`SmtpSession`) reuses one connection for several messages.
     """
     if not to_address or "@" not in to_address:
         raise EmailDeliveryError("Recipient email address is not configured.")
 
-    if not smtp_is_configured():
-        raise EmailDeliveryError(
-            "SMTP is not configured. Configure SMTP in Settings → Alert Routing or set SMTP_HOST and SMTP_FROM."
-        )
-
-    settings = _smtp_settings()
+    settings = _settings_for(session)
     message = EmailMessage()
     message["From"] = settings["from_addr"]
     message["To"] = to_address
@@ -324,26 +522,7 @@ def send_email(
             content, maintype=maintype, subtype=subtype or "octet-stream", filename=filename
         )
 
-    try:
-        if settings["use_ssl"]:
-            with smtplib.SMTP_SSL(settings["host"], settings["port"], timeout=30) as client:
-                if settings["user"]:
-                    client.login(settings["user"], settings["password"])
-                client.send_message(message)
-            return
-
-        with smtplib.SMTP(settings["host"], settings["port"], timeout=30) as client:
-            client.ehlo()
-            if settings["use_tls"]:
-                client.starttls(context=ssl.create_default_context())
-                client.ehlo()
-            if settings["user"]:
-                client.login(settings["user"], settings["password"])
-            client.send_message(message)
-    except OSError as exc:
-        raise EmailDeliveryError(f"Could not reach SMTP server: {exc}") from exc
-    except smtplib.SMTPException as exc:
-        raise EmailDeliveryError(f"SMTP send failed: {exc}") from exc
+    _deliver_message(message, settings, session)
 
 
 def send_temporary_password_email(
@@ -480,16 +659,17 @@ def send_security_event_email(
     send_email(to_address, subject, body, html_body=html_body)
 
 
-def send_alert_email(to_address: str, alert: Dict[str, Any], *, test: bool = False) -> None:
+def send_alert_email(
+    to_address: str,
+    alert: Dict[str, Any],
+    *,
+    test: bool = False,
+    session: Optional[SmtpSession] = None,
+) -> None:
     if not to_address or "@" not in to_address:
         raise EmailDeliveryError("Recipient email address is not configured.")
 
-    if not smtp_is_configured():
-        raise EmailDeliveryError(
-            "SMTP is not configured. Configure SMTP in Settings → Alert Routing or set SMTP_HOST and SMTP_FROM."
-        )
-
-    settings = _smtp_settings()
+    settings = _settings_for(session)
     message = EmailMessage()
     message["From"] = settings["from_addr"]
     message["To"] = to_address
@@ -506,23 +686,4 @@ def send_alert_email(to_address: str, alert: Dict[str, Any], *, test: bool = Fal
             # The plain-text part is always present; never fail delivery over HTML rendering.
             pass
 
-    try:
-        if settings["use_ssl"]:
-            with smtplib.SMTP_SSL(settings["host"], settings["port"], timeout=30) as client:
-                if settings["user"]:
-                    client.login(settings["user"], settings["password"])
-                client.send_message(message)
-            return
-
-        with smtplib.SMTP(settings["host"], settings["port"], timeout=30) as client:
-            client.ehlo()
-            if settings["use_tls"]:
-                client.starttls(context=ssl.create_default_context())
-                client.ehlo()
-            if settings["user"]:
-                client.login(settings["user"], settings["password"])
-            client.send_message(message)
-    except OSError as exc:
-        raise EmailDeliveryError(f"Could not reach SMTP server: {exc}") from exc
-    except smtplib.SMTPException as exc:
-        raise EmailDeliveryError(f"SMTP send failed: {exc}") from exc
+    _deliver_message(message, settings, session)

@@ -274,6 +274,7 @@ def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     db.session.add(row)
     db.session.commit()
+    shared.clear_published(PROVIDER)  # the next scheduled sync republishes everything
     return serialize(row)
 
 
@@ -379,7 +380,11 @@ def _cascade_tree(
 
 
 def _maybe_sync_cascade(
-    row: JiraIntegration, cfg: JiraConfig, bindings: List[Any], resolved: Dict[str, Any]
+    row: JiraIntegration,
+    cfg: JiraConfig,
+    bindings: List[Any],
+    resolved: Dict[str, Any],
+    force: bool = True,
 ) -> Dict[str, Any]:
     """Best-effort environment → application cascade. Never raises.
 
@@ -415,12 +420,22 @@ def _maybe_sync_cascade(
             msg = "Cascade not written — no environment has any application to offer."
             _record_dependency(row, "skipped", msg)
             return {"status": "skipped", "message": msg}
+        key = _publish_key(cfg, f"cascade:{cascade_field}")
+        fingerprint = shared.publish_fingerprint(tree)
+        if not force and shared.published_unchanged(key, fingerprint):
+            return {
+                "status": "ok",
+                "message": row.last_dependency_message or "Cascade unchanged.",
+                "unchanged": True,
+            }
+        shared.forget_published(key)
         result = jira_client.set_cascading_options(cfg, cascade_field, tree)
         message = (
             f"Cascade configured for {len(tree)} environment(s) "
             f"({result.created} added, {result.disabled} retired)."
         )
         _record_dependency(row, "ok", message)
+        shared.remember_published(key, fingerprint)
         return {"status": "ok", "message": message}
     except JiraError as exc:
         hint = ""
@@ -435,7 +450,7 @@ def _maybe_sync_cascade(
         return {"status": "error", "message": msg}
 
 
-def sync_now() -> Dict[str, Any]:
+def sync_now(*, force: bool = True) -> Dict[str, Any]:
     """Publish every bound field's option list, then wire the cascade.
 
     Structurally identical to :func:`zoho_sync_service.sync_now`: resolve the live
@@ -444,87 +459,122 @@ def sync_now() -> Dict[str, Any]:
     then layer the cascade on top. A stored binding that fails degrades to a
     warning — one operator-added dropdown must not stop the fields that drive
     production deploys — while a failure on the original three is fatal to the run.
-    """
-    from . import zoho_option_sources as sources
 
+    ``force=False`` (the scheduled sync) skips a field, and the cascade, whose
+    option list is unchanged since this process last published it (see
+    ``zoho_sync_service.published_unchanged``); a manual Sync always republishes.
+    """
     with _sync_lock:
         row = get_or_create_config()
         if not row.enabled:
             raise ValueError("The Jira integration is disabled. Enable it before syncing.")
-        cfg = _to_client_config(row)
         try:
-            entries = shared._source_entries(row, provider=PROVIDER)
-        except ValueError as exc:
-            _record_sync(row, "error", str(exc), None)
-            return {"status": "error", "message": str(exc), **serialize(row)}
+            return _sync_now_locked(row, force=force)
+        except Exception as exc:
+            # Any unexpected failure still stamps last_sync_at, so the
+            # scheduler waits a full interval instead of retrying every tick.
+            db.session.rollback()
+            try:
+                _record_sync(get_or_create_config(), "error", f"Sync failed: {exc}", None)
+            except Exception:
+                db.session.rollback()
+            raise
 
-        ctx = sources.SourceContext(row, entries, PROVIDER)
-        bindings = sources.all_bindings(row, PROVIDER)
-        publishing = [b for b in bindings if b.enabled]
-        resolved: Dict[str, Any] = {}
-        warnings: List[str] = []
 
-        def _degrade(binding, action: str, exc: Exception) -> None:
-            """Fatal for the original three, a warning for a stored binding."""
-            message = f"{action} the {binding.label} field: {exc}"
-            if binding.locked:
-                raise ValueError(message)
-            warnings.append(f"{message}.")
-            sources.record_result(binding, "error", message)
+def _publish_key(cfg: JiraConfig, field_id: str) -> tuple:
+    site = getattr(cfg, "api_root", "") or ""
+    project = getattr(cfg, "project_key", "") or ""
+    return (PROVIDER, str(site), str(project), str(field_id))
 
-        try:
-            for binding in list(publishing):
-                try:
-                    resolved[binding.field_id] = sources.resolve(binding, ctx)
-                except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-                    _degrade(binding, "Resolving", exc)
-                    publishing.remove(binding)
 
-            parts: List[str] = []
-            counts: Dict[str, int] = {}
-            for binding in list(publishing):
-                options = resolved[binding.field_id]
-                try:
-                    # Name the failing field — an option-context rejection is
-                    # meaningless without knowing which list Jira refused.
-                    jira_client.set_options(
-                        cfg, binding.field_id, _publishable(options.values)
-                    )
-                except JiraError as exc:
-                    _degrade(binding, "Publishing", exc)
-                    publishing.remove(binding)
-                    resolved.pop(binding.field_id, None)
-                    continue
+def _sync_now_locked(row: JiraIntegration, *, force: bool) -> Dict[str, Any]:
+    from . import zoho_option_sources as sources
+
+    cfg = _to_client_config(row)
+    try:
+        entries = shared._source_entries(row, provider=PROVIDER, touch=True)
+    except ValueError as exc:
+        _record_sync(row, "error", str(exc), None)
+        return {"status": "error", "message": str(exc), **serialize(row)}
+
+    ctx = sources.SourceContext(row, entries, PROVIDER)
+    bindings = sources.all_bindings(row, PROVIDER)
+    publishing = [b for b in bindings if b.enabled]
+    resolved: Dict[str, Any] = {}
+    warnings: List[str] = []
+
+    def _degrade(binding, action: str, exc: Exception) -> None:
+        """Fatal for the original three, a warning for a stored binding."""
+        message = f"{action} the {binding.label} field: {exc}"
+        if binding.locked:
+            raise ValueError(message)
+        warnings.append(f"{message}.")
+        sources.record_result(binding, "error", message)
+
+    try:
+        for binding in list(publishing):
+            try:
+                resolved[binding.field_id] = sources.resolve(binding, ctx)
+            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                _degrade(binding, "Resolving", exc)
+                publishing.remove(binding)
+
+        parts: List[str] = []
+        counts: Dict[str, int] = {}
+        for binding in list(publishing):
+            options = resolved[binding.field_id]
+            key = _publish_key(cfg, binding.field_id)
+            fingerprint = shared.publish_fingerprint(_publishable(options.values))
+            if not force and shared.published_unchanged(key, fingerprint):
                 counts[binding.field_id] = options.count
-                parts.append(binding.publish_note.format(n=options.count, label=binding.label))
-                sources.record_result(
-                    binding, "ok", f"Published {options.count} value(s).", options.count
+                parts.append(
+                    binding.publish_note.format(n=options.count, label=binding.label)
+                    + " (unchanged)"
                 )
+                continue
+            shared.forget_published(key)
+            try:
+                # Name the failing field — an option-context rejection is
+                # meaningless without knowing which list Jira refused.
+                jira_client.set_options(
+                    cfg, binding.field_id, _publishable(options.values)
+                )
+            except JiraError as exc:
+                _degrade(binding, "Publishing", exc)
+                publishing.remove(binding)
+                resolved.pop(binding.field_id, None)
+                continue
+            shared.remember_published(key, fingerprint)
+            counts[binding.field_id] = options.count
+            parts.append(binding.publish_note.format(n=options.count, label=binding.label))
+            sources.record_result(
+                binding, "ok", f"Published {options.count} value(s).", options.count
+            )
 
-            if parts:
-                message = "Published " + "; ".join(parts) + " to Jira."
-            else:
-                message = "Nothing published — all field syncs are turned off."
-            if warnings:
-                message = f"{message} {' '.join(warnings)}"
-            deployments = counts.get(str(row.app_field_id or ""), 0)
-            _record_sync(row, "ok", message, deployments)
-        except (JiraError, ValueError) as exc:
-            _record_sync(row, "error", str(exc), None)
-            return {"status": "error", "message": str(exc), **serialize(row)}
+        if parts:
+            message = "Published " + "; ".join(parts) + " to Jira."
+        else:
+            message = "Nothing published — all field syncs are turned off."
+        if warnings:
+            message = f"{message} {' '.join(warnings)}"
+        deployments = counts.get(str(row.app_field_id or ""), 0)
+        _record_sync(row, "ok", message, deployments)
+    except (JiraError, ValueError) as exc:
+        _record_sync(row, "error", str(exc), None)
+        return {"status": "error", "message": str(exc), **serialize(row)}
 
-        cascade = _maybe_sync_cascade(row, cfg, bindings, resolved)
-        return {
-            "status": "ok",
-            "message": message,
-            "deployments": deployments,
-            "namespaces": counts.get(str(row.environment_field_id or ""), 0),
-            "variables": counts.get(str(row.variable_field_id or ""), 0),
-            "count": deployments,
-            "cascade": cascade,
-            "warnings": warnings,
-            **serialize(row),
-        }
+    cascade = _maybe_sync_cascade(row, cfg, bindings, resolved, force=force)
+    return {
+        "status": "ok",
+        "message": message,
+        "deployments": deployments,
+        "namespaces": counts.get(str(row.environment_field_id or ""), 0),
+        "variables": counts.get(str(row.variable_field_id or ""), 0),
+        "count": deployments,
+        "cascade": cascade,
+        "warnings": warnings,
+        **serialize(row),
+    }
 
 
 def test_connection() -> Dict[str, Any]:
@@ -578,7 +628,8 @@ def run_due_sync() -> bool:
         elapsed_min = (datetime.now(timezone.utc) - last).total_seconds() / 60.0
         if elapsed_min < interval:
             return False
-    sync_now()
+    # Scheduled: unchanged lists and the unchanged cascade are not republished.
+    sync_now(force=False)
     return True
 
 

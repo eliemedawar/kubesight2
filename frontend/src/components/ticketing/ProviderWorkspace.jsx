@@ -128,45 +128,33 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
     }
   };
 
-  // Poll active automation runs every 10s so the pipeline chips move without a
-  // manual refresh; stops on its own once every run is terminal.
+  // One 10s poll (paused while the tab is hidden) keeps the page moving without
+  // a manual refresh: the runs while any is active, so the pipeline chips
+  // move, and the ticket log too while Hermes is reading a ticket (or a task
+  // waits on a human) — that is where the agent's tasks ride. Stops on its own
+  // once every run is terminal and the agent is idle.
   const hasActiveRun = runs.some((r) => ACTIVE_RUN_STATUSES.has(r.status));
-  useEffect(() => {
-    if (!hasActiveRun) return undefined;
-    const stopPolling = setVisibleInterval(async () => {
-      try {
-        const res = await api.listAutomationRuns(50);
-        setRuns(res?.items || []);
-      } catch {
-        /* transient — next poll retries */
-      }
-    }, 10000);
-    return stopPolling;
-  }, [hasActiveRun, api]);
-
-  // While Hermes is reading a ticket (or a task waits on a human), poll the
-  // ticket log too — that is where the agent's tasks ride.
   const agentBusy = tickets.some((t) =>
     (t.agentTasks || []).some((task) =>
       ["pending", "running", "awaiting_approval", "deciding"].includes(task.status)
     )
   );
   useEffect(() => {
-    if (!agentBusy) return undefined;
+    if (!hasActiveRun && !agentBusy) return undefined;
     const stopPolling = setVisibleInterval(async () => {
       try {
         const [inbound, res] = await Promise.all([
-          api.listInboundTickets(10),
+          agentBusy ? api.listInboundTickets(10) : Promise.resolve(null),
           api.listAutomationRuns(50),
         ]);
-        setTickets(inbound?.items || []);
+        if (inbound) setTickets(inbound?.items || []);
         setRuns(res?.items || []);
       } catch {
         /* transient — next poll retries */
       }
     }, 10000);
     return stopPolling;
-  }, [agentBusy, api]);
+  }, [hasActiveRun, agentBusy, api]);
 
   const refreshTickets = async () => {
     try {

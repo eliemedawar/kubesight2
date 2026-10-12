@@ -534,7 +534,12 @@ def set_options(
         for v in wanted
         if str(v).casefold() in result.ids_by_value
     ]
-    _reorder_options(cfg, field_id, ctx, ordered_ids)
+    # Jira lists options in display order: when nothing was created and the
+    # wanted options already appear in the wanted order, the move is a no-op.
+    wanted_ids = set(ordered_ids)
+    current_order = [str(o.get("id")) for o in existing if str(o.get("id")) in wanted_ids]
+    if created or current_order != ordered_ids:
+        _reorder_options(cfg, field_id, ctx, ordered_ids)
     invalidate_screen_cache()
     return result
 

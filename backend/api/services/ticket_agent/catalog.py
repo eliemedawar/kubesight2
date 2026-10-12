@@ -39,7 +39,47 @@ def targets(provider: str) -> List[ZohoDeploymentSnapshot]:
     and the dropdown sync never runs, and a deployment deleted since the last
     sync is not offered. Falls back to the stored snapshots if the cluster read
     fails.
+
+    Memoized for the current app context (one request, or one scheduler job):
+    deciding on a ticket builds the catalog several times, and
+    deploy_automation_service.start_run asks again for the same answer.
     """
+    memo = _memo()
+    if memo is not None and provider in memo:
+        return list(memo[provider])
+    result = _live_targets(provider)
+    if memo is not None:
+        memo[provider] = list(result)
+    return result
+
+
+def _memo() -> Optional[Dict[str, List[ZohoDeploymentSnapshot]]]:
+    try:
+        from flask import g, has_app_context
+
+        if not has_app_context():
+            return None
+        memo = g.get("_ticket_catalog_targets")
+        if memo is None:
+            memo = {}
+            g._ticket_catalog_targets = memo
+        return memo
+    except Exception:  # noqa: BLE001 — no memo is always a correct answer
+        return None
+
+
+def forget_targets() -> None:
+    """Drop the memo (after the source selection changed in this context)."""
+    try:
+        from flask import g, has_app_context
+
+        if has_app_context():
+            g.pop("_ticket_catalog_targets", None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _live_targets(provider: str) -> List[ZohoDeploymentSnapshot]:
     try:
         from ..zoho_sync_service import _source_entries
 
