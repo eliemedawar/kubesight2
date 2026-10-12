@@ -22,6 +22,8 @@ here as people, roles and emails).
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -105,31 +107,142 @@ def _actions(approve: str, reject: str, *, reject_field: Optional[str] = None,
 
 # ---------------------------------------------------------------------------
 # The inbox — one collector per kind
+#
+# Each kind has a "why not" rule shared by its collector (the inbox, which
+# serializes) and its counter (the sidebar badge, which only counts): the
+# badge must always equal the inbox's "waiting on me".
 # ---------------------------------------------------------------------------
 
-def _deployment_requests(user) -> List[Dict[str, Any]]:
+def _why_deployment_request(manage: bool, own: bool, voted: bool) -> str:
+    return (
+        "" if manage and not own and not voted
+        else "Your request — another approver decides it." if own
+        else "You already voted." if voted
+        else "Needs deployment_requests:manage."
+    )
+
+
+def _why_change_bundle(manage: bool, own: bool, voted: bool) -> str:
+    return (
+        "" if manage and not own and not voted
+        else "Your bundle — another approver decides it." if own
+        else "You already approved it." if voted
+        else "Needs change_bundles:manage."
+    )
+
+
+def _why_hermes(task, user, manage: bool, builds: bool) -> str:
+    from .ticket_agent import vm_requests
+
+    why = "" if manage else "Needs ticketing:manage."
+    if (task.decision or {}).get("vmRequest") and not why:
+        if not builds:
+            why = "Approving new VMs needs cluster_builds:execute."
+        else:
+            try:
+                vm_requests.check_approver(task, user)
+            except vm_requests.VmRequestError as exc:
+                why = str(exc)
+    return why
+
+
+def _why_destroy(execute: bool, own: bool) -> str:
+    return (
+        "" if execute and not own
+        else "You asked for this destroy — someone else has to approve it." if own
+        else "Needs cluster_builds:execute."
+    )
+
+
+def _is_own(owner_id, user) -> bool:
+    return owner_id is not None and owner_id == getattr(user, "id", None)
+
+
+def _pending_requests_query():
     from ..models import DeploymentRequest
-    from .deployment_request_service import serialize_request
+
+    return (
+        DeploymentRequest.query.filter_by(status="pending")
+        .order_by(DeploymentRequest.created_at.desc()).limit(_LIMIT)
+    )
+
+
+def _pending_bundles_query():
+    from ..models import ChangeBundle
+
+    return (
+        ChangeBundle.query.filter_by(status="pending_approval")
+        .order_by(ChangeBundle.created_at.desc()).limit(_LIMIT)
+    )
+
+
+def _pending_hermes():
+    from ..models import TicketInterpretation
+
+    return (
+        TicketInterpretation.query.filter_by(status="awaiting_approval")
+        .order_by(TicketInterpretation.created_at.desc()).limit(_LIMIT).all()
+    )
+
+
+def _waiting_ci_stages():
+    """(stage, state, build) for every approval stage waiting now, builds in one query."""
+    from ..models_ci import CiBuild, CiBuildStage
+    from .ci import server_stage_base as base
+
+    rows = (
+        CiBuildStage.query.filter_by(stage_type="approval", status="running")
+        .order_by(CiBuildStage.started_at.desc()).limit(_LIMIT).all()
+    )
+    waiting = [(stage, base.state(stage)) for stage in rows]
+    waiting = [(stage, current) for stage, current in waiting if current.get("phase") == "waiting_approval"]
+    build_ids = {stage.build_id for stage, _ in waiting}
+    builds = {b.id: b for b in CiBuild.query.filter(CiBuild.id.in_(build_ids)).all()} if build_ids else {}
+    return [(stage, current, builds[stage.build_id]) for stage, current in waiting if stage.build_id in builds]
+
+
+def _destroy_job_columns():
+    """The scalar columns the approvals views read off a provision job — never the
+    plan cipher, config, plan text or log tail."""
+    from ..models import ClusterProvisionJob as J
+
+    return (
+        J.id, J.build_id, J.operation, J.status, J.requested_by, J.requested_by_user_id, J.reason,
+        J.plan_summary_json, J.approved_by, J.approved_at, J.decision_note, J.created_at, J.finished_at,
+    )
+
+
+def _pending_destroys():
+    """(job, build) for every destroy waiting on its second person."""
+    from sqlalchemy.orm import load_only
+
+    from ..models import ClusterBuild, ClusterProvisionJob
+
+    rows = (
+        ClusterProvisionJob.query.options(load_only(*_destroy_job_columns()))
+        .filter_by(operation="destroy", status="awaiting_approval")
+        .order_by(ClusterProvisionJob.created_at.desc()).limit(_LIMIT).all()
+    )
+    build_ids = {job.build_id for job in rows}
+    builds = (
+        {b.id: b for b in ClusterBuild.query.filter(ClusterBuild.id.in_(build_ids)).all()}
+        if build_ids else {}
+    )
+    return [(job, builds[job.build_id]) for job in rows if job.build_id in builds]
+
+
+def _deployment_requests(user) -> List[Dict[str, Any]]:
+    from .deployment_request_service import _LIST_USER_LOADERS, serialize_request
 
     if not (_can(user, "deployment_requests:view") or _can(user, "deployment_requests:manage")):
         return []
     manage = _can(user, "deployment_requests:manage")
     me = _email(user)
     out = []
-    rows = (
-        DeploymentRequest.query.filter_by(status="pending")
-        .order_by(DeploymentRequest.created_at.desc()).limit(_LIMIT).all()
-    )
-    for row in rows:
+    for row in _pending_requests_query().options(*_LIST_USER_LOADERS).all():
         data = serialize_request(row)
         voted = any((v.get("email") or "").lower() == me for v in data["votes"]) if me else False
-        own = row.requester_id is not None and row.requester_id == getattr(user, "id", None)
-        why = (
-            "" if manage and not own and not voted
-            else "Your request — another approver decides it." if own
-            else "You already voted." if voted
-            else "Needs deployment_requests:manage."
-        )
+        why = _why_deployment_request(manage, _is_own(row.requester_id, user), voted)
         details = [f"Window {data['requestedWindowLabel']}"] if data.get("requestedWindowLabel") else []
         out.append(_item(
             "deployment_request", row.id,
@@ -151,9 +264,27 @@ def _deployment_requests(user) -> List[Dict[str, Any]]:
     return out
 
 
+def _bundle_summary_loaders(*item_columns) -> tuple:
+    """Votes, the requester/approver names, and only the named item columns —
+    never an item's payloads or YAML preview (a Helm item carries its whole
+    chart archive)."""
+    from sqlalchemy.orm import selectinload
+
+    from ..models import ChangeBundle, ChangeBundleItem, user_display_loader
+
+    columns = [ChangeBundleItem.id, ChangeBundleItem.bundle_id, ChangeBundleItem.position,
+               ChangeBundleItem.cluster_id, ChangeBundleItem.cluster_name]
+    columns += [getattr(ChangeBundleItem, name) for name in item_columns]
+    return (
+        selectinload(ChangeBundle.items).load_only(*columns),
+        selectinload(ChangeBundle.votes),
+        user_display_loader(ChangeBundle.requester),
+        user_display_loader(ChangeBundle.approved_by),
+    )
+
+
 def _change_bundles(user) -> List[Dict[str, Any]]:
-    from ..models import ChangeBundle
-    from .change_bundle_service import serialize_bundle
+    from .change_bundle_service import _active_cluster_names, _resolve_cluster_name, serialize_bundle
 
     if not (_can(user, "change_bundles:view") or _can(user, "change_bundles:manage")):
         return []
@@ -161,25 +292,22 @@ def _change_bundles(user) -> List[Dict[str, Any]]:
     me = _email(user)
     out = []
     rows = (
-        ChangeBundle.query.filter_by(status="pending_approval")
-        .order_by(ChangeBundle.created_at.desc()).limit(_LIMIT).all()
+        _pending_bundles_query()
+        .options(*_bundle_summary_loaders("action_type", "resource_kind", "resource_name", "namespace"))
+        .all()
     )
+    names = _active_cluster_names(item.cluster_id for row in rows for item in row.items)
     for row in rows:
-        data = serialize_bundle(row)
-        voted = me and any(
+        data = serialize_bundle(row, include_items=False, known_cluster_names=names)
+        voted = bool(me) and any(
             (v.voter_email or "").lower() == me and v.decision == "approve" for v in row.votes
         )
-        own = row.requester_user_id is not None and row.requester_user_id == getattr(user, "id", None)
-        why = (
-            "" if manage and not own and not voted
-            else "Your bundle — another approver decides it." if own
-            else "You already approved it." if voted
-            else "Needs change_bundles:manage."
-        )
-        items = data.get("items") or []
+        why = _why_change_bundle(manage, _is_own(row.requester_user_id, user), voted)
+        items = sorted(row.items, key=lambda i: i.position)
         details = [
-            f"{(i.get('actionType') or '').replace('_', ' ')} {i.get('resourceKind') or ''} "
-            f"{i.get('resourceName') or ''} in {i.get('namespace') or '-'} ({i.get('clusterName')})".strip()
+            f"{(i.action_type or '').replace('_', ' ')} {i.resource_kind or ''} "
+            f"{i.resource_name or ''} in {i.namespace or '-'} "
+            f"({_resolve_cluster_name(i.cluster_id, i.cluster_name, names)})".strip()
             for i in items[:6]
         ]
         if len(items) > 6:
@@ -207,31 +335,18 @@ def _change_bundles(user) -> List[Dict[str, Any]]:
 
 
 def _hermes(user) -> List[Dict[str, Any]]:
-    from ..models import TicketInterpretation
-    from .ticket_agent import engine, vm_requests
+    from .ticket_agent import engine
 
     if not _can(user, "ticketing:view"):
         return []
     manage = _can(user, "ticketing:manage")
     builds = _can(user, "cluster_builds:execute")
     out = []
-    rows = (
-        TicketInterpretation.query.filter_by(status="awaiting_approval")
-        .order_by(TicketInterpretation.created_at.desc()).limit(_LIMIT).all()
-    )
-    for task in rows:
+    for task in _pending_hermes():
         data = engine.serialize(task)
         vm = data.get("vmRequest")
         number = task.ticket_number or f"ticket {task.ticket_record_id}"
-        why = "" if manage else "Needs ticketing:manage."
-        if vm and not why:
-            if not builds:
-                why = "Approving new VMs needs cluster_builds:execute."
-            else:
-                try:
-                    vm_requests.check_approver(task, user)
-                except vm_requests.VmRequestError as exc:
-                    why = str(exc)
+        why = _why_hermes(task, user, manage, builds)
         if vm:
             machines = vm.get("machines") or []
             title = f"{number}: {len(machines) or vm.get('count')} new VM(s)" + (
@@ -271,25 +386,20 @@ def _hermes(user) -> List[Dict[str, Any]]:
 
 
 def _ci_stages(user) -> List[Dict[str, Any]]:
-    from ..models_ci import CiBuild, CiBuildStage, CiService
+    from ..models_ci import CiService
     from .ci import approval_config, approval_stage
-    from .ci import server_stage_base as base
 
     if not _can(user, "ci_builds:view"):
         return []
     out = []
-    rows = (
-        CiBuildStage.query.filter_by(stage_type="approval", status="running")
-        .order_by(CiBuildStage.started_at.desc()).limit(_LIMIT).all()
+    waiting = _waiting_ci_stages()
+    service_ids = {build.service_id for _, _, build in waiting if build.service_id}
+    services = (
+        {s.id: s for s in CiService.query.filter(CiService.id.in_(service_ids)).all()}
+        if service_ids else {}
     )
-    for stage in rows:
-        current = base.state(stage)
-        if current.get("phase") != "waiting_approval":
-            continue
-        build = db.session.get(CiBuild, stage.build_id)
-        if build is None:
-            continue
-        service = db.session.get(CiService, build.service_id) if build.service_id else None
+    for stage, current, build in waiting:
+        service = services.get(build.service_id) if build.service_id else None
         ok, reason, _ = approval_stage.eligibility(build, stage, user, "approve")
         decisions = current.get("decisions") or []
         started = current.get("startedBy") or {}
@@ -333,26 +443,12 @@ def _ci_stages(user) -> List[Dict[str, Any]]:
 
 
 def _cluster_destroys(user) -> List[Dict[str, Any]]:
-    from ..models import ClusterBuild, ClusterProvisionJob
-
     if not _can(user, "cluster_builds:view"):
         return []
     execute = _can(user, "cluster_builds:execute")
     out = []
-    rows = (
-        ClusterProvisionJob.query.filter_by(operation="destroy", status="awaiting_approval")
-        .order_by(ClusterProvisionJob.created_at.desc()).limit(_LIMIT).all()
-    )
-    for job in rows:
-        build = db.session.get(ClusterBuild, job.build_id)
-        if build is None:
-            continue
-        own = job.requested_by_user_id is not None and job.requested_by_user_id == getattr(user, "id", None)
-        why = (
-            "" if execute and not own
-            else "You asked for this destroy — someone else has to approve it." if own
-            else "Needs cluster_builds:execute."
-        )
+    for job, build in _pending_destroys():
+        why = _why_destroy(execute, _is_own(job.requested_by_user_id, user))
         summary = job.plan_summary_json or {}
         vms = [
             r.get("title") for r in summary.get("resources") or []
@@ -395,8 +491,191 @@ _COLLECTORS: Dict[str, Callable] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Counters — the same rules as the collectors, without serializing anything
+# ---------------------------------------------------------------------------
+
+def _count_deployment_requests(user) -> int:
+    from sqlalchemy import func
+
+    from ..models import DeploymentRequest, DeploymentRequestVote
+
+    if not _can(user, "deployment_requests:manage"):
+        return 0  # without manage nothing is decidable (and view-only sees no badge)
+    rows = (
+        _pending_requests_query()
+        .with_entities(DeploymentRequest.id, DeploymentRequest.requester_id).all()
+    )
+    ids = [rid for rid, owner in rows if not _is_own(owner, user)]
+    me = _email(user)
+    if not ids or not me:
+        return len(ids)
+    voted = {
+        rid for (rid,) in db.session.query(DeploymentRequestVote.request_id).filter(
+            DeploymentRequestVote.request_id.in_(ids),
+            func.lower(DeploymentRequestVote.voter_email) == me,
+        )
+    }
+    return sum(1 for rid in ids if rid not in voted)
+
+
+def _count_change_bundles(user) -> int:
+    from sqlalchemy import func
+
+    from ..models import ChangeBundle, ChangeBundleVote
+
+    if not _can(user, "change_bundles:manage"):
+        return 0
+    rows = _pending_bundles_query().with_entities(ChangeBundle.id, ChangeBundle.requester_user_id).all()
+    ids = [bid for bid, owner in rows if not _is_own(owner, user)]
+    me = _email(user)
+    if not ids or not me:
+        return len(ids)
+    voted = {
+        bid for (bid,) in db.session.query(ChangeBundleVote.bundle_id).filter(
+            ChangeBundleVote.bundle_id.in_(ids),
+            func.lower(ChangeBundleVote.voter_email) == me,
+            ChangeBundleVote.decision == "approve",
+        )
+    }
+    return sum(1 for bid in ids if bid not in voted)
+
+
+def _count_hermes(user) -> int:
+    if not (_can(user, "ticketing:view") and _can(user, "ticketing:manage")):
+        return 0
+    builds = _can(user, "cluster_builds:execute")
+    return sum(1 for task in _pending_hermes() if not _why_hermes(task, user, True, builds))
+
+
+def _count_ci_stages(user) -> int:
+    from .ci import approval_stage
+
+    if not _can(user, "ci_builds:view"):
+        return 0
+    return sum(
+        1 for stage, _current, build in _waiting_ci_stages()
+        if approval_stage.eligibility(build, stage, user, "approve")[0]
+    )
+
+
+def _count_destroys(user) -> int:
+    from ..models import ClusterBuild, ClusterProvisionJob
+
+    if not (_can(user, "cluster_builds:view") and _can(user, "cluster_builds:execute")):
+        return 0
+    rows = (
+        db.session.query(ClusterProvisionJob.requested_by_user_id, ClusterBuild.id)
+        .outerjoin(ClusterBuild, ClusterBuild.id == ClusterProvisionJob.build_id)
+        .filter(ClusterProvisionJob.operation == "destroy", ClusterProvisionJob.status == "awaiting_approval")
+        .order_by(ClusterProvisionJob.created_at.desc()).limit(_LIMIT).all()
+    )
+    return sum(1 for owner, build_id in rows if build_id is not None and not _is_own(owner, user))
+
+
+_COUNTERS: Dict[str, Callable] = {
+    "deployment_request": _count_deployment_requests,
+    "change_bundle": _count_change_bundles,
+    "hermes": _count_hermes,
+    "ci_stage": _count_ci_stages,
+    "cluster_destroy": _count_destroys,
+}
+
+
+# The sidebar asks every minute from every open tab; a short per-user cache
+# answers most of those. Any flush that adds, decides or withdraws something
+# approvable bumps the generation, so a vote shows in the badge at once.
+_COUNT_TTL_SECONDS = 20.0
+_count_lock = threading.Lock()
+_count_cache: Dict[int, tuple] = {}  # user id -> (expires monotonic, generation, count)
+_count_generation = 0
+
+
+def invalidate_waiting_counts() -> None:
+    """Forget every cached badge count (something approvable changed)."""
+    global _count_generation
+    with _count_lock:
+        _count_generation += 1
+        _count_cache.clear()
+
+
+def _count_cache_enabled() -> bool:
+    # Tests reset the database under the same user ids; they opt in explicitly.
+    try:
+        from flask import current_app
+
+        config = current_app.config
+        return bool(config.get("APPROVALS_COUNT_CACHE", not config.get("TESTING")))
+    except Exception:  # noqa: BLE001 — outside an app: no cache
+        return False
+
+
+def _cache_count(user, value: int, generation: int) -> None:
+    uid = getattr(user, "id", None)
+    if uid is None or not _count_cache_enabled():
+        return
+    with _count_lock:
+        if generation == _count_generation:
+            _count_cache[uid] = (time.monotonic() + _COUNT_TTL_SECONDS, generation, value)
+
+
+# Rows whose insert/delete changes what waits on someone, and the columns
+# whose update does.
+_WATCHED_COLUMNS = {
+    "DeploymentRequest": ("status",),
+    "DeploymentRequestVote": ("decision", "voter_email"),
+    "ChangeBundle": ("status",),
+    "ChangeBundleVote": ("decision", "voter_email"),
+    "TicketInterpretation": ("status", "decision"),
+    "CiBuildStage": ("status", "server_state"),
+    "ClusterProvisionJob": ("status",),
+}
+
+
+def _touches_approvals(session) -> bool:
+    from sqlalchemy import inspect as sa_inspect
+
+    for obj in list(session.new) + list(session.deleted):
+        if type(obj).__name__ in _WATCHED_COLUMNS:
+            if type(obj).__name__ != "CiBuildStage" or getattr(obj, "stage_type", None) == "approval":
+                return True
+    for obj in session.dirty:
+        columns = _WATCHED_COLUMNS.get(type(obj).__name__)
+        if not columns:
+            continue
+        if type(obj).__name__ == "CiBuildStage" and getattr(obj, "stage_type", None) != "approval":
+            continue
+        try:
+            attrs = sa_inspect(obj).attrs
+            if any(attrs[name].history.has_changes() for name in columns):
+                return True
+        except Exception:  # noqa: BLE001 — when unsure, forget the counts
+            return True
+    return False
+
+
+def _after_flush(session, _flush_context) -> None:
+    try:
+        if _count_cache and _touches_approvals(session):
+            invalidate_waiting_counts()
+    except Exception:  # noqa: BLE001 — a cache must never break a flush
+        logger.debug("Approvals count invalidation failed", exc_info=True)
+
+
+def _register_invalidation() -> None:
+    from sqlalchemy import event
+    from sqlalchemy.orm import Session
+
+    if not event.contains(Session, "after_flush", _after_flush):
+        event.listen(Session, "after_flush", _after_flush)
+
+
+_register_invalidation()
+
+
 def inbox(user, scope: str = "mine") -> Dict[str, Any]:
     """Everything pending the viewer may see; ``mine`` = what they may decide now."""
+    generation = _count_generation
     items: List[Dict[str, Any]] = []
     failed: List[str] = []
     for kind, collect in _COLLECTORS.items():
@@ -409,6 +688,7 @@ def inbox(user, scope: str = "mine") -> Dict[str, Any]:
     mine = [i for i in items if i["canDecide"]]
     shown = mine if scope == "mine" else items
     shown.sort(key=lambda i: i.get("requestedAt") or "", reverse=True)
+    _cache_count(user, len(mine), generation)
     return {
         "items": shown,
         "counts": {"waitingOnMe": len(mine), "pending": len(items)},
@@ -416,23 +696,72 @@ def inbox(user, scope: str = "mine") -> Dict[str, Any]:
     }
 
 
+def count_waiting(user) -> int:
+    """What :func:`inbox` would count as waiting on ``user``, without building it."""
+    total = 0
+    for kind, count in _COUNTERS.items():
+        try:
+            total += count(user)
+        except Exception:  # noqa: BLE001 — same as the inbox: a broken kind counts nothing
+            db.session.rollback()
+            logger.exception("Approvals count: %s could not be read", kind)
+    return total
+
+
 def waiting_count(user) -> int:
-    return inbox(user, "mine")["counts"]["waitingOnMe"]
+    """The sidebar badge: :func:`count_waiting`, cached per user for a few seconds."""
+    uid = getattr(user, "id", None)
+    if uid is not None and _count_cache_enabled():
+        with _count_lock:
+            hit = _count_cache.get(uid)
+            if hit and hit[0] > time.monotonic() and hit[1] == _count_generation:
+                return hit[2]
+    generation = _count_generation
+    value = count_waiting(user)
+    _cache_count(user, value, generation)
+    return value
 
 
 # ---------------------------------------------------------------------------
 # History
+#
+# Every kind orders by the same moment the merged list sorts on ("decidedAt"),
+# so ``limit`` and the ``before`` cursor go into each kind's own query.
 # ---------------------------------------------------------------------------
 
-def _history_requests(user) -> List[Dict[str, Any]]:
+def _parse_before(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _page(query, key, limit: int, before: Optional[datetime]):
+    if before is not None:
+        query = query.filter(key < before)
+    return query.order_by(key.desc()).limit(limit).all()
+
+
+def _history_requests(user, limit: int, before: Optional[datetime]) -> List[Dict[str, Any]]:
+    from sqlalchemy import func
+
     from ..models import DeploymentRequest
-    from .deployment_request_service import serialize_request
+    from .deployment_request_service import _LIST_USER_LOADERS, serialize_request
 
     if not (_can(user, "deployment_requests:view") or _can(user, "deployment_requests:manage")):
         return []
-    rows = (
-        DeploymentRequest.query.filter(DeploymentRequest.status != "pending")
-        .order_by(DeploymentRequest.created_at.desc()).limit(_LIMIT).all()
+    key = func.coalesce(DeploymentRequest.decided_at, DeploymentRequest.created_at)
+    rows = _page(
+        DeploymentRequest.query.options(*_LIST_USER_LOADERS).filter(DeploymentRequest.status != "pending"),
+        key, limit, before,
     )
     out = []
     for row in rows:
@@ -449,19 +778,24 @@ def _history_requests(user) -> List[Dict[str, Any]]:
     return out
 
 
-def _history_bundles(user) -> List[Dict[str, Any]]:
+def _history_bundles(user, limit: int, before: Optional[datetime]) -> List[Dict[str, Any]]:
+    from sqlalchemy import func
+
     from ..models import ChangeBundle
-    from .change_bundle_service import serialize_bundle
+    from .change_bundle_service import _active_cluster_names, serialize_bundle
 
     if not (_can(user, "change_bundles:view") or _can(user, "change_bundles:manage")):
         return []
-    rows = (
-        ChangeBundle.query.filter(ChangeBundle.status.notin_(("draft", "pending_approval")))
-        .order_by(ChangeBundle.updated_at.desc()).limit(_LIMIT).all()
+    key = func.coalesce(ChangeBundle.approved_at, ChangeBundle.updated_at)
+    rows = _page(
+        ChangeBundle.query.options(*_bundle_summary_loaders())
+        .filter(ChangeBundle.status.notin_(("draft", "pending_approval"))),
+        key, limit, before,
     )
+    names = _active_cluster_names(item.cluster_id for row in rows for item in row.items)
     out = []
     for row in rows:
-        data = serialize_bundle(row, include_items=False)
+        data = serialize_bundle(row, include_items=False, known_cluster_names=names)
         out.append({
             "key": f"change_bundle:{row.id}", "kind": "change_bundle",
             "kindLabel": KIND_LABELS["change_bundle"],
@@ -476,18 +810,14 @@ def _history_bundles(user) -> List[Dict[str, Any]]:
     return out
 
 
-def _history_hermes(user) -> List[Dict[str, Any]]:
-    from ..models import TicketInterpretation
+def _history_hermes(user, limit: int, before: Optional[datetime]) -> List[Dict[str, Any]]:
+    from ..models import TicketInterpretation as T
     from .ticket_agent import engine
 
     if not _can(user, "ticketing:view"):
         return []
-    rows = (
-        TicketInterpretation.query.filter(TicketInterpretation.decided_by.isnot(None))
-        .order_by(TicketInterpretation.decided_at.desc()).limit(_LIMIT).all()
-    )
     out = []
-    for task in rows:
+    for task in _page(T.query.filter(T.decided_by.isnot(None)), T.decided_at, limit, before):
         vm = (task.decision or {}).get("vmRequest")
         approved = task.status in ("executed",) or (vm and vm.get("approvedBy"))
         out.append({
@@ -501,13 +831,12 @@ def _history_hermes(user) -> List[Dict[str, Any]]:
             "href": f"#/ticketing/{task.provider or 'zoho'}/tickets",
         })
     # Approvals nobody decided: expired and withdrawn ones.
-    for task in (
-        TicketInterpretation.query.filter(
-            TicketInterpretation.decided_by.is_(None),
-            TicketInterpretation.approval_nonce.isnot(None),
-            TicketInterpretation.status.in_(("impediment", "superseded")),
-        ).order_by(TicketInterpretation.finished_at.desc()).limit(_LIMIT).all()
-    ):
+    unanswered = T.query.filter(
+        T.decided_by.is_(None),
+        T.approval_nonce.isnot(None),
+        T.status.in_(("impediment", "superseded")),
+    )
+    for task in _page(unanswered, T.finished_at, limit, before):
         out.append({
             "key": f"hermes:{task.id}", "kind": "hermes", "kindLabel": KIND_LABELS["hermes"],
             "title": f"{task.ticket_number or 'Ticket'}: {engine._describe_change(task)}",
@@ -520,25 +849,32 @@ def _history_hermes(user) -> List[Dict[str, Any]]:
     return out
 
 
-def _history_ci(user) -> List[Dict[str, Any]]:
+def _history_ci(user, limit: int, before: Optional[datetime]) -> List[Dict[str, Any]]:
     from ..models_ci import CiBuild, CiBuildStage, CiService
     from .ci import server_stage_base as base
 
     if not _can(user, "ci_builds:view"):
         return []
-    rows = (
+    rows = _page(
         CiBuildStage.query.filter(
             CiBuildStage.stage_type == "approval",
             CiBuildStage.status.in_(("success", "failed", "cancelled")),
-        ).order_by(CiBuildStage.finished_at.desc()).limit(_LIMIT).all()
+        ),
+        CiBuildStage.finished_at, limit, before,
+    )
+    decided = [(stage, base.state(stage)) for stage in rows]
+    decided = [(stage, current) for stage, current in decided if current.get("outcome") not in (None, "skipped")]
+    build_ids = {stage.build_id for stage, _ in decided}
+    builds = {b.id: b for b in CiBuild.query.filter(CiBuild.id.in_(build_ids)).all()} if build_ids else {}
+    service_ids = {b.service_id for b in builds.values() if b.service_id}
+    services = (
+        {s.id: s for s in CiService.query.filter(CiService.id.in_(service_ids)).all()}
+        if service_ids else {}
     )
     out = []
-    for stage in rows:
-        current = base.state(stage)
-        if current.get("outcome") in (None, "skipped"):
-            continue
-        build = db.session.get(CiBuild, stage.build_id)
-        service = db.session.get(CiService, build.service_id) if build and build.service_id else None
+    for stage, current in decided:
+        build = builds.get(stage.build_id)
+        service = services.get(build.service_id) if build and build.service_id else None
         decisions = current.get("decisions") or []
         out.append({
             "key": f"ci_stage:{stage.id}", "kind": "ci_stage", "kindLabel": KIND_LABELS["ci_stage"],
@@ -555,20 +891,30 @@ def _history_ci(user) -> List[Dict[str, Any]]:
     return out
 
 
-def _history_destroys(user) -> List[Dict[str, Any]]:
-    from ..models import ClusterBuild, ClusterProvisionJob
+def _history_destroys(user, limit: int, before: Optional[datetime]) -> List[Dict[str, Any]]:
+    from sqlalchemy import func
+    from sqlalchemy.orm import load_only
+
+    from ..models import ClusterBuild, ClusterProvisionJob as J
 
     if not _can(user, "cluster_builds:view"):
         return []
-    rows = (
-        ClusterProvisionJob.query.filter(
-            ClusterProvisionJob.operation == "destroy",
-            ClusterProvisionJob.status.notin_(("awaiting_approval", "planning", "planned")),
-        ).order_by(ClusterProvisionJob.created_at.desc()).limit(_LIMIT).all()
+    key = func.coalesce(J.approved_at, J.finished_at, J.created_at)
+    rows = _page(
+        J.query.options(load_only(*_destroy_job_columns())).filter(
+            J.operation == "destroy",
+            J.status.notin_(("awaiting_approval", "planning", "planned")),
+        ),
+        key, limit, before,
+    )
+    build_ids = {job.build_id for job in rows}
+    builds = (
+        {b.id: b for b in ClusterBuild.query.filter(ClusterBuild.id.in_(build_ids)).all()}
+        if build_ids else {}
     )
     out = []
     for job in rows:
-        build = db.session.get(ClusterBuild, job.build_id)
+        build = builds.get(job.build_id)
         outcome = (
             "rejected" if job.status == "rejected"
             else "withdrawn" if job.status == "discarded"
@@ -582,7 +928,7 @@ def _history_destroys(user) -> List[Dict[str, Any]]:
             "where": build.result_cluster_id if build else None,
             "requestedBy": job.requested_by, "requestedAt": _iso(job.created_at),
             "outcome": outcome, "decidedBy": job.approved_by,
-            "decidedAt": _iso(job.approved_at or job.finished_at),
+            "decidedAt": _iso(job.approved_at or job.finished_at or job.created_at),
             "href": f"#/cluster-builder/builds/{job.build_id}" if build else None,
         })
     return out
@@ -597,18 +943,28 @@ _HISTORY: Dict[str, Callable] = {
 }
 
 
-def history(user, kind: Optional[str] = None, limit: int = _LIMIT) -> Dict[str, Any]:
+def _decided_sort_key(item: Dict[str, Any]) -> datetime:
+    return _parse_before(item.get("decidedAt")) or datetime.min.replace(tzinfo=timezone.utc)
+
+
+def history(user, kind: Optional[str] = None, limit: int = _LIMIT, before: Any = None) -> Dict[str, Any]:
+    """What was decided, newest first. ``before`` (a ``decidedAt`` from a previous
+    page, or ``nextBefore``) returns the page after it."""
+    limit = max(1, min(int(limit or _LIMIT), 500))
+    cursor = _parse_before(before)
     items: List[Dict[str, Any]] = []
     for name, collect in _HISTORY.items():
         if kind and kind != name:
             continue
         try:
-            items.extend(collect(user))
+            items.extend(collect(user, limit, cursor))
         except Exception:  # noqa: BLE001
             db.session.rollback()
             logger.exception("Approvals history: %s could not be read", name)
-    items.sort(key=lambda i: i.get("decidedAt") or "", reverse=True)
-    return {"items": items[: max(1, min(int(limit or _LIMIT), 500))]}
+    items.sort(key=_decided_sort_key, reverse=True)
+    page = items[:limit]
+    next_before = page[-1].get("decidedAt") if len(page) == limit else None
+    return {"items": page, "nextBefore": next_before}
 
 
 # ---------------------------------------------------------------------------
