@@ -1,7 +1,12 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import ErrorBanner from "../../components/common/ErrorBanner.jsx";
 import LoadingState from "../../components/common/LoadingState.jsx";
-import { getSmtpSettings, listReceivers } from "../../api/alertRoutingApi.js";
+import {
+  getSmtpSettings,
+  listReceiverGroups,
+  listReceivers,
+} from "../../api/alertRoutingApi.js";
+import { listRoles, listUsers } from "../../api/usersApi.js";
 import { SmtpTab, ReceiversTab } from "../AlertRoutingPage.jsx";
 import ICONS from "./settingsIcons.jsx";
 
@@ -70,13 +75,81 @@ function SmtpConfig({ onChanged }) {
     load();
   }, [load]);
 
-  if (loading) return <LoadingState label="Loading SMTP settings..." />;
+  // Only the first load shows the spinner. Reloading after a save used to swap
+  // the form for it, which unmounted SmtpTab and threw away its "saved" /
+  // test-email result the moment it appeared.
+  if (loading && !smtp) return <LoadingState label="Loading SMTP settings..." />;
   return (
     <>
       {error ? <ErrorBanner message={error} onDismiss={() => setError("")} /> : null}
       <SmtpTab
         smtp={smtp}
         onSaved={() => {
+          load();
+          onChanged?.();
+        }}
+      />
+      <EmailRecipientsConfig onChanged={onChanged} />
+    </>
+  );
+}
+
+/* ─── Who the SMTP server mails ───
+   User, role and (legacy) email receivers, plus receiver groups, had no screen
+   once Alert Routing left the Alerts page: Slack and Webhooks each got their
+   own type, and these were left behind — alert policies listed them, nothing
+   could create or edit them. They are email destinations, so they live here. */
+const EMAIL_RECEIVER_TYPES = ["user", "role", "email"];
+
+function EmailRecipientsConfig({ onChanged }) {
+  const [state, setState] = useState(null);
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    setError("");
+    try {
+      const [receiverList, groupList, userList, roleList] = await Promise.all([
+        listReceivers(),
+        listReceiverGroups(),
+        listUsers().catch(() => ({ items: [] })),
+        listRoles().catch(() => ({ items: [] })),
+      ]);
+      setState({
+        receivers: receiverList?.items || receiverList || [],
+        groups: groupList?.items || [],
+        users: userList?.items || [],
+        roles: roleList?.items || [],
+      });
+    } catch (err) {
+      setError(err.message || "Failed to load recipients.");
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  if (!state) {
+    return error ? (
+      <ErrorBanner message={error} onDismiss={() => setError("")} />
+    ) : (
+      <LoadingState label="Loading recipients..." />
+    );
+  }
+  return (
+    <>
+      {error ? <ErrorBanner message={error} onDismiss={() => setError("")} /> : null}
+      <ReceiversTab
+        receivers={state.receivers}
+        groups={state.groups}
+        users={state.users}
+        roles={state.roles}
+        typeFilter={EMAIL_RECEIVER_TYPES}
+        withGroups
+        title="Email recipients"
+        description="People and roles alert policies can email. Groups bundle receivers into teams."
+        emptyMessage="No email recipients yet. Add a user or a role to start emailing alerts."
+        onChanged={() => {
           load();
           onChanged?.();
         }}
@@ -92,6 +165,7 @@ function ReceiversConfig({ typeFilter, title, description, emptyMessage, onChang
   const [receivers, setReceivers] = useState([]);
   const [users, setUsers] = useState([]);
   const [roles, setRoles] = useState([]);
+  const [loadedOnce, setLoadedOnce] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -101,6 +175,7 @@ function ReceiversConfig({ typeFilter, title, description, emptyMessage, onChang
     try {
       const receiverList = await listReceivers();
       setReceivers(receiverList?.items || receiverList || []);
+      setLoadedOnce(true);
       // The shared modal takes users and roles for user/role receivers, which
       // this screen never shows — empty lists rather than two calls whose
       // results cannot affect anything rendered here.
@@ -117,7 +192,9 @@ function ReceiversConfig({ typeFilter, title, description, emptyMessage, onChang
     load();
   }, [load]);
 
-  if (loading) return <LoadingState label="Loading destinations..." />;
+  // First load only — see SmtpConfig: a reload must not unmount the table and
+  // lose its test result.
+  if (loading && !loadedOnce) return <LoadingState label="Loading destinations..." />;
   return (
     <>
       {error ? <ErrorBanner message={error} onDismiss={() => setError("")} /> : null}

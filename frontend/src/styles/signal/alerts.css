@@ -1018,6 +1018,73 @@
   padding: 0;
 }
 
+/* ── Policy form + log-context modals ──────────────────────────────
+   These forms had no label styles of their own: a plain input sat inline
+   beside its label text, the header crammed the title next to its lede, the
+   checkbox rows inherited .checkbox-label's 1.7rem top margin (huge gaps
+   between receivers), and .modal-footer has no base layout. */
+.alert-policy-modal .modal-header,
+.alert-log-detail-modal .modal-header {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-1);
+}
+
+.alert-log-detail-modal .modal-header {
+  flex-direction: row;
+  align-items: center;
+}
+
+.alert-policy-modal .modal-header h2,
+.alert-log-detail-modal .modal-header h2 {
+  margin: 0;
+  font-size: var(--font-size-lg);
+}
+
+.alert-policy-modal .modal-header p {
+  margin: 0;
+}
+
+.alert-policy-modal label:not(.checkbox-label) {
+  display: grid;
+  gap: var(--space-1);
+  align-content: start;
+}
+
+.alert-policy-modal label:not(.checkbox-label) > input,
+.alert-policy-modal label:not(.checkbox-label) > textarea {
+  width: 100%;
+}
+
+.alert-policy-modal .checkbox-label,
+.alert-policy-modal .settings-checkbox {
+  margin-top: 0;
+}
+
+.alert-policy-modal .routing-rule-receiver-list {
+  gap: 0;
+}
+
+.alert-policy-modal .routing-rule-receiver-option {
+  padding: var(--space-1) 0;
+}
+
+.alert-policy-modal .modal-footer,
+.alert-log-detail-modal .modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-soft);
+}
+
+.receiver-type-user,
+.receiver-type-role {
+  color: var(--text-subtle);
+  background: var(--bg-interactive);
+}
+
 /* ── Responsive ─────────────────────────────────────────────────── */
 @media (max-width: 1024px) {
   .alerts-page .al-tiles {

@@ -153,8 +153,8 @@ function ActivityTab({ integrationKey, integrationName }) {
         </ol>
       ) : (
         <EmptyState
-          title="Nothing yet"
-          message={`${integrationName} has not recorded any activity. Entries appear here once it runs.`}
+          message="Nothing yet"
+          hint={`${integrationName} has not recorded any activity. Entries appear here once it runs.`}
         />
       )}
     </div>
@@ -166,8 +166,8 @@ function UsedByTab({ integration }) {
   if (!usedBy.length) {
     return (
       <EmptyState
-        title="Not referenced yet"
-        message={`Nothing in KubeSight depends on ${integration.name} right now. Turning it off would have no effect.`}
+        message="Not referenced yet"
+        hint={`Nothing in KubeSight depends on ${integration.name} right now. Turning it off would have no effect.`}
       />
     );
   }
@@ -242,6 +242,15 @@ export default function IntegrationDetail({
 
   const toggleEnabled = async () => {
     const next = !integration.enabled;
+    // Turning a connection off stops everything listed under Used by.
+    if (
+      !next &&
+      !window.confirm(
+        `Disable ${integration.name}? Everything that uses it stops until it is enabled again.`
+      )
+    ) {
+      return;
+    }
     setTogglingEnabled(true);
     setError("");
     try {

@@ -82,6 +82,7 @@ export default function ApiTokensPage() {
   const [name, setName] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
   const [issued, setIssued] = useState(null);
+  const [revokingId, setRevokingId] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -102,8 +103,9 @@ export default function ApiTokensPage() {
     load();
   }, [load]);
 
-  const create = async () => {
-    if (!name.trim()) return;
+  const create = async (event) => {
+    event?.preventDefault();
+    if (!name.trim() || creating) return;
     setCreating(true);
     setError("");
     try {
@@ -132,17 +134,23 @@ export default function ApiTokensPage() {
       )
     )
       return;
+    setRevokingId(token.id);
     try {
       await revokeApiToken(token.id);
-      load();
+      await load();
     } catch (err) {
       setError(err.message || "Could not revoke the token.");
+    } finally {
+      setRevokingId(null);
     }
   };
 
   if (loading) return <LoadingState label="Loading API tokens…" />;
 
   const active = tokens.filter((item) => item.is_active && !isExpired(item));
+  // The token expires at 00:00 UTC of the picked day, so today (or earlier)
+  // would mint a token that is already dead.
+  const tomorrow = new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 10);
 
   return (
     <div className="ops-page">
@@ -161,7 +169,7 @@ export default function ApiTokensPage() {
 
       {issued && <NewTokenPanel token={issued} onDismiss={() => setIssued(null)} />}
 
-      <section className="form-section sg-tok-create">
+      <form className="form-section sg-tok-create" onSubmit={create}>
         <h4>Create a token</h4>
         <div className="form-grid">
           <label>
@@ -180,6 +188,7 @@ export default function ApiTokensPage() {
             Expires
             <input
               type="date"
+              min={tomorrow}
               value={expiresAt}
               onChange={(event) => setExpiresAt(event.target.value)}
             />
@@ -188,17 +197,12 @@ export default function ApiTokensPage() {
             </span>
           </label>
           <div className="form-grid__full">
-            <button
-              type="button"
-              className="primary"
-              onClick={create}
-              disabled={creating || !name.trim()}
-            >
+            <button type="submit" className="primary" disabled={creating || !name.trim()}>
               {creating ? "Creating…" : "Create token"}
             </button>
           </div>
         </div>
-      </section>
+      </form>
 
       <section className="form-section">
         <div className="sg-tok-head">
@@ -209,8 +213,8 @@ export default function ApiTokensPage() {
 
         {tokens.length === 0 ? (
           <EmptyState
-            title="No API tokens yet"
-            message="Create one above to let a script, a pipeline or an agent authenticate as you."
+            message="No API tokens yet"
+            hint="Create one above to let a script, a pipeline or an agent authenticate as you."
           />
         ) : (
           <table className="sg-tok-table">
@@ -256,8 +260,9 @@ export default function ApiTokensPage() {
                           type="button"
                           className="btn-outline btn-compact sg-ci-danger"
                           onClick={() => revoke(token)}
+                          disabled={revokingId === token.id}
                         >
-                          Revoke
+                          {revokingId === token.id ? "Revoking…" : "Revoke"}
                         </button>
                       )}
                     </td>

@@ -735,3 +735,29 @@
     transition: none;
   }
 }
+
+/* ─── Button-element overrides ───
+   index.css centres every <button> (inline-flex + justify-content:center).
+   The rail rows and theme tiles are buttons, so the rail labels sat centred
+   and each theme tile laid its preview, label and hint out in a squashed
+   row instead of the stacked card the preview's margin-bottom assumes. */
+.settings-rail-link,
+.settings-rail-ext {
+  justify-content: flex-start;
+}
+.theme-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 0;
+}
+.theme-tile-preview {
+  flex: none;
+}
+/* !important: ui-polish's global button rule (0,8,1) pads every button,
+   which left a gap before the sentence's full stop. */
+.settings-card-footnote .link-button {
+  padding: 0 !important;
+  min-height: 0 !important;
+}

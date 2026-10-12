@@ -4,6 +4,15 @@ import AccessDeniedPage from "../components/auth/AccessDenied.jsx";
 import ErrorBanner from "../components/common/ErrorBanner.jsx";
 import { formatAccessError, isAccessDeniedError } from "../utils/authz.js";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
+import { parseApiTime } from "../lib/apiTime.js";
+
+const PAGE_SIZE = 200;
+
+// createdAt is naive UTC; read as local it was off by the viewer's UTC offset.
+function formatWhen(value) {
+  const ms = parseApiTime(value);
+  return Number.isFinite(ms) ? new Date(ms).toLocaleString() : "—";
+}
 
 // Audit entries reference a cluster in a few ways depending on the action:
 // deployment requests store it in details.clusterId; cluster/namespace/resource
@@ -40,13 +49,35 @@ export default function AuditLogsPage() {
   const [clusterNameById, setClusterNameById] = useState({});
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState("");
+  const [total, setTotal] = useState(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  // The page used to stop at the newest 200 entries with no way past them,
+  // while the filters below only search what is loaded. "Load more" pages
+  // back through the API's offset; the export always covers everything.
+  const loadMore = async () => {
+    setLoadingMore(true);
+    try {
+      const data = await listAuditLogs({ limit: PAGE_SIZE, offset: entries.length });
+      setEntries((prev) => {
+        const seen = new Set(prev.map((entry) => entry.id));
+        return [...prev, ...(data.items || []).filter((entry) => !seen.has(entry.id))];
+      });
+      setTotal(data.total ?? null);
+    } catch (err) {
+      setExportError(err.message || "Could not load more entries.");
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   useEffect(() => {
     const load = async () => {
       setLoading(true);
       try {
-        const data = await listAuditLogs({ limit: 200 });
+        const data = await listAuditLogs({ limit: PAGE_SIZE });
         setEntries(data.items || []);
+        setTotal(data.total ?? null);
       } catch (err) {
         setError(err.message);
       } finally {
@@ -220,7 +251,10 @@ export default function AuditLogsPage() {
         {!loading && !isAccessDeniedError(error) ? (
           <>
             <p className="muted" style={{ marginBottom: "0.5rem" }}>
-              Showing {filtered.length} of {entries.length} entries
+              Showing {filtered.length} of {entries.length} loaded entries
+              {total != null && total > entries.length
+                ? ` (${total.toLocaleString()} in total — the filters search the loaded ones; Export covers all)`
+                : ""}
             </p>
             <div className="table-wrap">
               <table className="data-table">
@@ -241,7 +275,7 @@ export default function AuditLogsPage() {
                   ) : (
                     filtered.map((entry) => (
                       <tr key={entry.id}>
-                        <td>{entry.createdAt ? new Date(entry.createdAt).toLocaleString() : "—"}</td>
+                        <td>{formatWhen(entry.createdAt)}</td>
                         <td>{displayActor(entry)}</td>
                         <td>{entry.action}</td>
                         <td>
@@ -259,6 +293,20 @@ export default function AuditLogsPage() {
                 </tbody>
               </table>
             </div>
+            {total != null && total > entries.length ? (
+              <div style={{ display: "flex", justifyContent: "center", marginTop: "0.75rem" }}>
+                <button
+                  type="button"
+                  className="btn-outline btn-compact"
+                  onClick={loadMore}
+                  disabled={loadingMore}
+                >
+                  {loadingMore
+                    ? "Loading…"
+                    : `Load ${Math.min(PAGE_SIZE, total - entries.length)} older entries`}
+                </button>
+              </div>
+            ) : null}
           </>
         ) : null}
       </section>

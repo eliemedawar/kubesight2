@@ -1,4 +1,5 @@
 import { hasAnyClusterAccess, hasAnyNamespaceAccess, isAdminUser } from "../utils/authz.js";
+import { parseApiTime } from "./apiTime.js";
 
 const SOURCE_LABELS = {
   cpu_usage_vs_limit: "CPU usage exceeded the configured threshold.",
@@ -28,11 +29,13 @@ export function formatAlertTime(value) {
   if (!value) {
     return "—";
   }
-  try {
-    return new Date(value).toLocaleString();
-  } catch {
+  // The API sends naive UTC ("2026-10-11T21:15:55"); `new Date()` would read it
+  // as local time and show it off by the UTC offset.
+  const ms = typeof value === "number" ? value : parseApiTime(value);
+  if (Number.isNaN(ms)) {
     return String(value);
   }
+  return new Date(ms).toLocaleString();
 }
 
 export function getAlertResourceName(alert) {

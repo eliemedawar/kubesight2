@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { listPermissions } from "../../api/usersApi";
+import { useEscapeToClose } from "../../hooks/useEscapeToClose.js";
 import {
   PERMISSION_GROUPS as FALLBACK_GROUPS,
   permissionLabel,
@@ -129,6 +130,13 @@ export default function RoleFormModal({
       setFormError("Role name is required.");
       return;
     }
+    // Same rule the API enforces — say it here instead of after a round trip.
+    if (!role?.isSystemRole && !/^[a-z][a-z0-9_]*$/.test(form.name.trim())) {
+      setFormError(
+        "Role name must start with a letter and use only lowercase letters, numbers, and underscores."
+      );
+      return;
+    }
     if (!form.permissions.length) {
       setFormError("Select at least one permission.");
       return;
@@ -147,6 +155,9 @@ export default function RoleFormModal({
     }
   };
 
+  // Not while saving: closing then would hide the result of a request in flight.
+  useEscapeToClose(onClose, !saving, Boolean(open));
+
   if (!open) {
     return null;
   }
@@ -154,8 +165,16 @@ export default function RoleFormModal({
   const title = mode === "view" ? "View Role" : role ? "Edit Role" : "Create Role";
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <div className="modal-card modal-card--wide" role="dialog" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      // mousedown, not click: a drag-select ending on the backdrop must not
+      // discard a half-built role.
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && !saving) onClose();
+      }}
+    >
+      <div className="modal-card modal-card--wide" role="dialog" aria-modal="true">
         <div className="modal-card__header">
           <h3>{title}</h3>
           <p className="muted">
@@ -184,6 +203,11 @@ export default function RoleFormModal({
                 disabled={readOnly || Boolean(role?.isSystemRole)}
                 placeholder="e.g. platform_operator"
               />
+              {!readOnly && !role?.isSystemRole ? (
+                <span className="muted role-preset-desc">
+                  Lowercase letters, numbers and underscores; starts with a letter.
+                </span>
+              ) : null}
             </label>
             <label className="form-grid__full">
               Description
@@ -274,8 +298,16 @@ export default function RoleFormModal({
           </div>
         </section>
 
+        {/* Repeated beside the buttons: the permission list is long, and an
+            error shown only at the top was scrolled out of sight. */}
+        {formError ? (
+          <p className="banner-message error" role="alert">
+            {formError}
+          </p>
+        ) : null}
+
         <div className="modal-actions">
-          <button type="button" className="btn-outline" onClick={onClose}>
+          <button type="button" className="btn-outline" onClick={onClose} disabled={saving}>
             {readOnly ? "Close" : "Cancel"}
           </button>
           {!readOnly ? (

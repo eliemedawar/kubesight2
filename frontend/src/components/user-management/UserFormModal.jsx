@@ -7,6 +7,7 @@ import AccessRulesEditor, {
 } from "./AccessRulesEditor";
 import EffectiveAccessPreview from "./EffectiveAccessPreview";
 import SearchableSelect from "../common/SearchableSelect.jsx";
+import { useEscapeToClose } from "../../hooks/useEscapeToClose.js";
 import {
   allowedClusterSnapshot,
   buildEffectiveAccessPreview,
@@ -90,11 +91,17 @@ export default function UserFormModal({
     const clusterIds = clusters.map((c) => c.id);
 
     if (!editingUser?.id) {
+      // Least privilege by default: roles come back admin-first, so roles[0]
+      // made every invite a full administrator unless someone noticed.
+      const defaultRole =
+        roles.find((role) => role.name === "viewer") ||
+        roles.find((role) => !isFullAccessRole(role)) ||
+        roles[0];
       setForm({
         username: "",
         fullName: "",
         email: "",
-        roleId: roles[0]?.id || "",
+        roleId: defaultRole?.id || "",
         isActive: true,
       });
       setClusterGrants(
@@ -221,14 +228,26 @@ export default function UserFormModal({
     }
   };
 
+  // Not while saving: closing then would hide the result of a request in flight.
+  useEscapeToClose(onClose, !saving, Boolean(open));
+
   if (!open) return null;
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      // mousedown, not click: a text selection dragged out of a field ends on
+      // the backdrop, and a click there threw the whole form away.
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && !saving) onClose();
+      }}
+    >
       <div
         className="modal-card modal-card--wide"
         role="dialog"
-        onClick={(e) => e.stopPropagation()}
+        aria-modal="true"
+        aria-label={editingUser ? "Edit user" : "Add user"}
       >
         <div className="modal-card__header">
           <h3>{editingUser ? "Edit User" : "Add User"}</h3>
@@ -325,8 +344,16 @@ export default function UserFormModal({
           </>
         ) : null}
 
+        {/* Repeated beside Save: with several clusters the form is long and
+            the top banner is out of sight when the error appears. */}
+        {formError ? (
+          <p className="banner-message error" role="alert">
+            {formError}
+          </p>
+        ) : null}
+
         <div className="modal-actions">
-          <button type="button" className="btn-outline" onClick={onClose}>
+          <button type="button" className="btn-outline" onClick={onClose} disabled={saving}>
             Cancel
           </button>
           <button type="button" className="primary" onClick={handleSubmit} disabled={saving}>

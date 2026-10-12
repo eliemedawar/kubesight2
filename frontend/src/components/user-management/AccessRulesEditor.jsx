@@ -160,6 +160,12 @@ export default function AccessRulesEditor({
         <p className="muted">
           Choose how much of each cluster this user can see. You do not need to know technical permission names.
         </p>
+        {!clusters.length ? (
+          <p className="muted">
+            No clusters are available yet. If the cluster list is still loading, close this form
+            and open it again in a moment.
+          </p>
+        ) : null}
         <div className="cluster-access-list">
           {clusters.map((cluster) => {
             const grant = clusterGrants[cluster.id] || emptyClusterGrant(cluster.id);

@@ -149,3 +149,14 @@
 .row-actions-menu__panel button.users-menu-danger:hover {
   background: var(--danger-soft);
 }
+
+/* The row menu panel is pinned to the viewport (see RowActionsMenu) so the
+   table's scroll container cannot clip it; items read left-aligned like a
+   menu, not centered like buttons. */
+.users-page .users-menu-panel {
+  z-index: 60;
+}
+
+.users-page .row-actions-menu__panel button {
+  justify-content: flex-start;
+}

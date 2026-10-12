@@ -1,6 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
-  formatAlertTime,
   getAlertResourceName,
   getAlertTypeLabel,
   isAutomationAlert,
@@ -8,8 +7,19 @@ import {
   isServiceAlert,
 } from "../../lib/alertDisplay.js";
 import { formatDurationShort, formatFiringDuration, parseAlertTime, severityInfo } from "../../lib/alertFeed.js";
+import { useEscapeToClose } from "../../hooks/useEscapeToClose.js";
 
 const AlertLogContextModal = lazy(() => import("./AlertLogContextModal.jsx"));
+
+// Backend timestamps are naive UTC (history rows especially); parseAlertTime
+// reads them as UTC so the drawer shows local time, not time off by the offset.
+function formatAlertTime(value) {
+  if (!value) {
+    return "—";
+  }
+  const ts = parseAlertTime(value);
+  return Number.isNaN(ts) ? String(value) : new Date(ts).toLocaleString();
+}
 
 function numeric(value) {
   const num = Number.parseFloat(String(value ?? "").replace("%", ""));
@@ -186,26 +196,24 @@ function AutomationSection({ alert }) {
 export default function AlertDetailDrawer({ alert, clusterLabel, onClose, onViewPolicy }) {
   const closeRef = useRef(null);
   const previousFocusRef = useRef(null);
+  const isOpen = Boolean(alert);
+  useEscapeToClose(onClose, true, isOpen);
 
+  // Keyed on opening/closing only: the parent passes a fresh onClose every
+  // render (and re-renders on every poll), and re-running this would yank
+  // focus back to the close button each time.
   useEffect(() => {
-    if (!alert) {
+    if (!isOpen) {
       return undefined;
     }
     previousFocusRef.current = document.activeElement;
     closeRef.current?.focus();
-    const onKeyDown = (event) => {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
     return () => {
-      document.removeEventListener("keydown", onKeyDown);
       if (previousFocusRef.current?.focus) {
         previousFocusRef.current.focus();
       }
     };
-  }, [alert, onClose]);
+  }, [isOpen]);
 
   if (!alert) {
     return null;

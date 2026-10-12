@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   createUser,
   deleteUser,
@@ -25,6 +25,7 @@ import { formatAccessError, isAccessDeniedError } from "../utils/authz.js";
 import { temporaryPasswordNotice } from "../utils/sensitiveResponses.js";
 import RolesPanel from "../components/user-management/RolesPanel";
 import { isFullAccessRole } from "../lib/rolePresets";
+import { parseApiTime } from "../lib/apiTime.js";
 
 const UserFormModal = lazy(() => import("../components/user-management/UserFormModal.jsx"));
 
@@ -87,6 +88,96 @@ const IconMore = () => (
     <circle cx="19" cy="12" r="1" />
   </SvgIcon>
 );
+
+/* ── Row actions menu ────────────────────────────────────────────────
+   A native <details> never closes on an outside click or Escape, and its
+   absolutely positioned panel was clipped by the table's scroll container —
+   Disable and Delete sat below the fold of the card for the last rows. This
+   keeps the markup and classes but owns `open`, closes on outside press /
+   Escape / scroll / picking an item, and pins the panel to the viewport
+   (above the trigger when there is no room below). */
+function RowActionsMenu({ label, children }) {
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState(null);
+  const detailsRef = useRef(null);
+  const summaryRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) {
+      return undefined;
+    }
+    const close = () => setOpen(false);
+    const onPointerDown = (event) => {
+      if (!detailsRef.current?.contains(event.target)) {
+        close();
+      }
+    };
+    // Capture phase, and the key is claimed, so the app-wide dialog stack
+    // leaves whatever is open underneath alone.
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+        summaryRef.current?.focus();
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [open]);
+
+  const toggle = (event) => {
+    event.preventDefault();
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    const rect = summaryRef.current.getBoundingClientRect();
+    const roomBelow = window.innerHeight - rect.bottom;
+    setPosition({
+      right: Math.max(8, window.innerWidth - rect.right),
+      ...(roomBelow < 340
+        ? { bottom: window.innerHeight - rect.top + 4 }
+        : { top: rect.bottom + 4 }),
+    });
+    setOpen(true);
+  };
+
+  return (
+    <details ref={detailsRef} className="row-actions-menu" open={open}>
+      <summary
+        ref={summaryRef}
+        className="btn-ghost users-more"
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={toggle}
+      >
+        <IconMore />
+      </summary>
+      {open ? (
+        <div
+          className="row-actions-menu__panel users-menu-panel"
+          style={{ position: "fixed", marginTop: 0, ...position }}
+          onClick={(event) => {
+            if (event.target.closest("button")) {
+              setOpen(false);
+            }
+          }}
+        >
+          {children}
+        </div>
+      ) : null}
+    </details>
+  );
+}
 
 /* ── Presentation helpers ────────────────────────────────────────── */
 const AVATAR_TINT_COUNT = 7; // users-av-0..6 → var(--chart-2..8)
@@ -319,11 +410,14 @@ export default function UserManagementPage({ clusters = [] }) {
       return;
     }
     setError("");
+    setBusyUserId(user.id);
     try {
       await disableUser(user.id);
       await loadData();
     } catch (err) {
       setError(err.message);
+    } finally {
+      setBusyUserId(null);
     }
   };
 
@@ -342,23 +436,25 @@ export default function UserManagementPage({ clusters = [] }) {
       return;
     }
     setError("");
+    setBusyUserId(user.id);
     try {
       await deleteUser(user.id);
       await loadData();
     } catch (err) {
       setError(err.message);
+    } finally {
+      setBusyUserId(null);
     }
   };
 
+  // The API sends naive UTC; parseApiTime adds the missing "Z" so a sign-in
+  // a minute ago no longer reads "3 h ago" east of Greenwich.
   const formatDate = (value) => {
     if (!value) {
       return "—";
     }
-    try {
-      return new Date(value).toLocaleString();
-    } catch {
-      return value;
-    }
+    const ms = parseApiTime(value);
+    return Number.isFinite(ms) ? new Date(ms).toLocaleString() : value;
   };
 
   // Concept-style relative timestamp ("2 min ago"); full date lives in the title attr.
@@ -366,7 +462,7 @@ export default function UserManagementPage({ clusters = [] }) {
     if (!value) {
       return "—";
     }
-    const then = new Date(value);
+    const then = new Date(parseApiTime(value));
     if (Number.isNaN(then.getTime())) {
       return value;
     }
@@ -533,11 +629,7 @@ export default function UserManagementPage({ clusters = [] }) {
           </button>
         ) : null}
         {hasMenu ? (
-          <details className="row-actions-menu">
-            <summary className="btn-ghost users-more" aria-label={`Actions for ${user.username}`}>
-              <IconMore />
-            </summary>
-            <div className="row-actions-menu__panel">
+          <RowActionsMenu label={`Actions for ${user.username}`}>
               {canUpdate ? (
                 <button type="button" onClick={() => openEdit(user.id)}>
                   Edit user
@@ -620,7 +712,7 @@ export default function UserManagementPage({ clusters = [] }) {
                   type="button"
                   className="users-menu-danger"
                   onClick={() => handleDisable(user)}
-                  disabled={isSelf}
+                  disabled={isSelf || busy}
                   title={isSelf ? "You cannot disable your own account" : undefined}
                 >
                   Disable
@@ -631,7 +723,7 @@ export default function UserManagementPage({ clusters = [] }) {
                   type="button"
                   className="users-menu-danger"
                   onClick={() => handleDelete(user)}
-                  disabled={isSelf}
+                  disabled={isSelf || busy}
                   title={
                     isSelf ? "You cannot delete your own account" : "Permanently delete this user"
                   }
@@ -639,8 +731,7 @@ export default function UserManagementPage({ clusters = [] }) {
                   Delete
                 </button>
               ) : null}
-            </div>
-          </details>
+          </RowActionsMenu>
         ) : (
           <span className="muted">—</span>
         )}
@@ -689,7 +780,7 @@ export default function UserManagementPage({ clusters = [] }) {
         ) : null}
       </nav>
 
-      {activeTab === "users" ? (
+      {activeTab === "users" || !canViewRoles ? (
         <>
           {readOnlyUsers ? (
             <p className="banner-message">You have read-only access to user accounts.</p>

@@ -26,8 +26,11 @@ import {
   shouldShowLogReceiverWarning,
 } from "../lib/logPolicyDefaults.js";
 import { setVisibleInterval } from "../lib/visibleInterval";
+import { useEscapeToClose } from "../hooks/useEscapeToClose.js";
 
 const RECEIVER_TYPE_LABELS = {
+  user: "User",
+  role: "Role",
   email: "Email",
   slack: "Slack",
   webhook: "Webhook",
@@ -86,16 +89,16 @@ function PolicyLastEvalCell({ policy }) {
   );
 }
 
-function PolicyRowActions({ policy, onEdit, onToggle, onDelete }) {
+function PolicyRowActions({ policy, busy, onEdit, onToggle, onDelete }) {
   return (
     <div className="inventory-actions-cell policy-table-actions" onClick={(e) => e.stopPropagation()}>
       <button type="button" className="btn-text" onClick={() => onEdit(policy)}>
         Edit
       </button>
-      <button type="button" className="btn-text" onClick={() => onToggle(policy)}>
+      <button type="button" className="btn-text" onClick={() => onToggle(policy)} disabled={busy}>
         {policy.enabled ? "Disable" : "Enable"}
       </button>
-      <button type="button" className="btn-text danger-text" onClick={() => onDelete(policy)}>
+      <button type="button" className="btn-text danger-text" onClick={() => onDelete(policy)} disabled={busy}>
         Delete
       </button>
     </div>
@@ -236,6 +239,9 @@ function PolicyFormModal({
     }
   }, [open, initial]);
 
+  // A SearchableSelect panel claims its own Escape first.
+  useEscapeToClose(onClose, true, Boolean(open));
+
   const applyLogDefaults = (previous) =>
     applyLogPolicyDefaults(previous, logDefaultsContext, touchedRef.current);
 
@@ -361,10 +367,20 @@ function PolicyFormModal({
   };
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      // mousedown, not click: a text selection dragged out of an input ends
+      // on the backdrop, and a click there would discard the whole form.
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
       <form
         className="modal-card alert-policy-modal"
-        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={mode === "edit" ? "Edit alert policy" : "Create alert policy"}
         onSubmit={handleSubmit}
       >
         <header className="modal-header">
@@ -785,8 +801,9 @@ function PolicyFormModal({
         <section className="alert-policy-section">
           <h3>Notification Receivers</h3>
           <p className="muted alert-policy-routing-hint">
-            Choose where to send notifications when this policy fires. Configure receivers under
-            Administration → Alert Routing.
+            Choose where to send notifications when this policy fires. People, roles and groups are
+            set up under Integrations → SMTP; Slack and webhook destinations under their own
+            integrations.
           </p>
           {showReceiverWarning ? (
             <p className="alert-policy-receiver-warning" role="status">
@@ -839,7 +856,7 @@ function PolicyFormModal({
           ) : null}
 
           {!receiverGroups.length && !receivers.length ? (
-            <p className="muted">No receivers configured yet. Add receivers or groups in Alert Routing.</p>
+            <p className="muted">No receivers configured yet. Add them under Integrations → SMTP, Slack or Webhooks.</p>
           ) : null}
         </section>
 
@@ -888,6 +905,9 @@ export default function AlertPoliciesPage({
   const [editing, setEditing] = useState(null);
   const [saving, setSaving] = useState(false);
   const [modalError, setModalError] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [actionError, setActionError] = useState("");
+  const [busyPolicyId, setBusyPolicyId] = useState(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -904,6 +924,7 @@ export default function AlertPoliciesPage({
       setPolicies([]);
     } finally {
       setLoading(false);
+      setLoaded(true);
     }
   }, [clusterId]);
 
@@ -967,12 +988,18 @@ export default function AlertPoliciesPage({
     }
   };
 
+  // Row action failures get their own banner: routed through `error` they
+  // replaced the whole table until the next 30s poll cleared it.
   const handleToggle = async (policy) => {
+    setActionError("");
+    setBusyPolicyId(policy.id);
     try {
       await setAlertPolicyEnabled(policy.id, !policy.enabled);
       await loadData();
     } catch (toggleError) {
-      setError(toggleError.message);
+      setActionError(toggleError.message);
+    } finally {
+      setBusyPolicyId(null);
     }
   };
 
@@ -980,11 +1007,15 @@ export default function AlertPoliciesPage({
     if (!window.confirm(`Delete policy "${policy.name}"?`)) {
       return;
     }
+    setActionError("");
+    setBusyPolicyId(policy.id);
     try {
       await deleteAlertPolicy(policy.id);
       await loadData();
     } catch (deleteError) {
-      setError(deleteError.message);
+      setActionError(deleteError.message);
+    } finally {
+      setBusyPolicyId(null);
     }
   };
 
@@ -1053,7 +1084,10 @@ export default function AlertPoliciesPage({
   const header = embedded ? (
     canManage ? (
       <div className="al-embed-head">
-        <button type="button" className="primary" onClick={openCreate} disabled={!hasClusters}>
+        <button type="button" className="primary" onClick={openCreate}
+          disabled={!hasClusters}
+          title={hasClusters ? undefined : "No clusters are available to scope a policy to"}
+        >
           Create Policy
         </button>
       </div>
@@ -1065,7 +1099,10 @@ export default function AlertPoliciesPage({
         subtitle="Define cluster-level alert rules evaluated continuously against metrics and workload health."
       />
       {canManage ? (
-        <button type="button" className="primary" onClick={openCreate} disabled={!hasClusters}>
+        <button type="button" className="primary" onClick={openCreate}
+          disabled={!hasClusters}
+          title={hasClusters ? undefined : "No clusters are available to scope a policy to"}
+        >
           Create Policy
         </button>
       ) : null}
@@ -1076,12 +1113,17 @@ export default function AlertPoliciesPage({
     <div className="ops-page alert-policies-page">
       <AccessScopeView
         coreLoading={coreLoading}
-        loading={loading}
+        // The prop is pageLoading (a `loading` prop was silently ignored, so the
+        // first load flashed "No alert policies"); polls refresh in place.
+        pageLoading={loading && !loaded}
         accessError={accessError || error}
         empty={!hasClusters}
         emptyMessage={EMPTY_MESSAGES.noClusters}
         header={header}
       >
+        {actionError ? (
+          <ErrorBanner message={actionError} onDismiss={() => setActionError("")} />
+        ) : null}
         {policyRows.length ? (
           <DataTable
             tableClassName="alert-policies-table"
@@ -1091,6 +1133,7 @@ export default function AlertPoliciesPage({
               actions: canManage ? (
                 <PolicyRowActions
                   policy={row.actions}
+                  busy={busyPolicyId === row.id}
                   onEdit={openEdit}
                   onToggle={handleToggle}
                   onDelete={handleDelete}

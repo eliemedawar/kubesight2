@@ -99,6 +99,12 @@
   font-size: var(--font-size-xs);
   color: var(--text-muted);
 }
+/* The status pill never wraps: "Not configured" broke onto two lines beside
+   a two-line name ("Container registries"). */
+.sg-int-card-head .status-pill {
+  flex: none;
+  white-space: nowrap;
+}
 
 .sg-int-card-head,
 .sg-int-card-detail,

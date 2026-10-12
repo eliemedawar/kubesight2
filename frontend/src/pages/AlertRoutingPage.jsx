@@ -76,6 +76,9 @@ const RECEIVER_TYPE_LABELS = {
   webhook: "Webhook",
 };
 
+// Types a new receiver can be created as (static email is legacy, edit-only).
+const RECEIVER_PICKER_TYPES = ["user", "role", "slack", "webhook"];
+
 function receiverDestination(receiver) {
   if (!receiver) {
     return "—";
@@ -289,7 +292,19 @@ export function SmtpTab({ smtp, onSaved }) {
   );
 }
 
-function ReceiverModal({ open, mode, initial, users, roles, onClose, onSave, saving, error, lockType = "" }) {
+function ReceiverModal({
+  open,
+  mode,
+  initial,
+  users,
+  roles,
+  onClose,
+  onSave,
+  saving,
+  error,
+  lockType = "",
+  allowedTypes = [],
+}) {
   const [form, setForm] = useState(initial);
   const [headersText, setHeadersText] = useState("{}");
   const [localError, setLocalError] = useState("");
@@ -359,12 +374,18 @@ function ReceiverModal({ open, mode, initial, users, roles, onClose, onSave, sav
   };
 
   return (
-    <div className="modal-overlay" role="presentation" onClick={onClose}>
-      <section className="card modal-panel routing-modal" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="modal-overlay"
+      role="presentation"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <section className="card modal-panel routing-modal" role="dialog" aria-modal="true">
         <header className="modal-header">
           <h3>{mode === "edit" ? "Edit receiver" : "Add receiver"}</h3>
-          <button type="button" className="modal-close" onClick={onClose}>
-            <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" /></svg>
+          <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
           </button>
         </header>
 
@@ -390,10 +411,13 @@ function ReceiverModal({ open, mode, initial, users, roles, onClose, onSave, sav
                 onChange={(e) => setForm((p) => ({ ...p, type: e.target.value }))}
                 disabled={mode === "edit"}
               >
-                <option value="user">User</option>
-                <option value="role">Role</option>
-                <option value="slack">Slack</option>
-                <option value="webhook">Webhook</option>
+                {RECEIVER_PICKER_TYPES.filter(
+                  (type) => !allowedTypes.length || allowedTypes.includes(type)
+                ).map((type) => (
+                  <option key={type} value={type}>
+                    {RECEIVER_TYPE_LABELS[type]}
+                  </option>
+                ))}
                 {showLegacyEmail ? <option value="email">Email (legacy)</option> : null}
               </SearchableSelect>
             </label>
@@ -588,12 +612,18 @@ function ReceiverDetailsModal({ open, receiver, onClose }) {
   const groupNames = receiver.groupNames || [];
 
   return (
-    <div className="modal-overlay" role="presentation" onClick={onClose}>
-      <section className="card modal-panel routing-modal" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="modal-overlay"
+      role="presentation"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <section className="card modal-panel routing-modal" role="dialog" aria-modal="true">
         <header className="modal-header">
           <h3>Receiver details</h3>
-          <button type="button" className="modal-close" onClick={onClose}>
-            <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" /></svg>
+          <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
           </button>
         </header>
 
@@ -680,6 +710,11 @@ function ReceiverDetailsModal({ open, receiver, onClose }) {
  * it narrows the list, drops the Receiver Groups sub-tab (a group spans types,
  * so it does not belong on a single provider's screen), and locks the type in
  * the create form.
+ *
+ * It may also be a list of types (the SMTP integration shows the people it
+ * mails: user, role and legacy email receivers). Then the type column stays,
+ * the create form offers only those types, and `withGroups` decides whether
+ * the Receiver Groups sub-tab is shown.
  */
 export function ReceiversTab({
   receivers,
@@ -688,6 +723,7 @@ export function ReceiversTab({
   roles,
   onChanged,
   typeFilter = "",
+  withGroups,
   title = "Individual receivers",
   description = "Email inboxes and webhook endpoints that can receive alerts.",
   emptyMessage = "Add an email, Slack, or webhook receiver to get started.",
@@ -702,13 +738,17 @@ export function ReceiversTab({
   const [testingId, setTestingId] = useState(null);
   const [testMessage, setTestMessage] = useState("");
 
-  const visibleReceivers = typeFilter
-    ? (receivers || []).filter((receiver) => receiver.type === typeFilter)
+  const [actionError, setActionError] = useState("");
+
+  const filterTypes = Array.isArray(typeFilter) ? typeFilter : typeFilter ? [typeFilter] : [];
+  const lockType = filterTypes.length === 1 ? filterTypes[0] : "";
+  const visibleReceivers = filterTypes.length
+    ? (receivers || []).filter((receiver) => filterTypes.includes(receiver.type))
     : receivers || [];
 
   const openCreate = () => {
     setModalMode("create");
-    setEditing(typeFilter ? { ...EMPTY_RECEIVER, type: typeFilter } : EMPTY_RECEIVER);
+    setEditing(filterTypes.length ? { ...EMPTY_RECEIVER, type: filterTypes[0] } : EMPTY_RECEIVER);
     setError("");
     setModalOpen(true);
   };
@@ -766,8 +806,13 @@ export function ReceiversTab({
     if (!window.confirm("Delete this receiver?")) {
       return;
     }
-    await deleteReceiver(id);
-    onChanged();
+    setActionError("");
+    try {
+      await deleteReceiver(id);
+      onChanged();
+    } catch (err) {
+      setActionError(err.message || "Could not delete the receiver.");
+    }
   };
 
   const runTest = async (id) => {
@@ -827,7 +872,7 @@ export function ReceiversTab({
   // On a single-provider screen the Type column would repeat the page title.
   const columns = [
     { key: "name", label: "Name" },
-    ...(typeFilter ? [] : [{ key: "typeDisplay", label: "Type" }]),
+    ...(lockType ? [] : [{ key: "typeDisplay", label: "Type" }]),
     { key: "groups", label: "Groups" },
     { key: "filtersDisplay", label: "Filters" },
     { key: "statusDisplay", label: "Enabled" },
@@ -835,7 +880,7 @@ export function ReceiversTab({
     { key: "actionsDisplay", label: "" },
   ];
 
-  const showGroups = !typeFilter;
+  const showGroups = withGroups ?? !filterTypes.length;
 
   return (
     <div className="receivers-tab-shell">
@@ -873,6 +918,7 @@ export function ReceiversTab({
           </header>
 
           {testMessage ? <p className="routing-test-message">{testMessage}</p> : null}
+          {actionError ? <p className="routing-error">{actionError}</p> : null}
 
           {visibleReceivers.length ? (
             <DataTable columns={columns} rows={tableRows} />
@@ -886,7 +932,8 @@ export function ReceiversTab({
             initial={editing || EMPTY_RECEIVER}
             users={users}
             roles={roles}
-            lockType={typeFilter}
+            lockType={lockType}
+            allowedTypes={filterTypes}
             onClose={() => setModalOpen(false)}
             onSave={save}
             saving={saving}
