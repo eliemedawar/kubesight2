@@ -279,6 +279,15 @@ def run_background_lane(app: Flask) -> None:
             advance_provision_jobs()
     except Exception:
         logger.exception("Cluster provisioning tick failed")
+    try:
+        with app.app_context():
+            from .retention import run_due_retention
+
+            # Opt-in history retention (audit, CI logs, alert deliveries):
+            # each kind only when its *_RETENTION_DAYS is set; at most hourly.
+            run_due_retention()
+    except Exception:
+        logger.exception("Retention tick failed")
 
 
 _scheduler_started = False
