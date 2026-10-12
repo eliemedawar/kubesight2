@@ -1184,6 +1184,7 @@ class DeploymentRequest(db.Model):
     __tablename__ = "deployment_requests"
     __table_args__ = (
         db.Index("ix_deployment_request_status_created", "status", "created_at"),
+        db.Index("ix_deployment_request_requester_created", "requester_id", "created_at"),
     )
 
     id = db.Column(db.Integer, primary_key=True)
@@ -2587,6 +2588,7 @@ class MobileAppBuild(db.Model):
     __table_args__ = (
         db.Index("ix_mobile_build_app", "app_id"),
         db.Index("ix_mobile_build_status", "status"),
+        db.Index("ix_mobile_build_run", "run_id"),
     )
 
     id = db.Column(db.Integer, primary_key=True)
