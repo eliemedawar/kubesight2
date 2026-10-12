@@ -87,8 +87,8 @@ def test_the_badge_equals_the_inbox_for_every_viewer(client, admin_token, admin2
         mine = _inbox(client, token)
         assert _count(client, token) == mine["counts"]["waitingOnMe"] == len(mine["items"])
     # admin: 3 requests not theirs minus 1 voted; 4 bundles not theirs minus 1 approved;
-    # 2 destroys not theirs.
-    assert _count(client, admin_token) == 2 + 3 + 2
+    # all 3 destroys (an admin needs no second person, so their own counts too).
+    assert _count(client, admin_token) == 2 + 3 + 3
     assert _count(client, viewer_token) == 0
 
 

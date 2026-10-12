@@ -5,7 +5,9 @@ Who may do what (the routes add the permission check):
   * a create or grow plan is applied by anyone allowed to execute builds,
     the requester included — they reviewed the plan;
   * a destroy plan waits for a *second* person with that permission. The
-    requester can withdraw it, never approve it.
+    requester can withdraw it, never approve it — unless the requester is an
+    admin: an admin's destroy runs as soon as its plan is made (``direct``),
+    and an admin may approve a destroy they asked for earlier.
 """
 
 from __future__ import annotations
@@ -470,7 +472,18 @@ def request_grow_plan(build: ClusterBuild, payload: Dict[str, Any], *, actor: st
     return job
 
 
-def request_destroy(build: ClusterBuild, payload: Dict[str, Any], *, actor: str = "", user=None) -> ClusterProvisionJob:
+def _is_admin(user) -> bool:
+    if user is None:
+        return False
+    from ....access_engine import is_admin
+    return is_admin(user)
+
+
+def request_destroy(build: ClusterBuild, payload: Dict[str, Any], *, actor: str = "", user=None,
+                    direct: bool = False) -> ClusterProvisionJob:
+    """Plan a destroy. ``direct`` (an admin asked, and the cluster's own
+    approval rule lets them) applies the plan as soon as it is made, with no
+    second person; otherwise the plan waits in ``awaiting_approval``."""
     _require_vmware(build)
     if build.status in _BUSY_BUILD_STATUSES or build.status == "destroyed":
         raise ValueError(f"The VMs cannot be destroyed while the build is '{build.status}'.")
@@ -481,6 +494,14 @@ def request_destroy(build: ClusterBuild, payload: Dict[str, Any], *, actor: str 
     reason = str(payload.get("reason") or "").strip()[:1000] or None
     _require_no_open_job(build, supersede_planned=True)
     job = _new_job(build, "destroy", actor=actor, user=user, reason=reason)
+    if direct:
+        job.auto_apply = True
+        job.approved_by = actor or None
+        job.approved_by_user_id = getattr(user, "id", None)
+        job.approved_at = _utcnow()
+        job.applied_by = actor or None
+        job.applied_by_user_id = getattr(user, "id", None)
+        job.decision_note = "Admin destroy: no second approval needed."
     db.session.commit()
     jobs.start_worker(job.id, "plan")
     db.session.refresh(job)
@@ -517,7 +538,8 @@ def approve_destroy(build: ClusterBuild, job: ClusterProvisionJob, *, actor: str
                     note: str = "") -> ClusterProvisionJob:
     if job.operation != "destroy" or job.status != "awaiting_approval":
         raise ValueError("There is no destroy request waiting for approval.")
-    if user is not None and job.requested_by_user_id and job.requested_by_user_id == user.id:
+    if (user is not None and job.requested_by_user_id and job.requested_by_user_id == user.id
+            and not _is_admin(user)):
         raise PermissionError(
             "You asked for this cluster to be destroyed, so someone else has to approve it."
         )

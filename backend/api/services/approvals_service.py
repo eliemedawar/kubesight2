@@ -7,7 +7,7 @@ rules living next to the thing it protects:
   change_bundle       a set of cluster changes, or a queued direct change (same)
   hermes              a ticket action Hermes was unsure about, or new VMs it asked for
   ci_stage            an Approval stage in a CI pipeline        (the stage's own approvers)
-  cluster_destroy     destroying VMs KubeSight created          (a second person)
+  cluster_destroy     destroying VMs KubeSight created          (a second person; admins need none)
 
 This module does not decide anything. The **inbox** reads each kind's pending
 rows and asks that kind's own eligibility rule whether the viewer may decide
@@ -27,7 +27,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from ..access_engine import user_has_permission
+from ..access_engine import is_admin, user_has_permission
 from ..db import db
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,13 @@ def _can(user, key: str) -> bool:
     try:
         return bool(user is not None and user_has_permission(user, key))
     except Exception:  # noqa: BLE001 — a permission lookup must not break the inbox
+        return False
+
+
+def _admin(user) -> bool:
+    try:
+        return bool(user is not None and is_admin(user))
+    except Exception:  # noqa: BLE001 — same as _can
         return False
 
 
@@ -453,7 +460,7 @@ def _cluster_destroys(user) -> List[Dict[str, Any]]:
     execute = _can(user, "cluster_builds:execute")
     out = []
     for job, build in _pending_destroys():
-        why = _why_destroy(execute, _is_own(job.requested_by_user_id, user))
+        why = _why_destroy(execute, _is_own(job.requested_by_user_id, user) and not _admin(user))
         summary = job.plan_summary_json or {}
         vms = [
             r.get("title") for r in summary.get("resources") or []
@@ -575,7 +582,9 @@ def _count_destroys(user) -> int:
         .filter(ClusterProvisionJob.operation == "destroy", ClusterProvisionJob.status == "awaiting_approval")
         .order_by(ClusterProvisionJob.created_at.desc()).limit(_LIMIT).all()
     )
-    return sum(1 for owner, build_id in rows if build_id is not None and not _is_own(owner, user))
+    # Same rule as the inbox: an admin decides their own destroy too.
+    admin = _admin(user)
+    return sum(1 for owner, build_id in rows if build_id is not None and (admin or not _is_own(owner, user)))
 
 
 _COUNTERS: Dict[str, Callable] = {
@@ -1105,8 +1114,8 @@ def rules(user) -> Dict[str, Any]:
         }
     if _can(user, "cluster_builds:view"):
         out["clusterBuilder"] = {
-            "destroy": "A second person with cluster_builds:execute approves every destroy; "
-                       "the person who asked can withdraw it but never approve it.",
+            "destroy": "An admin destroys VMs directly, with no approval. Anyone else's destroy waits for "
+                       "a second person with cluster_builds:execute; they can withdraw it but never approve it.",
             "vmRequests": "VMs asked for on a ticket wait for a VM approver (Hermes, below).",
             "dayTwo": "Changes to a built cluster follow that cluster's approval count above, and are "
                       "refused (not queued) without an approved deployment request.",

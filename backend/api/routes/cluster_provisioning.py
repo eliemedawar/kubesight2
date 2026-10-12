@@ -21,6 +21,7 @@ import os
 
 from flask import Blueprint, Response, request
 
+from ..access_engine import is_admin
 from ..audit import log_audit
 from ..auth_utils import get_current_user
 from ..db import db
@@ -228,11 +229,17 @@ def request_destroy(build_id: int):
         return err
     user, actor = _actor()
     payload = request.get_json(silent=True) or {}
+    # An admin destroys without a second person, as long as the cluster's own
+    # approval rule lets them; otherwise the request waits like anyone's.
+    direct = (
+        user is not None and is_admin(user)
+        and _day_two_approval_refusal(build_id, "destroy") is None
+    )
     try:
-        job = provisioning.request_destroy(build, payload, actor=actor, user=user)
+        job = provisioning.request_destroy(build, payload, actor=actor, user=user, direct=direct)
     except ValueError as exc:
         return error_response(str(exc), 400)
-    _audit_job("cluster_build_destroy_requested", user, build, job, reason=job.reason)
+    _audit_job("cluster_build_destroy_requested", user, build, job, reason=job.reason, direct=direct)
     return _build_response(build, 202)
 
 

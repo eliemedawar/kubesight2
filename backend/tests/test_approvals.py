@@ -22,7 +22,7 @@ from api.models import (
     Role,
     User,
 )
-from api.services import deployment_request_service
+from api.services import approvals_service, deployment_request_service
 from tests.conftest import auth_headers
 from tests.test_ticket_agent import agent, writes  # noqa: F401,E402
 from tests.test_ci_approval_stage import (  # noqa: F401  (fixtures are used by name)
@@ -129,7 +129,7 @@ def test_a_change_bundle_shows_its_changes(client, admin_token, admin2_token):
     assert done["outcome"] == "rejected"
 
 
-def test_a_destroy_needs_the_second_person(client, admin_token, admin2_token):
+def test_a_destroy_needs_the_second_person(client, admin_token, admin2_token, monkeypatch):
     build = ClusterBuild(name="uat-09", status="vms_ready", machine_source="vmware", k8s_version="1.32.4")
     db.session.add(build)
     db.session.flush()
@@ -142,9 +142,12 @@ def test_a_destroy_needs_the_second_person(client, admin_token, admin2_token):
     )
     db.session.add(job)
     db.session.commit()
+    # An admin may decide their own destroy: admins need no second person.
     [item] = _inbox(client, admin_token, "all")["items"]
-    assert item["kind"] == "cluster_destroy" and item["canDecide"] is False
-    assert "someone else" in item["why"]
+    assert item["kind"] == "cluster_destroy" and item["canDecide"] is True
+    monkeypatch.setattr(approvals_service, "_admin", lambda user: False)
+    [item] = _inbox(client, admin_token, "all")["items"]
+    assert item["canDecide"] is False and "someone else" in item["why"]
     [item] = _inbox(client, admin2_token)["items"]
     assert item["canDecide"] is True and "uat-09-vm-1" in item["details"][0]
     assert item["actions"]["reject"].endswith(f"/provision/jobs/{job.id}/reject")
@@ -189,6 +192,7 @@ def test_rules_gather_every_setting(client, admin_token):
     assert any(row["id"] == CLUSTER for row in rules["clusters"]["clusters"])
     assert rules["hermes"]["minConfidence"] == "High"
     assert "second person" in rules["clusterBuilder"]["destroy"]
+    assert "admin destroys VMs directly" in rules["clusterBuilder"]["destroy"]
     assert "ciStages" in rules["elsewhere"] and "promotions" in rules["elsewhere"]
 
 

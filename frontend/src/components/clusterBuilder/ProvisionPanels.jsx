@@ -38,6 +38,7 @@ import {
   retryProvisionConnect,
 } from "../../api/clusterBuildsApi.js";
 import { confirmDialog } from "../../lib/dialogs.js";
+import { useAuth } from "../../context/AuthContext";
 
 /** The server's own words when it refused (a 403 otherwise reads as a bare
     "no access"): an approval rule or a second-person rule explains itself. */
@@ -274,9 +275,12 @@ export function ProvisionProgress({ build, now, compact = false }) {
   );
 }
 
-/** Second-person approval for a destroy, seen from either side. */
+/** Second-person approval for a destroy, seen from either side. An admin
+ *  needs no second person, so they decide their own request too. */
 function DestroyDecision({ build, job, currentUserId, canExecute, busy, act, refusal }) {
-  const stance = destroyStance(job, currentUserId);
+  const { isAdmin } = useAuth();
+  const own = currentUserId != null && job.requestedByUserId === currentUserId;
+  const stance = destroyStance(job, currentUserId, isAdmin);
   const [note, setNote] = useState("");
   return (
     <PlanReview
@@ -284,7 +288,9 @@ function DestroyDecision({ build, job, currentUserId, canExecute, busy, act, ref
       title={`Destroy ${build.name}?`}
       lede={stance === "requester"
         ? "Waiting for a second person who can run cluster builds. You asked, so you cannot approve it. The cluster keeps running until someone does."
-        : `${job.requestedBy || "Someone"} asked to delete this cluster's VMs and remove it from KubeSight. Read the plan, then decide.`}
+        : own
+          ? "You asked to delete this cluster's VMs and remove it from KubeSight. As an admin you need no second person: read the plan, then destroy."
+          : `${job.requestedBy || "Someone"} asked to delete this cluster's VMs and remove it from KubeSight. Read the plan, then decide.`}
       busy={busy}
     >
       <div className="sg-cb-pv-ask">
@@ -303,10 +309,17 @@ function DestroyDecision({ build, job, currentUserId, canExecute, busy, act, ref
             <input id="pv-note" className="sg-cb-input" value={note}
                    onChange={(event) => setNote(event.target.value)} placeholder="Checked with the UAT team" />
             <div className="sg-cb-actions">
-              <button className="btn-outline" type="button" disabled={busy}
-                      onClick={() => act(() => rejectClusterDestroy(build.id, job.id, note))}>
-                Reject
-              </button>
+              {own ? (
+                <button className="btn-outline" type="button" disabled={busy}
+                        onClick={() => act(() => discardProvisionJob(build.id, job.id))}>
+                  Withdraw request
+                </button>
+              ) : (
+                <button className="btn-outline" type="button" disabled={busy}
+                        onClick={() => act(() => rejectClusterDestroy(build.id, job.id, note))}>
+                  Reject
+                </button>
+              )}
               <button className="btn-danger" type="button" disabled={busy}
                       onClick={async () => {
                         if (!(await confirmDialog({
@@ -317,7 +330,7 @@ function DestroyDecision({ build, job, currentUserId, canExecute, busy, act, ref
                         }))) return;
                         act(() => approveClusterDestroy(build.id, job.id, note));
                       }}>
-                {busy ? "Working…" : "Approve and destroy"}
+                {busy ? "Working…" : own ? "Destroy" : "Approve and destroy"}
               </button>
             </div>
           </>
@@ -818,8 +831,10 @@ export function ProvisionGrowPanel({ build, canExecute, notify, onChanged, onClo
   );
 }
 
-/** Ask to destroy: typed name, a reason, and a second person decides. */
+/** Ask to destroy: typed name, a reason, and a second person decides —
+ *  or, for an admin, the destroy runs as soon as it is planned. */
 export function DestroyPanel({ build, notify, onChanged, onClose }) {
+  const { isAdmin } = useAuth();
   const [typed, setTyped] = useState("");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
@@ -849,7 +864,9 @@ export function DestroyPanel({ build, notify, onChanged, onClose }) {
         network and every other VM stay as they are.
       </p>
       <p className="muted">
-        KubeSight first shows the exact plan. A second person who can run cluster builds has to approve it; you cannot approve your own request.
+        {isAdmin
+          ? "You are an admin, so no approval is needed: KubeSight plans the destroy and runs it straight away."
+          : "KubeSight first shows the exact plan. A second person who can run cluster builds has to approve it; you cannot approve your own request."}
       </p>
       <div className="sg-cb-qgrid">
         <div className="sg-cb-field">
@@ -867,7 +884,7 @@ export function DestroyPanel({ build, notify, onChanged, onClose }) {
       </div>
       <div className="sg-cb-actions">
         <button className="btn-danger" type="button" disabled={busy || typed !== build.name} onClick={submit}>
-          {busy ? "Planning…" : "Plan the destroy and ask for approval"}
+          {busy ? "Planning…" : isAdmin ? "Destroy VMs" : "Plan the destroy and ask for approval"}
         </button>
       </div>
     </div>

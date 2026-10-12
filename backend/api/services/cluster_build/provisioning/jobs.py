@@ -1179,6 +1179,14 @@ def _do_plan(job: ClusterProvisionJob, engine) -> None:
     db.session.commit()
 
 
+def _direct_destroy_may_apply(job: ClusterProvisionJob) -> bool:
+    """An admin's destroy applies itself once planned (service.request_destroy)."""
+    return (
+        job.operation == "destroy" and bool(job.auto_apply) and not job.recovered_from_job_id
+        and job.status == "awaiting_approval" and not (job.plan_summary_json or {}).get("blocked")
+    )
+
+
 def _recovery_may_apply(job: ClusterProvisionJob) -> bool:
     """A recovery plan applies itself only when it finishes the approved job."""
     if not job.auto_apply or not job.recovered_from_job_id:
@@ -1791,7 +1799,8 @@ def _run(app, job_id: int, phase: str) -> None:
                     _fail(job_id, "plan_failed", str(exc))
                     return
                 job = db.session.get(ClusterProvisionJob, job_id)
-                if not _recovery_may_apply(job):
+                direct = _direct_destroy_may_apply(job)
+                if not direct and not _recovery_may_apply(job):
                     if job.recovered_from_job_id:
                         _note(job, "KubeSight restarted during the previous apply. This plan "
                                    "goes further than finishing it, so it waits for you.")
@@ -1799,6 +1808,9 @@ def _run(app, job_id: int, phase: str) -> None:
                 phase = "apply"
                 job.status = "applying"
                 build = db.session.get(ClusterBuild, job.build_id)
+                if direct:
+                    job.prior_build_status = build.status
+                    build.status = "destroying"
                 _sync_build_status(build, job)
                 db.session.commit()
 

@@ -207,6 +207,7 @@ describe("plans and progress", () => {
     expect(destroyStance(job, 1)).toBe("requester");
     expect(destroyStance(job, 2)).toBe("approver");
     expect(destroyStance({ ...job, status: "applying" }, 2)).toBe("none");
+    expect(destroyStance(job, 1, true)).toBe("approver"); // an admin decides their own
   });
 });
 

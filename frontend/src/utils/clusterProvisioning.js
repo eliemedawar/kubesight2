@@ -467,10 +467,11 @@ export function growthState(build) {
 }
 
 /** Who can act on a destroy request, from where the viewer stands. */
-export function destroyStance(job, currentUserId) {
+export function destroyStance(job, currentUserId, isAdmin = false) {
   if (!job || job.operation !== "destroy") return "none";
   if (job.status !== "awaiting_approval") return "none";
-  if (currentUserId != null && job.requestedByUserId === currentUserId) return "requester";
+  // Admins need no second person, so an admin decides their own request too.
+  if (!isAdmin && currentUserId != null && job.requestedByUserId === currentUserId) return "requester";
   return "approver";
 }
 

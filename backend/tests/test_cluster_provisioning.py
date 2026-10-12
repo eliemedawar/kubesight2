@@ -154,6 +154,18 @@ SMALL_HOSTS = {
 }
 
 
+@pytest.fixture()
+def not_admin(monkeypatch):
+    """Treat every caller as a non-admin with cluster_builds:execute: only then
+    does a destroy wait for a second person (admins destroy directly)."""
+    from api.routes import cluster_provisioning as routes
+    from api.services.cluster_build.provisioning import service as provisioning_service
+
+    monkeypatch.setattr(routes, "is_admin", lambda user: False)
+    monkeypatch.setattr(provisioning_service, "_is_admin", lambda user: False)
+    return monkeypatch
+
+
 def second_admin_token(client, app):
     admin = User.query.filter_by(username="admin").first()
     other = User(username="admin2", email="admin2@example.com", is_active=True, role_id=admin.role_id)
@@ -650,7 +662,7 @@ class TestVmsOnly:
                             headers=auth_headers(admin_token))
         assert again.status_code == 400
 
-    def test_destroy_takes_a_second_person_too(self, client, app, admin_token, ready):
+    def test_destroy_takes_a_second_person_too(self, client, app, admin_token, ready, not_admin):
         job = client.post(
             f"/api/cluster-builds/{ready['id']}/provision/destroy",
             json={"confirmName": "uat-02"}, headers=auth_headers(admin_token),
@@ -1013,7 +1025,7 @@ class TestGrowAndDestroy:
         assert len(workers) == 3 and all(n["status"] == "joined" for n in workers)
         assert len(state_store.vm_instances(built["id"])) == 5
 
-    def test_destroy_takes_a_second_person(self, client, app, admin_token, built):
+    def test_destroy_takes_a_second_person(self, client, app, admin_token, built, not_admin):
         refused = client.post(
             f"/api/cluster-builds/{built['id']}/provision/destroy",
             json={"confirmName": "wrong"}, headers=auth_headers(admin_token),
@@ -1051,7 +1063,7 @@ class TestGrowAndDestroy:
         cluster_id = int(built["resultClusterId"].split("-")[-1])
         assert Cluster.query.get(cluster_id).is_active is False
 
-    def test_rejected_destroy_leaves_everything(self, client, app, admin_token, built):
+    def test_rejected_destroy_leaves_everything(self, client, app, admin_token, built, not_admin):
         job = client.post(
             f"/api/cluster-builds/{built['id']}/provision/destroy",
             json={"confirmName": "uat-02"}, headers=auth_headers(admin_token),
@@ -1065,6 +1077,33 @@ class TestGrowAndDestroy:
         data = rejected.get_json()["data"]
         assert data["status"] == "completed" and data["provisionStatus"] == "ready"
         assert len(state_store.vm_instances(built["id"])) == 4
+
+    def test_an_admin_destroys_without_approval(self, client, admin_token, built):
+        response = client.post(
+            f"/api/cluster-builds/{built['id']}/provision/destroy",
+            json={"confirmName": "uat-02", "reason": "UAT moved"}, headers=auth_headers(admin_token),
+        )
+        assert response.status_code == 202, response.get_json()
+        gone = response.get_json()["data"]
+        job = gone["provisioning"]["job"]
+        assert job["status"] == "succeeded" and job["approvedBy"] == "admin"
+        assert gone["status"] == "destroyed" and gone["provisionStatus"] == "destroyed"
+        assert state_store.vm_instances(built["id"]) == {}
+        assert VSphereIpReservation.query.filter_by(build_id=built["id"]).count() == 0
+
+    def test_an_admin_approves_their_own_waiting_request(self, client, admin_token, built, not_admin):
+        job = client.post(
+            f"/api/cluster-builds/{built['id']}/provision/destroy",
+            json={"confirmName": "uat-02"}, headers=auth_headers(admin_token),
+        ).get_json()["data"]["provisioning"]["job"]
+        assert job["status"] == "awaiting_approval"
+        not_admin.undo()  # e.g. asked before admins could destroy directly
+        approved = client.post(
+            f"/api/cluster-builds/{built['id']}/provision/jobs/{job['id']}/approve",
+            headers=auth_headers(admin_token),
+        )
+        assert approved.status_code == 200, approved.get_json()
+        assert approved.get_json()["data"]["status"] == "destroyed"
 
 
 # ---------------------------------------------------------------------------

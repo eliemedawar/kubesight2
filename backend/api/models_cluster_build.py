@@ -581,7 +581,7 @@ class ClusterProvisionJob(db.Model):
     Status lifecycle:
         planning -> planned | plan_failed
         planned -> applying (create/grow, by anyone allowed to execute)
-        planned -> awaiting_approval -> applying (destroy, by a second person)
+        planned -> awaiting_approval -> applying (destroy, by a second person; an admin's applies itself)
         applying -> connecting -> succeeded           (create/grow)
         applying -> succeeded                         (destroy)
         applying | connecting -> apply_failed | connect_failed
