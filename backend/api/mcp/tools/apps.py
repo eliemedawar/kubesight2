@@ -85,7 +85,7 @@ def _applications_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
     "kubesight_application_get",
     permission="applications:view",
     description=(
-        "One analysed application in full, with its analysis history: what the "
+        "One analysed application in full, with its last ten analyses: what the "
         "code is built from, what it talks to, and what the last analysis found."
     ),
     schema={
@@ -101,7 +101,8 @@ def _application_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
         row = get_application(int(arguments.get("applicationId") or 0))
     except (LookupError, TypeError, ValueError) as exc:
         raise ToolError(str(exc) or "Name the application by its id.")
-    return application_to_dict(row, include_history=True)
+    # The last ten runs: enough to see a trend, small enough for a tool answer.
+    return application_to_dict(row, include_history=True, history_limit=10)
 
 
 @tool(

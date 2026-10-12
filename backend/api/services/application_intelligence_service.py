@@ -359,16 +359,35 @@ def _finding_posture(analysis_id: int) -> dict:
     They are reproducible from the findings table, unlike a model-supplied
     score, and their polarity is unambiguous.
     """
-    grouped = (
-        db.session.query(
-            ApplicationFinding.severity,
-            ApplicationFinding.status,
-            func.count(ApplicationFinding.id),
+    return _finding_postures([analysis_id])[analysis_id]
+
+
+def _finding_postures(analysis_ids) -> dict:
+    """``_finding_posture`` for many analyses in one GROUP BY."""
+    ids = list({int(i) for i in analysis_ids})
+    grouped_by_id: dict = {i: [] for i in ids}
+    if ids:
+        rows = (
+            db.session.query(
+                ApplicationFinding.analysis_id,
+                ApplicationFinding.severity,
+                ApplicationFinding.status,
+                func.count(ApplicationFinding.id),
+            )
+            .filter(ApplicationFinding.analysis_id.in_(ids))
+            .group_by(
+                ApplicationFinding.analysis_id,
+                ApplicationFinding.severity,
+                ApplicationFinding.status,
+            )
+            .all()
         )
-        .filter(ApplicationFinding.analysis_id == analysis_id)
-        .group_by(ApplicationFinding.severity, ApplicationFinding.status)
-        .all()
-    )
+        for analysis_id, severity, status, count in rows:
+            grouped_by_id[analysis_id].append((severity, status, count))
+    return {i: _posture_from(grouped) for i, grouped in grouped_by_id.items()}
+
+
+def _posture_from(grouped) -> dict:
     total = {severity: 0 for severity in SEVERITY_ORDER}
     open_counts = {severity: 0 for severity in SEVERITY_ORDER}
     for severity, status, count in grouped:
@@ -439,25 +458,93 @@ def _source_coverage(payload: Any) -> dict | None:
     return coverage
 
 
-def _build_verification_status(row: ApplicationAnalysis) -> str | None:
+def _verification_from_summary(summary: Any) -> str | None:
     """Status of KubeSight's own build stage, not the model's account of it."""
-    profile = (row.result_summary or {}).get("application_profile")
+    profile = summary.get("application_profile") if isinstance(summary, dict) else None
     report = profile.get("build_verification") if isinstance(profile, dict) else None
-    return report.get("status") if isinstance(report, dict) else None
+    status = report.get("status") if isinstance(report, dict) else None
+    return str(status)[:32] if status is not None else None
 
 
-def application_to_dict(row: IntelligenceApplication, *, include_history=False) -> dict:
-    latest = row.analyses.order_by(ApplicationAnalysis.created_at.desc()).first()
-    critical = high = 0
-    if latest:
-        grouped = (
-            db.session.query(ApplicationFinding.severity, func.count(ApplicationFinding.id))
-            .filter(ApplicationFinding.analysis_id == latest.id)
-            .group_by(ApplicationFinding.severity)
+def _build_verification_status(row: ApplicationAnalysis) -> str | None:
+    """From the stored column ("" = the result had none). Analyses stored
+    before the column existed read result_summary once and keep the answer."""
+    stored = row.build_verification_status
+    if stored is None:
+        summary = row.result_summary
+        stored = _verification_from_summary(summary) or ""
+        if summary is not None:
+            row.build_verification_status = stored
+    return stored or None
+
+
+def _keep_backfilled_verdicts() -> None:
+    """Commit verdicts _build_verification_status filled in on old rows — and
+    only when they are all the session holds, so a read never commits anything
+    else. Called once a response is fully built (a commit expires every row)."""
+    from sqlalchemy import inspect as sa_inspect
+
+    dirty = list(db.session.dirty)
+    if not dirty or db.session.new or db.session.deleted:
+        return
+    for obj in dirty:
+        if not isinstance(obj, ApplicationAnalysis):
+            return
+        changed = {attr.key for attr in sa_inspect(obj).attrs if attr.history.has_changes()}
+        if changed - {"build_verification_status"}:
+            return
+    try:
+        db.session.commit()
+    except Exception:  # noqa: BLE001 — the verdict is a cache; the read must not fail
+        db.session.rollback()
+
+
+def _compact_analysis_options():
+    """Lists show analyses compactly: never the Hermes document, and the
+    requesting user by name only (one SELECT ... IN, without the user's
+    access collections)."""
+    from sqlalchemy.orm import defer
+
+    from ..models import user_display_loader
+
+    return (
+        defer(ApplicationAnalysis.result_summary),
+        user_display_loader(ApplicationAnalysis.requested_by),
+    )
+
+
+# The run history a CI service's Intelligence tab shows.
+HISTORY_LIMIT = 50
+
+
+def application_to_dict(row: IntelligenceApplication, *, include_history=False,
+                        history_limit: int = HISTORY_LIMIT, latest=None,
+                        postures: dict | None = None) -> dict:
+    """``latest`` (False = known to have none) and ``postures`` let a list
+    pass in what it read for every row at once; left out, they are read here."""
+    if latest is None:
+        latest = (
+            row.analyses.options(*_compact_analysis_options())
+            .order_by(ApplicationAnalysis.created_at.desc())
+            .first()
+        )
+    latest = latest or None
+    history = []
+    if include_history:
+        history = (
+            row.analyses.options(*_compact_analysis_options())
+            .order_by(ApplicationAnalysis.created_at.desc())
+            .limit(history_limit)
             .all()
         )
-        counts = {severity: count for severity, count in grouped}
-        critical, high = counts.get("Critical", 0), counts.get("High", 0)
+    wanted = [item.id for item in history] + ([latest.id] if latest else [])
+    if postures is None or any(i not in postures for i in wanted):
+        postures = {**(postures or {}), **_finding_postures(wanted)}
+    critical = high = 0
+    if latest:
+        # Counted over every finding of the run, whatever its status.
+        by_severity = postures[latest.id]["bySeverity"]
+        critical, high = by_severity.get("Critical", 0), by_severity.get("High", 0)
     data = {
         "id": row.id,
         "name": row.name,
@@ -482,21 +569,22 @@ def application_to_dict(row: IntelligenceApplication, *, include_history=False) 
         "createdBy": row.created_by.username if row.created_by else None,
         "createdAt": _iso(row.created_at),
         "updatedAt": _iso(row.updated_at),
-        "latestAnalysis": analysis_to_dict(latest, compact=True) if latest else None,
+        "latestAnalysis": (
+            analysis_to_dict(latest, compact=True, posture=postures[latest.id]) if latest else None
+        ),
         "criticalFindingCount": critical,
         "highFindingCount": high,
     }
     if include_history:
         data["analyses"] = [
-            analysis_to_dict(item, compact=True)
-            for item in row.analyses.order_by(ApplicationAnalysis.created_at.desc())
-            .limit(50)
-            .all()
+            analysis_to_dict(item, compact=True, posture=postures[item.id]) for item in history
         ]
+        _keep_backfilled_verdicts()
     return data
 
 
-def analysis_to_dict(row: ApplicationAnalysis | None, *, compact=False) -> dict | None:
+def analysis_to_dict(row: ApplicationAnalysis | None, *, compact=False,
+                     posture: dict | None = None) -> dict | None:
     if row is None:
         return None
     data = {
@@ -517,7 +605,7 @@ def analysis_to_dict(row: ApplicationAnalysis | None, *, compact=False) -> dict 
         "failedAt": _iso(row.failed_at),
         "failureStage": row.failure_stage,
         "safeErrorMessage": row.safe_error_message,
-        "posture": _finding_posture(row.id),
+        "posture": posture if posture is not None else _finding_posture(row.id),
         "evidenceCoverage": _evidence_coverage(row),
         "sourceCoverage": row.source_coverage,
         "buildVerificationStatus": _build_verification_status(row),
@@ -653,11 +741,52 @@ def update_finding_status(
     return finding_to_dict(row)
 
 
+def _latest_analyses(application_ids) -> dict:
+    """Each application's newest analysis, for a page of applications at once."""
+    ids = list({int(i) for i in application_ids})
+    if not ids:
+        return {}
+    newest = (
+        db.session.query(
+            ApplicationAnalysis.application_id,
+            func.max(ApplicationAnalysis.created_at).label("created_at"),
+        )
+        .filter(ApplicationAnalysis.application_id.in_(ids))
+        .group_by(ApplicationAnalysis.application_id)
+        .subquery()
+    )
+    rows = (
+        ApplicationAnalysis.query.options(*_compact_analysis_options())
+        .join(
+            newest,
+            (ApplicationAnalysis.application_id == newest.c.application_id)
+            & (ApplicationAnalysis.created_at == newest.c.created_at),
+        )
+        .order_by(ApplicationAnalysis.id.asc())
+        .all()
+    )
+    return {row.application_id: row for row in rows}
+
+
 def list_applications(page=1, per_page=25) -> dict:
-    query = IntelligenceApplication.query.order_by(IntelligenceApplication.updated_at.desc())
+    from sqlalchemy.orm import selectinload
+
+    from ..models import user_display_loader
+
+    query = IntelligenceApplication.query.options(
+        selectinload(IntelligenceApplication.credential_profile),
+        user_display_loader(IntelligenceApplication.created_by),
+    ).order_by(IntelligenceApplication.updated_at.desc())
     rows, total, page, per_page = _page(query, page, per_page)
+    latest = _latest_analyses([row.id for row in rows])
+    postures = _finding_postures([analysis.id for analysis in latest.values()])
+    items = [
+        application_to_dict(row, latest=latest.get(row.id) or False, postures=postures)
+        for row in rows
+    ]
+    _keep_backfilled_verdicts()
     return {
-        "items": [application_to_dict(row) for row in rows],
+        "items": items,
         "pagination": {"page": page, "perPage": per_page, "total": total},
     }
 
@@ -1024,9 +1153,13 @@ def list_analyses(application_id: int, page=1, per_page=25) -> dict:
     query = ApplicationAnalysis.query.filter_by(application_id=application_id).order_by(
         ApplicationAnalysis.created_at.desc()
     )
+    query = query.options(*_compact_analysis_options())
     rows, total, page, per_page = _page(query, page, per_page)
+    postures = _finding_postures([row.id for row in rows])
+    items = [analysis_to_dict(row, compact=True, posture=postures[row.id]) for row in rows]
+    _keep_backfilled_verdicts()
     return {
-        "items": [analysis_to_dict(row, compact=True) for row in rows],
+        "items": items,
         "pagination": {"page": page, "perPage": per_page, "total": total},
     }
 
@@ -1790,12 +1923,21 @@ def record_worker_result(row: ApplicationAnalysis, payload: dict) -> dict:
                 ),
             }
         )
+    # One read of what is already stored, then a set: a result can carry
+    # hundreds of findings, and a query per finding (each autoflushing the
+    # ones added so far) was the slow part of storing it. Fingerprints added
+    # in this loop join the set, so a repeat within the result is skipped too.
+    seen_fingerprints = {
+        fingerprint
+        for (fingerprint,) in db.session.query(ApplicationFinding.fingerprint).filter(
+            ApplicationFinding.analysis_id == row.id
+        )
+    }
     for item in combined_findings:
         fingerprint = _fingerprint(row.id, item)
-        if ApplicationFinding.query.filter_by(
-            analysis_id=row.id, fingerprint=fingerprint
-        ).first():
+        if fingerprint in seen_fingerprints:
             continue
+        seen_fingerprints.add(fingerprint)
         db.session.add(
             ApplicationFinding(
                 analysis_id=row.id,
@@ -1869,6 +2011,7 @@ def record_worker_result(row: ApplicationAnalysis, payload: dict) -> dict:
         if isinstance(item, dict) and item.get("name")
     }
     row.result_summary = result
+    row.build_verification_status = _verification_from_summary(result) or ""
     row.hermes_model = str(payload.get("hermesModel") or "")[:120] or None
     row.hermes_prompt_version = (
         str(payload.get("hermesPromptVersion") or "")[:64] or None
