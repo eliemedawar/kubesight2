@@ -17,6 +17,7 @@ import {
   IconTicketFile,
   PlatformBadge,
   StoreReadinessRows,
+  storeTargetLabel,
   timeAgo,
 } from "../components/mobileApps/common.jsx";
 import {
@@ -40,6 +41,7 @@ import {
 } from "../api/mobileAppsApi.js";
 import { useEntityRoute } from "../routes/RouterContext.jsx";
 import { setVisibleInterval } from "../lib/visibleInterval";
+import { useEscapeToClose } from "../hooks/useEscapeToClose.js";
 
 /** URL ids are strings; record ids usually are not. Compare through this. */
 const sameId = (a, b) => a !== null && a !== undefined && String(a) === String(b);
@@ -110,6 +112,8 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
   const [publishError, setPublishError] = useState("");
   const [deleteApp, setDeleteApp] = useState(null);
   const [deletingApp, setDeletingApp] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const [buildToDelete, setBuildToDelete] = useState(null);
 
   const selectedApp = useMemo(
     () => apps.find((a) => sameId(selectedAppId, a.id)) || null,
@@ -163,19 +167,24 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
     }
   }, []);
 
-  const openApp = (app) => {
-    setSelectedAppId(app.id);
+  // The drawer is an address, so it opens from a card click, a pasted link,
+  // or Back/Forward alike — load its builds whenever the open id changes
+  // rather than only from the card's click handler.
+  useEffect(() => {
     setBuilds([]);
     setPublishes([]);
     setResigns([]);
-    loadDrawerData(app.id);
+    // An error from the previous drawer's actions belongs to that app.
+    setError("");
+    if (selectedAppId) loadDrawerData(selectedAppId);
+  }, [selectedAppId, loadDrawerData]);
+
+  const openApp = (app) => {
+    setSelectedAppId(app.id);
   };
 
   const closeDrawer = () => {
     setSelectedAppId(null);
-    setBuilds([]);
-    setPublishes([]);
-    setResigns([]);
   };
 
   // Poll while the open app has a build fetching/downloading or a publish in
@@ -242,8 +251,13 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
     try {
       const build = await uploadMobileBuild(selectedApp.id, { file, platform, version });
       setUploadOpen(false);
+      // A shielded upload has no signature and the publish gate refuses it, so
+      // only promise "ready to publish" when the binary can actually go out.
       setNotice(
-        `Uploaded ${build?.fileName || "binary"} to ${selectedApp.name}. Ready to publish.`
+        `Uploaded ${build?.fileName || "binary"} to ${selectedApp.name}. ` +
+          (build?.signatureState === "unsigned"
+            ? "It is unsigned — re-sign it before publishing."
+            : "Ready to publish.")
       );
       await Promise.all([loadDrawerData(selectedApp.id), refreshApps()]);
     } catch (err) {
@@ -273,41 +287,34 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
     }
   };
 
+  // Store credential tests run from inside the edit modal, so they hand their
+  // result back to it (shown next to the button) instead of the page banner
+  // the modal would cover.
   const runTestPlay = async () => {
-    if (!editingApp) return;
+    if (!editingApp) return null;
     setTestingPlay(true);
-    setNotice("");
-    setError("");
     try {
       const result = await testMobileAppPlay(editingApp.id);
-      if (result.status === "ok") {
-        setNotice(result.message || "Google Play credentials verified.");
-      } else {
-        setError(result.message || "Google Play test failed.");
-      }
-      await refreshApps();
+      return result.status === "ok"
+        ? { ok: true, message: result.message || "Google Play credentials verified." }
+        : { ok: false, message: result.message || "Google Play test failed." };
     } catch (err) {
-      setError(err.message || "Google Play test failed.");
+      return { ok: false, message: err.message || "Google Play test failed." };
     } finally {
       setTestingPlay(false);
     }
   };
 
   const runTestAppStore = async () => {
-    if (!editingApp) return;
+    if (!editingApp) return null;
     setTestingAppStore(true);
-    setNotice("");
-    setError("");
     try {
       const result = await testMobileAppAppStore(editingApp.id);
-      if (result.status === "ok") {
-        setNotice(result.message || "App Store Connect credentials verified.");
-      } else {
-        setError(result.message || "App Store Connect test failed.");
-      }
-      await refreshApps();
+      return result.status === "ok"
+        ? { ok: true, message: result.message || "App Store Connect credentials verified." }
+        : { ok: false, message: result.message || "App Store Connect test failed." };
     } catch (err) {
-      setError(err.message || "App Store Connect test failed.");
+      return { ok: false, message: err.message || "App Store Connect test failed." };
     } finally {
       setTestingAppStore(false);
     }
@@ -372,7 +379,7 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
   const confirmDeleteApp = async () => {
     if (!deleteApp) return;
     setDeletingApp(true);
-    setError("");
+    setDeleteError("");
     try {
       await deleteMobileApp(deleteApp.id);
       setNotice(`Deleted ${deleteApp.name}.`);
@@ -380,7 +387,8 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
       setDeleteApp(null);
       await refreshApps();
     } catch (err) {
-      setError(err.message || "Failed to delete the application.");
+      // Shown inside the confirm dialog — the page banner sits behind it.
+      setDeleteError(err.message || "Failed to delete the application.");
     } finally {
       setDeletingApp(false);
     }
@@ -419,18 +427,23 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
     }
   };
 
-  const runDeleteBuild = async (build) => {
-    if (!window.confirm(`Delete build ${build.version || build.fileName || `#${build.id}`}?`)) {
-      return;
-    }
+  const runDeleteBuild = (build) => {
+    setDeleteError("");
+    setBuildToDelete(build);
+  };
+
+  const confirmDeleteBuild = async () => {
+    const build = buildToDelete;
+    if (!build) return;
     setDeletingBuildId(build.id);
-    setError("");
+    setDeleteError("");
     try {
       await deleteMobileBuild(build.id);
       setBuilds((prev) => prev.filter((b) => b.id !== build.id));
+      setBuildToDelete(null);
       refreshApps();
     } catch (err) {
-      setError(err.message || "Failed to delete the build.");
+      setDeleteError(err.message || "Failed to delete the build.");
     } finally {
       setDeletingBuildId(null);
     }
@@ -442,7 +455,7 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
     setPublishError("");
     try {
       await publishMobileBuild(publishBuild.id, { store, target });
-      setNotice(`Publishing ${selectedApp?.name || "build"} to ${target}.`);
+      setNotice(`Publishing ${selectedApp?.name || "build"} to ${storeTargetLabel(store, target)}.`);
       setPublishBuild(null);
       if (selectedAppId) await loadDrawerData(selectedAppId);
     } catch (err) {
@@ -451,6 +464,14 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
       setPublishing(false);
     }
   };
+
+  // Escape closes the topmost layer only — a dialog opened from the drawer
+  // first, then the drawer itself — and never one that is mid-request. Each
+  // layer sits on the shared stack (the delete confirms register themselves).
+  useEscapeToClose(() => setSelectedAppId(null), true, Boolean(selectedAppId));
+  useEscapeToClose(() => setFormOpen(false), !saving, formOpen);
+  useEscapeToClose(() => setUploadOpen(false), !uploading, uploadOpen);
+  useEscapeToClose(() => setPublishBuild(null), !publishing, Boolean(publishBuild));
 
   // ── Stats (fleet-level, from each app's latest build) ───────────────
   const stats = useMemo(() => {
@@ -491,7 +512,7 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
   const tiles = [
     { key: "all", label: "Applications", value: stats.count, detail: `${stats.enabled} enabled` },
     { key: "ready", label: "Ready", value: stats.ready, tone: "ok", detail: "latest build downloadable" },
-    { key: "inflight", label: "In flight", value: stats.inFlight, tone: "warn", detail: "fetching or publishing" },
+    { key: "inflight", label: "In flight", value: stats.inFlight, tone: "warn", detail: "latest build still fetching" },
     { key: "failed", label: "Failed", value: stats.failed, tone: "danger", detail: "latest build failed" },
   ];
 
@@ -634,7 +655,7 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
                 <span className="sg-ma-card-top">
                   <AppAvatar name={app.name} enabled={app.enabled} />
                   <span className="sg-ma-card-id">
-                    <span className="sg-ma-card-name">
+                    <span className="sg-ma-card-name" title={app.name}>
                       {app.name}
                       <span
                         className={`sg-ma-endot${app.enabled ? "" : " sg-ma-endot--off"}`}
@@ -669,8 +690,13 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
                 </span>
                 <StoreReadinessRows app={app} />
                 <span className="sg-ma-card-foot">
-                  {app.jenkinsJobPath ? (
-                    <span className="sg-ma-count sg-ma-card-job">{app.jenkinsJobPath}</span>
+                  {/* A linked CI service replaces the Jenkins job entirely. */}
+                  {app.ciServiceId ? (
+                    <span className="sg-ma-count">KubeSight CI</span>
+                  ) : app.jenkinsJobPath ? (
+                    <span className="sg-ma-count sg-ma-card-job" title={app.jenkinsJobPath}>
+                      {app.jenkinsJobPath}
+                    </span>
                   ) : (
                     <span className="sg-ma-count">No Jenkins job</span>
                   )}
@@ -718,7 +744,13 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
           onTestJenkins={runTestJenkins}
           testingJenkins={testingJenkins}
           onEdit={openEdit}
-          onDelete={() => setDeleteApp(selectedApp)}
+          onDelete={() => {
+            setDeleteError("");
+            setDeleteApp(selectedApp);
+          }}
+          notice={notice}
+          error={error}
+          onDismissNotice={() => setNotice("")}
           onDownload={runDownload}
           downloadingBuildId={downloadingBuildId}
           onDeleteBuild={runDeleteBuild}
@@ -739,7 +771,9 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
             mode={formMode}
             app={editingApp}
             environments={envOptions}
-            onClose={() => setFormOpen(false)}
+            onClose={() => {
+              if (!saving) setFormOpen(false);
+            }}
             onSave={saveApp}
             saving={saving}
             error={formError}
@@ -770,7 +804,9 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
             open={Boolean(publishBuild)}
             app={selectedApp}
             build={publishBuild}
-            onClose={() => setPublishBuild(null)}
+            onClose={() => {
+              if (!publishing) setPublishBuild(null);
+            }}
             onConfirm={runPublish}
             publishing={publishing}
             error={publishError}
@@ -789,8 +825,29 @@ export default function MobileAppsPage({ canManage = false, canPublish = false }
         confirmLabel="Delete application"
         danger
         busy={deletingApp}
-        onClose={() => setDeleteApp(null)}
+        error={deleteError}
+        onClose={() => {
+          if (!deletingApp) setDeleteApp(null);
+        }}
         onConfirm={confirmDeleteApp}
+      />
+
+      <ConfirmActionModal
+        open={Boolean(buildToDelete)}
+        title="Delete build"
+        message={
+          buildToDelete
+            ? `Delete build ${buildToDelete.version || buildToDelete.fileName || `#${buildToDelete.id}`} and its binary from KubeSight? Anything already published to a store stays there.`
+            : ""
+        }
+        confirmLabel="Delete build"
+        danger
+        busy={deletingBuildId !== null}
+        error={deleteError}
+        onClose={() => {
+          if (deletingBuildId === null) setBuildToDelete(null);
+        }}
+        onConfirm={confirmDeleteBuild}
       />
     </div>
   );

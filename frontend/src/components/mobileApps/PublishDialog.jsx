@@ -86,7 +86,7 @@ export default function PublishDialog({
                 <span className="sg-ma-target-body">
                   <span className="sg-ma-target-label">
                     {t.label}
-                    {t.danger ? <span className="status-pill danger">Public</span> : null}
+                    {t.danger ? <span className="status-pill danger">{t.badge || "Public"}</span> : null}
                   </span>
                   <span className="sg-ma-target-hint">{t.hint}</span>
                 </span>
@@ -106,6 +106,7 @@ export default function PublishDialog({
               onChange={(e) => setConfirmName(e.target.value)}
               placeholder={app?.name}
               autoComplete="off"
+              autoFocus
             />
           </label>
 

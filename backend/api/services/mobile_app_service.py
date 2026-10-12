@@ -950,8 +950,9 @@ def create_upload_build(app_id, platform, file, version: str = "", user=None) ->
             build.version = f"{short} ({bundle})"
         except Exception:
             pass  # unreadable version is non-fatal
-    if not build.version:
-        build.version = file_name
+    # No version given or readable: leave it empty (the UI shows "—"). The file
+    # name is kept in its own field; as a "version" it filled cards with
+    # 60-character labels.
 
     build.file_name = file_name
     build.file_size = size

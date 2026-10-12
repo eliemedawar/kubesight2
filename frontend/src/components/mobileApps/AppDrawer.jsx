@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import ErrorBanner from "../common/ErrorBanner.jsx";
 import {
   ACTIVE_PUBLISH_STATUSES,
   ACTIVE_RESIGN_STATUSES,
@@ -92,6 +93,7 @@ function ReleaseCard({
   canManage,
   canPublish,
   canResign,
+  signingJob = false,
   onDownload,
   downloading,
   onDeleteBuild,
@@ -175,6 +177,18 @@ function ReleaseCard({
           </div>
           {build.status === "failed" && build.error ? (
             <p className="sg-ma-inline-error">{build.error}</p>
+          ) : null}
+          {/* Publish is disabled for an unsigned binary; when no signing job
+              exists for its platform there is no Re-sign button either, so
+              say what unblocks it instead of leaving a dead end. */}
+          {available && unsigned && !signingJob ? (
+            <p className="sg-ma-gate-note">
+              Unsigned, and no {build.platform === "ios" ? "iOS" : "Android"} signing job is
+              configured —{" "}
+              {canManage
+                ? "add one under Edit → Signing, or upload a signed binary."
+                : "ask an administrator to configure signing."}
+            </p>
           ) : null}
         </div>
         <div className="sg-ma-rel-acts">
@@ -329,6 +343,9 @@ export default function AppDrawer({
   onPublishBuild,
   onResignBuild,
   resigningBuildId,
+  notice = "",
+  error = "",
+  onDismissNotice,
 }) {
   const [tab, setTab] = useState("releases");
 
@@ -367,6 +384,9 @@ export default function AppDrawer({
   if (!app) return null;
 
   const artifactConfig = app.artifactConfig || {};
+  // A linked CI service builds the binaries; the Jenkins job is then ignored,
+  // so a Jenkins test could only ever report "no job configured".
+  const ciLinked = Boolean(app.ciServiceId);
 
   const readiness = storeReadiness(app);
   const playState = readiness.find((r) => r.key === "google_play")?.state || "off";
@@ -416,14 +436,16 @@ export default function AppDrawer({
                   Upload build
                 </button>
               ) : null}
-              <button
-                type="button"
-                className="secondary"
-                onClick={onTestJenkins}
-                disabled={testingJenkins}
-              >
-                {testingJenkins ? "Testing…" : "Test Jenkins"}
-              </button>
+              {!ciLinked ? (
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={onTestJenkins}
+                  disabled={testingJenkins}
+                >
+                  {testingJenkins ? "Testing…" : "Test Jenkins"}
+                </button>
+              ) : null}
               <button type="button" className="btn-outline" onClick={onEdit}>
                 Edit
               </button>
@@ -461,6 +483,19 @@ export default function AppDrawer({
         </nav>
 
         <div className="sg-ma-dr-body">
+          {/* The page banner sits behind the scrim — repeat the outcome of a
+              drawer action here, where the operator is looking. */}
+          {error ? <ErrorBanner message={error} className="banner-message error sg-ma-dr-banner" /> : null}
+          {notice ? (
+            <div className="banner banner-success sg-ma-dr-banner" role="status">
+              <span>{notice}</span>
+              {onDismissNotice ? (
+                <button type="button" className="link-button" onClick={onDismissNotice}>
+                  Dismiss
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           {tab === "releases" ? (
             loading && !builds.length ? (
               <p className="muted">Loading builds…</p>
@@ -476,6 +511,7 @@ export default function AppDrawer({
                       canManage={canManage}
                       canPublish={canPublish}
                       canResign={canResign}
+                      signingJob={Boolean(resignConfig[build.platform])}
                       onDownload={onDownload}
                       downloading={downloadingBuildId === build.id}
                       onDeleteBuild={onDeleteBuild}
@@ -504,7 +540,7 @@ export default function AppDrawer({
               <p className="muted sg-ma-empty-hint">
                 No builds yet.{" "}
                 {canManage
-                  ? "Use “Fetch latest build” to pull the newest Jenkins artifact, or “Upload build” to add an APK/AAB/IPA directly."
+                  ? `Use “Fetch latest build” to pull the newest ${ciLinked ? "CI" : "Jenkins"} artifact, or “Upload build” to add an APK/AAB/IPA directly.`
                   : null}
               </p>
             )
@@ -522,13 +558,24 @@ export default function AppDrawer({
                     )}
                   </span>
                 </div>
+                {ciLinked ? (
+                  <div className="sg-ma-cfg-row">
+                    <span className="sg-ma-cfg-k">Builds from</span>
+                    <span className="sg-ma-cfg-v">
+                      KubeSight CI service · its APK/AAB/IPA artifacts
+                    </span>
+                  </div>
+                ) : null}
                 <div className="sg-ma-cfg-row">
                   <span className="sg-ma-cfg-k">Jenkins job</span>
-                  <span className="sg-ma-cfg-v mono">{app.jenkinsJobPath || "—"}</span>
+                  <span className="sg-ma-cfg-v mono">
+                    {app.jenkinsJobPath || "—"}
+                    {ciLinked && app.jenkinsJobPath ? " (ignored while a CI service is linked)" : ""}
+                  </span>
                 </div>
                 <ArtifactRow platform="android" config={artifactConfig.android} />
                 <ArtifactRow platform="ios" config={artifactConfig.ios} />
-                {app.lastTestStatus ? (
+                {app.lastTestStatus && !ciLinked ? (
                   <p className={`sg-ma-testline ${app.lastTestStatus === "ok" ? "" : "sg-ma-testline--err"}`}>
                     <TestStatusPill status={app.lastTestStatus} />
                     <span>
@@ -537,7 +584,7 @@ export default function AppDrawer({
                     </span>
                   </p>
                 ) : null}
-                {canManage ? (
+                {canManage && !ciLinked ? (
                   <div className="sg-ma-cfg-foot">
                     <button
                       type="button"

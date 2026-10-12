@@ -54,6 +54,7 @@ import {
 } from "../utils/applicationIntelligence";
 import "./ApplicationIntelligencePage.css";
 import { setVisibleInterval } from "../lib/visibleInterval";
+import { useEscapeToClose } from "../hooks/useEscapeToClose.js";
 
 const EMPTY_FORM = {
   name: "",
@@ -112,6 +113,11 @@ const WORKLOAD_KIND_OPTIONS = [
 ];
 const FINDING_STATUS_OPTIONS = FINDING_STATUSES.map((value) => ({ value, label: value }));
 const HTTP_METHOD_ORDER = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+const FILTER_ALL_LABEL = {
+  severity: "All severities",
+  confidence: "All confidence levels",
+  status: "All statuses",
+};
 
 function isCompleteBitbucketRepositoryUrl(value) {
   try {
@@ -149,11 +155,14 @@ function RiskBadge({ level }) {
   );
 }
 
+// Compact chip labels. A blind four-letter slice read "Medi" for Medium.
+const SEVERITY_SHORT = { Critical: "Crit", High: "High", Medium: "Med", Low: "Low", Informational: "Info" };
+
 function SeverityChip({ severity, count }) {
   if (!count) return null;
   return (
     <span className={`ai-sev ai-sev--${String(severity).toLowerCase()}`} title={`${count} ${severity}`}>
-      <b>{count}</b> {severity.slice(0, 4)}
+      <b>{count}</b> {SEVERITY_SHORT[severity] || severity}
     </span>
   );
 }
@@ -266,6 +275,8 @@ function CredentialPanel({ credential, onSaved, onCancel }) {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
+  useEscapeToClose(onCancel, !saving);
+
   const submit = async (event) => {
     event.preventDefault();
     setSaving(true);
@@ -360,6 +371,8 @@ function AnalyzeModal({
   onCredentialDeleted,
   onClose,
   onComplete,
+  hidden = false,
+  selectCredentialId = null,
 }) {
   const [form, setForm] = useState(EMPTY_FORM);
   const [errors, setErrors] = useState({});
@@ -394,6 +407,18 @@ function AnalyzeModal({
       setHermesTesting(false);
     }
   };
+
+  // The credential panel opens on top of this dialog and keeps it mounted
+  // (hidden), so the form survives; a profile saved there is picked here.
+  useEffect(() => {
+    if (!selectCredentialId) return;
+    if (credentials.some((item) => String(item.id) === String(selectCredentialId))) {
+      updateCredential(String(selectCredentialId));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectCredentialId]);
+
+  useEscapeToClose(onClose, !saving, !hidden);
 
   const deleteSelectedCredential = async () => {
     const selected = credentials.find((item) => String(item.id) === String(form.credentialProfileId));
@@ -697,7 +722,13 @@ function AnalyzeModal({
     }
   };
   return (
-    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Analyze application">
+    <div
+      className="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Analyze application"
+      style={hidden ? { display: "none" } : undefined}
+    >
       <form className="modal-panel ai-modal" onSubmit={submit}>
         <div className="modal-header">
           <div>
@@ -857,6 +888,12 @@ function AnalyzeModal({
         {hermesTest ? (
           <p className={`banner-message ${hermesTest.ok ? "" : "error"}`}>{hermesTest.message}</p>
         ) : null}
+        {!credentials.length ? (
+          <p className="banner-message">
+            Analysis needs an enabled, read-only Bitbucket credential profile.{" "}
+            {canManage ? "Add one with “Add credential” first." : "Ask an administrator to add one."}
+          </p>
+        ) : null}
         <div className="modal-actions">
           <button type="button" className="btn-outline" onClick={testHermes} disabled={hermesTesting}>
             {hermesTesting ? "Testing Hermes…" : "Test Hermes"}
@@ -899,6 +936,7 @@ function FindingCard({ finding, canManage, onStatusChanged, selected, onSelected
     finding.startLine ? `line ${finding.startLine}` : null,
   ].filter(Boolean).join(" · ");
   const latestChange = finding.statusHistory?.at(-1);
+  const reasonRequired = ["Risk Accepted", "False Positive"].includes(status);
   return (
     <article className={`card ai-finding ai-finding--${String(finding.severity).toLowerCase()}`}>
       <button type="button" className="ai-finding__head" onClick={() => setOpen((value) => !value)} aria-expanded={open}>
@@ -969,10 +1007,21 @@ function FindingCard({ finding, canManage, onStatusChanged, selected, onSelected
             searchThreshold={10}
             aria-label={`Status for ${finding.title}`}
           />
-          {["Risk Accepted", "False Positive"].includes(status) ? (
-            <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Required reason" />
+          {reasonRequired ? (
+            <input
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+              placeholder="Required reason"
+              aria-label={`Reason for marking ${finding.title} as ${status}`}
+            />
           ) : null}
-          <button type="button" className="btn-outline" disabled={saving || status === finding.status} onClick={saveStatus}>
+          <button
+            type="button"
+            className="btn-outline"
+            disabled={saving || status === finding.status || (reasonRequired && !reason.trim())}
+            title={reasonRequired && !reason.trim() ? "Give a reason for this status first" : undefined}
+            onClick={saveStatus}
+          >
             {saving ? "Saving…" : "Update status"}
           </button>
         </div>
@@ -984,6 +1033,7 @@ function FindingCard({ finding, canManage, onStatusChanged, selected, onSelected
 
 function Findings({
   items,
+  total = 0,
   filters,
   onFilters,
   canManage,
@@ -1001,6 +1051,14 @@ function Findings({
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
   const writeCredentials = credentials.filter((item) => item.enabled && !item.readOnly);
+  // Each filter change refetches, so the free-text path waits for a pause in
+  // typing instead of firing a request per keystroke.
+  const [fileDraft, setFileDraft] = useState(filters.file);
+  useEffect(() => {
+    if (fileDraft === filters.file) return undefined;
+    const timer = window.setTimeout(() => onFilters({ ...filters, file: fileDraft }), 350);
+    return () => window.clearTimeout(timer);
+  }, [fileDraft, filters, onFilters]);
   const ordered = useMemo(() => sortFindings(items), [items]);
   const coverage = analysis?.evidenceCoverage;
   const createPullRequest = async () => {
@@ -1038,7 +1096,7 @@ function Findings({
             value={filters[key]}
             onChange={(e) => onFilters({ ...filters, [key]: e.target.value })}
             options={[
-              { value: "", label: `All ${key}` },
+              { value: "", label: FILTER_ALL_LABEL[key] },
               ...(key === "severity"
                 ? SEVERITY_ORDER
                 : key === "confidence"
@@ -1050,8 +1108,19 @@ function Findings({
             aria-label={`Filter by ${key}`}
           />
         ))}
-        <input placeholder="File path" value={filters.file} onChange={(e) => onFilters({ ...filters, file: e.target.value })} />
+        <input
+          placeholder="File path contains…"
+          aria-label="Filter by file path"
+          value={fileDraft}
+          onChange={(e) => setFileDraft(e.target.value)}
+        />
       </div>
+      {total > ordered.length ? (
+        <p className="ai-trust-note">
+          Showing the {ordered.length} most recently recorded of {total} findings. Narrow the list
+          with the filters above to reach the rest.
+        </p>
+      ) : null}
       {!ordered.length ? <EmptyState title="No findings match these filters" /> : (
         <div className="ai-finding-list">
           {ordered.map((finding) => (
@@ -1237,9 +1306,16 @@ function CommunicationsTable({ edges, onSelect, selectedId }) {
             {edges.map((edge) => (
               <tr
                 key={edge.id}
-                className={edge.id === selectedId ? "is-current" : ""}
+                className={`ai-row-select${edge.id === selectedId ? " is-current" : ""}`}
                 onClick={() => onSelect(edge.id)}
-                style={{ cursor: "pointer" }}
+                // Rows select an edge, so they must be reachable without a mouse.
+                tabIndex={0}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onSelect(edge.id);
+                  }
+                }}
               >
                 <td><strong>{edge.destination}</strong></td>
                 <td>{edge.destinationType || "—"}</td>
@@ -2139,6 +2215,7 @@ function ApplicationDetail({
   application,
   analysis,
   findings,
+  findingsTotal,
   topology,
   runtime,
   runtimeError,
@@ -2167,6 +2244,28 @@ function ApplicationDetail({
   const tab = embedded ? localTab : routedTab;
   const setTab = embedded ? setLocalTab : setRoutedTab;
   const [rerunMode, setRerunMode] = useState("Quick");
+  // Busy flags so a second click cannot queue a duplicate run or cancel.
+  const [starting, setStarting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const startRerun = async () => {
+    setStarting(true);
+    try {
+      await onAnalyze(
+        rerunMode,
+        analysis?.requestedRevision || analysis?.branch || application.defaultBranch,
+      );
+    } finally {
+      setStarting(false);
+    }
+  };
+  const cancelRun = async () => {
+    setCancelling(true);
+    try {
+      await onCancel();
+    } finally {
+      setCancelling(false);
+    }
+  };
   // The detail view mounts before the analysis resolves, so adopt the last
   // mode used once it is known rather than silently offering Quick.
   useEffect(() => {
@@ -2196,7 +2295,11 @@ function ApplicationDetail({
         </div>
         <div className="ai-actions">
           <Status status={analysis?.status} />
-          {active ? <button type="button" className="btn-outline" onClick={onCancel}>Cancel analysis</button> : null}
+          {active ? (
+            <button type="button" className="btn-outline" onClick={cancelRun} disabled={cancelling}>
+              {cancelling ? "Cancelling…" : "Cancel analysis"}
+            </button>
+          ) : null}
           {canAnalyze && !active ? (
             <>
               <SearchableSelect
@@ -2210,15 +2313,8 @@ function ApplicationDetail({
                 searchThreshold={10}
                 aria-label="Rerun analysis mode"
               />
-              <button
-                type="button"
-                className="primary"
-                onClick={() => onAnalyze(
-                  rerunMode,
-                  analysis?.requestedRevision || analysis?.branch || application.defaultBranch,
-                )}
-              >
-                Re-analyze
+              <button type="button" className="primary" onClick={startRerun} disabled={starting}>
+                {starting ? "Starting…" : "Re-analyze"}
               </button>
             </>
           ) : null}
@@ -2262,6 +2358,7 @@ function ApplicationDetail({
           {tab === "Findings" ? (
             <Findings
               items={findings}
+              total={findingsTotal}
               filters={filters}
               onFilters={onFilters}
               canManage={canManage}
@@ -2325,6 +2422,8 @@ export function ApplicationIntelligenceWorkspace({
   const [selected, setSelected] = useState(null);
   const [analysis, setAnalysis] = useState(null);
   const [findings, setFindings] = useState([]);
+  // Server-side total — the list request is capped at 100 rows.
+  const [findingsTotal, setFindingsTotal] = useState(0);
   const [topology, setTopology] = useState({ nodes: [], edges: [] });
   const [runtime, setRuntime] = useState({ status: "Not Collected" });
   const [runtimeError, setRuntimeError] = useState("");
@@ -2385,7 +2484,10 @@ export function ApplicationIntelligenceWorkspace({
     const load = async () => {
       try {
         const data = await listApplicationFindings(analysis.id, { ...filters, perPage: 100 });
-        if (!cancelled) setFindings(data.items || []);
+        if (!cancelled) {
+          setFindings(data.items || []);
+          setFindingsTotal(data.pagination?.total ?? (data.items || []).length);
+        }
       } catch { /* detail error is already surfaced by its analysis state */ }
     };
     load();
@@ -2431,6 +2533,7 @@ export function ApplicationIntelligenceWorkspace({
         application={selected}
         analysis={analysis}
         findings={findings}
+        findingsTotal={findingsTotal}
         topology={topology}
         runtime={runtime}
         runtimeError={runtimeError}
@@ -2504,6 +2607,7 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
   const [error, setError] = useState("");
   const [modal, setModal] = useState(false);
   const [credentialPanel, setCredentialPanel] = useState(null);
+  const [savedCredentialId, setSavedCredentialId] = useState(null);
 
   const loadList = useCallback(async () => {
     try {
@@ -2652,14 +2756,10 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
           credentials={credentials.filter((item) => item.enabled && item.readOnly)}
           clusters={clusters}
           canManage={canManage}
-          onCredentialRequested={() => {
-            setModal(false);
-            setCredentialPanel({ credential: null });
-          }}
-          onCredentialEditRequested={(credential) => {
-            setModal(false);
-            setCredentialPanel({ credential });
-          }}
+          hidden={Boolean(credentialPanel)}
+          selectCredentialId={savedCredentialId}
+          onCredentialRequested={() => setCredentialPanel({ credential: null })}
+          onCredentialEditRequested={(credential) => setCredentialPanel({ credential })}
           onCredentialDeleted={(credentialId) => {
             setCredentials((items) => items.filter((item) => item.id !== credentialId));
           }}
@@ -2675,7 +2775,7 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
         <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Bitbucket credential">
           <CredentialPanel
             credential={credentialPanel.credential}
-            onCancel={() => { setCredentialPanel(null); setModal(true); }}
+            onCancel={() => setCredentialPanel(null)}
             onSaved={(saved) => {
               setCredentials((items) => {
                 const exists = items.some((item) => item.id === saved.id);
@@ -2684,7 +2784,7 @@ export default function ApplicationIntelligencePage({ clusters = [], canManage, 
                   : [...items, saved];
               });
               setCredentialPanel(null);
-              setModal(true);
+              if (saved.readOnly && saved.enabled) setSavedCredentialId(saved.id);
             }}
           />
         </div>

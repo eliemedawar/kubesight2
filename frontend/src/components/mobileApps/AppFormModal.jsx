@@ -216,6 +216,16 @@ function ResignFields({ prefix, form, set }) {
   );
 }
 
+// Inline outcome of a store credential test ("Passed" / "Failed" + message).
+function StoreTestResult({ result }) {
+  return (
+    <p className={`sg-ma-testline sg-ma-testline--inline ${result.ok ? "" : "sg-ma-testline--err"}`} role="status">
+      <TestStatusPill status={result.ok ? "ok" : "error"} />
+      <span>{result.message}</span>
+    </p>
+  );
+}
+
 export default function AppFormModal({
   open,
   mode = "create",
@@ -231,6 +241,9 @@ export default function AppFormModal({
   testingAppStore = false,
 }) {
   const [form, setForm] = useState(() => formFromApp(app));
+  // Results of the store credential tests, shown next to their buttons.
+  const [playTest, setPlayTest] = useState(null);
+  const [ascTest, setAscTest] = useState(null);
   const [ciServices, setCiServices] = useState([]);
   useEffect(() => {
     listCiServices()
@@ -325,7 +338,10 @@ export default function AppFormModal({
   const lastTest = app?.lastTestStatus ? (
     <p className={`sg-ma-testline ${app.lastTestStatus === "ok" ? "" : "sg-ma-testline--err"}`}>
       <TestStatusPill status={app.lastTestStatus} />
-      <span>{app.lastTestMessage || (app.lastTestStatus === "ok" ? "Last test passed." : "Last test failed.")}</span>
+      <span>
+        Last Jenkins test:{" "}
+        {app.lastTestMessage || (app.lastTestStatus === "ok" ? "passed." : "failed.")}
+      </span>
     </p>
   ) : null;
 
@@ -402,7 +418,7 @@ export default function AppFormModal({
               )}
               <span className="field-hint">
                 {envList && environments.length === 0
-                  ? "No custom environments configured yet — add one under Zoho Desk settings."
+                  ? "No custom environments configured yet — add one in Ticketing → Zoho settings."
                   : "The custom Environment whose ticket builds feed this app."}
               </span>
             </label>
@@ -495,12 +511,16 @@ export default function AppFormModal({
                 <button
                   type="button"
                   className="secondary"
-                  onClick={onTestPlay}
+                  onClick={async () => {
+                    setPlayTest(null);
+                    setPlayTest(await onTestPlay());
+                  }}
                   disabled={testingPlay || !app?.playServiceAccountConfigured}
                   title={app?.playServiceAccountConfigured ? "" : "Save a service-account key first"}
                 >
                   {testingPlay ? "Testing…" : "Test Google Play"}
                 </button>
+                {playTest ? <StoreTestResult result={playTest} /> : null}
               </div>
             ) : null}
           </div>
@@ -597,12 +617,16 @@ export default function AppFormModal({
                 <button
                   type="button"
                   className="secondary"
-                  onClick={onTestAppStore}
+                  onClick={async () => {
+                    setAscTest(null);
+                    setAscTest(await onTestAppStore());
+                  }}
                   disabled={testingAppStore || !app?.ascPrivateKeyConfigured}
                   title={app?.ascPrivateKeyConfigured ? "" : "Save an API private key first"}
                 >
                   {testingAppStore ? "Testing…" : "Test App Store"}
                 </button>
+                {ascTest ? <StoreTestResult result={ascTest} /> : null}
               </div>
             ) : null}
           </div>

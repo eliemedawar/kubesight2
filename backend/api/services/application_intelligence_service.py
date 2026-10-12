@@ -2101,7 +2101,12 @@ def list_findings(analysis_id: int, filters: dict, page=1, per_page=25) -> dict:
     for key, column in columns.items():
         value = str(filters.get(key) or "").strip()
         if value:
-            query = query.filter(column == value)
+            # The UI's file box is free text — a path fragment has to match,
+            # not only the exact stored path.
+            if key == "file":
+                query = query.filter(column.icontains(value, autoescape=True))
+            else:
+                query = query.filter(column == value)
     query = query.order_by(ApplicationFinding.created_at.desc())
     rows, total, page, per_page = _page(query, page, per_page)
     return {

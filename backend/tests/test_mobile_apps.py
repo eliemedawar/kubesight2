@@ -312,8 +312,9 @@ def test_upload_build_creates_available_build(client, admin_token, artifact_dir)
     assert build["artifactType"] == "aab"
     assert build["fileName"] == "app-release.aab"
     assert build["fileSize"] == len(b"aab-bytes-123")
-    # No version supplied and not an IPA → the file name is the release label.
-    assert build["version"] == "app-release.aab"
+    # No version supplied and not an IPA → no version (the UI shows "—"); the
+    # file name stays in its own field.
+    assert build["version"] == ""
 
     # It shows up in the build list and the stored binary downloads normally —
     # proving the publish flow (which only needs an available build on disk)

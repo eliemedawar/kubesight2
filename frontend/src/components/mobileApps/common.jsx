@@ -295,11 +295,15 @@ export function PublishSteps({ steps }) {
 const RESIGN_STATUS_PILL = {
   queued: ["info", "Queued"],
   running: ["info", "Signing"],
+  // Jenkins finished; KubeSight is pulling the signed artifact back.
+  collecting: ["info", "Collecting"],
   completed: ["ok", "Signed"],
   failed: ["danger", "Failed"],
 };
 
-export const ACTIVE_RESIGN_STATUSES = new Set(["queued", "running"]);
+// Mirrors the backend RESIGN_ACTIVE_STATUSES — "collecting" must keep the
+// drawer polling, or the signed child build never appears without a reload.
+export const ACTIVE_RESIGN_STATUSES = new Set(["queued", "running", "collecting"]);
 
 export function ResignStatusPill({ status }) {
   const [tone, label] = RESIGN_STATUS_PILL[status] || ["muted", status || "—"];
@@ -335,7 +339,9 @@ export const PUBLISH_TARGETS = {
   ],
   app_store: [
     { value: "testflight", label: "TestFlight", hint: "Distribute to TestFlight beta testers." },
-    { value: "review", label: "App Store review", hint: "Submit for App Store review and public release.", danger: true },
+    // "review" is Beta App Review (external TestFlight) — the backend never
+    // submits for public App Store release, so the copy must not promise it.
+    { value: "review", label: "TestFlight + Beta App Review", hint: "Submit for Beta App Review so external TestFlight testers can install it. Does not release to the public App Store.", danger: true, badge: "External" },
   ],
 };
 
@@ -345,7 +351,7 @@ const TARGET_LABEL = {
   beta: "beta track",
   production: "production",
   testflight: "TestFlight",
-  review: "App Store review",
+  review: "Beta App Review",
 };
 
 // "Google Play · beta track" / "App Store · TestFlight"

@@ -74,15 +74,17 @@ export default function UploadBuildModal({
         </header>
 
         <p className="muted sg-ma-upl-hint">
-          Add a final APK, AAB or IPA directly to <b>{app?.name}</b>. It lands as a ready-to-publish
-          build — no Jenkins fetch needed. Use this for a re-signed IPA or a release AAB you already
-          have in hand.
+          Add a final APK, AAB or IPA directly to <b>{app?.name}</b>. It lands as a build you can
+          publish — no Jenkins fetch needed. Use this for a re-signed IPA or a release AAB you already
+          have in hand; an unsigned (shielded) binary has to be re-signed first.
         </p>
 
         <form onSubmit={submit}>
           <fieldset className="sg-ma-targets">
             <legend className="sg-ma-pick-label">Platform</legend>
-            {["android", "ios"].map((p) => (
+            {/* Only the platforms this app ships — an IPA on an Android-only
+                app would land as a build no store can take. */}
+            {configured.map((p) => (
               <label
                 key={p}
                 className={`sg-ma-target ${platform === p ? "sg-ma-target--on" : ""}`}
@@ -127,9 +129,12 @@ export default function UploadBuildModal({
           ) : null}
 
           <label className="sg-ma-confirm-field">
-            Version{" "}
-            <span className="muted">
-              (optional{platform === "ios" ? " — auto-read from the IPA" : ""})
+            {/* One grid row for the label text — the field is a grid. */}
+            <span>
+              Version{" "}
+              <span className="muted">
+                (optional{platform === "ios" ? " — auto-read from the IPA" : ""})
+              </span>
             </span>
             <input
               value={version}

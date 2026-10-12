@@ -59,6 +59,14 @@
   white-space: normal;
   overflow-wrap: anywhere;
 }
+/* On a card the job path is a one-line pill; the full path is in its title. */
+.sg-ma-card-job {
+  display: block;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* Neutral variant for the shared status pill (missing / disabled). */
 .status-pill.muted {
@@ -270,10 +278,10 @@
 
 .sg-ma-card-top { display: flex; gap: 0.7rem; align-items: flex-start; min-width: 0; }
 .sg-ma-card-id { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; flex: 1; }
+/* Block + inline dot, so the enabled dot follows the last word of a long,
+   wrapping name instead of floating at the far edge of the card. */
 .sg-ma-card-name {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
+  display: block;
   font-family: var(--font-display);
   font-weight: 800;
   font-size: 0.98rem;
@@ -282,7 +290,15 @@
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.sg-ma-endot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: none; }
+.sg-ma-endot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 0.45rem;
+  vertical-align: middle;
+  border-radius: 50%;
+  background: var(--ok);
+}
 .sg-ma-endot--off { background: var(--border-strong); }
 .sg-ma-card-desc {
   font-size: 0.75rem;
@@ -519,6 +535,15 @@
   overflow-wrap: anywhere;
 }
 .sg-ma-empty-hint { font-size: 0.8125rem; line-height: 1.5; }
+/* Action outcome repeated inside the drawer (the page banner is behind the scrim). */
+.sg-ma-dr-banner { margin: 0 0 0.8rem; }
+/* Why an unsigned build cannot be published when nothing can sign it. */
+.sg-ma-gate-note {
+  margin: 0.5rem 0 0;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: var(--warn);
+}
 
 /* Publish attempts nested under their build. */
 .sg-ma-rel-pubs {
@@ -700,7 +725,8 @@
   font-size: var(--font-size-sm);
 }
 .sg-ma-textarea { font-size: 0.78rem; line-height: 1.5; resize: vertical; }
-.sg-ma-testrow { display: flex; gap: 0.5rem; }
+.sg-ma-testrow { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.sg-ma-testline--inline { margin: 0; flex: 1 1 16rem; min-width: 0; overflow-wrap: anywhere; }
 
 @media (max-width: 640px) {
   .sg-ma-grid2.settings-form,
