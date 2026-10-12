@@ -1786,7 +1786,10 @@ def create_missing_indexes(metadata=None) -> list:
                     with engine.connect() as conn:
                         conn = conn.execution_options(isolation_level="AUTOCOMMIT")
                         conn.execute(text(f"SET lock_timeout = {_index_lock_timeout_ms()}"))
-                        conn.execute(text(f'DROP INDEX CONCURRENTLY IF EXISTS "{name}"'))
+                        try:
+                            conn.execute(text(f'DROP INDEX CONCURRENTLY IF EXISTS "{name}"'))
+                        finally:
+                            conn.execute(text("RESET lock_timeout"))
                 except Exception:  # noqa: BLE001
                     logger.debug("Could not drop the invalid index %s", name, exc_info=True)
             continue
