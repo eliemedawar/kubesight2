@@ -288,7 +288,10 @@ def _default_engine_options(database_url: str) -> dict:
         options.update(
             {
                 "pool_recycle": int(os.getenv("DB_POOL_RECYCLE_SECONDS", "280")),
-                "pool_size": int(os.getenv("DB_POOL_SIZE", "10")),
+                # 16 = gunicorn's default request threads (k8s_entrypoint.sh), so
+                # a busy worker reuses pooled connections instead of opening and
+                # closing overflow ones; the overflow absorbs background loops.
+                "pool_size": int(os.getenv("DB_POOL_SIZE", "16")),
                 "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "20")),
                 "pool_timeout": int(os.getenv("DB_POOL_TIMEOUT_SECONDS", "30")),
             }

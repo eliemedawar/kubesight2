@@ -50,7 +50,13 @@ export FLASK_DEBUG="${FLASK_DEBUG:-false}"
 # worker that made a change clears them: with more workers a list can lag a
 # write by up to its TTL (10-30s). Raise GUNICORN_WORKERS if that is acceptable.
 # Never add --preload: each worker must start its own loops after fork.
-# Threads provide concurrency for blocking kubectl/helm/log-stream calls.
-exec gunicorn -w "${GUNICORN_WORKERS:-1}" --threads "${GUNICORN_THREADS:-8}" \
+# Threads provide concurrency for blocking kubectl/helm/log-stream calls; they
+# spend nearly all their time waiting on I/O, so 16 costs little CPU and stops
+# a few long log streams from queueing every other request. Each worker's DB
+# pool (DB_POOL_SIZE 16 + DB_MAX_OVERFLOW 20) covers those threads plus the
+# background loops. More workers multiply that, and every worker runs the
+# scheduler/CI loops idle (only the leader works), so size Postgres
+# max_connections for GUNICORN_WORKERS x replicas x 36, plus a few.
+exec gunicorn -w "${GUNICORN_WORKERS:-1}" --threads "${GUNICORN_THREADS:-16}" \
   -b 0.0.0.0:5000 \
   --timeout "${GUNICORN_TIMEOUT:-300}" "api:create_app()"
