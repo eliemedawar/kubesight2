@@ -22,6 +22,8 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from sqlalchemy.exc import IntegrityError
+
 from ..db import db
 from ..models_promotion import PromotionEnvironment, PromotionRecord
 from . import promotion_service as core
@@ -114,15 +116,24 @@ def build_overview() -> Dict[str, Any]:
     rungs = core.ladder()
     pol = core.policy()
     resolver = core.Resolver()
-    by_env, errors = core.scan_ladder(resolver)
-    ledgers = core.ledger_by_env([env.id for env in rungs])
+    by_env, errors = core.scan_ladder(resolver, allow_stale=True)
+    # Only the ledger rows for images running now: the ledger only grows.
+    images = core.scanned_images(by_env)
+    ledgers = core.ledger_by_env([env.id for env in rungs], images)
 
-    # What the page sees running healthy has passed that environment: record it
-    # now rather than wait for the observer's next tick.
+    # What the page sees running healthy for the first time has passed that
+    # environment: record it now rather than wait for the observer's next
+    # tick. Rows already recorded are left to the observer (no write per
+    # poll), and a race with the observer over a new row is not an error.
+    recorded = 0
     for env in rungs:
-        core.record_healthy(env, by_env.get(env.id, []), existing=ledgers[env.id])
-    if rungs:
-        db.session.commit()
+        recorded += core.record_healthy(env, by_env.get(env.id, []), existing=ledgers[env.id])
+    if recorded:
+        try:
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            ledgers = core.ledger_by_env([env.id for env in rungs], images)
 
     links = _ci_links()
     pending = pending_changes()
