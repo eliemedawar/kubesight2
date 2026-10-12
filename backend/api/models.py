@@ -506,7 +506,7 @@ class AlertRoutingReceiverGroup(db.Model):
     members = db.relationship(
         "AlertRoutingReceiver",
         secondary=alert_receiver_group_members,
-        lazy="joined",
+        lazy="selectin",
         back_populates="receiver_groups",
     )
     policies = db.relationship(
@@ -676,13 +676,13 @@ class AlertPolicy(db.Model):
     notification_receivers = db.relationship(
         "AlertRoutingReceiver",
         secondary=alert_policy_receivers,
-        lazy="joined",
+        lazy="selectin",
         back_populates="policies",
     )
     notification_receiver_groups = db.relationship(
         "AlertRoutingReceiverGroup",
         secondary=alert_policy_receiver_groups,
-        lazy="joined",
+        lazy="selectin",
         back_populates="policies",
     )
     history_entries = db.relationship(
@@ -751,19 +751,19 @@ class ApplicationService(db.Model):
         "ApplicationServiceDeployment",
         back_populates="service",
         cascade="all, delete-orphan",
-        lazy="joined",
+        lazy="selectin",
     )
     topology_nodes = db.relationship(
         "ApplicationServiceTopologyNode",
         back_populates="service",
         cascade="all, delete-orphan",
-        lazy="joined",
+        lazy="selectin",
     )
     topology_edges = db.relationship(
         "ApplicationServiceTopologyEdge",
         back_populates="service",
         cascade="all, delete-orphan",
-        lazy="joined",
+        lazy="selectin",
     )
     client_links = db.relationship(
         "ClientApplicationService",
@@ -1529,20 +1529,20 @@ class ServiceBlueprint(db.Model):
         "ServiceBlueprintComponent",
         back_populates="blueprint",
         cascade="all, delete-orphan",
-        lazy="joined",
+        lazy="selectin",
         order_by="ServiceBlueprintComponent.position",
     )
     connections = db.relationship(
         "ServiceBlueprintConnection",
         back_populates="blueprint",
         cascade="all, delete-orphan",
-        lazy="joined",
+        lazy="selectin",
     )
     requirements = db.relationship(
         "ServiceBlueprintRequirement",
         back_populates="blueprint",
         cascade="all, delete-orphan",
-        lazy="joined",
+        lazy="selectin",
     )
     app_services = db.relationship(
         "AppService",
