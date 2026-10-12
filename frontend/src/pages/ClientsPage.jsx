@@ -232,7 +232,7 @@ export default function ClientsPage({ clusters = [] }) {
       if (editingClient?.id) {
         const updated = await updateClient(editingClient.id, payload);
         setClients((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
-        setSelectedId(updated.id);
+        if (!sameId(selectedId, updated.id)) setSelectedId(updated.id);
       } else {
         const created = await createClient(payload);
         setClients((prev) => [...prev, created]);
@@ -247,6 +247,7 @@ export default function ClientsPage({ clusters = [] }) {
   };
 
   const handleDelete = async (client) => {
+    if (deleting) return;
     if (!window.confirm(`Delete "${client.name}"? This cannot be undone.`)) return;
     setDeleting(true);
     try {
@@ -291,14 +292,15 @@ export default function ClientsPage({ clusters = [] }) {
           type="search"
           className="form-input"
           placeholder="Search by name, contact, or email…"
+          aria-label="Search clients"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          style={{ maxWidth: 280 }}
         />
         <SearchableSelect
           className="form-select"
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
+          aria-label="Filter by status"
         >
           <option value="all">All statuses</option>
           <option value="healthy">Healthy</option>
@@ -335,7 +337,16 @@ export default function ClientsPage({ clusters = [] }) {
                         key={c.id}
                         className={sameId(selectedId, c.id) ? "table-row--selected" : ""}
                         style={{ cursor: "pointer" }}
+                        tabIndex={0}
+                        aria-label={`Open ${c.name}`}
                         onClick={() => setSelectedId(sameId(selectedId, c.id) ? null : c.id)}
+                        onKeyDown={(e) => {
+                          if (e.target !== e.currentTarget) return;
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setSelectedId(c.id);
+                          }
+                        }}
                       >
                         <td>
                           <strong>{c.name}</strong>
@@ -359,14 +370,17 @@ export default function ClientsPage({ clusters = [] }) {
 
       </div>
 
-      {selectedClient && (
+      {/* Hidden, not closed, while its edit form is open: the address keeps
+          naming the client, so Cancel lands back on its detail. */}
+      {selectedClient && !modalOpen && (
         <ClientDetailModal
           client={selectedClient}
           clusters={clusters}
           canUpdate={canUpdate}
-          canDelete={canDelete && !deleting}
-          onEditClient={() => { const c = selectedClient; setSelectedId(null); openEdit(c); }}
-          onDeleteClient={() => { const c = selectedClient; setSelectedId(null); handleDelete(c); }}
+          canDelete={canDelete}
+          deleting={deleting}
+          onEditClient={() => openEdit(selectedClient)}
+          onDeleteClient={() => handleDelete(selectedClient)}
           onClose={() => setSelectedId(null)}
         />
       )}

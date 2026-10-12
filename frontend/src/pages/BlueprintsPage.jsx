@@ -177,15 +177,15 @@ function BlueprintCard({ blueprint, active, onView, onDeploy, canDeploy }) {
   );
 }
 
-function BlueprintDetail({ detail, onClose, onEdit, onDelete, onDeploy, canUpdate, canDelete, canDeploy }) {
+function BlueprintDetail({ detail, onClose, onEdit, onDelete, onDeploy, canUpdate, canDelete, canDeploy, deleting }) {
   const componentName = (id) =>
     detail.components.find((c) => c.id === id)?.name || `#${id}`;
 
   return (
     <div className="card" style={{ padding: "1.25rem", position: "sticky", top: "1rem" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "1rem" }}>
-        <div>
-          <h3 style={{ margin: 0 }}>{detail.name}</h3>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.75rem 1rem", flexWrap: "wrap" }}>
+        <div style={{ minWidth: 0 }}>
+          <h3 style={{ margin: 0, overflowWrap: "anywhere" }}>{detail.name}</h3>
           <p className="muted" style={{ marginTop: "0.25rem", fontSize: "0.85rem" }}>
             v{detail.version} · <StatusPill status={detail.status} />
           </p>
@@ -198,7 +198,9 @@ function BlueprintDetail({ detail, onClose, onEdit, onDelete, onDeploy, canUpdat
             <button type="button" className="btn-outline btn-compact" onClick={onEdit}>Edit</button>
           )}
           {canDelete && (
-            <button type="button" className="btn-outline btn-compact danger" onClick={onDelete}>Delete</button>
+            <button type="button" className="btn-outline btn-compact danger" onClick={onDelete} disabled={deleting}>
+              {deleting ? "Deleting…" : "Delete"}
+            </button>
           )}
           <button type="button" className="btn-outline btn-compact" onClick={onClose}>Close</button>
         </div>
@@ -282,6 +284,7 @@ export default function BlueprintsPage({ clusters = [] }) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [deployBlueprint, setDeployBlueprint] = useState(null);
+  const [deleting, setDeleting] = useState(false);
 
   const loadData = async () => {
     setLoading(true);
@@ -355,14 +358,17 @@ export default function BlueprintsPage({ clusters = [] }) {
   };
 
   const handleDelete = async () => {
-    if (!detail) return;
+    if (!detail || deleting) return;
     if (!window.confirm(`Delete blueprint "${detail.name}"? This cannot be undone.`)) return;
+    setDeleting(true);
     try {
       await deleteServiceBlueprint(detail.id);
       setOpenBlueprintId(null);
       await loadData();
     } catch (err) {
       setError(err.message || "Delete failed.");
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -430,7 +436,7 @@ export default function BlueprintsPage({ clusters = [] }) {
         </label>
       </div>
 
-      <div className={`sg-cat-layout${detail ? " sg-cat-layout--split" : ""}`}>
+      <div className={`sg-cat-layout${detail || detailLoading ? " sg-cat-layout--split" : ""}`}>
         <div>
           {loading ? (
             <LoadingState label="Loading blueprints…" />
@@ -459,9 +465,9 @@ export default function BlueprintsPage({ clusters = [] }) {
           )}
         </div>
 
-        {detail && (
+        {(detail || detailLoading) && (
           <div>
-            {detailLoading ? (
+            {detailLoading || !detail ? (
               <LoadingState label="Loading blueprint…" />
             ) : (
               <BlueprintDetail
@@ -473,6 +479,7 @@ export default function BlueprintsPage({ clusters = [] }) {
                 canUpdate={canUpdate}
                 canDelete={canDelete}
                 canDeploy={canDeploy}
+                deleting={deleting}
               />
             )}
           </div>

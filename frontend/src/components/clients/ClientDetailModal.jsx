@@ -10,6 +10,7 @@ import SearchableSelect from "../common/SearchableSelect.jsx";
 import LoadingState from "../common/LoadingState.jsx";
 import EmptyState from "../common/EmptyState.jsx";
 import EditConnectionModal from "./EditConnectionModal.jsx";
+import { useEscapeToClose } from "../../hooks/useEscapeToClose.js";
 
 const HEALTH_BADGE = { healthy: "pass", warning: "warning", critical: "fail", unknown: "pending" };
 const CONN_STATUS_BADGE = { active: "pass", degraded: "warning", inactive: "fail", planned: "pending" };
@@ -236,7 +237,7 @@ function ServicesTab({ services, canUpdate, onViewTopology, onEditConnection, on
                   </button>
                 )}
                 {canUpdate && svc.connection && (
-                  <button type="button" className="btn-ghost btn-compact danger" onClick={stop(() => onRemove(svc))}>
+                  <button type="button" className="btn-outline btn-compact danger" onClick={stop(() => onRemove(svc))}>
                     Remove
                   </button>
                 )}
@@ -260,6 +261,7 @@ export default function ClientDetailModal({
   client,
   canUpdate,
   canDelete,
+  deleting = false,
   onEditClient,
   onDeleteClient,
   onClose,
@@ -289,12 +291,9 @@ export default function ClientDetailModal({
 
   useEffect(() => { loadServices(); }, [loadServices]);
 
-  // Close on Escape (only when no nested modal is open).
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === "Escape" && !editingConn) onClose?.(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, editingConn]);
+  // Close on Escape. The connection editor opens on top of this in the shared
+  // stack, so its Escape closes only itself.
+  useEscapeToClose(() => onClose?.());
 
   const handleViewTopology = (serviceId) => {
     setSelectedServiceId(serviceId);
@@ -332,12 +331,21 @@ export default function ClientDetailModal({
     { id: "access", label: "Access Details" },
   ];
 
+  // The connection editor is a sibling of this backdrop, not a child: a click
+  // on its own backdrop would otherwise bubble on and close this dialog too.
   return (
+    <>
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <div className="modal-card modal-card--wide service-detail-modal" role="dialog" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal-card modal-card--wide service-detail-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="client-detail-title"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="service-detail-modal__head">
           <div>
-            <h3 style={{ margin: 0 }}>{client.name}</h3>
+            <h3 id="client-detail-title" style={{ margin: 0 }}>{client.name}</h3>
             {client.contactPerson && (
               <p className="muted" style={{ marginTop: "0.25rem", fontSize: "0.875rem" }}>{client.contactPerson}</p>
             )}
@@ -367,8 +375,12 @@ export default function ClientDetailModal({
               {client.createdAt && ` · Created ${new Date(client.createdAt).toLocaleDateString()}`}
             </div>
             <div style={{ display: "flex", gap: "0.75rem", marginTop: "0.75rem" }}>
-              {canUpdate && <button className="btn-outline btn-compact" onClick={onEditClient}>Edit client</button>}
-              {canDelete && <button className="btn-outline btn-compact danger" onClick={onDeleteClient}>Delete client</button>}
+              {canUpdate && <button type="button" className="btn-outline btn-compact" onClick={onEditClient}>Edit client</button>}
+              {canDelete && (
+                <button type="button" className="btn-outline btn-compact danger" onClick={onDeleteClient} disabled={deleting}>
+                  {deleting ? "Deleting…" : "Delete client"}
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -401,9 +413,10 @@ export default function ClientDetailModal({
         )}
 
         <div className="modal-actions">
-          <button className="btn-outline btn-compact" onClick={onClose}>Close</button>
+          <button type="button" className="btn-outline btn-compact" onClick={onClose}>Close</button>
         </div>
       </div>
+    </div>
 
       {editingConn && (
         <EditConnectionModal
@@ -417,6 +430,6 @@ export default function ClientDetailModal({
           error={connError}
         />
       )}
-    </div>
+    </>
   );
 }

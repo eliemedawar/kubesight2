@@ -1,5 +1,6 @@
 import { useState } from "react";
 import SearchableSelect from "../common/SearchableSelect.jsx";
+import { useEscapeToClose } from "../../hooks/useEscapeToClose.js";
 
 export const TRANSPORT_TYPES = [
   "VPN",
@@ -88,6 +89,10 @@ export default function EditConnectionModal({
     setCompData((prev) => ({ ...prev, [ref]: { ...prev[ref], [field]: val } }));
   };
 
+  // Escape closes this dialog only: it sits above the client detail in the
+  // shared stack, and an open dropdown claims the key before it.
+  useEscapeToClose(() => onClose?.(), !saving);
+
   const handleSubmit = () => {
     if (otherMissing) return;
     onSave({
@@ -112,10 +117,16 @@ export default function EditConnectionModal({
   };
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <div className="modal-card modal-card--wide" role="dialog" onClick={(e) => e.stopPropagation()}>
+    <div className="modal-backdrop" role="presentation" onClick={saving ? undefined : onClose}>
+      <div
+        className="modal-card modal-card--wide"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="edit-connection-title"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-card__header">
-          <h3>{heading}</h3>
+          <h3 id="edit-connection-title">{heading}</h3>
           <p className="muted">
             {subtitle || (
               <>Client-specific connectivity for <strong>{clientName}</strong> ↔ <strong>{serviceName}</strong>.</>

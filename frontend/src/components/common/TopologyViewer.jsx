@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useEscapeToClose } from "../../hooks/useEscapeToClose.js";
 
 // Shared, read-only topology renderer used by the Application Services detail
 // view and the Client Service Access Topology overlay. The layout helpers are
@@ -504,6 +505,10 @@ export default function TopologyViewer({
   }, [edges]);
 
   const [fullscreen, setFullscreen] = useState(false);
+  // Fullscreen always pans and zooms: it exists to explore a graph that is too
+  // dense for the inline card, and its entry jumps to actual card size, which
+  // is only useful when the reader can move around and fit back to the whole.
+  const panZoom = zoomable || fullscreen;
 
   // ── Click-to-focus ─────────────────────────────────────────────────────
   // Clicking a node isolates it: the node, its direct neighbours and the edges
@@ -529,32 +534,27 @@ export default function TopologyViewer({
     String(edge.sourceNodeId) === focusId ||
     String(edge.targetNodeId) === focusId;
 
-  // Exit fullscreen on Escape. Capture phase + stopPropagation so the parent
-  // modal's own Escape-to-close handler (service/client detail) doesn't also
-  // fire — one Escape closes only the fullscreen layer.
+  // Exit fullscreen on Escape. Fullscreen opens on top of the parent modal
+  // (service/client detail) in the shared stack, so one Escape closes only the
+  // fullscreen layer. It unwinds one step at a time: drop the focus highlight
+  // first, and only leave fullscreen once nothing is highlighted.
+  useEscapeToClose(() => {
+    if (focusId) {
+      setFocusId(null);
+      return;
+    }
+    setView({ k: 1, x: 0, y: 0 });
+    setFullscreen(false);
+  }, true, fullscreen);
+
   useEffect(() => {
     if (!fullscreen) return undefined;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    const onKey = (e) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        // Escape unwinds one layer at a time: drop the focus highlight first,
-        // and only leave fullscreen once nothing is highlighted.
-        if (focusId) {
-          setFocusId(null);
-          return;
-        }
-        setView({ k: 1, x: 0, y: 0 });
-        setFullscreen(false);
-      }
-    };
-    window.addEventListener("keydown", onKey, true);
     return () => {
-      window.removeEventListener("keydown", onKey, true);
       document.body.style.overflow = previousOverflow;
     };
-  }, [fullscreen, focusId]);
+  }, [fullscreen]);
 
   // ── Pan & zoom (opt-in via `zoomable`) ─────────────────────────────────
   const svgRef = useRef(null);
@@ -573,7 +573,7 @@ export default function TopologyViewer({
   // Wheel-to-zoom toward the cursor. A native, non-passive listener so the page
   // doesn't scroll while the pointer is over the canvas.
   useEffect(() => {
-    if (!zoomable) return undefined;
+    if (!panZoom) return undefined;
     const svg = svgRef.current;
     if (!svg) return undefined;
     const onWheel = (event) => {
@@ -593,7 +593,7 @@ export default function TopologyViewer({
     };
     svg.addEventListener("wheel", onWheel, { passive: false });
     return () => svg.removeEventListener("wheel", onWheel);
-  }, [zoomable, fullscreen]);
+  }, [panZoom, fullscreen]);
 
   // Edge tone from real data: worst endpoint component health first (unhealthy
   // → danger, degraded → warn), then the existing scope encoding (external →
@@ -653,7 +653,7 @@ export default function TopologyViewer({
   // node drill-downs). Deltas convert screen px → viewBox-user units via the
   // CTM scale, so panning tracks the cursor at any zoom level.
   const startPan = (event) => {
-    if (!zoomable || (event.button && event.button !== 0)) return;
+    if (!panZoom || (event.button && event.button !== 0)) return;
     const ctm = svgRef.current?.getScreenCTM();
     panRef.current = {
       startX: event.clientX,
@@ -766,7 +766,7 @@ export default function TopologyViewer({
       {allowFullscreen ? (
         <button
           type="button"
-          className="topo-fs-btn"
+          className="btn-ghost topo-fs-btn"
           onClick={toggleFullscreen}
           aria-label={fullscreen ? "Exit fullscreen" : "View topology fullscreen"}
           title={fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"}
@@ -782,24 +782,24 @@ export default function TopologyViewer({
           )}
         </button>
       ) : null}
-      {zoomable && hasNodes ? (
+      {panZoom && hasNodes ? (
         <div className="topo-zoom" role="group" aria-label="Zoom controls">
           <output className="topo-zoom-level" aria-live="polite">
             ×{view.k < 10 ? view.k.toFixed(1) : Math.round(view.k)}
           </output>
-          <button type="button" className="topo-fs-btn" onClick={() => zoomBy(1.4)}
+          <button type="button" className="btn-ghost topo-fs-btn" onClick={() => zoomBy(1.4)}
             disabled={view.k >= MAX_ZOOM - 0.001} aria-label="Zoom in" title="Zoom in">
             <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><path d="M10 5v10M5 10h10" /></svg>
           </button>
-          <button type="button" className="topo-fs-btn" onClick={() => zoomBy(1 / 1.4)}
+          <button type="button" className="btn-ghost topo-fs-btn" onClick={() => zoomBy(1 / 1.4)}
             disabled={view.k <= MIN_ZOOM + 0.001} aria-label="Zoom out" title="Zoom out">
             <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><path d="M5 10h10" /></svg>
           </button>
-          <button type="button" className="topo-fs-btn topo-actual-btn" onClick={zoomToActualSize}
+          <button type="button" className="btn-ghost topo-fs-btn topo-actual-btn" onClick={zoomToActualSize}
             aria-label="Show at actual size" title="Actual size">
             1:1
           </button>
-          <button type="button" className="topo-fs-btn" onClick={resetView} aria-label="Fit graph" title="Fit graph">
+          <button type="button" className="btn-ghost topo-fs-btn" onClick={resetView} aria-label="Fit graph" title="Fit graph">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v4h4" /></svg>
           </button>
         </div>
@@ -822,7 +822,7 @@ export default function TopologyViewer({
         onPointerUp={endPan}
         onPointerCancel={endPan}
         onPointerLeave={endPan}
-        style={zoomable ? { ...svgStyle, cursor: panning ? "grabbing" : "grab", touchAction: "none" } : svgStyle}>
+        style={panZoom ? { ...svgStyle, cursor: panning ? "grabbing" : "grab", touchAction: "none" } : svgStyle}>
         <defs>
           <filter id="topo-shadow" x="-30%" y="-30%" width="160%" height="160%">
             <feDropShadow dx="0" dy="2" stdDeviation="4" floodColor="rgba(0,0,0,0.5)" />
@@ -846,7 +846,7 @@ export default function TopologyViewer({
           </marker>
         </defs>
 
-        <g transform={zoomable ? `translate(${view.x} ${view.y}) scale(${view.k})` : undefined}>
+        <g transform={panZoom ? `translate(${view.x} ${view.y}) scale(${view.k})` : undefined}>
         <g transform={`translate(${PAD},${PAD})`}>
           {/* Edges */}
           {(edges || []).map((edge, idx) => {
@@ -1101,13 +1101,14 @@ export default function TopologyViewer({
                 aria-pressed={isFocusNode}
                 aria-label={
                   clickableNode
-                    ? `Open ${node.name} namespace`
+                    ? `Open ${node.name}`
                     : `${node.name} — highlight its connections`
                 }
                 style={{ cursor: "pointer" }}
-                title={node.description || node.name}
               >
-                {node.description ? <title>{node.description}</title> : null}
+                {/* SVG ignores a title attribute; only a <title> child shows a
+                    tooltip — and the card truncates names at 15 characters. */}
+                <title>{[node.name, sub, node.description].filter(Boolean).join("\n")}</title>
                 <rect className="topo-node-card" x={pos.x} y={pos.y} width={NODE_W} height={NODE_H}
                   rx={14} ry={14}
                   fill="var(--bg-panel)" stroke="var(--border-strong)" strokeWidth={1}

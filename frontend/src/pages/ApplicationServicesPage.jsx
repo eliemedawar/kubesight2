@@ -15,13 +15,14 @@ import EmptyState from "../components/common/EmptyState.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import TopologyViewer, {
-
-
   computeLayout,
+  NODE_H,
+  NODE_W,
   rectExitPoint,
 } from "../components/common/TopologyViewer.jsx";
 import { useEntityRoute, useRouteParam } from "../routes/RouterContext.jsx";
 import { setVisibleInterval } from "../lib/visibleInterval";
+import { useEscapeToClose } from "../hooks/useEscapeToClose.js";
 
 /** URL ids are strings; record ids usually are not. Compare through this. */
 const sameId = (a, b) => a !== null && a !== undefined && String(a) === String(b);
@@ -66,7 +67,15 @@ function DeploymentRow({ dep, clusterName, onRemove }) {
       <span className="dep-picker-sep">/</span>
       <span className="dep-picker-name">{dep.deploymentName}</span>
       {onRemove && (
-        <button type="button" className="btn-ghost dep-picker-remove" onClick={onRemove}>✕</button>
+        <button
+          type="button"
+          className="btn-ghost dep-picker-remove"
+          onClick={onRemove}
+          aria-label={`Unlink ${dep.deploymentName}`}
+          title="Unlink"
+        >
+          ✕
+        </button>
       )}
     </div>
   );
@@ -268,7 +277,7 @@ function DRLinker({ dr, onChange, clusters = [] }) {
         />
         <div style={{ display: "flex", gap: "0.35rem", marginTop: "0.25rem" }}>
           <button type="button" className="btn-outline btn-compact" onClick={() => { setEditing(true); loadNamespaces(dr.clusterId); loadItems(dr.clusterId, dr.namespace, dr.kind); }}>Change</button>
-          <button type="button" className="btn-ghost btn-compact danger" onClick={clearLink}>Remove DR</button>
+          <button type="button" className="btn-outline btn-compact danger" onClick={clearLink}>Remove DR</button>
         </div>
       </div>
     );
@@ -299,7 +308,7 @@ function DRLinker({ dr, onChange, clusters = [] }) {
         <p className="muted" style={{ fontSize: "0.82rem", marginTop: "0.4rem" }}>No {KIND_LABEL[kind]}s found in this namespace.</p>
       )}
       {dr && (
-        <button type="button" className="btn-ghost btn-compact danger" style={{ marginTop: "0.35rem" }} onClick={clearLink}>Remove DR</button>
+        <button type="button" className="btn-outline btn-compact danger" style={{ marginTop: "0.35rem" }} onClick={clearLink}>Remove DR</button>
       )}
     </div>
   );
@@ -486,17 +495,30 @@ function TopologyEditor({ topology, onChange, components = [], clusters = [], de
   const posOf = (node) =>
     drag && drag.tempId === node.tempId ? { x: drag.x, y: drag.y } : { x: node.x, y: node.y };
 
-  // Auto-place any node that lacks a position (legacy/AI topologies, or first load).
+  // Auto-place any node that lacks a position (legacy/AI/API-created
+  // topologies, or first load). Only the unplaced nodes are laid out, in rows
+  // below anything already placed, so they never land on a saved box.
   useEffect(() => {
     if (!nodes.length) return;
-    if (nodes.every((n) => typeof n.x === "number" && typeof n.y === "number")) return;
-    const layoutNodes = nodes.map((n) => ({ id: n.tempId, x: n.x, y: n.y }));
-    const layoutEdges = edges.map((e) => ({ sourceNodeId: e.sourceTempId, targetNodeId: e.targetTempId }));
+    const hasPos = (n) => typeof n.x === "number" && typeof n.y === "number";
+    if (nodes.every(hasPos)) return;
+    const unplaced = nodes.filter((n) => !hasPos(n));
+    const unplacedIds = new Set(unplaced.map((n) => n.tempId));
+    const layoutNodes = unplaced.map((n) => ({ id: n.tempId }));
+    const layoutEdges = edges
+      .filter((e) => unplacedIds.has(e.sourceTempId) && unplacedIds.has(e.targetTempId))
+      .map((e) => ({ sourceNodeId: e.sourceTempId, targetNodeId: e.targetTempId }));
     const { positions } = computeLayout(layoutNodes, layoutEdges);
+    // computeLayout spaces the viewer's small cards (NODE_W + 70 apart, rows
+    // NODE_H + 90 apart); stretch that grid to the editor's taller boxes.
+    const sx = (E_NODE_W + 40) / (NODE_W + 70);
+    const sy = (E_NODE_H + 48) / (NODE_H + 90);
+    const bottoms = nodes.filter(hasPos).map((n) => n.y + E_NODE_H);
+    const top = bottoms.length ? Math.max(...bottoms) + 48 : 40;
     const placed = nodes.map((n) => {
-      if (typeof n.x === "number" && typeof n.y === "number") return n;
-      const p = positions[n.tempId];
-      return p ? { ...n, x: p.x, y: p.y } : { ...n, x: 40, y: 40 };
+      if (hasPos(n)) return n;
+      const p = positions[n.tempId] || { x: 0, y: 0 };
+      return { ...n, x: 40 + Math.round(p.x * sx), y: top + Math.round(p.y * sy) };
     });
     onChange({ nodes: placed, edges });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -514,21 +536,9 @@ function TopologyEditor({ topology, onChange, components = [], clusters = [], de
     setResourcePickerOpen(false);
   };
 
-  // Exit fullscreen on Escape. Capture phase + stopPropagation so a parent
-  // modal's own Escape-to-close handler doesn't also fire — one Escape closes
-  // only the fullscreen layer (same pattern as TopologyViewer).
-  useEffect(() => {
-    if (!fullscreen) return undefined;
-    const onKey = (e) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        exitFullscreen();
-      }
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fullscreen]);
+  // Exit fullscreen on Escape. Fullscreen sits above the service dialog in
+  // the shared stack, so one Escape closes only the fullscreen layer.
+  useEscapeToClose(exitFullscreen, true, fullscreen);
 
   const canvasPoint = (evt) => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -539,10 +549,21 @@ function TopologyEditor({ topology, onChange, components = [], clusters = [], de
     };
   };
 
-  // Next free drop position near the top-left, staggered by node count.
+  // First grid slot from the top-left that no existing box overlaps (a slot
+  // picked by node count alone lands on a saved layout's boxes).
   const nextDropPos = () => {
-    const i = nodes.length;
-    return { x: 40 + (i % 4) * (E_NODE_W + 40), y: 40 + Math.floor(i / 4) * (E_NODE_H + 48) };
+    const overlaps = (x, y) =>
+      nodes.some(
+        (n) =>
+          typeof n.x === "number" && typeof n.y === "number" &&
+          x < n.x + E_NODE_W && n.x < x + E_NODE_W &&
+          y < n.y + E_NODE_H && n.y < y + E_NODE_H
+      );
+    for (let i = 0; ; i++) {
+      const x = 40 + (i % 4) * (E_NODE_W + 40);
+      const y = 40 + Math.floor(i / 4) * (E_NODE_H + 48);
+      if (!overlaps(x, y)) return { x, y };
+    }
   };
 
   const addNode = () => {
@@ -936,7 +957,7 @@ function TopologyEditor({ topology, onChange, components = [], clusters = [], de
                 <button
                   key={`elabel-${idx}`}
                   type="button"
-                  className={`topo-edge-label${isExternal ? " is-external" : ""}`}
+                  className={`btn-ghost topo-edge-label${isExternal ? " is-external" : ""}`}
                   style={{ left: lx, top: ly }}
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={() => setEdgePopup({ index: idx, x: lx, y: ly })}
@@ -974,7 +995,7 @@ function TopologyEditor({ topology, onChange, components = [], clusters = [], de
                           {KIND_LABEL[(node.type || "deployment").toLowerCase()] || "Deployment"}
                         </span>
                         {onDeploymentsChange && (
-                          <button type="button" className="topo-node-del" onPointerDown={(e) => e.stopPropagation()} onClick={() => removeResourceNode(node)} title="Unlink resource">✕</button>
+                          <button type="button" className="btn-ghost topo-node-del" onPointerDown={(e) => e.stopPropagation()} onClick={() => removeResourceNode(node)} title="Unlink resource" aria-label={`Unlink ${node.name}`}>✕</button>
                         )}
                       </>
                     ) : isComponent ? (
@@ -984,10 +1005,10 @@ function TopologyEditor({ topology, onChange, components = [], clusters = [], de
                           <span className={`topo-node-status topo-node-status--${node.componentStatus}`}
                             title={`Component health: ${node.componentStatus}`} />
                         ) : null}
-                        <button type="button" className="topo-node-del" onPointerDown={(e) => e.stopPropagation()} onClick={() => removeNode(node.tempId)} title="Remove component">✕</button>
+                        <button type="button" className="btn-ghost topo-node-del" onPointerDown={(e) => e.stopPropagation()} onClick={() => removeNode(node.tempId)} title="Remove component" aria-label={`Remove ${node.name || "component"}`}>✕</button>
                       </>
                     ) : (
-                      <button type="button" className="topo-node-del" onPointerDown={(e) => e.stopPropagation()} onClick={() => removeNode(node.tempId)} title="Remove component">✕</button>
+                      <button type="button" className="btn-ghost topo-node-del" onPointerDown={(e) => e.stopPropagation()} onClick={() => removeNode(node.tempId)} title="Remove component" aria-label={`Remove ${node.name || "component"}`}>✕</button>
                     )}
                   </div>
                   {isResource || isComponent ? (
@@ -1050,7 +1071,7 @@ function TopologyEditor({ topology, onChange, components = [], clusters = [], de
                       <button
                         key={sc}
                         type="button"
-                        className={(popupEdge.scope || DEFAULT_SCOPE) === sc ? "is-active" : ""}
+                        className={`btn-ghost${(popupEdge.scope || DEFAULT_SCOPE) === sc ? " is-active" : ""}`}
                         onClick={() => updateEdge(edgePopup.index, { scope: sc })}
                       >
                         {sc === "internal" ? "Internal" : "External"}
@@ -1150,13 +1171,22 @@ function syncTopologyWithResources(topology, deployments) {
   });
   const haveKeys = new Set(kept.map(nodeResourceKey).filter(Boolean));
 
-  // Add a component for each newly linked resource.
+  // Add a component for each newly linked resource. New boxes go in rows
+  // below everything already placed — a grid from the top-left would land
+  // them on top of a saved layout's boxes.
+  const placedBottoms = kept
+    .filter((n) => typeof n.x === "number" && typeof n.y === "number")
+    .map((n) => n.y + E_NODE_H);
+  const firstRowY = placedBottoms.length ? Math.max(...placedBottoms) + 48 : 40;
+  // A saved topology without positions is laid out by the editor on open; new
+  // boxes stay unplaced too so that layout arranges them with the rest.
+  const anyUnplaced = kept.some((n) => typeof n.x !== "number" || typeof n.y !== "number");
   const additions = [];
   deployments.forEach((dep) => {
     const k = resourceKey(dep);
     if (haveKeys.has(k)) return;
     haveKeys.add(k);
-    const idx = kept.length + additions.length;
+    const idx = additions.length;
     additions.push({
       tempId: newTempId(),
       name: dep.deploymentName,
@@ -1165,8 +1195,8 @@ function syncTopologyWithResources(topology, deployments) {
       linkedClusterId: dep.clusterId,
       linkedNamespace: dep.namespace,
       linkedDeployment: dep.deploymentName,
-      x: 40 + (idx % 4) * (E_NODE_W + 40),
-      y: 40 + Math.floor(idx / 4) * (E_NODE_H + 48),
+      x: anyUnplaced ? null : 40 + (idx % 4) * (E_NODE_W + 40),
+      y: anyUnplaced ? null : firstRowY + Math.floor(idx / 4) * (E_NODE_H + 48),
     });
   });
 
@@ -1176,16 +1206,34 @@ function syncTopologyWithResources(topology, deployments) {
   return { nodes: nextNodes, edges: nextEdges };
 }
 
+// What a save would change, minus box positions (auto-layout moves those on
+// open), so closing can tell a real edit from a glance.
+function draftFingerprint(name, description, deployments, topology) {
+  return JSON.stringify([
+    name.trim(),
+    description.trim(),
+    deployments,
+    topology.nodes.map((n) => [n.tempId, n.name, n.type, n.linkedDeployment, n.componentId]),
+    topology.edges.map((e) => [e.sourceTempId, e.targetTempId, e.protocol, e.scope, e.description]),
+  ]);
+}
+
 function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }) {
   const isEdit = Boolean(service?.id);
+  // Mirror linked resources into the topology canvas on open so existing
+  // services pick up a component per linked deployment/pod.
+  const [initial] = useState(() => {
+    const topo = syncTopologyWithResources(initTopologyFromService(service), service?.deployments || []);
+    return {
+      topology: topo,
+      fingerprint: draftFingerprint(service?.name || "", service?.description || "", service?.deployments || [], topo),
+    };
+  });
   const [name, setName] = useState(service?.name || "");
   const [description, setDescription] = useState(service?.description || "");
   const [deployments, setDeployments] = useState(service?.deployments || []);
-  // Mirror linked resources into the topology canvas on open so existing
-  // services pick up a component per linked deployment/pod.
-  const [topology, setTopology] = useState(() =>
-    syncTopologyWithResources(initTopologyFromService(service), service?.deployments || [])
-  );
+  const [topology, setTopology] = useState(initial.topology);
+  const [localError, setLocalError] = useState("");
   // Predefined components available to drop into the topology.
   const [components, setComponents] = useState([]);
   useEffect(() => {
@@ -1198,8 +1246,31 @@ function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }
     setTopology((topo) => syncTopologyWithResources(topo, next));
   };
 
+  // A stray backdrop click or Escape must not silently throw away a drawn
+  // topology: ask first when anything changed.
+  const requestClose = () => {
+    if (saving) return;
+    const dirty = draftFingerprint(name, description, deployments, topology) !== initial.fingerprint;
+    if (dirty && !window.confirm("Discard your unsaved changes to this service?")) return;
+    onClose();
+  };
+
+  // Escape closes (the fullscreen editor, above this in the shared stack,
+  // takes its own Escape first).
+  useEscapeToClose(requestClose);
+
   const handleSubmit = () => {
     if (!name.trim()) return;
+    // The backend skips boxes without a name (and their connections), so
+    // saving one would silently drop it.
+    const unnamed = topology.nodes.filter((n) => !n.name.trim()).length;
+    if (unnamed) {
+      setLocalError(
+        `${unnamed} box${unnamed === 1 ? " on the topology canvas has" : "es on the topology canvas have"} no name. Name or remove ${unnamed === 1 ? "it" : "them"} before saving.`
+      );
+      return;
+    }
+    setLocalError("");
     onSave({
       name: name.trim(),
       description: description.trim(),
@@ -1233,18 +1304,22 @@ function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }
   };
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <div className="modal-card modal-card--wide" role="dialog" onClick={(e) => e.stopPropagation()}>
+    <div className="modal-backdrop" role="presentation" onClick={requestClose}>
+      <div
+        className="modal-card modal-card--wide"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="app-service-modal-title"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-card__header">
-          <h3>{isEdit ? "Edit Application Service" : "New Application Service"}</h3>
+          <h3 id="app-service-modal-title">{isEdit ? "Edit Application Service" : "New Application Service"}</h3>
           <p className="muted">
             {isEdit
               ? "Update service details, topology, and linked deployments."
               : "Define a logical service with its topology and linked deployments."}
           </p>
         </div>
-
-        {error && <p className="banner-message error">{error}</p>}
 
         <section className="form-section">
           <h4>Service details</h4>
@@ -1315,6 +1390,10 @@ function ServiceModal({ service, onClose, onSave, saving, error, clusters = [] }
           )}
         </section>
 
+        {/* Next to Save: this form is long enough that a banner at the top
+            scrolls out of sight of the button that raised it. */}
+        {(localError || error) && <p className="banner-message error" role="alert">{localError || error}</p>}
+
         <div className="modal-actions">
           <button type="button" className="btn-outline" onClick={onClose} disabled={saving}>Cancel</button>
           <button type="button" className="primary" onClick={handleSubmit} disabled={saving || !name.trim()}>
@@ -1377,7 +1456,7 @@ function DRSheet({ service, clusterNameById }) {
             </thead>
             <tbody>
               {drDeployments.map((dep) => (
-                <tr key={`${dep.clusterId}/${dep.namespace}/${dep.deploymentName}`}>
+                <tr key={resourceKey(dep)}>
                   <td>
                     <DeploymentRow dep={dep} clusterName={clusterNameById?.[dep.clusterId]} />
                   </td>
@@ -1399,7 +1478,7 @@ function DRSheet({ service, clusterNameById }) {
         <div style={{ marginTop: "1rem" }}>
           <p className="form-label" style={{ marginBottom: "0.5rem" }}>Components without DR</p>
           {noDr.map((dep) => (
-            <div key={`${dep.clusterId}/${dep.namespace}/${dep.deploymentName}`}
+            <div key={resourceKey(dep)}
               style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
               <DeploymentRow dep={dep} clusterName={clusterNameById?.[dep.clusterId]} />
               <span className="status-badge status-badge--pending">No DR</span>
@@ -1433,7 +1512,7 @@ function linkedWorkloadHealth(node, deployments) {
   return WORKLOAD_STATUS_TO_NODE_HEALTH[match?.status] || null;
 }
 
-function ServiceDetailPanel({ service, clusterNameById, onEdit, onDelete, canEdit, canDelete, onClose }) {
+function ServiceDetailPanel({ service, clusterNameById, onEdit, onDelete, canEdit, canDelete, deleting, onClose }) {
   // Enrich topology nodes with live health: predefined components already carry
   // componentStatus; linked deployments/pods inherit their workload's status so
   // they get the same green/amber/red bar, chip, and edge treatment.
@@ -1447,18 +1526,20 @@ function ServiceDetailPanel({ service, clusterNameById, onEdit, onDelete, canEdi
   const [tab, setTab] = useRouteParam("tab", "overview");
 
   // Close on Escape.
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === "Escape") onClose?.(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  useEscapeToClose(() => onClose?.());
 
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <div className="modal-card modal-card--wide service-detail-modal" role="dialog" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal-card modal-card--wide service-detail-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="app-service-detail-title"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="service-detail-modal__head">
           <div>
-            <h3 style={{ margin: 0 }}>{service.name}</h3>
+            <h3 id="app-service-detail-title" style={{ margin: 0 }}>{service.name}</h3>
             {service.description && (
               <p className="muted" style={{ marginTop: "0.25rem", fontSize: "0.875rem" }}>{service.description}</p>
             )}
@@ -1497,11 +1578,15 @@ function ServiceDetailPanel({ service, clusterNameById, onEdit, onDelete, canEdi
               {service.createdAt && <span>Created {new Date(service.createdAt).toLocaleDateString()}</span>}
             </div>
 
-            {topo.nodes.length > 0 && (
+            {topo.nodes.length > 0 ? (
               <div style={{ marginBottom: "1.25rem" }}>
                 <p className="form-label" style={{ marginBottom: "0.6rem" }}>Service Topology</p>
                 <TopologyViewer nodes={topo.nodes} edges={topo.edges} />
               </div>
+            ) : (
+              <p className="muted" style={{ fontSize: "0.85rem", margin: "0 0 1.25rem" }}>
+                No topology drawn yet.{canEdit ? " Use Edit to add its components and connections." : ""}
+              </p>
             )}
 
             {(service.deployments || []).length > 0 && (
@@ -1509,7 +1594,7 @@ function ServiceDetailPanel({ service, clusterNameById, onEdit, onDelete, canEdi
                 <p className="form-label" style={{ marginBottom: "0.5rem" }}>Linked resources</p>
                 {service.deployments.map((dep) => (
                   <DeploymentRow
-                    key={`${dep.clusterId}/${dep.namespace}/${dep.deploymentName}`}
+                    key={resourceKey(dep)}
                     dep={dep}
                     clusterName={clusterNameById?.[dep.clusterId]}
                   />
@@ -1522,9 +1607,13 @@ function ServiceDetailPanel({ service, clusterNameById, onEdit, onDelete, canEdi
         )}
 
         <div className="modal-actions">
-          {canEdit && <button className="btn-outline btn-compact" onClick={onEdit}>Edit</button>}
-          {canDelete && <button className="btn-outline btn-compact danger" onClick={onDelete}>Delete</button>}
-          <button className="btn-outline btn-compact" onClick={onClose}>Close</button>
+          {canEdit && <button type="button" className="btn-outline btn-compact" onClick={onEdit}>Edit</button>}
+          {canDelete && (
+            <button type="button" className="btn-outline btn-compact danger" onClick={onDelete} disabled={deleting}>
+              {deleting ? "Deleting…" : "Delete"}
+            </button>
+          )}
+          <button type="button" className="btn-outline btn-compact" onClick={onClose}>Close</button>
         </div>
       </div>
     </div>
@@ -1600,7 +1689,7 @@ export default function ApplicationServicesPage({ clusters: clustersProp = [] })
       if (editingService?.id) {
         const updated = await updateApplicationService(editingService.id, payload);
         setServices((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
-        setSelectedId(updated.id);
+        if (!sameId(selectedId, updated.id)) setSelectedId(updated.id);
       } else {
         const created = await createApplicationService(payload);
         setServices((prev) => [...prev, created]);
@@ -1613,6 +1702,7 @@ export default function ApplicationServicesPage({ clusters: clustersProp = [] })
   };
 
   const handleDelete = async (svc) => {
+    if (deleting) return;
     if (!window.confirm(`Delete "${svc.name}"? This cannot be undone.`)) return;
     setDeleting(true);
     try {
@@ -1648,8 +1738,10 @@ export default function ApplicationServicesPage({ clusters: clustersProp = [] })
 
       <div className="user-filters" style={{ marginBottom: "1rem" }}>
         <input type="search" className="form-input" placeholder="Search by name or description…"
-          value={search} onChange={(e) => setSearch(e.target.value)} style={{ maxWidth: 280 }} />
-        <SearchableSelect className="form-select" value={healthFilter} onChange={(e) => setHealthFilter(e.target.value)}>
+          aria-label="Search application services"
+          value={search} onChange={(e) => setSearch(e.target.value)} />
+        <SearchableSelect className="form-select" value={healthFilter} onChange={(e) => setHealthFilter(e.target.value)}
+          aria-label="Filter by health">
           <option value="all">All health states</option>
           <option value="healthy">Healthy</option>
           <option value="warning">Warning</option>
@@ -1687,11 +1779,22 @@ export default function ApplicationServicesPage({ clusters: clustersProp = [] })
                         <tr key={svc.id}
                           className={sameId(selectedId, svc.id) ? "table-row--selected" : ""}
                           style={{ cursor: "pointer" }}
-                          onClick={() => setSelectedId(sameId(selectedId, svc.id) ? null : svc.id)}>
-                          <td>
-                            <strong>{svc.name}</strong>
+                          tabIndex={0}
+                          aria-label={`Open ${svc.name}`}
+                          onClick={() => setSelectedId(sameId(selectedId, svc.id) ? null : svc.id)}
+                          onKeyDown={(e) => {
+                            if (e.target !== e.currentTarget) return;
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              setSelectedId(svc.id);
+                            }
+                          }}>
+                          {/* Wraps instead of stretching the table: a long name or
+                              description pushed Health/Topology/Updated off screen. */}
+                          <td style={{ whiteSpace: "normal", minWidth: "14rem", maxWidth: "36rem" }}>
+                            <strong style={{ overflowWrap: "anywhere" }}>{svc.name}</strong>
                             {svc.description && (
-                              <div className="muted" style={{ fontSize: "0.8rem" }}>{svc.description}</div>
+                              <div className="muted" style={{ fontSize: "0.8rem", overflowWrap: "anywhere" }}>{svc.description}</div>
                             )}
                           </td>
                           <td><HealthBadge health={svc.health} /></td>
@@ -1714,15 +1817,18 @@ export default function ApplicationServicesPage({ clusters: clustersProp = [] })
 
       </div>
 
-      {selectedService && (
+      {/* Hidden, not closed, while its edit form is open: the address keeps
+          naming the service, so Cancel lands back on its detail. */}
+      {selectedService && !modalOpen && (
         <ServiceDetailPanel
           service={selectedService}
           clusterNameById={Object.fromEntries(clusters.map((c) => [c.id, c.name || c.id]))}
-          onEdit={() => { const svc = selectedService; setSelectedId(null); openEdit(svc); }}
+          onEdit={() => openEdit(selectedService)}
           onDelete={() => handleDelete(selectedService)}
           onClose={() => setSelectedId(null)}
           canEdit={canUpdate}
-          canDelete={canDelete && !deleting}
+          canDelete={canDelete}
+          deleting={deleting}
         />
       )}
 

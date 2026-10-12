@@ -15,6 +15,7 @@ import EmptyState from "../components/common/EmptyState.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import SearchableSelect from "../components/common/SearchableSelect.jsx";
 import { setVisibleInterval } from "../lib/visibleInterval";
+import { useEscapeToClose } from "../hooks/useEscapeToClose.js";
 
 const STATUS_BADGE = { healthy: "pass", degraded: "warning", unhealthy: "fail", unknown: "pending" };
 const STATUS_LABEL = { healthy: "Healthy", degraded: "Degraded", unhealthy: "Unhealthy", unknown: "Unknown" };
@@ -54,7 +55,7 @@ function ComponentModal({ component, onClose, onSave, saving, error }) {
   const [healthCheckUrl, setHealthCheckUrl] = useState(component?.healthCheckUrl || "");
   const [tcpHost, setTcpHost] = useState(component?.tcpHost || "");
   const [tcpPort, setTcpPort] = useState(component?.tcpPort != null ? String(component.tcpPort) : "");
-  const [interval, setInterval] = useState(
+  const [heartbeatInterval, setHeartbeatInterval] = useState(
     component?.heartbeatIntervalSeconds != null ? String(component.heartbeatIntervalSeconds) : "300"
   );
   const [localError, setLocalError] = useState("");
@@ -77,11 +78,13 @@ function ComponentModal({ component, onClose, onSave, saving, error }) {
       if (!p || p < 1 || p > 65535) return "A valid TCP port (1–65535) is required.";
     }
     if (checkType === "webhook") {
-      const i = Number(interval);
+      const i = Number(heartbeatInterval);
       if (!i || i < 10) return "Heartbeat interval must be at least 10 seconds.";
     }
     return "";
   };
+
+  useEscapeToClose(onClose, !saving);
 
   const handleSubmit = () => {
     const v = validate();
@@ -95,22 +98,30 @@ function ComponentModal({ component, onClose, onSave, saving, error }) {
       healthCheckUrl: checkType === "http" ? healthCheckUrl.trim() : "",
       tcpHost: checkType === "tcp" ? tcpHost.trim() : "",
       tcpPort: checkType === "tcp" ? Number(tcpPort) : null,
-      heartbeatIntervalSeconds: checkType === "webhook" ? Number(interval) : null,
+      heartbeatIntervalSeconds: checkType === "webhook" ? Number(heartbeatInterval) : null,
     });
   };
 
   const copyWebhook = () => {
-    navigator.clipboard?.writeText(webhookUrl).then(() => {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    });
+    const done = navigator.clipboard?.writeText(webhookUrl);
+    if (!done) {
+      setLocalError("Copying is blocked in this browser — select the URL and copy it by hand.");
+      return;
+    }
+    done.then(
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      },
+      () => setLocalError("Copying is blocked in this browser — select the URL and copy it by hand.")
+    );
   };
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <div className="modal-card" role="dialog" onClick={(e) => e.stopPropagation()}>
+    <div className="modal-backdrop" role="presentation" onClick={saving ? undefined : onClose}>
+      <div className="modal-card" role="dialog" aria-modal="true" aria-labelledby="component-modal-title" onClick={(e) => e.stopPropagation()}>
         <div className="modal-card__header">
-          <h3>{isEdit ? "Edit Component" : "New Component"}</h3>
+          <h3 id="component-modal-title">{isEdit ? "Edit Component" : "New Component"}</h3>
           <p className="muted">A reusable building block (e.g. WAF, API Gateway) you can drop into a service topology.</p>
         </div>
 
@@ -165,8 +176,8 @@ function ComponentModal({ component, onClose, onSave, saving, error }) {
             {checkType === "webhook" && (
               <label>
                 Heartbeat interval (seconds) *
-                <input type="number" min="10" value={interval}
-                  onChange={(e) => setInterval(e.target.value)} placeholder="300" />
+                <input type="number" min="10" value={heartbeatInterval}
+                  onChange={(e) => setHeartbeatInterval(e.target.value)} placeholder="300" />
               </label>
             )}
           </div>
@@ -225,6 +236,8 @@ export default function ComponentsPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [checkingId, setCheckingId] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
+  const [openingId, setOpeningId] = useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -263,12 +276,16 @@ export default function ComponentsPage() {
 
   const openCreate = () => { setEditing(null); setSaveError(""); setModalOpen(true); };
   const openEdit = async (c) => {
+    if (openingId) return;
     // Fetch the full record so webhook token is available for the URL display.
+    setOpeningId(c.id);
     try {
       const full = await getComponent(c.id);
       setEditing(full);
     } catch {
       setEditing(c);
+    } finally {
+      setOpeningId(null);
     }
     setSaveError("");
     setModalOpen(true);
@@ -294,12 +311,16 @@ export default function ComponentsPage() {
   };
 
   const handleDelete = async (c) => {
+    if (deletingId) return;
     if (!window.confirm(`Delete component "${c.name}"? It will be unlinked from any topologies that use it.`)) return;
+    setDeletingId(c.id);
     try {
       await deleteComponent(c.id);
       await load();
     } catch (err) {
       setError(err.message || "Delete failed.");
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -316,6 +337,9 @@ export default function ComponentsPage() {
   };
 
   if (!canView) return <AccessDeniedPage />;
+
+  // A read-only viewer gets no empty Actions column.
+  const hasActions = canCheck || canUpdate || canDelete;
 
   const filtered = components.filter((c) => {
     if (statusFilter !== "all" && (c.lastStatus || "unknown") !== statusFilter) return false;
@@ -339,8 +363,10 @@ export default function ComponentsPage() {
 
       <div className="user-filters" style={{ marginBottom: "1rem" }}>
         <input type="search" className="form-input" placeholder="Search by name, category…"
-          value={search} onChange={(e) => setSearch(e.target.value)} style={{ maxWidth: 280 }} />
-        <SearchableSelect className="form-select" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          aria-label="Search components"
+          value={search} onChange={(e) => setSearch(e.target.value)} />
+        <SearchableSelect className="form-select" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}
+          aria-label="Filter by status">
           <option value="all">All statuses</option>
           <option value="healthy">Healthy</option>
           <option value="degraded">Degraded</option>
@@ -371,7 +397,7 @@ export default function ComponentsPage() {
                   <th>Health check</th>
                   <th>Status</th>
                   <th>Last checked</th>
-                  <th>Actions</th>
+                  {hasActions && <th>Actions</th>}
                 </tr>
               </thead>
               <tbody>
@@ -383,17 +409,27 @@ export default function ComponentsPage() {
                     <td className="muted" style={{ fontSize: "0.82rem" }}>{CHECK_TYPE_LABEL[c.checkType] || c.checkType}</td>
                     <td><StatusBadge status={c.lastStatus} /></td>
                     <td className="muted" style={{ fontSize: "0.8rem" }}>{fmtDate(c.lastCheckedAt)}</td>
+                    {hasActions && (
                     <td>
                       <div style={{ display: "flex", gap: "0.35rem" }}>
                         {canCheck && c.checkType !== "none" && (
-                          <button className="btn-outline btn-compact" onClick={() => handleCheck(c)} disabled={checkingId === c.id}>
+                          <button type="button" className="btn-outline btn-compact" onClick={() => handleCheck(c)} disabled={checkingId === c.id}>
                             {checkingId === c.id ? "Checking…" : "Check"}
                           </button>
                         )}
-                        {canUpdate && <button className="btn-outline btn-compact" onClick={() => openEdit(c)}>Edit</button>}
-                        {canDelete && <button className="btn-outline btn-compact danger" onClick={() => handleDelete(c)}>Delete</button>}
+                        {canUpdate && (
+                          <button type="button" className="btn-outline btn-compact" onClick={() => openEdit(c)} disabled={openingId === c.id}>
+                            {openingId === c.id ? "Opening…" : "Edit"}
+                          </button>
+                        )}
+                        {canDelete && (
+                          <button type="button" className="btn-outline btn-compact danger" onClick={() => handleDelete(c)} disabled={deletingId === c.id}>
+                            {deletingId === c.id ? "Deleting…" : "Delete"}
+                          </button>
+                        )}
                       </div>
                     </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

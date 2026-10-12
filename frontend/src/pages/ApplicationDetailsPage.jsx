@@ -74,6 +74,16 @@ function MetadataItem({ label, value }) {
   );
 }
 
+// Timestamps arrive as raw ISO strings ("2026-10-11T20:32:29.133144+00:00");
+// show them in the reader's locale. Anything that does not parse as a date
+// (already-humanised values such as "5m") passes through unchanged.
+function formatWhen(value) {
+  if (!value) return value;
+  if (typeof value === "string" && !/^\d{4}-\d{2}-\d{2}T/.test(value)) return value;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? value : d.toLocaleString();
+}
+
 function formatReplicasSummary(summary) {
   const ready = summary?.readyReplicas ?? "—";
   const desired = summary?.replicas ?? "—";
@@ -137,6 +147,17 @@ export default function ApplicationDetailsPage({
   const [rollbackConfirm, setRollbackConfirm] = useState("");
   const [versionActionBusy, setVersionActionBusy] = useState(false);
   const [versionActionError, setVersionActionError] = useState("");
+  const [compareBusy, setCompareBusy] = useState(false);
+  const [compareError, setCompareError] = useState("");
+
+  const pickVersion = (v) => {
+    setSelectedVersion(v);
+    setCompareVersionB("");
+    setVersionDiff("");
+    setCompareError("");
+    setRollbackConfirm("");
+    setVersionActionError("");
+  };
 
   const closeInspectModal = useCallback(() => {
     setInspectModal(CLOSED_INSPECT_MODAL);
@@ -395,7 +416,10 @@ export default function ApplicationDetailsPage({
         }
         result = await rollbackWorkload(body);
       }
-      setApprovalNotice(isPendingApproval(result) ? pendingApprovalMessage(result) : "");
+      const done = { restart: "Restart requested", scale: "Scale requested", rollback: "Rollback requested" }[actionModal];
+      setApprovalNotice(
+        isPendingApproval(result) ? pendingApprovalMessage(result) : `${done} for ${primaryWorkload}.`
+      );
       closeActionModal();
       onRefreshDetail?.();
       onHelmActionComplete?.();
@@ -496,7 +520,7 @@ export default function ApplicationDetailsPage({
                 <MetadataItem label="CPU" value={cpuDisplay} />
                 <MetadataItem label="Memory" value={memoryDisplay} />
                 <MetadataItem label="Helm release" value={helmReleaseLabel} />
-                <MetadataItem label="Last deployment" value={lastDeployment} />
+                <MetadataItem label="Last deployment" value={formatWhen(lastDeployment)} />
                 <MetadataItem label="Source" value={summary.source || "Discovered"} />
               </dl>
             </InfoCard>
@@ -694,7 +718,7 @@ export default function ApplicationDetailsPage({
                 message: event.message || "—",
                 involvedObject: [event.involvedKind, event.involvedName].filter(Boolean).join("/") || "—",
                 count: event.count ?? "—",
-                time: event.lastTimestamp || event.firstTimestamp || event.time || event.age || "—",
+                time: formatWhen(event.lastTimestamp || event.firstTimestamp || event.time) || event.age || "—",
               }))}
             />
           ) : !eventsLoading ? (
@@ -764,17 +788,14 @@ export default function ApplicationDetailsPage({
                   createdAt: v.createdAt ? new Date(v.createdAt).toLocaleString() : "—",
                   actions: (
                     <div className="inventory-actions-cell">
-                      <button type="button" className="btn-outline btn-sm" onClick={() => setSelectedVersion(v)}>
+                      <button type="button" className="btn-outline btn-sm" onClick={() => pickVersion(v)}>
                         View
                       </button>
                       {canDeploy ? (
                         <button
                           type="button"
                           className="btn-outline btn-sm"
-                          onClick={() => {
-                            setSelectedVersion(v);
-                            setRollbackConfirm("");
-                          }}
+                          onClick={() => pickVersion(v)}
                         >
                           Rollback
                         </button>
@@ -805,14 +826,25 @@ export default function ApplicationDetailsPage({
                     <button
                       type="button"
                       className="btn-outline btn-sm"
-                      disabled={!compareVersionB}
+                      disabled={!compareVersionB || compareBusy}
                       onClick={async () => {
-                        const result = await compareApplicationVersions(selectedVersion.id, Number(compareVersionB));
-                        setVersionDiff(result.diff || "");
+                        setCompareBusy(true);
+                        setCompareError("");
+                        try {
+                          const result = await compareApplicationVersions(selectedVersion.id, Number(compareVersionB));
+                          setVersionDiff(result.diff || "");
+                          if (!result.diff) setCompareError("These two versions are identical.");
+                        } catch (err) {
+                          setVersionDiff("");
+                          setCompareError(err.message || "Could not compare the versions.");
+                        } finally {
+                          setCompareBusy(false);
+                        }
                       }}
                     >
-                      Compare versions
+                      {compareBusy ? "Comparing…" : "Compare versions"}
                     </button>
+                    {compareError ? <p className="muted">{compareError}</p> : null}
                     {versionDiff ? <pre className="wizard-yaml-panel__diff">{versionDiff}</pre> : null}
                     <label className="wizard-field">
                       <span className="wizard-field__label">Rollback — type APPLY {summary.namespace}</span>
@@ -827,7 +859,11 @@ export default function ApplicationDetailsPage({
                         setVersionActionError("");
                         try {
                           const result = await rollbackApplicationVersion(selectedVersion.id, rollbackConfirm);
-                          setApprovalNotice(isPendingApproval(result) ? pendingApprovalMessage(result) : "");
+                          setApprovalNotice(
+                            isPendingApproval(result)
+                              ? pendingApprovalMessage(result)
+                              : `Rolled back to ${selectedVersion.versionLabel}.`
+                          );
                           onRefreshDetail?.();
                           setRollbackConfirm("");
                         } catch (err) {
@@ -872,7 +908,6 @@ export default function ApplicationDetailsPage({
             canRollbackHelm={canRollbackHelm}
             canUninstallHelm={canUninstallHelm}
             onUpgrade={() => onHelmUpgrade?.(detail)}
-            onViewManifest={() => {}}
             onActionComplete={onHelmActionComplete}
           />
         </div>
