@@ -48,7 +48,7 @@ def history():
         limit = int(request.args.get("limit") or 200)
     except ValueError:
         limit = 200
-    return success_response(svc.history(get_current_user(), kind, limit))
+    return success_response(svc.history(get_current_user(), kind, limit, request.args.get("before") or None))
 
 
 @approvals_bp.route("/rules", methods=["GET"])

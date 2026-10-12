@@ -109,6 +109,10 @@ class TicketInterpretation(db.Model):
     __table_args__ = (
         db.Index("ix_ticket_interp_status", "status"),
         db.Index("ix_ticket_interp_ticket", "ticket_record_id"),
+        # The VM-request tick: open requests by route and status.
+        db.Index("ix_ticket_interp_route_status", "route", "status"),
+        # The approvals history: decided tasks, newest first.
+        db.Index("ix_ticket_interp_decided_at", "decided_at"),
     )
 
     id = db.Column(db.Integer, primary_key=True)

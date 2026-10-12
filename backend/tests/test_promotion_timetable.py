@@ -202,3 +202,7 @@ def test_a_schedule_whose_owner_cannot_deploy_does_not_run(app):
     db.session.commit()
     assert tt.run_due(now=slot - timedelta(minutes=10))["closed"] == []
     assert PromotionEvent.query.filter_by(kind="blocked", path="schedule").count() == 1
+    # The scheduler keeps asking every 30 s: the feed hears about it once.
+    for minutes in (9, 8, 7):
+        assert tt.run_due(now=slot - timedelta(minutes=minutes))["closed"] == []
+    assert PromotionEvent.query.filter_by(kind="blocked", path="schedule").count() == 1

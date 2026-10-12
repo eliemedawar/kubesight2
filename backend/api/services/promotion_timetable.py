@@ -356,9 +356,14 @@ def close_departure(env: PromotionEnvironment, dep: Dict[str, Any], *, user=None
     if actor is None:
         actor, problem = _owner(env)
         if actor is None:
+            # The departure stays open (saving the schedule again unblocks it
+            # before it leaves), but the scheduler asks every 30 s: the
+            # activity feed hears about a problem once, not on every tick.
+            first_time = row.note != problem
             row.note = problem
             db.session.commit()
-            core.record_event("blocked", None, path="schedule", message=problem, environment=env, images=[])
+            if first_time:
+                core.record_event("blocked", None, path="schedule", message=problem, environment=env, images=[])
             return None
     items = items if items is not None else eligible_items(env, list(row.excluded or []))
     if not items:
@@ -436,6 +441,22 @@ def _required_approvals(env: PromotionEnvironment) -> int:
         except Exception:  # noqa: BLE001
             continue
     return required
+
+
+def _board_bundle_loaders() -> tuple:
+    """What the board reads off a release's bundles: status, quorum, votes and
+    the approver's name — never the items (their payloads can be megabytes)."""
+    from sqlalchemy.orm import load_only, noload, selectinload
+
+    from ..models import ChangeBundle, user_display_loader
+
+    return (
+        load_only(ChangeBundle.id, ChangeBundle.status, ChangeBundle.required_approvals,
+                  ChangeBundle.approved_by_user_id),
+        selectinload(ChangeBundle.votes),
+        user_display_loader(ChangeBundle.approved_by),
+        noload(ChangeBundle.items),
+    )
 
 
 def _release_state(row: PromotionRelease, serialized: Dict[str, Any], bundles: Dict[int, Any], watches: Dict[int, List[str]], now: datetime) -> Dict[str, Any]:
@@ -563,7 +584,10 @@ def timetable(now: Optional[datetime] = None) -> Dict[str, Any]:
         .all()
     )
     bundle_ids = sorted({i for r in releases for i in (r.bundle_ids or [])})
-    bundles = {b.id: b for b in ChangeBundle.query.filter(ChangeBundle.id.in_(bundle_ids)).all()} if bundle_ids else {}
+    bundles = (
+        {b.id: b for b in ChangeBundle.query.options(*_board_bundle_loaders()).filter(ChangeBundle.id.in_(bundle_ids)).all()}
+        if bundle_ids else {}
+    )
     watches: Dict[int, List[str]] = {}
     if bundle_ids:
         for w in BundleRolloutWatch.query.filter(BundleRolloutWatch.bundle_id.in_(bundle_ids)).all():

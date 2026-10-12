@@ -1299,6 +1299,9 @@ class ChangeBundle(db.Model):
     __table_args__ = (
         db.Index("ix_change_bundle_status_created", "status", "created_at"),
         db.Index("ix_change_bundle_requester_status", "requester_user_id", "status"),
+        # The executor's 15 s tick: what is due (window opened) and what expired.
+        db.Index("ix_change_bundle_status_start", "status", "requested_start_time"),
+        db.Index("ix_change_bundle_status_end", "status", "requested_end_time"),
     )
 
     id = db.Column(db.Integer, primary_key=True)
@@ -1346,13 +1349,16 @@ class ChangeBundle(db.Model):
         back_populates="bundle",
         cascade="all, delete-orphan",
         order_by="ChangeBundleItem.position",
-        lazy="joined",
+        # selectin, not joined: items and votes joined together multiply (every
+        # item row, with its payloads — a Helm item carries its whole chart
+        # archive — repeats once per vote). Each comes in its own SELECT ... IN.
+        lazy="selectin",
     )
     votes = db.relationship(
         "ChangeBundleVote",
         back_populates="bundle",
         cascade="all, delete-orphan",
-        lazy="joined",
+        lazy="selectin",
     )
 
 

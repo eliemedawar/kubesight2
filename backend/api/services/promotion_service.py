@@ -42,7 +42,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
@@ -70,9 +70,20 @@ DEFAULT_LADDER = (
 
 MAX_ENVIRONMENTS = 12
 
-_SCAN_TTL_SECONDS = int(os.getenv("PROMOTION_SCAN_TTL_SECONDS", "30"))
+# A cluster scan is fresh for a minute. The Promotions page (which polls
+# every 45 s) may be served a scan up to _SCAN_STALE_SECONDS older while one
+# background kubectl refreshes it; the deploy gate and the observer never are.
+_SCAN_TTL_SECONDS = max(60, int(os.getenv("PROMOTION_SCAN_TTL_SECONDS", "60")))
+_SCAN_STALE_SECONDS = int(os.getenv("PROMOTION_SCAN_STALE_SECONDS", "240"))
+_SCAN_WORKERS = 4
+# A cluster bound by at most this many exact namespaces is scanned per
+# namespace instead of across every namespace.
+_FEW_NAMESPACES = 3
 _OBSERVE_INTERVAL_SECONDS = int(os.getenv("PROMOTION_OBSERVE_SECONDS", "300"))
 _SCAN_CACHE = TTLCache("promotion-scan")
+# The whole overview payload, single-flight: every open Promotions page polls it.
+_OVERVIEW_TTL_SECONDS = int(os.getenv("PROMOTION_OVERVIEW_TTL_SECONDS", "60"))
+_OVERVIEW_CACHE = TTLCache("promotion-overview")
 
 # Namespaces no pattern or whole-cluster binding covers: the platform's own.
 _SYSTEM_NAMESPACE_PREFIXES = ("kube-", "calico-", "tigera-", "cattle-", "metallb-")
@@ -265,6 +276,15 @@ class Resolver:
         names = {c for c, _ns in self.exact} | set(self.patterns) | set(self.whole)
         return sorted(names)
 
+    def scan_namespaces(self, cluster_id: str) -> Optional[List[str]]:
+        """The namespaces a scan of ``cluster_id`` must read, or None for all
+        (a pattern or whole-cluster binding, or too many to ask one by one)."""
+        cluster = str(cluster_id)
+        if cluster in self.patterns or cluster in self.whole:
+            return None
+        names = sorted(ns for c, ns in self.exact if c == cluster)
+        return names if 0 < len(names) <= _FEW_NAMESPACES else None
+
     def binding_for(self, cluster_id: str, namespace: str) -> Optional[PromotionBinding]:
         key = (str(cluster_id), namespace)
         if key in self._cache:
@@ -371,26 +391,55 @@ def _workload_health(kind: str, item: Dict[str, Any]) -> Tuple[str, int, int]:
     return ("healthy" if current else "progressing"), ready, desired
 
 
-def _scan_cluster_uncached(cluster_id: str) -> List[Dict[str, Any]]:
+def _scan_job(
+    cluster_id: str, namespaces: Optional[List[str]] = None, *, allow_stale: bool = False
+) -> Tuple[str, Callable[[], List[Dict[str, Any]]], float]:
+    """``(cache key, fetch, stale seconds)`` for one cluster scan.
+
+    Everything that needs the database or the app (which cluster, its
+    credentials) is resolved here, on the calling thread; ``fetch`` only runs
+    kubectl and parses, so it can run on a worker or background thread.
+    """
     from ..k8s_provider import K8sCommandError, should_use_real_k8s
 
-    if should_use_real_k8s(cluster_id):
-        from ..k8s_provider import _run_for_access, resolve_cluster_access
-
-        access = resolve_cluster_access(cluster_id)
-        if access is None:
-            return []
-        try:
-            raw = _run_for_access(access, ["get", "deployments,statefulsets,daemonsets", "-A", "-o", "json"])
-            items = json.loads(raw).get("items") or []
-        except (K8sCommandError, ValueError) as exc:
-            logger.warning("Promotion scan of %s failed: %s", cluster_id, exc)
-            raise
-    else:
+    key = f"scan:{cluster_id}" + (f":{','.join(namespaces)}" if namespaces else "")
+    if not should_use_real_k8s(cluster_id):
         from . import promotion_mock
 
-        items = promotion_mock.workloads(cluster_id)
+        return key, lambda: _parse_workloads(cluster_id, promotion_mock.workloads(cluster_id)), 0
 
+    from ..k8s_provider import _run_for_access, resolve_cluster_access
+
+    access = resolve_cluster_access(cluster_id)
+    if access is None:
+        return key, lambda: [], 0
+    scopes = [["-n", ns] for ns in namespaces] if namespaces else [["-A"]]
+
+    def fetch() -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        for scope in scopes:
+            try:
+                raw = _run_for_access(access, ["get", "deployments,statefulsets,daemonsets", *scope, "-o", "json"])
+                items.extend(json.loads(raw).get("items") or [])
+            except (K8sCommandError, ValueError) as exc:
+                logger.warning("Promotion scan of %s failed: %s", cluster_id, exc)
+                raise
+        return _parse_workloads(cluster_id, items)
+
+    return key, fetch, (_SCAN_STALE_SECONDS if allow_stale else 0)
+
+
+def _run_scan_job(job: Tuple[str, Callable[[], List[Dict[str, Any]]], float]) -> List[Dict[str, Any]]:
+    key, fetch, stale = job
+    return _SCAN_CACHE.get_or_compute(key, _SCAN_TTL_SECONDS, fetch, stale_ttl=stale)
+
+
+def _scan_cluster_uncached(cluster_id: str) -> List[Dict[str, Any]]:
+    return _scan_job(cluster_id)[1]()
+
+
+def _parse_workloads(cluster_id: str, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The fields the ladder reads off each workload (nothing else is kept)."""
     out = []
     for item in items:
         kind = item.get("kind") or ""
@@ -422,31 +471,63 @@ def _scan_cluster_uncached(cluster_id: str) -> List[Dict[str, Any]]:
     return out
 
 
-def scan_cluster(cluster_id: str) -> List[Dict[str, Any]]:
-    return _SCAN_CACHE.get_or_compute(
-        f"scan:{cluster_id}", _SCAN_TTL_SECONDS, lambda: _scan_cluster_uncached(cluster_id)
-    )
+def scan_cluster(cluster_id: str, namespaces: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    return _run_scan_job(_scan_job(cluster_id, namespaces))
 
 
 def invalidate_scan(cluster_id: Optional[str] = None) -> None:
     _SCAN_CACHE.invalidate(f"scan:{cluster_id}" if cluster_id else "scan:")
+    # What runs changed: the overview built from it is stale too.
+    invalidate_overview()
+
+
+def invalidate_overview() -> None:
+    _OVERVIEW_CACHE.invalidate()
 
 
 def scan_ladder(
     resolver: Optional[Resolver] = None,
+    *,
+    allow_stale: bool = False,
 ) -> Tuple[Dict[int, List[Dict[str, Any]]], List[Dict[str, str]]]:
     """Every workload in the ladder, by environment id. ``(by_env, errors)``.
 
-    One scan per cluster that has any binding; each workload lands in the
-    environment its namespace resolves to."""
+    One scan per cluster that has any binding (only its bound namespaces when
+    there are few), clusters scanned in parallel; each workload lands in the
+    environment its namespace resolves to. ``allow_stale`` lets the page be
+    served a recent scan while a newer one is read in the background."""
+    from ..ttl_cache import caching_disabled
+
     resolver = resolver or Resolver()
     by_env: Dict[int, List[Dict[str, Any]]] = {}
     errors: List[Dict[str, str]] = []
+    jobs: Dict[str, Any] = {}
     for cluster_id in resolver.clusters:
         try:
-            items = scan_cluster(cluster_id)
+            jobs[cluster_id] = _scan_job(cluster_id, resolver.scan_namespaces(cluster_id), allow_stale=allow_stale)
         except Exception as exc:  # noqa: BLE001 — one unreachable cluster must not empty the page
             errors.append({"clusterId": cluster_id, "message": str(exc)[:300]})
+    results: Dict[str, Any] = {}
+    if len(jobs) > 1 and not caching_disabled():
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(_SCAN_WORKERS, len(jobs)),
+                                thread_name_prefix="promotion-scan") as pool:
+            futures = {cid: pool.submit(_run_scan_job, job) for cid, job in jobs.items()}
+            for cid, future in futures.items():
+                try:
+                    results[cid] = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    results[cid] = exc
+    else:
+        for cid, job in jobs.items():
+            try:
+                results[cid] = _run_scan_job(job)
+            except Exception as exc:  # noqa: BLE001
+                results[cid] = exc
+    for cluster_id, items in results.items():
+        if isinstance(items, Exception):
+            errors.append({"clusterId": cluster_id, "message": str(items)[:300]})
             continue
         for item in items:
             env = resolver.resolve(cluster_id, item["namespace"])
@@ -463,7 +544,7 @@ def scan_environment(env: PromotionEnvironment) -> Tuple[List[Dict[str, Any]], L
     clusters = {b.cluster_id for b in env.bindings}
     for cluster_id in clusters:
         try:
-            items = scan_cluster(cluster_id)
+            items = scan_cluster(cluster_id, resolver.scan_namespaces(cluster_id))
         except Exception as exc:  # noqa: BLE001
             errors.append({"clusterId": cluster_id, "message": str(exc)[:300]})
             continue
@@ -558,14 +639,38 @@ def record_rollout(
             db.session.rollback()
 
 
-def ledger_by_env(env_ids: Iterable[int]) -> Dict[int, Dict[str, PromotionRecord]]:
+def ledger_by_env(
+    env_ids: Iterable[int], images: Optional[Iterable[str]] = None
+) -> Dict[int, Dict[str, PromotionRecord]]:
+    """Each environment's ledger by image. ``images`` limits it to those images
+    (the ledger only grows; a page needs the rows for what runs now)."""
     ids = list(env_ids)
     out: Dict[int, Dict[str, PromotionRecord]] = {i: {} for i in ids}
     if not ids:
         return out
-    for row in PromotionRecord.query.filter(PromotionRecord.environment_id.in_(ids)).all():
+    query = PromotionRecord.query.filter(PromotionRecord.environment_id.in_(ids))
+    if images is None:
+        rows = query.all()
+    else:
+        wanted = sorted(set(images))
+        rows = []
+        for start in range(0, len(wanted), 500):
+            rows.extend(query.filter(PromotionRecord.image.in_(wanted[start:start + 500])).all())
+    for row in rows:
         out.setdefault(row.environment_id, {})[row.image] = row
     return out
+
+
+def scanned_images(by_env: Dict[int, List[Dict[str, Any]]]) -> List[str]:
+    """Every image key a ladder scan saw."""
+    keys = set()
+    for workloads in by_env.values():
+        for workload in workloads:
+            for container in workload["containers"]:
+                parsed = parse_image(container["image"])
+                if parsed:
+                    keys.add(parsed["image"])
+    return sorted(keys)
 
 
 def record_healthy(
@@ -574,9 +679,14 @@ def record_healthy(
     *,
     source: str = "observed",
     existing: Optional[Dict[str, PromotionRecord]] = None,
+    refresh_after: Optional[int] = None,
 ) -> int:
     """Record every image a healthy workload runs. ``existing`` (this
-    environment's ledger by image) saves a query per image."""
+    environment's ledger by image) saves a query per image. A row already
+    recorded for the same workload is only touched once ``refresh_after``
+    seconds (default: the observer's interval) have passed since it was seen."""
+    if refresh_after is None:
+        refresh_after = _OBSERVE_INTERVAL_SECONDS
     if existing is None:
         existing = ledger_by_env([env.id])[env.id]
     count = 0
@@ -590,7 +700,7 @@ def record_healthy(
             row = existing.get(parsed["image"])
             if row is not None and row.namespace == workload["namespace"] and row.workload_name == workload["name"]:
                 # Seen here before: only refresh when it is worth a write.
-                if (_now() - (_aware(row.last_seen_at) or _now())).total_seconds() < 60:
+                if (_now() - (_aware(row.last_seen_at) or _now())).total_seconds() < refresh_after:
                     continue
             _upsert_record(
                 env, parsed, cluster_id=workload["clusterId"], namespace=workload["namespace"],
@@ -604,12 +714,16 @@ def observe() -> Dict[str, Any]:
     """Scan every environment's namespaces and record what runs healthy there."""
     rungs = {env.id: env for env in ladder()}
     by_env, errors = scan_ladder()
-    ledgers = ledger_by_env(rungs.keys())
+    ledgers = ledger_by_env(rungs.keys(), scanned_images(by_env))
     seen = 0
     for env_id, workloads in by_env.items():
         if env_id in rungs:
-            seen += record_healthy(rungs[env_id], workloads, existing=ledgers.get(env_id))
+            # Refresh what this observer saw a whole interval ago (minus a
+            # little, so a tick that runs slightly early still refreshes).
+            seen += record_healthy(rungs[env_id], workloads, existing=ledgers.get(env_id),
+                                   refresh_after=max(30, _OBSERVE_INTERVAL_SECONDS - 30))
     db.session.commit()
+    invalidate_overview()
     return {"recorded": seen, "errors": errors}
 
 
@@ -946,9 +1060,12 @@ def gate_yaml(
 # ---------------------------------------------------------------------------
 
 def overview() -> Dict[str, Any]:
+    """The Promotions overview, built at most once per
+    PROMOTION_OVERVIEW_TTL_SECONDS however many pages poll it (concurrent
+    callers share one build). Writes that change it invalidate it."""
     from .promotion_overview import build_overview
 
-    return build_overview()
+    return _OVERVIEW_CACHE.get_or_compute("overview", _OVERVIEW_TTL_SECONDS, build_overview)
 
 
 def board() -> Dict[str, Any]:
@@ -1039,6 +1156,8 @@ def setup_payload() -> Dict[str, Any]:
 
 
 def _audit_setup(user, action: str, details: Dict[str, Any]) -> None:
+    # Every ladder/binding/policy change passes here: the overview is stale.
+    invalidate_overview()
     log_audit(action, actor=user, target_type="promotion_ladder", target_id="ladder", details=details)
 
 

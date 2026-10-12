@@ -70,20 +70,32 @@ def _environment(reference: Any):
             "application": {
                 "type": "string",
                 "description": "Optional: only applications whose name, system or image repository contains this.",
-            }
+            },
+            "limit": {
+                "type": "integer", "minimum": 1, "maximum": 200,
+                "description": "At most this many applications (default 100).",
+            },
         },
     },
 )
 def _board(arguments: Dict[str, Any]) -> Dict[str, Any]:
     from ...services import promotion_service as svc
 
+    # The cached overview the Promotions page reads (rebuilt at most once a
+    # minute), not a fresh scan of every bound cluster per call.
     data = svc.overview()
     envs = {env["id"]: env["name"] for env in data["environments"]}
     needle = str(arguments.get("application") or "").strip().lower()
+    try:
+        limit = max(1, min(int(arguments.get("limit") or 100), 200))
+    except (TypeError, ValueError):
+        limit = 100
+    matching = [
+        row for row in data["apps"]
+        if not needle or any(needle in (row[k] or "").lower() for k in ("name", "repository", "system"))
+    ]
     rows: List[Dict[str, Any]] = []
-    for row in data["apps"]:
-        if needle and not any(needle in (row[k] or "").lower() for k in ("name", "repository", "system")):
-            continue
+    for row in matching[:limit]:
         rows.append(
             {
                 "application": row["name"],
@@ -124,8 +136,9 @@ def _board(arguments: Dict[str, Any]) -> Dict[str, Any]:
             }
             for g in data["gates"]
         ],
-        "applications": rows[:100],
-        "truncated": len(rows) > 100,
+        "applications": rows,
+        "totalMatching": len(matching),
+        "truncated": len(matching) > limit,
         "summary": data["summary"],
         "errors": data["errors"],
     }

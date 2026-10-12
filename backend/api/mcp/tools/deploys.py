@@ -258,24 +258,37 @@ _REQUEST_FIELDS = (
     },
 )
 def _deployment_requests_list(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    from ...services.deployment_request_service import list_requests, list_requests_for_user
-
-    user = _user()
-    rows = (
-        list_requests_for_user(user) if arguments.get("mine") else list_requests()
+    from ...models import DeploymentRequest
+    from ...services.deployment_request_service import (
+        _LIST_USER_LOADERS,
+        auto_decline_overdue_requests,
+        serialize_request,
     )
-    status = str(arguments.get("status") or "").strip().lower()
-    if status and status != "all":
-        rows = [row for row in rows if str(row.get("status", "")).lower() == status]
-    if arguments.get("cluster"):
-        cluster_id = resolve_cluster(user, arguments.get("cluster"))
-        rows = [row for row in rows if str(row.get("clusterId")) == cluster_id]
     from ..access import keep_allowed
 
-    rows = keep_allowed(rows)
-    total = len(rows)
-    rows = [pick(row, _REQUEST_FIELDS) for row in take(rows, _limit(arguments, MAX_ROWS))]
-    return {"totalMatching": total, "count": len(rows), "requests": rows}
+    user = _user()
+    # The same expiry the list routes apply before reading.
+    auto_decline_overdue_requests()
+    # Status, cluster and owner are filtered in SQL, so an older match is
+    # found even when the newest 200 requests are all something else.
+    query = DeploymentRequest.query.options(*_LIST_USER_LOADERS)
+    if arguments.get("mine"):
+        if user is None:
+            return {"totalMatching": 0, "count": 0, "requests": []}
+        query = query.filter(DeploymentRequest.requester_id == user.id)
+    status = str(arguments.get("status") or "").strip().lower()
+    if status and status != "all":
+        query = query.filter(DeploymentRequest.status == status)
+    if arguments.get("cluster"):
+        cluster_id = resolve_cluster(user, arguments.get("cluster"))
+        query = query.filter(DeploymentRequest.cluster_id == cluster_id)
+    limit = _limit(arguments, MAX_ROWS)
+    allowed = [
+        row for row in query.order_by(DeploymentRequest.created_at.desc()).limit(500).all()
+        if keep_allowed([{"clusterId": row.cluster_id}])
+    ]
+    rows = [pick(serialize_request(row), _REQUEST_FIELDS) for row in take(allowed, limit)]
+    return {"totalMatching": len(allowed), "count": len(rows), "requests": rows}
 
 
 @tool(

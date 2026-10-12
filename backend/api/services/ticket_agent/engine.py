@@ -60,6 +60,8 @@ SESSION_KEY = "kubesight-ticket-agent"
 
 _executor: Optional[ThreadPoolExecutor] = None
 _executor_lock = threading.Lock()
+# Task ids handed to a worker of this process and not finished yet.
+_in_flight: set = set()
 
 
 class AgentError(Exception):
@@ -248,20 +250,28 @@ def _apply_fallback(ticket: ZohoInboundTicket, event: Optional[Dict[str, Any]]) 
 # Workers
 # ---------------------------------------------------------------------------
 
+def _workers() -> int:
+    return max(1, _int_env("TICKET_AGENT_WORKERS", 2))
+
+
 def _pool() -> ThreadPoolExecutor:
     global _executor
     with _executor_lock:
         if _executor is None:
-            _executor = ThreadPoolExecutor(
-                max_workers=max(1, _int_env("TICKET_AGENT_WORKERS", 2)),
-                thread_name_prefix="ticket-agent",
-            )
+            _executor = ThreadPoolExecutor(max_workers=_workers(), thread_name_prefix="ticket-agent")
         return _executor
 
 
 def _run_in_app(app, task_id: int) -> None:
     with app.app_context():
         try:
+            # The heartbeat starts when the work does, not when the task was
+            # claimed: a task waiting for a worker must not look stale.
+            now = _now()
+            TicketInterpretation.query.filter_by(id=task_id, status=RUNNING).update(
+                {"heartbeat_at": now, "started_at": now}, synchronize_session=False
+            )
+            db.session.commit()
             process(task_id)
         except Exception:  # noqa: BLE001 — a worker must never die silently
             logger.exception("Ticket agent task %s crashed", task_id)
@@ -269,16 +279,32 @@ def _run_in_app(app, task_id: int) -> None:
             task = db.session.get(TicketInterpretation, task_id)
             if task is not None and task.status == RUNNING:
                 _fail(task, "The ticket agent crashed while handling this task.")
+        finally:
+            with _executor_lock:
+                _in_flight.discard(task_id)
 
 
 def kick() -> int:
-    """Claim due pending tasks and hand them to workers. Returns how many."""
+    """Claim due pending tasks and hand them to workers. Returns how many.
+
+    Claims no more than there are free workers: a task claimed into the
+    pool's queue would sit RUNNING without a worker, and the stale-task reaper
+    would hand it out a second time.
+    """
     now = _now()
+    testing = _testing()
+    if testing:
+        room = 10
+    else:
+        with _executor_lock:
+            room = _workers() - len(_in_flight)
+        if room <= 0:
+            return 0
     due = [
         t for t in TicketInterpretation.query.filter_by(status=PENDING)
         .order_by(TicketInterpretation.id.asc()).limit(10).all()
         if not t.retry_at or _aware(t.retry_at) <= now
-    ]
+    ][:room]
     claimed: List[int] = []
     for task in due:
         # Conditional claim: two ticks (or a tick and a webhook) never both win.
@@ -292,7 +318,7 @@ def kick() -> int:
     db.session.commit()
     if not claimed:
         return 0
-    if _testing():
+    if testing:
         for task_id in claimed:
             process(task_id)
         return len(claimed)
@@ -300,6 +326,8 @@ def kick() -> int:
 
     app = current_app._get_current_object()
     for task_id in claimed:
+        with _executor_lock:
+            _in_flight.add(task_id)
         _pool().submit(_run_in_app, app, task_id)
     return len(claimed)
 
@@ -389,6 +417,9 @@ def process(task_id: int) -> None:
                     "namespaces in its Field sync first.")
         return
 
+    # Hermes can take up to its timeout (minutes) and calls back into KubeSight
+    # over MCP: hold no transaction (and no pooled connection) meanwhile.
+    db.session.commit()
     try:
         text, model = hermes.run_task(message, session_key=SESSION_KEY)
     except hermes.HermesTransientError as exc:
@@ -1191,9 +1222,12 @@ def reject(task_id: int, by: str, *, note: str = "", nonce: Optional[str] = None
 def expire_approvals() -> int:
     now = _now()
     expired = 0
-    for task in TicketInterpretation.query.filter_by(status="awaiting_approval").all():
-        if not task.expires_at or _aware(task.expires_at) > now:
-            continue
+    overdue = TicketInterpretation.query.filter(
+        TicketInterpretation.status == "awaiting_approval",
+        TicketInterpretation.expires_at.isnot(None),
+        TicketInterpretation.expires_at <= now,
+    ).order_by(TicketInterpretation.id.asc()).all()
+    for task in overdue:
         won = TicketInterpretation.query.filter_by(id=task.id, status="awaiting_approval").update(
             {"status": "impediment", "finished_at": now,
              "decision_note": "No one approved it in time."},
@@ -1669,7 +1703,11 @@ def reap_stale() -> int:
     """Running tasks whose worker vanished (restart) go back in the queue."""
     cutoff = _now() - timedelta(seconds=_stale_seconds())
     reaped = 0
+    with _executor_lock:
+        mine = set(_in_flight)
     for task in TicketInterpretation.query.filter_by(status=RUNNING).all():
+        if task.id in mine:
+            continue
         beat = _aware(task.heartbeat_at) or _aware(task.started_at)
         if beat and beat > cutoff:
             continue
