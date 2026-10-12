@@ -194,6 +194,23 @@ class TestDiscovery:
         k8s_versions.supported_versions()
         assert len(discovery.calls) == first_round
 
+    def test_a_failed_fetch_is_not_retried_on_every_request(self, discovery, monkeypatch):
+        """Air-gapped: one timeout per retry window, not one per options call."""
+        for minor in ENABLED_MINORS:
+            discovery.responses[minor] = urllib.error.URLError("no route")
+        first = k8s_versions.supported_versions()
+        first_round = len(discovery.calls)
+        assert first_round == len(ENABLED_MINORS)
+        assert k8s_versions.supported_versions() == first
+        assert len(discovery.calls) == first_round
+
+        # Once the window has passed, upstream is asked again.
+        monkeypatch.setenv("KUBESIGHT_K8S_DISCOVERY_RETRY_S", "0")
+        with k8s_versions._lock:
+            k8s_versions._failed_until.clear()
+        _all_minors_respond(discovery, patch=7)
+        assert k8s_versions.supported_versions()[0].endswith(".7")
+
     @pytest.mark.parametrize(
         "outcome",
         [
