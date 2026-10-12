@@ -225,6 +225,9 @@ class AuditLog(db.Model):
     __table_args__ = (
         db.Index("ix_audit_log_actor_created", "actor_user_id", "created_at"),
         db.Index("ix_audit_log_action_created", "action", "created_at"),
+        # Integration activity feeds (target_type IN ...) and the dashboard's
+        # last pre-check per cluster (target_type + target_id), newest first.
+        db.Index("ix_audit_log_target_created", "target_type", "target_id", "created_at"),
     )
 
     id = db.Column(db.Integer, primary_key=True)
