@@ -19,6 +19,8 @@ Python standard library only (plus Playwright for the page capture).
 | `freshness.py` | Crashes one pod in a fake cluster and times how long each page takes to show it. |
 | `direct_parity.py`, `tls_parity.py` | Check `api/kube_direct.py` returns what kubectl returns (plain and TLS client-certificate clusters). |
 | `probe.py`, `pages_summary.py`, `merge_pages.py` | Small helpers. |
+| `bench_endpoints.py` | Times every GET endpoint as an admin and as a restricted user (warm-up + 5 calls, SQL and kubectl counts from `serve.py`'s log), then a short 25/50-user concurrency phase. Writes `results.json` + `report.md`. |
+| `compare_bench.py` | Before/after table of two `bench_endpoints.py` result folders; a timing change counts only above both 20 ms and 20%. |
 
 ## Running it
 
