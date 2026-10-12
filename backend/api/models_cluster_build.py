@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from sqlalchemy.orm import deferred
+
 from .db import db
 
 
@@ -525,8 +527,9 @@ class ClusterBuildStep(db.Model):
     started_at = db.Column(db.DateTime(timezone=True), nullable=True)
     finished_at = db.Column(db.DateTime(timezone=True), nullable=True)
     # Scrubbed before persisting — never raw kubeadm output (join tokens /
-    # certificate keys appear in init output).
-    log_tail = db.Column(db.Text, nullable=True)
+    # certificate keys appear in init output). Deferred: up to 8 KB per step
+    # and 30-60 steps per build, read only by the logs endpoint.
+    log_tail = deferred(db.Column(db.Text, nullable=True))
     error = db.Column(db.Text, nullable=True)
 
 
@@ -554,6 +557,10 @@ class ClusterInfraState(db.Model):
     serial = db.Column(db.Integer, nullable=True)
     lineage = db.Column(db.String(64), nullable=True)
     resource_count = db.Column(db.Integer, nullable=False, default=0)
+    # VMs the state lists, counted when the state is written so the builds list
+    # never decrypts and parses the state to show it. NULL on rows written
+    # before the column existed; the first read fills it in.
+    vm_count = db.Column(db.Integer, nullable=True)
     # KubeSight's own write counter, shown as "state version N".
     version = db.Column(db.Integer, nullable=False, default=0)
     # The OpenTofu lock: its id, the lock info OpenTofu sent, and the job that
@@ -600,14 +607,17 @@ class ClusterProvisionJob(db.Model):
     # The rendered OpenTofu configuration (main.tf.json) this job planned with,
     # plus what the job needs to finish (new node specs for growth). No secrets:
     # vCenter credentials reach OpenTofu through its environment only.
-    config_json = db.Column(db.JSON, nullable=True)
-    # The saved plan file (binary), base64 then Fernet-encrypted.
-    plan_cipher = db.Column(db.Text, nullable=True)
+    # The four big columns are deferred: build pages poll every couple of
+    # seconds and read none of them. Whatever needs one loads it on access.
+    config_json = deferred(db.Column(db.JSON, nullable=True))
+    # The saved plan file (binary), base64 then Fernet-encrypted. Cleared once
+    # the plan is applied, discarded or superseded: it is never used again.
+    plan_cipher = deferred(db.Column(db.Text, nullable=True))
     # {"add": n, "change": n, "destroy": n, "resources": [...], "checks": [...]}
     plan_summary_json = db.Column(db.JSON, nullable=True)
     # OpenTofu's own human-readable plan, scrubbed.
-    plan_text = db.Column(db.Text, nullable=True)
-    log_tail = db.Column(db.Text, nullable=True)
+    plan_text = deferred(db.Column(db.Text, nullable=True))
+    log_tail = deferred(db.Column(db.Text, nullable=True))
     # {"phase": "...", "vms": {name: {"state": ..., "detail": ...}}}
     progress_json = db.Column(db.JSON, nullable=True)
     error = db.Column(db.Text, nullable=True)

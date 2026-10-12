@@ -333,6 +333,7 @@ def _require_no_open_job(build: ClusterBuild, *, supersede_planned: bool = False
     if supersede_planned and current.status == "planned":
         current.status = "discarded"
         current.finished_at = _utcnow()
+        current.plan_cipher = None
         current.decision_note = "Replaced by a newer plan."
         db.session.commit()
         return
@@ -547,6 +548,7 @@ def reject_destroy(build: ClusterBuild, job: ClusterProvisionJob, *, actor: str 
     if user is not None and job.requested_by_user_id == user.id:
         raise PermissionError("Withdraw your own request instead of rejecting it.")
     job.status = "rejected"
+    job.plan_cipher = None
     job.decision_note = (note or "").strip()[:1000] or None
     job.approved_by = actor or None
     job.approved_by_user_id = getattr(user, "id", None)
@@ -563,6 +565,7 @@ def discard(build: ClusterBuild, job: ClusterProvisionJob, *, actor: str = "", u
     if job.status == "awaiting_approval" and user is not None and job.requested_by_user_id not in (None, user.id):
         raise PermissionError("Only the person who asked can withdraw a destroy request; others reject it.")
     job.status = "discarded"
+    job.plan_cipher = None
     job.decision_note = f"Discarded by {actor}" if actor else "Discarded"
     job.finished_at = _utcnow()
     if job.operation == "grow":
@@ -678,9 +681,10 @@ def install_kubernetes(build: ClusterBuild, payload: Optional[Dict[str, Any]] = 
     if not build.vms_only or build.status != "vms_ready":
         raise ValueError("Kubernetes can be installed only on a VMs-only build whose VMs are ready.")
     _require_no_open_job(build)
-    created = next(
-        (j for j in jobs.jobs_for(build.id) if j.operation == "create" and j.status == "succeeded"),
-        None,
+    created = (
+        ClusterProvisionJob.query.filter_by(build_id=build.id, operation="create", status="succeeded")
+        .order_by(ClusterProvisionJob.id.desc())
+        .first()
     )
     if created is None or not state_store.has_resources(build.id):
         raise ValueError("OpenTofu's state lists no VMs for this build.")
@@ -726,30 +730,84 @@ def install_kubernetes(build: ClusterBuild, payload: Optional[Dict[str, Any]] = 
 # Reading
 # ---------------------------------------------------------------------------
 
-def summary_for_list(build: ClusterBuild) -> Optional[Dict[str, Any]]:
+class ListContext:
+    """What the builds list needs from provisioning, read for every listed
+    build at once: the current job of each and its state row (no ciphertext)."""
+
+    def __init__(self, builds):
+        ids = [b.id for b in builds if is_vmware(b)]
+        self.jobs = jobs.current_jobs(ids)
+        self.states = state_store.light_rows(ids)
+        # States written before vm_count existed, counted (and stored) now.
+        self.backfilled = False
+
+    def has_resources(self, build_id: int) -> bool:
+        row = self.states.get(build_id)
+        return row is not None and state_store.has_resources(build_id, row)
+
+    def vm_count(self, build_id: int) -> int:
+        row = self.states.get(build_id)
+        if row is None:
+            return 0
+        if row.has_state and row.vm_count is None:
+            self.backfilled = True
+        return state_store.vm_count_of(build_id, row)
+
+
+def summary_for_list(build: ClusterBuild, ctx: Optional[ListContext] = None) -> Optional[Dict[str, Any]]:
     if not is_vmware(build):
         return None
-    current = jobs.open_job(build.id) or (jobs.jobs_for(build.id) or [None])[0]
+    if ctx is not None:
+        current = ctx.jobs.get(build.id)
+        vm_count = ctx.vm_count(build.id)
+    else:
+        current = jobs.current_jobs([build.id]).get(build.id)
+        vm_count = state_store.vm_count_of(build.id)
     return {
         "provisionStatus": build.provision_status,
         "job": jobs.serialize_job(current) if current else None,
         # VMs OpenTofu's state still lists: these, not a leftover folder,
         # are what must be destroyed before the build can be deleted.
-        "vmCount": len(state_store.vm_instances(build.id)),
+        "vmCount": vm_count,
     }
+
+
+_HISTORY_LIMIT = 12
+# The job statuses whose card shows OpenTofu's own plan (PlanReview) ...
+_PLAN_SHOWN = ("planned", "awaiting_approval")
+
+
+def _log_shown(build: ClusterBuild, job: ClusterProvisionJob) -> bool:
+    """... and whose card shows OpenTofu's log. Planning shows a spinner; once
+    Kubernetes has the machines the card is a one-line summary, and the page
+    polls for the whole Kubernetes build — 20 KB a poll for nothing."""
+    if job.status == "planning":
+        return False
+    if job.status == "succeeded" and build.status not in ("draft", "vms_ready"):
+        return False
+    return True
 
 
 def detail(build: ClusterBuild) -> Optional[Dict[str, Any]]:
     if not is_vmware(build):
         return None
-    history = jobs.jobs_for(build.id)
-    current = jobs.open_job(build.id) or (history[0] if history else None)
+    history = jobs.jobs_for(build.id, limit=_HISTORY_LIMIT)
+    current = next((j for j in history if j.status in jobs.OPEN_STATUSES), None)
+    if current is None and history:
+        # An open job is always the newest unless something odd happened; only
+        # then is it worth a second query.
+        current = jobs.open_job(build.id) if len(history) >= _HISTORY_LIMIT else None
+        current = current or history[0]
     reservations = ip_pool.reservations_for(build.id)
     return {
         "provisionStatus": build.provision_status,
         "spec": build.provisioning_json or {},
-        "job": jobs.serialize_job(current, include_plan=True) if current else None,
-        "history": [jobs.serialize_job(item) for item in history[:12]],
+        "job": jobs.serialize_job(
+            current, include_plan=True,
+            plan_text=current.status in _PLAN_SHOWN,
+            log_tail=_log_shown(build, current),
+        ) if current else None,
+        "history": [jobs.serialize_job(item) for item in history],
         "state": state_store.summary(build.id),
         "reservations": [
             {"address": r.address, "purpose": r.purpose, "name": r.node_name, "status": r.status}
@@ -766,7 +824,7 @@ def overview() -> Dict[str, Any]:
         build = db.session.get(ClusterBuild, row.build_id)
         if build is None:
             continue
-        last = (jobs.jobs_for(build.id) or [None])[0]
+        last = (jobs.jobs_for(build.id, limit=1) or [None])[0]
         states.append({
             "buildId": build.id,
             "name": build.name,

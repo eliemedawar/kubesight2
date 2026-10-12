@@ -567,8 +567,10 @@ def build_kubeconfig(build_id: int):
 @require_permission("cluster_builds:view")
 def build_logs(build_id: int):
     node_id = request.args.get("node", type=int)
+    # ?step=<id>: only that step's log — what the log panel polls.
+    step_id = request.args.get("step", type=int)
     try:
-        items = svc.build_logs(build_id, node_id=node_id)
+        items = svc.build_logs(build_id, node_id=node_id, step_id=step_id)
     except LookupError:
         return error_response("Cluster build not found.", 404)
     return success_response({"items": items})

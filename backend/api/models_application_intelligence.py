@@ -41,6 +41,10 @@ class BitbucketCredentialProfile(db.Model):
 
 class IntelligenceApplication(db.Model):
     __tablename__ = "intelligence_applications"
+    __table_args__ = (
+        # The CI service's Intelligence tab looks its application up by this.
+        db.Index("ix_intelligence_app_ci_service", "ci_service_id"),
+    )
 
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(160), nullable=False)
@@ -118,6 +122,10 @@ class ApplicationAnalysis(db.Model):
     hermes_model = db.Column(db.String(120), nullable=True)
     hermes_prompt_version = db.Column(db.String(64), nullable=True)
     result_summary = db.Column(db.JSON, nullable=True)
+    # What the list views show of result_summary (its build-verification
+    # verdict), kept beside it so they never load the whole Hermes document.
+    # NULL on analyses stored before the column; filled in on first read.
+    build_verification_status = db.Column(db.String(32), nullable=True)
     workspace_cleanup_status = db.Column(db.String(32), nullable=False, default="Pending")
     warnings = db.Column(db.JSON, nullable=False, default=list)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_now)
@@ -215,6 +223,10 @@ class ApplicationFindingStatusEvent(db.Model):
 
 class ApplicationDependency(db.Model):
     __tablename__ = "application_dependencies"
+    # Every read of these child tables is "the rows of one analysis".
+    __table_args__ = (
+        db.Index("ix_app_dependency_analysis", "analysis_id", "name"),
+    )
 
     id = db.Column(db.Integer, primary_key=True)
     analysis_id = db.Column(db.Integer, db.ForeignKey("application_analyses.id"), nullable=False)
@@ -231,6 +243,9 @@ class ApplicationDependency(db.Model):
 
 class ApplicationCommunication(db.Model):
     __tablename__ = "application_communications"
+    __table_args__ = (
+        db.Index("ix_app_communication_analysis", "analysis_id"),
+    )
 
     id = db.Column(db.Integer, primary_key=True)
     analysis_id = db.Column(db.Integer, db.ForeignKey("application_analyses.id"), nullable=False)
@@ -252,6 +267,9 @@ class ApplicationCommunication(db.Model):
 
 class ApplicationArtifact(db.Model):
     __tablename__ = "application_artifacts"
+    __table_args__ = (
+        db.Index("ix_app_artifact_analysis", "analysis_id", "created_at"),
+    )
 
     id = db.Column(db.Integer, primary_key=True)
     analysis_id = db.Column(db.Integer, db.ForeignKey("application_analyses.id"), nullable=False)

@@ -14,6 +14,8 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy.orm import selectinload, undefer
+
 from ...db import db
 from ...models import (
     BuildProfile,
@@ -123,7 +125,9 @@ def _current_phase(build: ClusterBuild) -> Optional[str]:
                if p in _PHASE_ORDER else -1)
 
 
-def serialize_build(build: ClusterBuild, *, include_detail: bool = False) -> Dict[str, Any]:
+def serialize_build(build: ClusterBuild, *, include_detail: bool = False,
+                    list_ctx: Optional["provisioning_service.ListContext"] = None) -> Dict[str, Any]:
+    """``list_ctx`` carries provisioning reads made once for a whole list."""
     data = {
         "id": build.id,
         "name": build.name,
@@ -176,7 +180,8 @@ def serialize_build(build: ClusterBuild, *, include_detail: bool = False) -> Dic
             (build.machine_source or "existing") == "vmware"
             and build.status not in ("building", "preflighting", "provisioning",
                                      "destroying", "destroyed")
-            and provisioning_state.has_resources(build.id)
+            and (list_ctx.has_resources(build.id) if list_ctx is not None
+                 else provisioning_state.has_resources(build.id))
         ),
         "nodeCounts": {
             "controlPlane": sum(1 for n in build.nodes if n.role == "control_plane"),
@@ -200,7 +205,7 @@ def serialize_build(build: ClusterBuild, *, include_detail: bool = False) -> Dic
     }
     data["provisioning"] = (
         provisioning_service.detail(build) if include_detail
-        else provisioning_service.summary_for_list(build)
+        else provisioning_service.summary_for_list(build, list_ctx)
     )
     if include_detail:
         data["nodes"] = [serialize_node(n) for n in build.nodes]
@@ -242,8 +247,28 @@ def _growth_limits(build: ClusterBuild) -> Dict[str, Any]:
 
 
 def list_builds() -> List[Dict[str, Any]]:
-    rows = ClusterBuild.query.order_by(ClusterBuild.created_at.desc()).all()
-    return [serialize_build(row) for row in rows]
+    """Every build, as the library cards show them. Polled every few seconds
+    while a build runs, so the query count does not grow with the builds:
+    nodes and steps come in one SELECT ... IN each (steps without their logs,
+    nodes without their preflight reports) and provisioning in one pass."""
+    rows = (
+        ClusterBuild.query.options(
+            selectinload(ClusterBuild.nodes).defer(ClusterBuildNode.preflight_json),
+            selectinload(ClusterBuild.steps).load_only(
+                ClusterBuildStep.id, ClusterBuildStep.build_id, ClusterBuildStep.node_id,
+                ClusterBuildStep.phase, ClusterBuildStep.status,
+            ),
+        )
+        .order_by(ClusterBuild.created_at.desc())
+        .all()
+    )
+    ctx = provisioning_service.ListContext(rows)
+    items = [serialize_build(row, list_ctx=ctx) for row in rows]
+    if ctx.backfilled and not (db.session.dirty or db.session.new or db.session.deleted):
+        # VM counts filled in on states written before the column existed:
+        # keep them, so the next poll reads the stored number.
+        db.session.commit()
+    return items
 
 
 def get_build(build_id: int) -> ClusterBuild:
@@ -1838,11 +1863,19 @@ def cancel_build(build_id: int) -> Dict[str, Any]:
     return serialize_build(build)
 
 
-def build_logs(build_id: int, *, node_id: Optional[int] = None) -> List[Dict[str, Any]]:
+def build_logs(build_id: int, *, node_id: Optional[int] = None,
+               step_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Step logs. ``step_id`` reads just that step's (what the log panel
+    polls); otherwise every step of the build, or of one node."""
     build = get_build(build_id)
-    steps = build.steps
-    if node_id is not None:
-        steps = [s for s in steps if s.node_id == node_id]
+    query = ClusterBuildStep.query.options(undefer(ClusterBuildStep.log_tail)).filter(
+        ClusterBuildStep.build_id == build.id
+    )
+    if step_id is not None:
+        query = query.filter(ClusterBuildStep.id == step_id)
+    elif node_id is not None:
+        query = query.filter(ClusterBuildStep.node_id == node_id)
+    steps = query.order_by(ClusterBuildStep.id).all()
     return [
         {**serialize_step(step), "logTail": step.log_tail or ""}
         for step in steps

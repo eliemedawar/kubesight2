@@ -75,6 +75,18 @@ def _count_resources(document: Dict[str, Any]) -> int:
     return count
 
 
+def _count_vms(document: Dict[str, Any]) -> int:
+    """How many VMs ``vm_instances`` would list for this state document."""
+    names = set()
+    for resource in document.get("resources") or []:
+        if resource.get("mode") != "managed" or resource.get("type") != "vsphere_virtual_machine":
+            continue
+        for instance in resource.get("instances") or []:
+            if instance.get("index_key") is not None:
+                names.add(str(instance.get("index_key")))
+    return len(names)
+
+
 def write_state(build_id: int, text: str, *, lock_id: Optional[str] = None) -> ClusterInfraState:
     """Store a state document OpenTofu sent. Refused while someone else holds the lock."""
     try:
@@ -91,6 +103,7 @@ def write_state(build_id: int, text: str, *, lock_id: Optional[str] = None) -> C
     row.serial = document.get("serial") if isinstance(document.get("serial"), int) else row.serial
     row.lineage = str(document.get("lineage") or row.lineage or "")[:64] or None
     row.resource_count = _count_resources(document)
+    row.vm_count = _count_vms(document)
     row.version = (row.version or 0) + 1
     row.updated_at = _utcnow()
     db.session.commit()
@@ -106,6 +119,7 @@ def delete_state(build_id: int, *, lock_id: Optional[str] = None) -> None:
         raise StateLocked(row.lock_info_json)
     row.state_cipher = None
     row.resource_count = 0
+    row.vm_count = 0
     row.version = (row.version or 0) + 1
     db.session.commit()
 
@@ -209,16 +223,67 @@ def vm_instances(build_id: int) -> Dict[str, Dict[str, Any]]:
     }
 
 
-def summary(build_id: int) -> Dict[str, Any]:
-    row = _row(build_id)
+# What the read paths need from a state row: everything but the ciphertext,
+# plus whether there is one. Build pages poll these every few seconds.
+_LIGHT_COLUMNS = (
+    ClusterInfraState.build_id,
+    ClusterInfraState.version,
+    ClusterInfraState.serial,
+    ClusterInfraState.resource_count,
+    ClusterInfraState.vm_count,
+    ClusterInfraState.lock_id,
+    ClusterInfraState.lock_job_id,
+    ClusterInfraState.locked_at,
+    ClusterInfraState.lock_info_json,
+    ClusterInfraState.updated_at,
+    ClusterInfraState.state_cipher.isnot(None).label("has_state"),
+)
+
+
+def light_rows(build_ids) -> Dict[int, Any]:
+    """State rows without their ciphertext, keyed by build id, in one query."""
+    ids = list({int(b) for b in build_ids})
+    if not ids:
+        return {}
+    rows = db.session.query(*_LIGHT_COLUMNS).filter(ClusterInfraState.build_id.in_(ids)).all()
+    return {row.build_id: row for row in rows}
+
+
+def _light_row(build_id: int):
+    return db.session.query(*_LIGHT_COLUMNS).filter(
+        ClusterInfraState.build_id == build_id
+    ).first()
+
+
+def vm_count_of(build_id: int, row=None) -> int:
+    """VMs the state lists, from the stored count. A row written before the
+    count was stored is decrypted once and the count kept for next time."""
+    row = row if row is not None else _light_row(build_id)
+    if row is None or not row.has_state:
+        return 0
+    if row.vm_count is not None:
+        return row.vm_count
+    count = len(vm_instances(build_id))
+    try:
+        ClusterInfraState.query.filter(
+            ClusterInfraState.build_id == build_id,
+            ClusterInfraState.vm_count.is_(None),
+        ).update({"vm_count": count}, synchronize_session=False)
+    except Exception:  # noqa: BLE001 — the count is a cache; reading must not fail over it
+        pass
+    return count
+
+
+def summary(build_id: int, row=None) -> Dict[str, Any]:
+    row = row if row is not None else _light_row(build_id)
     if row is None:
         return {"exists": False, "version": 0, "resourceCount": 0, "vmCount": 0, "locked": False}
     return {
-        "exists": bool(row.state_cipher),
+        "exists": bool(row.has_state),
         "version": row.version or 0,
         "serial": row.serial,
         "resourceCount": row.resource_count or 0,
-        "vmCount": len(vm_instances(build_id)) if row.state_cipher else 0,
+        "vmCount": vm_count_of(build_id, row),
         "locked": bool(row.lock_id),
         "lockJobId": row.lock_job_id,
         "lockedAt": row.locked_at.isoformat() if row.locked_at else None,
@@ -227,6 +292,6 @@ def summary(build_id: int) -> Dict[str, Any]:
     }
 
 
-def has_resources(build_id: int) -> bool:
-    row = _row(build_id)
-    return bool(row and row.state_cipher and (row.resource_count or 0) > 0)
+def has_resources(build_id: int, row=None) -> bool:
+    row = row if row is not None else _light_row(build_id)
+    return bool(row and row.has_state and (row.resource_count or 0) > 0)

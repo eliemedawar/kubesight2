@@ -48,9 +48,9 @@ def _build_or_404(build_id: int):
         return None, error_response("Cluster build not found.", 404)
 
 
-def _job_or_404(build_id: int, job_id: int):
+def _job_or_404(build_id: int, job_id: int, load=()):
     try:
-        return jobs.get_job(job_id, build_id), None
+        return jobs.get_job(job_id, build_id, load=tuple(load)), None
     except LookupError:
         return None, error_response("Provisioning job not found.", 404)
 
@@ -241,7 +241,7 @@ def request_destroy(build_id: int):
 )
 @require_permission("cluster_builds:view")
 def get_provision_job(build_id: int, job_id: int):
-    job, err = _job_or_404(build_id, job_id)
+    job, err = _job_or_404(build_id, job_id, load=("plan_text", "log_tail"))
     if err:
         return err
     return success_response(jobs.serialize_job(job, include_plan=True))
@@ -259,7 +259,7 @@ def get_provision_job_config(build_id: int, job_id: int):
     build, err = _build_or_404(build_id)
     if err:
         return err
-    job, err = _job_or_404(build_id, job_id)
+    job, err = _job_or_404(build_id, job_id, load=("config_json",))
     if err:
         return err
     config = (job.config_json or {}).get("tofu")

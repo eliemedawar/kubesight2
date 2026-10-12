@@ -126,6 +126,10 @@ class LocalArtifactStore:
         rel_path = os.path.join(rel_dir, filename)
         abs_path = os.path.join(artifact_root(), rel_path)
         if os.path.abspath(upload.local_path) != os.path.abspath(abs_path):
+            # Unlink first: Mobile Apps may hold a hard link to an earlier file
+            # at this path, and copying over it would rewrite that one too.
+            if os.path.exists(abs_path):
+                os.remove(abs_path)
             shutil.copyfile(upload.local_path, abs_path)
         digest = hashlib.sha256()
         with open(abs_path, "rb") as handle:

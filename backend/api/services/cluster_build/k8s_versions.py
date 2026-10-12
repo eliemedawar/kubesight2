@@ -25,6 +25,7 @@ good value, then to the static per-minor fallback baked into the table below, so
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import time
@@ -46,6 +47,15 @@ HTTP_TIMEOUT_S = 3.0
 # stable-<minor>.txt changes a handful of times a year; six hours is plenty
 # fresh while keeping the wizard off the network almost always.
 CACHE_TTL_S = 6 * 60 * 60
+# After a failed fetch, wait this long before asking upstream again. An
+# air-gapped install would otherwise spend the full HTTP timeout on every
+# options request; meanwhile the last known good answer (or the static set)
+# is served.
+def _retry_after_failure_s() -> float:
+    try:
+        return max(0.0, float(os.environ.get("KUBESIGHT_K8S_DISCOVERY_RETRY_S", "600")))
+    except ValueError:
+        return 600.0
 # The payload is one version string. Anything larger is not a release file.
 _MAX_RESPONSE_BYTES = 64
 
@@ -265,6 +275,8 @@ _cache: Dict[str, Tuple[float, str]] = {}
 # minor -> version. Never expires: a successful fetch stays usable as the
 # last known good answer for as long as the process lives.
 _last_known_good: Dict[str, str] = {}
+# minor -> monotonic time before which a failed minor is not fetched again.
+_failed_until: Dict[str, float] = {}
 
 
 def reset_cache() -> None:
@@ -272,6 +284,7 @@ def reset_cache() -> None:
     with _lock:
         _cache.clear()
         _last_known_good.clear()
+        _failed_until.clear()
 
 
 def _network_disabled() -> bool:
@@ -343,16 +356,20 @@ def latest_patch(
         entry = _cache.get(record.minor)
         if entry is not None and entry[0] > now:
             return entry[1], "cache"
+        recently_failed = _failed_until.get(record.minor, 0.0) > now
 
     if allow_network is None:
         allow_network = not _network_disabled()
-    if allow_network:
+    if allow_network and not recently_failed:
         discovered = _fetch_stable_patch(record.minor)
         if discovered:
             with _lock:
                 _cache[record.minor] = (time.monotonic() + CACHE_TTL_S, discovered)
                 _last_known_good[record.minor] = discovered
+                _failed_until.pop(record.minor, None)
             return discovered, "upstream"
+        with _lock:
+            _failed_until[record.minor] = time.monotonic() + _retry_after_failure_s()
 
     with _lock:
         previous = _last_known_good.get(record.minor)

@@ -470,7 +470,10 @@ def launch(resources: list[dict]) -> str:
     kubeconfig = os.getenv("K8S_KUBECONFIG", "").strip()
     if kubeconfig:
         command.extend(["--kubeconfig", kubeconfig])
-    command.extend(["apply", "-f", "-"])
+    base = list(command)
+    # ``-o json`` returns what was applied, the Job's uid included, so no
+    # separate ``get`` is needed for it.
+    command.extend(["apply", "-f", "-", "-o", "json"])
     # A stream that starts with ``{`` is parsed by kubectl as JSON, so joining
     # JSON objects with YAML ``---`` separators applies the first object and
     # then fails at the separator.  Send one valid Kubernetes List document so
@@ -492,50 +495,53 @@ def launch(resources: list[dict]) -> str:
     # collection then removes credentials and the per-job policy when the Job
     # TTL controller deletes the completed Job.
     namespace = job["metadata"]["namespace"]
-    get_uid = [*command[:-3], "get", "job", job["metadata"]["name"], "-n", namespace, "-o", "jsonpath={.metadata.uid}"]
-    uid_result = subprocess.run(
-        get_uid, capture_output=True, text=True, timeout=15, check=False
-    )
-    uid = uid_result.stdout.strip()
-    if uid:
-        owner_patch = json.dumps(
-            {
-                "metadata": {
-                    "ownerReferences": [
-                        {
-                            "apiVersion": "batch/v1",
-                            "kind": "Job",
-                            "name": job["metadata"]["name"],
-                            "uid": uid,
-                            "controller": True,
-                            "blockOwnerDeletion": True,
-                        }
-                    ]
-                }
-            }
+    uid = _applied_job_uid(completed.stdout, job["metadata"]["name"])
+    if not uid:
+        get_uid = [*base, "get", "job", job["metadata"]["name"], "-n", namespace, "-o", "jsonpath={.metadata.uid}"]
+        uid_result = subprocess.run(
+            get_uid, capture_output=True, text=True, timeout=15, check=False
         )
-        for kind, name in (
-            ("secret", secret["metadata"]["name"]),
-            ("networkpolicy", network_policy["metadata"]["name"]),
-        ):
-            subprocess.run(
-                [
-                    *command[:-3],
-                    "patch",
-                    kind,
-                    name,
-                    "-n",
-                    namespace,
-                    "--type=merge",
-                    "-p",
-                    owner_patch,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                check=False,
-            )
+        uid = (uid_result.stdout or "").strip()
+    if uid:
+        owner = {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "name": job["metadata"]["name"],
+            "uid": uid,
+            "controller": True,
+            "blockOwnerDeletion": True,
+        }
+        # Both owned objects in one apply rather than a patch each.
+        owned = []
+        for item in (secret, network_policy):
+            copy = json.loads(json.dumps(item))
+            copy["metadata"]["ownerReferences"] = [owner]
+            owned.append(copy)
+        subprocess.run(
+            [*base, "apply", "-f", "-"],
+            input=json.dumps({"apiVersion": "v1", "kind": "List", "items": owned}),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
     return job["metadata"]["name"]
+
+
+def _applied_job_uid(output: str, job_name: str) -> str:
+    """The Job's uid from ``kubectl apply -o json`` output, or ""."""
+    try:
+        document = json.loads(output or "")
+    except (TypeError, ValueError):
+        return ""
+    items = document.get("items") if isinstance(document, dict) and "items" in document else [document]
+    for item in items or []:
+        if not isinstance(item, dict) or item.get("kind") != "Job":
+            continue
+        metadata = item.get("metadata") or {}
+        if metadata.get("name") == job_name and metadata.get("uid"):
+            return str(metadata["uid"])
+    return ""
 
 
 def cancel(job_name: str) -> None:

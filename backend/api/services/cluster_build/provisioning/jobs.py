@@ -20,6 +20,7 @@ already-approved job set out to do. Anything else waits for a person.
 from __future__ import annotations
 
 import base64
+import collections
 import hashlib
 import hmac
 import json
@@ -36,6 +37,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from flask import current_app
+from sqlalchemy import case, func
+from sqlalchemy.orm import undefer
 
 from ....audit import log_audit
 from ....db import db
@@ -64,6 +67,10 @@ _PLAN_TIMEOUT_S = 15 * 60
 _APPLY_TIMEOUT_S = 90 * 60
 _SSH_TIMEOUT_S = 15 * 60
 _FLUSH_SECONDS = 2.0
+# How much of a command's output a job keeps in memory for its error summary.
+# A long apply prints "Still creating..." for every VM every 10 s; only the end
+# of it matters, and the row keeps just _LOG_TAIL_CHARS anyway.
+_TRANSCRIPT_CHARS = 200000
 
 _active_lock = threading.Lock()
 _active_jobs: set = set()
@@ -91,19 +98,54 @@ def _iso(value) -> Optional[str]:
 # Reading jobs
 # ---------------------------------------------------------------------------
 
-def get_job(job_id: int, build_id: Optional[int] = None) -> ClusterProvisionJob:
-    job = db.session.get(ClusterProvisionJob, job_id)
+# The deferred columns, for the few readers that want them up front.
+BIG_COLUMNS = ("config_json", "plan_cipher", "plan_text", "log_tail")
+
+
+def get_job(job_id: int, build_id: Optional[int] = None, *, load: Tuple[str, ...] = ()) -> ClusterProvisionJob:
+    """One job. ``load`` names deferred columns to read in the same query."""
+    options = [undefer(getattr(ClusterProvisionJob, name)) for name in load]
+    job = db.session.get(ClusterProvisionJob, job_id, options=options or None)
     if job is None or (build_id is not None and job.build_id != build_id):
         raise LookupError("Provisioning job not found.")
     return job
 
 
-def jobs_for(build_id: int) -> List[ClusterProvisionJob]:
-    return (
+def jobs_for(build_id: int, *, limit: Optional[int] = None) -> List[ClusterProvisionJob]:
+    query = (
         ClusterProvisionJob.query.filter_by(build_id=build_id)
         .order_by(ClusterProvisionJob.id.desc())
+    )
+    if limit:
+        query = query.limit(limit)
+    return query.all()
+
+
+def current_jobs(build_ids) -> Dict[int, ClusterProvisionJob]:
+    """Per build, the job a page shows: the open one, else the newest.
+
+    One aggregate query and one load for any number of builds; the big
+    columns stay deferred.
+    """
+    ids = list({int(b) for b in build_ids})
+    if not ids:
+        return {}
+    open_id = func.max(case(
+        (ClusterProvisionJob.status.in_(OPEN_STATUSES), ClusterProvisionJob.id),
+        else_=None,
+    ))
+    pairs = (
+        db.session.query(ClusterProvisionJob.build_id, open_id, func.max(ClusterProvisionJob.id))
+        .filter(ClusterProvisionJob.build_id.in_(ids))
+        .group_by(ClusterProvisionJob.build_id)
         .all()
     )
+    wanted = {build_id: (open_job_id or latest_id) for build_id, open_job_id, latest_id in pairs}
+    if not wanted:
+        return {}
+    rows = ClusterProvisionJob.query.filter(ClusterProvisionJob.id.in_(list(wanted.values()))).all()
+    by_id = {row.id: row for row in rows}
+    return {build_id: by_id[job_id] for build_id, job_id in wanted.items() if job_id in by_id}
 
 
 def open_job(build_id: int) -> Optional[ClusterProvisionJob]:
@@ -117,7 +159,10 @@ def open_job(build_id: int) -> Optional[ClusterProvisionJob]:
     )
 
 
-def serialize_job(job: ClusterProvisionJob, *, include_plan: bool = False) -> Dict[str, Any]:
+def serialize_job(job: ClusterProvisionJob, *, include_plan: bool = False,
+                  plan_text: bool = True, log_tail: bool = True) -> Dict[str, Any]:
+    """``include_plan`` adds OpenTofu's plan and log; ``plan_text`` /
+    ``log_tail`` leave either out where the page shows neither."""
     data = {
         "id": job.id,
         "buildId": job.build_id,
@@ -141,8 +186,10 @@ def serialize_job(job: ClusterProvisionJob, *, include_plan: bool = False) -> Di
         "updatedAt": _iso(job.updated_at),
     }
     if include_plan:
-        data["planText"] = job.plan_text or ""
-        data["logTail"] = job.log_tail or ""
+        if plan_text:
+            data["planText"] = job.plan_text or ""
+        if log_tail:
+            data["logTail"] = job.log_tail or ""
     return data
 
 
@@ -336,7 +383,8 @@ class _Output:
         self.hide = [s for s in secrets_to_hide if s]
         # One transcript per job: a later phase appends to what earlier ones said.
         self.base = job.log_tail or ""
-        self.lines: List[str] = []
+        self._lines: "collections.deque[str]" = collections.deque()
+        self._chars = 0
         self.track_vms = track_vms
         self._last_flush = 0.0
         self._last_error: Optional[str] = None
@@ -345,10 +393,21 @@ class _Output:
         # worker thread writes the job row, so they wait here until it drains.
         self.side: "queue.Queue[str]" = queue.Queue()
 
+    @property
+    def lines(self) -> List[str]:
+        """The kept output, oldest first (at most _TRANSCRIPT_CHARS of it)."""
+        return list(self._lines)
+
+    def _append(self, line: str) -> None:
+        self._lines.append(line)
+        self._chars += len(line) + 1
+        while self._chars > _TRANSCRIPT_CHARS and len(self._lines) > 1:
+            self._chars -= len(self._lines.popleft()) + 1
+
     def _drain(self) -> None:
         while True:
             try:
-                self.lines.append(self._clean(self.side.get_nowait()))
+                self._append(self._clean(self.side.get_nowait()))
             except queue.Empty:
                 return
 
@@ -360,7 +419,7 @@ class _Output:
     def on_line(self, line: str) -> None:
         self._drain()
         line = self._clean(line)
-        self.lines.append(line)
+        self._append(line)
         if line.startswith("Error:") or line.startswith("│ Error:"):
             self._last_error = line.lstrip("│ ").strip()
             self.errors.append(self._last_error)
@@ -406,10 +465,21 @@ class _Output:
     def text(self) -> str:
         return "\n".join(self.lines)
 
+    def _tail_text(self) -> str:
+        """The newest lines, just enough of them to fill the stored tail."""
+        newest: List[str] = []
+        size = 0
+        for line in reversed(self._lines):
+            newest.append(line)
+            size += len(line) + 1
+            if size >= _LOG_TAIL_CHARS:
+                break
+        return "\n".join(reversed(newest))
+
     def flush(self) -> None:
         self._drain()
         try:
-            joined = (self.base + "\n" if self.base else "") + self.text()
+            joined = (self.base + "\n" if self.base else "") + self._tail_text()
             self.job.log_tail = joined[-_LOG_TAIL_CHARS:]
             db.session.commit()
         except Exception:  # noqa: BLE001 — a failed flush must not kill the job
@@ -417,7 +487,7 @@ class _Output:
 
     def error_summary(self) -> str:
         if not self.errors:
-            tail = [line for line in self.lines if line.strip()][-6:]
+            tail = [line for line in self._lines if line.strip()][-6:]
             return "\n".join(tail)[:1500]
         # The block following the first error is OpenTofu's own explanation.
         first = self.text().split(self.errors[0], 1)
@@ -1192,6 +1262,10 @@ def _do_apply(job: ClusterProvisionJob, engine) -> bool:
         _cleanup(workdir)
     db.session.expire_all()
     job = db.session.get(ClusterProvisionJob, job.id)
+    # Applied or refused, a saved plan is never applied twice: a failed apply
+    # leaves it stale, and recovery always plans afresh. Don't keep it around.
+    job.plan_cipher = None
+    db.session.commit()
     if code:
         summary = output.error_summary()
         if "Saved plan is stale" in summary:
@@ -1679,6 +1753,7 @@ def _fail(job_id: int, status: str, message: str) -> None:
     job.status = status
     job.error = scrub(message)[:4000]
     job.finished_at = _utcnow()
+    job.plan_cipher = None  # a failed job's plan is never applied
     progress = dict(job.progress_json or {})
     progress["phase"] = status
     job.progress_json = progress
@@ -1833,6 +1908,7 @@ def advance_provision_jobs() -> None:
         else:  # applying
             job.status = "interrupted"
             job.finished_at = _utcnow()
+            job.plan_cipher = None  # the recovery job makes its own plan
             job.error = (
                 "KubeSight restarted while OpenTofu was applying this plan. OpenTofu "
                 "saved its state as it went; a new plan was made to finish the job."

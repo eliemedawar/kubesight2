@@ -251,7 +251,9 @@ def _artifact_type_for(file_name: str, platform: str) -> str:
 # Serialization
 # ---------------------------------------------------------------------------
 
-def serialize_app(app: MobileApplication, *, with_stats: bool = False) -> Dict[str, Any]:
+def serialize_app(app: MobileApplication, *, with_stats: bool = False,
+                  stats: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """``stats`` (from ``_app_stats``) replaces the per-app counting queries."""
     data = {
         "id": app.id,
         "name": app.name or "",
@@ -276,7 +278,9 @@ def serialize_app(app: MobileApplication, *, with_stats: bool = False) -> Dict[s
         "createdAt": _iso(app.created_at),
         "updatedAt": _iso(app.updated_at),
     }
-    if with_stats:
+    if stats is not None:
+        data.update(stats.get(app.id) or {"buildCount": 0, "publishCount": 0, "latestBuild": None})
+    elif with_stats:
         latest = (
             MobileAppBuild.query.filter_by(app_id=app.id)
             .order_by(MobileAppBuild.id.desc())
@@ -333,9 +337,48 @@ def serialize_publish(pub: MobileAppPublish) -> Dict[str, Any]:
 # CRUD
 # ---------------------------------------------------------------------------
 
+def _app_stats(app_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    """Build/publish counts and the newest build of every app, in three queries
+    whatever the number of apps (the page polls this every 8 s while active)."""
+    from sqlalchemy import func
+
+    if not app_ids:
+        return {}
+    build_counts = dict(
+        db.session.query(MobileAppBuild.app_id, func.count(MobileAppBuild.id))
+        .filter(MobileAppBuild.app_id.in_(app_ids))
+        .group_by(MobileAppBuild.app_id)
+        .all()
+    )
+    publish_counts = dict(
+        db.session.query(MobileAppPublish.app_id, func.count(MobileAppPublish.id))
+        .filter(MobileAppPublish.app_id.in_(app_ids))
+        .group_by(MobileAppPublish.app_id)
+        .all()
+    )
+    newest_ids = (
+        db.session.query(func.max(MobileAppBuild.id))
+        .filter(MobileAppBuild.app_id.in_(app_ids))
+        .group_by(MobileAppBuild.app_id)
+    )
+    latest = {
+        build.app_id: build
+        for build in MobileAppBuild.query.filter(MobileAppBuild.id.in_(newest_ids)).all()
+    }
+    return {
+        app_id: {
+            "buildCount": int(build_counts.get(app_id) or 0),
+            "publishCount": int(publish_counts.get(app_id) or 0),
+            "latestBuild": serialize_build(latest[app_id]) if app_id in latest else None,
+        }
+        for app_id in app_ids
+    }
+
+
 def list_apps() -> List[Dict[str, Any]]:
     apps = MobileApplication.query.order_by(MobileApplication.name.asc()).all()
-    return [serialize_app(a, with_stats=True) for a in apps]
+    stats = _app_stats([a.id for a in apps])
+    return [serialize_app(a, stats=stats) for a in apps]
 
 
 def get_app(app_id: int) -> MobileApplication:
@@ -573,8 +616,6 @@ def ingest_ci_build(
     ``artifact_ids`` narrows the ingest to those artifacts — the App store
     upload stage names the one file it publishes. None ingests them all.
     """
-    import shutil
-
     from ..models_ci import CiArtifact
     from .ci import artifacts as ci_artifacts_service
 
@@ -595,8 +636,9 @@ def ingest_ci_build(
         ).first()
         if duplicate is not None:
             continue
+        store = ci_artifacts_service.get_store("local")
         try:
-            source_stream = ci_artifacts_service.get_store("local").open(artifact)
+            source_stream = store.open(artifact)
         except (OSError, ValueError):
             logger.warning("CI artifact %s file is missing; skipped", artifact.id)
             continue
@@ -621,9 +663,8 @@ def ingest_ci_build(
         rel_dir = _store_dir_for(build)
         file_name = _safe_filename(artifact.name)
         dest = os.path.join(artifact_root(), rel_dir, file_name)
-        with source_stream, open(dest, "wb") as sink:
-            shutil.copyfileobj(source_stream, sink)
-        sha, size = _hash_and_size(dest)
+        with source_stream:
+            sha, size = _place_ci_artifact(store, artifact, source_stream, dest)
         build.file_name = file_name
         build.storage_path = os.path.join(rel_dir, file_name).replace("\\", "/")
         build.sha256 = sha
@@ -781,6 +822,45 @@ def fetch_latest(app_id: int, user=None) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 _HASH_CHUNK = 1024 * 1024
+
+
+def _place_ci_artifact(store, artifact, source_stream, dest: str) -> tuple:
+    """Put a CI artifact's file at ``dest``; return (sha256 hex, byte size).
+
+    Runs on the scheduler tick and in the CI engine's pass, on binaries of
+    hundreds of MB. A hard link costs nothing when both stores share a
+    filesystem (the usual case: one data volume), and the CI store already
+    recorded the file's checksum. Otherwise the file is copied and hashed in
+    the same pass instead of copied, then read back to hash.
+    """
+    import hashlib
+
+    resolve = getattr(store, "_absolute", None)
+    try:
+        source_path = resolve(artifact) if resolve else None
+    except ValueError:
+        source_path = None
+    if source_path and os.path.isfile(source_path):
+        try:
+            if os.path.exists(dest):
+                os.remove(dest)
+            os.link(source_path, dest)
+        except OSError:
+            pass  # another filesystem, or links not allowed: copy below
+        else:
+            size = os.path.getsize(dest)
+            if artifact.checksum_sha256 and artifact.size_bytes == size:
+                return artifact.checksum_sha256, size
+            return _hash_and_size(dest)
+
+    digest = hashlib.sha256()
+    size = 0
+    with open(dest, "wb") as sink:
+        for chunk in iter(lambda: source_stream.read(_HASH_CHUNK), b""):
+            sink.write(chunk)
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
 
 
 def _hash_and_size(path: str) -> tuple:
@@ -979,6 +1059,41 @@ def _try_dispatch(work) -> bool:
             _worker_semaphore.release()
 
     threading.Thread(target=_runner, name="mobile-app-worker", daemon=True).start()
+    return True
+
+
+# Jenkins and App Store Connect status checks run on the scheduler tick (every
+# 15 s) and each can take 15-30 s when the far end is slow. A signing build or
+# Apple's processing takes many minutes, so asking once a minute per row loses
+# nothing. Process-local: after a restart the first tick simply asks at once.
+_POLL_INTERVAL_S = 60.0
+_next_poll: Dict[tuple, float] = {}
+_next_poll_lock = threading.Lock()
+
+
+def _poll_throttled() -> bool:
+    """Tests drive the tick by hand and expect each call to ask."""
+    from flask import current_app
+
+    try:
+        return not current_app.config.get("TESTING")
+    except RuntimeError:  # outside an app context
+        return True
+
+
+def _poll_due(kind: str, row_id: int) -> bool:
+    """True when this row's external status may be asked for now (and books
+    the next check a minute out)."""
+    if not _poll_throttled():
+        return True
+    now = time.monotonic()
+    with _next_poll_lock:
+        if _next_poll.get((kind, row_id), 0.0) > now:
+            return False
+        _next_poll[(kind, row_id)] = now + _POLL_INTERVAL_S
+        if len(_next_poll) > 500:
+            for key in [k for k, due in _next_poll.items() if due <= now]:
+                _next_poll.pop(key, None)
     return True
 
 
@@ -1413,7 +1528,10 @@ def _publish_app_store(pub: MobileAppPublish, app: MobileApplication, build: Mob
         cfg, binary_path(build), build.file_name,
         progress=_upload_progress(pub, build.file_name, "App Store Connect"),
     )
-    pub.store_ref = {**(pub.store_ref or {}), **upload_ref}
+    pub.store_ref = {
+        **(pub.store_ref or {}), **upload_ref,
+        "processingSince": datetime.now(timezone.utc).isoformat(),
+    }
     _set_pub_step(pub, "upload", "done", "binary delivered — Apple is processing it")
     _set_pub_step(pub, "release", "run", "waiting for App Store Connect processing")
     pub.status = "processing"
@@ -1422,10 +1540,37 @@ def _publish_app_store(pub: MobileAppPublish, app: MobileApplication, build: Mob
     # _poll_processing takes over on the scheduler tick.
 
 
+def _processing_max_age() -> timedelta:
+    """How long Apple may process an upload before KubeSight stops waiting.
+    Processing normally takes minutes; hours means it is stuck on Apple's side."""
+    try:
+        hours = float(os.environ.get("KUBESIGHT_ASC_PROCESSING_MAX_HOURS", "2"))
+    except ValueError:
+        hours = 2.0
+    return timedelta(hours=hours if hours > 0 else 2.0)
+
+
+def _processing_since(pub: MobileAppPublish) -> Optional[datetime]:
+    """When the upload finished and Apple's processing began."""
+    raw = (pub.store_ref or {}).get("processingSince")
+    if not raw:
+        # Publishes uploaded before this was recorded: the upload step's time.
+        raw = next((s.get("at") for s in (pub.steps or []) if s.get("key") == "upload"), None)
+    if raw:
+        try:
+            return _aware(datetime.fromisoformat(str(raw)))
+        except ValueError:
+            pass
+    return _aware(pub.created_at)
+
+
 def _poll_processing(pub: MobileAppPublish) -> None:
-    """App Store uploads finish asynchronously; poll until the build is usable."""
+    """App Store uploads finish asynchronously; poll until the build is usable
+    — at most once a minute, and not past _processing_max_age()."""
     from . import app_store_client
 
+    if not _poll_due("publish", pub.id):
+        return
     build = MobileAppBuild.query.get(pub.build_id)
     app = MobileApplication.query.get(pub.app_id)
     if build is None or app is None:
@@ -1441,9 +1586,25 @@ def _poll_processing(pub: MobileAppPublish) -> None:
     )
     state = app_store_client.processing_state(cfg, pub.store_ref or {}, build.version or "")
     if state["state"] == "processing":
-        _set_pub_step(pub, "release", "run", state.get("detail") or "still processing")
-        db.session.add(pub)
-        db.session.commit()
+        since = _processing_since(pub)
+        limit = _processing_max_age()
+        if since is not None and datetime.now(timezone.utc) - since > limit:
+            hours = limit.total_seconds() / 3600
+            _fail_publish(
+                pub,
+                f"App Store Connect was still processing the build after {hours:g} h, so "
+                "KubeSight stopped waiting. Check the build in App Store Connect; publish "
+                "again once it shows there.",
+            )
+            db.session.commit()
+            return
+        detail = state.get("detail") or "still processing"
+        current = next((s for s in (pub.steps or []) if s.get("key") == "release"), {})
+        # Only a new answer is worth a commit: the page polls this row.
+        if current.get("status") != "run" or current.get("detail") != detail:
+            _set_pub_step(pub, "release", "run", detail)
+            db.session.add(pub)
+            db.session.commit()
         return
     if state["state"] == "failed":
         _fail_publish(pub, state.get("detail") or "App Store Connect rejected the build.")
@@ -1681,9 +1842,27 @@ def start_resign(build_id: int, user=None) -> Dict[str, Any]:
 
 
 def advance_mobile_resigns() -> None:
-    """Tick: trigger queued signing builds, poll running ones, collect results."""
-    for row in MobileAppResign.query.filter_by(status="queued").all():
-        _launch_resign(row.id)
+    """Tick: trigger queued signing builds, poll running ones, collect results.
+
+    Triggering uploads the whole binary (50-300 MB) to Jenkins, so it runs on
+    a mobile worker thread, never on the scheduler tick. While it does, the row
+    is "running" with ``job_ref = {"launching": true}`` — still an active
+    status for the UI and for the one-run-per-binary rule.
+    """
+    for row in MobileAppResign.query.filter_by(status="queued").order_by(MobileAppResign.id).all():
+        row.status = "running"
+        row.job_ref = {"launching": True}
+        _set_resign_step(row, "launch", "run", "uploading the binary to Jenkins")
+        db.session.add(row)
+        db.session.commit()
+        resign_id = row.id
+        if not _try_dispatch(lambda _app, rid=resign_id: _launch_resign(rid)):
+            row.status = "queued"
+            row.job_ref = None
+            _set_resign_step(row, "launch", "wait", "waiting for a free worker")
+            db.session.add(row)
+            db.session.commit()
+            break
 
     for row in MobileAppResign.query.filter_by(status="running").all():
         _poll_resign(row.id)
@@ -1700,7 +1879,7 @@ def _launch_resign(resign_id: int) -> None:
     from . import resign_executor
 
     row = MobileAppResign.query.get(int(resign_id))
-    if row is None or row.status != "queued":
+    if row is None or row.status != "running" or not (row.job_ref or {}).get("launching"):
         return
     build = MobileAppBuild.query.get(row.build_id)
     app = MobileApplication.query.get(row.app_id)
@@ -1716,6 +1895,10 @@ def _launch_resign(resign_id: int) -> None:
             return
         size_mb = os.path.getsize(source) / (1024 * 1024)
         _set_resign_step(row, "prepare", "done", f"{build.file_name} ({size_mb:.0f} MB)")
+        # Committed before the upload: updated_at then says when it started,
+        # which is what the stale sweep in _poll_resign measures.
+        db.session.add(row)
+        db.session.commit()
 
         spec = resign_executor.ResignJobSpec(
             resign_id=row.id,
@@ -1731,8 +1914,16 @@ def _launch_resign(resign_id: int) -> None:
         )
 
         _set_resign_step(row, "launch", "run", f"uploading to {spec.job_path}")
+        db.session.add(row)
+        db.session.commit()
         jcfg = _jenkins_cfg(spec.job_path)
-        row.job_ref = resign_executor.launch(jcfg, spec)
+        job_ref = resign_executor.launch(jcfg, spec)
+        db.session.refresh(row)
+        if row.status != "running" or not (row.job_ref or {}).get("launching"):
+            # The stale sweep gave up on this upload while it was still going.
+            logger.warning("Resign %s finished uploading after it was abandoned", resign_id)
+            return
+        row.job_ref = job_ref
         _set_resign_step(row, "launch", "done", "uploaded and queued in Jenkins")
         _set_resign_step(row, "sign", "run", "waiting for the signing build")
         row.status = "running"
@@ -1750,12 +1941,22 @@ def _poll_resign(resign_id: int) -> None:
     row = MobileAppResign.query.get(int(resign_id))
     if row is None or row.status != "running":
         return
+    ref = dict(row.job_ref or {})
+    if ref.get("launching"):
+        # A worker is uploading the binary; a restart would have left it here.
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=_STALE_WORKER_MINUTES)
+        if (_aware(row.updated_at) or datetime.now(timezone.utc)) < cutoff:
+            _set_resign_step(row, "launch", "fail", "upload interrupted")
+            _fail_resign(row, "Uploading the binary to the signing job was interrupted "
+                              "(backend restart). Start the re-sign again.")
+        return
+    if not _poll_due("resign", row.id):
+        return
     app = MobileApplication.query.get(row.app_id)
     if app is None:
         _fail_resign(row, "The application registration no longer exists.")
         return
 
-    ref = dict(row.job_ref or {})
     try:
         jcfg = _jenkins_cfg(ref.get("jobPath") or "")
         state = resign_executor.poll(jcfg, ref)
