@@ -20,6 +20,7 @@ from ...db import db
 from ...models import (
     BuildProfile,
     ClusterBuild,
+    ClusterBuildApp,
     ClusterBuildNode,
     ClusterBuildStep,
 )
@@ -27,6 +28,7 @@ from ...secret_encryption import encrypt_secret
 from .. import ssh_profile_service, vsphere_service
 from ..vsphere_client import VSphereError
 from . import addons as addon_registry
+from . import apps as build_apps
 from . import cni as cni_registry
 from .addons import metallb as metallb_addon
 from . import executor, k8s_versions, os_adapters, preflight
@@ -148,6 +150,9 @@ def serialize_build(build: ClusterBuild, *, include_detail: bool = False,
         "serviceCidr": build.service_cidr,
         "addons": list(build.addons_json or []),
         "workloads": workload_copy.summarize(workload_copy.selection_of(build)),
+        # Inventory Helm charts installed once the cluster is up. The detail
+        # view carries each one's values.yaml, credentials masked.
+        "apps": build_apps.serialize_apps(build, with_values=include_detail),
         "vsphereConnectionId": build.vsphere_connection_id,
         # existing | vmware — whether KubeSight creates the VMs (OpenTofu).
         "machineSource": build.machine_source or "existing",
@@ -258,6 +263,8 @@ def list_builds() -> List[Dict[str, Any]]:
                 ClusterBuildStep.id, ClusterBuildStep.build_id, ClusterBuildStep.node_id,
                 ClusterBuildStep.phase, ClusterBuildStep.status,
             ),
+            # The cards name each chart; its encrypted values are not read.
+            selectinload(ClusterBuild.apps).defer(ClusterBuildApp.values_cipher),
         )
         .order_by(ClusterBuild.created_at.desc())
         .all()
@@ -945,9 +952,22 @@ def create_build(
                 for n in build.nodes
             ],
         )
+    _apply_apps_payload(build, payload, created_by)
     db.session.add(build)
     db.session.commit()
     return serialize_build(build, include_detail=True)
+
+
+def _apply_apps_payload(build: ClusterBuild, payload: Dict[str, Any], actor: str = "") -> None:
+    """The wizard's Apps step: Inventory Helm charts for the new cluster."""
+    if "apps" not in payload:
+        return
+    if build.vms_only and payload.get("apps"):
+        raise ValueError("A VMs-only build installs no Kubernetes, so it cannot install Helm charts.")
+    try:
+        build_apps.replace_apps(build, payload.get("apps") or [], actor=actor)
+    except build_apps.AppsError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def update_build(build_id: int, payload: Dict[str, Any], user=None) -> Dict[str, Any]:
@@ -973,6 +993,7 @@ def update_build(build_id: int, payload: Dict[str, Any], user=None) -> Dict[str,
         build.execution_user_id = None
     if "nodes" in payload and build.machine_source != "vmware":
         _apply_nodes_payload(build, payload.get("nodes") or [])
+    _apply_apps_payload(build, payload, getattr(user, "username", "") or "")
     if build.nodes and build.machine_source != "vmware":
         _validate_topology(
             build,
@@ -1116,6 +1137,9 @@ def run_preflight(build_id: int, user=None) -> Dict[str, Any]:
             probe=_ssh_probe,
             probe_targets=_mount_probe_targets(build),
         )
+        # Every Helm chart to install renders with its values — a missing
+        # password fails here, not after the whole cluster was built.
+        build_checks += build_apps.preflight_checks(build)
 
         vsphere_results = preflight.vsphere_checks(build)
         node_results = preflight.run_node_preflight(
@@ -1718,6 +1742,190 @@ def add_addons(build_id: int, payload: Any, *, actor: str = "") -> Dict[str, Any
     db.session.commit()
     executor.start_build_worker(build.id)
     db.session.refresh(build)
+    return serialize_build(build, include_detail=True)
+
+
+# ---------------------------------------------------------------------------
+# Day two: Inventory Helm charts on a cluster that is already running
+#
+# The apps phase, reopened — unless the cluster needs approval for changes.
+# Then each chart is sent for approval as a change bundle that refers to its
+# encrypted values, and ``apps.advance_queued`` records the outcome.
+# ---------------------------------------------------------------------------
+
+def app_starting_values(slug: str, version: str = "", values_file: str = "") -> Dict[str, Any]:
+    """What the values editor opens with for a chart, version and values file."""
+    from .. import helm_chart_template_service as charts
+
+    try:
+        values = charts.starting_values(slug, version, values_file)
+        required = charts.required_inputs(slug, version)
+        chart = charts.resolve_chart(slug, version, values_file)
+    except charts.ChartTemplateError as exc:
+        raise ValueError(str(exc)) from exc
+    return {
+        **chart,
+        "valuesYaml": build_apps._dump(values),
+        "requiredInputs": required,
+    }
+
+
+def _existing_release(cluster_id: str, namespace: str, release: str) -> bool:
+    from .. import helm_service
+
+    try:
+        access = helm_service._resolve_access(cluster_id)
+        return helm_service.release_exists(access, release, namespace)
+    except Exception:  # noqa: BLE001 — the install reports a real problem itself
+        return False
+
+
+def add_apps(build_id: int, payload: Any, *, user=None, actor: str = "",
+             approval_context: Optional[str] = None,
+             profile_ids: Optional[List[Optional[int]]] = None) -> Dict[str, Any]:
+    """Install more Inventory Helm charts on a cluster this build produced.
+
+    ``approval_context`` names an approval the charts already have (a ticket's
+    approval); without one the cluster's own rule decides.
+    """
+    from .. import helm_service
+
+    build = get_build(build_id)
+    _require_growable(build)
+    if growth_nodes(build):
+        raise ValueError(
+            "Machines are queued to join. Finish (or remove) those first — "
+            "one run of the phase machine does one job."
+        )
+    requested = payload.get("apps") if isinstance(payload, dict) else payload
+    try:
+        added = build_apps.append_apps(build, requested, actor=actor, profile_ids=profile_ids)
+    except build_apps.AppsError as exc:
+        db.session.rollback()
+        raise ValueError(str(exc)) from exc
+    db.session.flush()
+
+    problems = []
+    for app in added:
+        problem = build_apps.check_app(app)
+        if problem is None and _existing_release(build.result_cluster_id, app.namespace, app.release_name):
+            problem = ("a release with this name is already in that namespace; "
+                       "upgrade it from Inventory → Helm Charts instead.")
+        if problem:
+            problems.append(f"{app.release_name}: {problem}")
+    if problems:
+        db.session.rollback()
+        raise ValueError(" ".join(problems))
+
+    needs_approval = (
+        approval_context is None
+        and build_apps.cluster_needs_approval(build.result_cluster_id)
+    )
+    if needs_approval:
+        if user is None:
+            db.session.rollback()
+            raise ValueError("This cluster needs approval for changes and nobody is asking.")
+        for app in added:
+            app.status = "awaiting_approval"
+        db.session.commit()
+        queued = []
+        for app in added:
+            body = build_apps.install_payload(app, build.result_cluster_id, by_ref=True)
+            confirmation = helm_service.expected_confirmation(app.release_name, app.namespace, False)
+            data, error, status = helm_service.install_or_upgrade_release(user, body, confirmation)
+            if status == 202 and data:
+                app.bundle_id = data.get("bundleId")
+                queued.append(app.bundle_id)
+            elif error or status >= 300:
+                app.status = "failed"
+                app.error = scrub(error or f"status {status}")[:2000]
+            else:
+                # The person holds a live approved deployment request: it ran.
+                build_apps.mark_installed(app)
+            db.session.commit()
+        result = serialize_build(build, include_detail=True)
+        result["pendingApproval"] = bool(queued)
+        result["bundleIds"] = [bundle for bundle in queued if bundle]
+        return result
+
+    # Reopen only this phase; every other one is completed and is skipped.
+    ClusterBuildStep.query.filter(
+        ClusterBuildStep.build_id == build.id,
+        ClusterBuildStep.phase == "apps",
+    ).update(
+        {"status": "pending", "error": None, "started_at": None, "finished_at": None},
+        synchronize_session=False,
+    )
+    build.status = "building"
+    build.error = None
+    build.growth_started_at = datetime.now(timezone.utc)
+    build.finished_at = None
+    db.session.commit()
+    executor.start_build_worker(build.id)
+    db.session.refresh(build)
+    return serialize_build(build, include_detail=True)
+
+
+def update_app_values(build_id: int, app_id: int, payload: Dict[str, Any],
+                      *, actor: str = "") -> Dict[str, Any]:
+    """Fix a chart that has not gone in yet (its values, mostly) before a retry."""
+    build = get_build(build_id)
+    if build.status in ("building", "preflighting"):
+        raise ValueError("Wait for the build to stop before changing a chart.")
+    app = next((a for a in build.apps if a.id == app_id), None)
+    if app is None:
+        raise ValueError("That chart is not part of this build.")
+    if app.status not in build_apps.EDITABLE:
+        raise ValueError(f"A chart that is {app.status.replace('_', ' ')} cannot be changed.")
+    try:
+        item = build_apps._normalize_item(
+            {**build_apps.serialize_app(app), **(payload or {}), "id": app.id}, app
+        )
+        build_apps._apply_item(app, item)
+        build_apps._check_unique(list(build.apps))
+    except build_apps.AppsError as exc:
+        db.session.rollback()
+        raise ValueError(str(exc)) from exc
+    if build.status in ("preflight_passed", "preflight_failed"):
+        build.status = "draft"
+    db.session.commit()
+    return serialize_build(build, include_detail=True)
+
+
+def remove_app(build_id: int, app_id: int) -> Dict[str, Any]:
+    """Withdraw a chart that has not gone in. An installed release is not
+    uninstalled here — that is Inventory's job."""
+    build = get_build(build_id)
+    if build.status in ("building", "preflighting"):
+        raise ValueError("Wait for the build to stop before removing a chart.")
+    app = next((a for a in build.apps if a.id == app_id), None)
+    if app is None:
+        raise ValueError("That chart is not part of this build.")
+    if app.status not in build_apps.EDITABLE:
+        raise ValueError(f"A chart that is {app.status.replace('_', ' ')} cannot be withdrawn.")
+    build.apps.remove(app)
+    for position, item in enumerate(build.apps):
+        item.position = position
+    # A day-two install that failed only on this chart is finished now.
+    if (
+        build.status == "failed"
+        and build.result_cluster_id
+        and build.build_seconds is not None
+        and not any(a.status in build_apps.TO_INSTALL for a in build.apps)
+    ):
+        failed_other = ClusterBuildStep.query.filter(
+            ClusterBuildStep.build_id == build.id,
+            ClusterBuildStep.status == "failed",
+            ClusterBuildStep.phase != "apps",
+        ).count()
+        if not failed_other:
+            ClusterBuildStep.query.filter_by(build_id=build.id, phase="apps").update(
+                {"status": "completed", "error": None}, synchronize_session=False,
+            )
+            build.status = "completed"
+            build.error = None
+            build.finished_at = datetime.now(timezone.utc)
+    db.session.commit()
     return serialize_build(build, include_detail=True)
 
 

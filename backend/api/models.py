@@ -2973,8 +2973,10 @@ class JiraIntegration(db.Model):
 # Cluster Builder tables live in their own module; re-exported here so the
 # canonical import surface stays "from .models import X".
 from .models_cluster_build import (  # noqa: E402,F401
+    AppProfile,
     BuildProfile,
     ClusterBuild,
+    ClusterBuildApp,
     ClusterBuildNode,
     ClusterBuildStep,
     ClusterInfraState,

@@ -29,8 +29,8 @@ change bundle, and KubeSight applies it by itself once it is approved (an
 unapproved one expires after 24h). The result has `pendingApproval: true` and a
 `bundleId`, and its summary starts "NOT applied yet". Tell the person exactly
 that: "sent for approval as bundle #N; it will be applied once approved". Never
-report it as done. Helm install/upgrade/rollback/uninstall has no bundle form
-and is still refused on a gated cluster.
+report it as done. Helm install/upgrade/rollback/uninstall is queued the same
+way (see "On a cluster that requires approvals" below).
 
 ## The promotion ladder
 

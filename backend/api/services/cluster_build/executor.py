@@ -37,6 +37,7 @@ from ...secret_encryption import decrypt_secret, encrypt_secret
 from ..ssh import SshCommandError, SshConnectionError, SshTarget, get_transport
 from .. import ssh_profile_service
 from . import addons as addon_registry
+from . import apps as build_apps
 from . import cni as cni_registry
 from . import kubeadm, lb, onboard, os_adapters
 from . import storage as workload_storage
@@ -1910,6 +1911,56 @@ def _verify_claims_bound(
     return unbound
 
 
+def _phase_apps(build: ClusterBuild) -> None:
+    """Install the build's Inventory Helm charts, in order, onto the cluster.
+
+    Runs on the KubeSight server with the cluster's registered kubeconfig —
+    the same Helm install a person runs from Inventory. A chart that is in is
+    never installed again, so a retry resumes at the one that failed.
+
+    Charts chosen with the cluster go in on the run that creates it. On day
+    two the cluster's change-approval rule applies: service.add_apps sends
+    them for approval instead of reopening this phase, and a cluster that
+    needs approval by now is refused here too.
+    """
+    pending = [app for app in build.apps if app.status in build_apps.TO_INSTALL]
+    if not pending:
+        return
+    step = _get_step(build, "apps")
+    if step.status == "completed":
+        return
+    _step_start(step)
+    stream = _StreamTail(step.id)
+    try:
+        if not build.result_cluster_id:
+            raise _PhaseFailed("the cluster is not registered in KubeSight yet.")
+        first_run = build.build_seconds is None
+        if not first_run and build_apps.cluster_needs_approval(build.result_cluster_id):
+            raise _PhaseFailed(
+                "this cluster needs approval for changes now. Use Install apps "
+                "on the build, which sends the charts for approval."
+            )
+        context = f"cluster_build:{build.id}"
+        for app in pending:
+            _check_cancelled(build)
+            stream.header(
+                f"helm install {app.release_name} "
+                f"({app.chart_name or app.chart_slug} {app.chart_version}) "
+                f"in {app.namespace}"
+            )
+            output = build_apps.install_one(build, app, context)
+            if output:
+                stream.write(output if output.endswith("\n") else output + "\n")
+        _check_cancelled(build)
+        _step_done(step, stream.text())
+    except _Cancelled:
+        raise
+    except (build_apps.AppsError, _PhaseFailed) as exc:
+        stream.write(f"\n!! {exc}\n")
+        _step_fail(step, str(exc), stream.text())
+        raise _PhaseFailed(f"Helm apps failed: {exc}") from exc
+
+
 def _phase_workloads(build: ClusterBuild, primary: ClusterBuildNode) -> None:
     """Copy the selected namespaces/workloads out of an existing cluster.
 
@@ -2165,6 +2216,8 @@ def _run_build(app, build_id: int) -> None:
             _check_cancelled(build)
             _phase_workloads(build, primary)
             _check_cancelled(build)
+            _phase_apps(build)
+            _check_cancelled(build)
 
             # Bank the original build's duration the first time it completes.
             # A growth run rewrites finished_at, so without this the receipt
@@ -2276,6 +2329,14 @@ def advance_cluster_builds() -> None:
         db.session.commit()
         logger.info("Marked interrupted preflight failed for build %s (%s)",
                     build.id, build.name)
+
+    # Day-two Helm charts that waited for a cluster's change approval take
+    # their change bundle's outcome.
+    try:
+        build_apps.advance_queued()
+    except Exception:  # noqa: BLE001 — never stop the resume pass below
+        db.session.rollback()
+        logger.exception("Could not advance Helm charts waiting for approval")
 
     candidates = ClusterBuild.query.filter(ClusterBuild.status == "building").all()
     for build in candidates:

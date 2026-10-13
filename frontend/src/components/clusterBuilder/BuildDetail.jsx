@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Blueprint from "./Blueprint.jsx";
 import AddonsPanel from "./AddonsPanel.jsx";
+import AppsPanel, { BuildAppsCard } from "./AppsPanel.jsx";
 import GrowPanel from "./GrowPanel.jsx";
 import WorkloadsPanel from "./WorkloadsPanel.jsx";
 import PhaseRail from "./PhaseRail.jsx";
@@ -110,7 +111,7 @@ function FailureHero({ point, build, log, canExecute, onRetry, busy }) {
 
 function DayTwo({
   build, canCreate, canDownloadKubeconfig, onOpenCluster, onGrow, onBringWorkloads,
-  onAddAddons, onSaveTemplate, onDestroy, notify, busy, setBusy,
+  onAddAddons, onInstallApps, onSaveTemplate, onDestroy, notify, busy, setBusy,
 }) {
   const download = async () => {
     setBusy(true);
@@ -152,6 +153,11 @@ function DayTwo({
       {canCreate ? (
         <button className="btn-outline btn-sm" type="button" onClick={onBringWorkloads}>
           Bring workloads over
+        </button>
+      ) : null}
+      {canCreate && onInstallApps ? (
+        <button className="btn-outline btn-sm" type="button" onClick={onInstallApps}>
+          Install apps
         </button>
       ) : null}
       {canDownloadKubeconfig ? (
@@ -416,6 +422,7 @@ export default function BuildDetail({
   const [savingTemplate, setSavingTemplate] = useState(false);
   const [bringing, setBringing] = useState(false);
   const [addingAddons, setAddingAddons] = useState(false);
+  const [installingApps, setInstallingApps] = useState(false);
   const [build, setBuild] = useState(null);
   // Why the first read failed (a deleted build, a mistyped address) — without
   // it the page would say "Loading…" forever.
@@ -439,10 +446,10 @@ export default function BuildDetail({
   // A day-two panel opens below the receipt, usually under the fold: bring it
   // into view, or the button looks like it did nothing.
   useEffect(() => {
-    if (!(growing || addingAddons || bringing || savingTemplate || destroyOpen)) return;
+    if (!(growing || addingAddons || installingApps || bringing || savingTemplate || destroyOpen)) return;
     const panel = rootEl.current?.querySelector(".sg-cb-grow, .sg-cb-pv-panel, .sg-cb-pv-danger");
     panel?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
-  }, [growing, addingAddons, bringing, savingTemplate, destroyOpen]);
+  }, [growing, addingAddons, installingApps, bringing, savingTemplate, destroyOpen]);
 
   const load = useCallback(async () => {
     try {
@@ -909,11 +916,18 @@ export default function BuildDetail({
               canCreate={canCreate}
               canDownloadKubeconfig={canDownloadKubeconfig}
               onOpenCluster={onOpenCluster}
-              onGrow={() => { setBringing(false); setAddingAddons(false); setGrowing(true); }}
-              onBringWorkloads={() => {
-                setGrowing(false); setAddingAddons(false); setBringing(true);
+              onGrow={() => {
+                setBringing(false); setAddingAddons(false); setInstallingApps(false); setGrowing(true);
               }}
-              onAddAddons={() => { setGrowing(false); setBringing(false); setAddingAddons(true); }}
+              onBringWorkloads={() => {
+                setGrowing(false); setAddingAddons(false); setInstallingApps(false); setBringing(true);
+              }}
+              onAddAddons={() => {
+                setGrowing(false); setBringing(false); setInstallingApps(false); setAddingAddons(true);
+              }}
+              onInstallApps={() => {
+                setGrowing(false); setBringing(false); setAddingAddons(false); setInstallingApps(true);
+              }}
               onSaveTemplate={canManageTemplates ? () => setSavingTemplate(true) : null}
               onDestroy={destroyable ? () => setDestroyOpen(true) : null}
               notify={notify}
@@ -966,6 +980,20 @@ export default function BuildDetail({
           onChanged={load}
           onClose={() => setAddingAddons(false)}
         />
+      ) : null}
+
+      {isDone && installingApps ? (
+        <AppsPanel
+          build={build}
+          canExecute={canExecute}
+          notify={notify}
+          onChanged={load}
+          onClose={() => setInstallingApps(false)}
+        />
+      ) : null}
+
+      {!destroyed ? (
+        <BuildAppsCard build={build} canCreate={canCreate} notify={notify} onChanged={load} />
       ) : null}
 
       {isDone && bringing ? (

@@ -81,8 +81,10 @@ kubesight_ticket_answer            {ticketRecordId, comment, diagnosis,
                                     proposedFix?: {…same as request_approval…}}
 kubesight_ticket_request_vms       {ticketRecordId, profile, name, count, size?: {cpu,
                                     memoryGb, diskGb}, kubernetes?: {shape | counts,
-                                    version?}, confidence, understanding, comment,
-                                    commentOnApprove}
+                                    version?}, apps?: [appProfile names], confidence,
+                                    understanding, comment, commentOnApprove}
+kubesight_ticket_install_apps      {ticketRecordId, cluster, apps: [appProfile names],
+                                    confidence, understanding, comment, commentOnApprove}
 ```
 
 **One ticket can name several applications** — "deploy issuing-ms 1.4.2 and
@@ -130,6 +132,20 @@ the cluster id): `done` when `result` is `ready` or `cluster_ready`, `on_hold`
 for `needs_attention` (VMs exist, Kubernetes waits for DevOps), `failed` for
 `failed`. A `vm_request_failed` follow-up (the plan could not be made) is an
 `impediment`. Never reach for a Cluster Builder or OpenTofu tool to do this.
+
+**Applications a ticket asks for come from `appProfiles`.** Each profile is an
+administrator's Inventory Helm chart with its version, values, namespace and
+release — you never write values or pick versions, and you never see the
+values. On a new cluster, add `apps` (names copied exactly) to
+`kubesight_ticket_request_vms`: the charts are installed once Kubernetes is up,
+under the same single approval, and the follow-up carries `apps` with each
+release's status. On a cluster the Cluster Builder already built, call
+`kubesight_ticket_install_apps` with its name as `cluster`: an approver ALWAYS
+approves first, and a cluster that needs approval for changes then asks its own
+approvers (the phase reads `waiting_cluster_approval`). One follow-up:
+`vm_request_finished` with `result: apps_ready` (→ `done`) or `failed`. An app
+that is not in `appProfiles`, or a cluster the Cluster Builder did not build,
+is an `impediment`. Never install a chart for a ticket with a Helm tool.
 
 **Call exactly one of the settling tools per new ticket.**
 `kubesight_ticket_execute` when you understand it exactly and are confident: it

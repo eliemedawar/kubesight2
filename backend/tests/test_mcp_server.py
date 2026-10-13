@@ -265,6 +265,9 @@ def test_every_tool_declares_honestly_whether_it_writes(client, admin_token):
         # New VMs a ticket asks for: only ever a PLAN — a VM approver applies
         # it. Nothing an agent calls creates, grows or destroys a VM itself.
         "kubesight_ticket_request_vms",
+        # Apps a ticket asks for: an approver approves first, then the
+        # cluster's own change-approval rule applies.
+        "kubesight_ticket_install_apps",
     }
 
 

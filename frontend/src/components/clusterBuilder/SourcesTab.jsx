@@ -15,6 +15,7 @@ import { Field, StatusPill } from "./common.jsx";
 import HostKeysPanel from "./HostKeysPanel.jsx";
 import { NetworkRanges, OpenTofuStatus, ProvisioningAccount } from "./ProvisioningSources.jsx";
 import VmRequestProfiles from "./VmRequestProfiles.jsx";
+import AppProfiles from "./AppProfiles.jsx";
 import {
   bundleCoverage,
   freshness,
@@ -410,6 +411,7 @@ export default function SourcesTab({
   canManageVSphere = false,
   canManageSSH = false,
   canManageBuildProfiles = false,
+  canManageApps = false,
 }) {
   const { vsphere, credentials, profiles, buildProfiles } = infra;
   const [open, setOpen] = useState(null);
@@ -573,6 +575,15 @@ export default function SourcesTab({
           description="Where VMs a ticket asks for go. Hermes picks one of these profiles by name and fills in only how many and how big, within its limits. Nothing is created until a VM approver approves the OpenTofu plan."
         >
           <VmRequestProfiles vsphere={vsphere} sshProfiles={profiles} notify={notify} />
+        </Group>
+      ) : null}
+
+      {canManageApps ? (
+        <Group
+          title="Apps from tickets"
+          description="Applications a ticket may ask for: an Inventory Helm chart with its version, values, namespace and release. Hermes picks a profile by name — with new VMs and Kubernetes, or onto a cluster the Cluster Builder built — and never sees the values. Nothing is installed until an approver approves."
+        >
+          <AppProfiles notify={notify} />
         </Group>
       ) : null}
 

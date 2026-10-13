@@ -377,6 +377,7 @@ def _task_message(task: TicketInterpretation, ticket: ZohoInboundTicket) -> Dict
             "newComments": event.get("comments") or [],
             "catalog": catalog.catalog_entries(targets),
             "vmProfiles": vm_requests.catalog(),
+            "appProfiles": vm_requests.app_catalog(),
         }
     return {
         **base,
@@ -386,7 +387,10 @@ def _task_message(task: TicketInterpretation, ticket: ZohoInboundTicket) -> Dict
             "for a change: execute it, request approval, or set it to impediment with a comment. "
             "A request for new VMs (or a new Kubernetes cluster on new VMs): "
             "kubesight_ticket_request_vms with a profile from vmProfiles — if vmProfiles is empty, "
-            "set it to impediment. "
+            "set it to impediment; add `apps` (names from appProfiles) when it also asks for "
+            "applications on the new cluster. Applications on a cluster the Cluster Builder already "
+            "built: kubesight_ticket_install_apps with names from appProfiles — if the app is not "
+            "in appProfiles, set the ticket to impediment. "
             "A question or a problem report (something is wrong, failing, slow, not working): "
             "investigate with your read-only KubeSight tools and answer it with "
             "kubesight_ticket_answer — unless troubleshooting is false below."
@@ -395,6 +399,7 @@ def _task_message(task: TicketInterpretation, ticket: ZohoInboundTicket) -> Dict
         "ticket": catalog.ticket_context(ticket),
         "catalog": catalog.catalog_entries(targets),
         "vmProfiles": vm_requests.catalog(),
+        "appProfiles": vm_requests.app_catalog(),
     }
 
 
@@ -558,6 +563,9 @@ def brief(record_id: Any) -> Dict[str, Any]:
         # Where new VMs may go (kubesight_ticket_request_vms); empty when VM
         # requests are switched off.
         "vmProfiles": vm_requests.catalog(),
+        # Applications a ticket may ask for (kubesight_ticket_request_vms
+        # `apps`, kubesight_ticket_install_apps); empty when switched off.
+        "appProfiles": vm_requests.app_catalog(),
         "confidenceBar": agent_settings.get_or_create().min_confidence or "High",
         "runs": [
             {"id": r.id, "status": r.status, "changeType": r.change_type, "deployment": r.deployment_name,
@@ -1135,15 +1143,17 @@ def _approve_vms(task: TicketInterpretation, by: str, user=None) -> Dict[str, An
     if on_approve:
         _post(ticket, on_approve)
     vm = (task.decision or {}).get("vmRequest") or {}
+    apps_only = vm.get("kind") == vm_requests.APPS_KIND
     log_audit(
-        "ticket_agent_vms_approved",
+        "ticket_agent_apps_approved" if apps_only else "ticket_agent_vms_approved",
         actor=user,
         target_type="ticket_interpretation",
         target_id=str(task.id),
         details={"ticket": task.ticket_number, "by": by, "buildId": vm.get("buildId"),
                  "jobId": vm.get("jobId"), "vms": [m.get("name") for m in vm.get("machines") or []]},
     )
-    _edit_telegram(task, f"✅ Approved by {by} — OpenTofu is creating the VMs.")
+    _edit_telegram(task, f"✅ Approved by {by} — "
+                   + ("installing the apps." if apps_only else "OpenTofu is creating the VMs."))
     return serialize(task)
 
 

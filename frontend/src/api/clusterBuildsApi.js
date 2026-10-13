@@ -64,6 +64,25 @@ export const removeClusterBuildAddon = (id, addonId) =>
     method: "DELETE",
   });
 
+// --- Inventory Helm charts on the cluster -----------------------------------
+
+/** What the values editor opens with: chart defaults + the chosen values file. */
+export const getAppStartingValues = (chart, version = "", valuesFile = "") =>
+  request("/api/cluster-builds/app-values", { query: { chart, version, valuesFile } });
+
+/** Day two: install Inventory Helm charts. A cluster that needs approval
+ *  answers 202 with pendingApproval and the change bundles they wait in. */
+export const addClusterBuildApps = (id, apps) =>
+  request(`/api/cluster-builds/${id}/apps`, { method: "POST", body: { apps } });
+
+/** Fix a chart that has not gone in yet (its values, mostly) before a retry. */
+export const updateClusterBuildApp = (id, appId, payload) =>
+  request(`/api/cluster-builds/${id}/apps/${appId}`, { method: "PUT", body: payload });
+
+/** Withdraw a chart that has not gone in. */
+export const removeClusterBuildApp = (id, appId) =>
+  request(`/api/cluster-builds/${id}/apps/${appId}`, { method: "DELETE" });
+
 // --- Bringing workloads from an existing cluster ----------------------------
 
 /** Clusters that can act as a source, plus the registries to check against. */

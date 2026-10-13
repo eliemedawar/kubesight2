@@ -2267,12 +2267,75 @@ def _coerce_value(value: Any, variable: Dict[str, Any]) -> Any:
     return "" if value is None else str(value)
 
 
+def resolve_chart(slug: str, version: str = "", values_file: str = "") -> Dict[str, Any]:
+    """Check that a chart, version and values-*.yaml exist; describe them.
+
+    ``version`` defaults to the chart's current one. Raises ChartTemplateError.
+    """
+    row = _get_row(slug)
+    chosen = _clean_text(version, 64) or (row.version or "")
+    definition = _definition_for(row, chosen)
+    selected = _clean_text(values_file, 500)
+    if selected and selected not in _environment_values_files(definition):
+        raise ChartTemplateError(
+            f"Environment values file '{selected}' is not available for {row.name} {chosen}."
+        )
+    return {"slug": row.slug, "name": row.name, "version": chosen, "valuesFile": selected}
+
+
+def starting_values(slug: str, version: str = "", values_file: str = "") -> Dict[str, Any]:
+    """Where a person's values.yaml starts: the chart's defaults with the
+    chosen ``values-*.yaml`` merged over them. Passwords import blanked stay
+    blank — the person fills them in."""
+    resolved = resolve_chart(slug, version, values_file)
+    definition = _definition_for(_get_row(slug), resolved["version"])
+    values = deepcopy(definition.get("values") or {})
+    if resolved["valuesFile"]:
+        values = _merge_values(
+            values, _environment_values_files(definition)[resolved["valuesFile"]]
+        )
+    return values
+
+
+def required_inputs(slug: str, version: str = "") -> List[Dict[str, Any]]:
+    """The chart's required inputs (mostly the passwords import blanked)."""
+    definition = _definition_for(_get_row(slug), version)
+    return [
+        {"path": str(item.get("path") or ""), "label": item.get("label") or item.get("path"),
+         "sensitive": bool(item.get("sensitive"))}
+        for item in definition.get("variables") or []
+        if item.get("required") and item.get("path")
+    ]
+
+
+def parse_values_overlay(overlay_yaml: str) -> Dict[str, Any]:
+    """A person's own values.yaml: a mapping, or empty."""
+    if not str(overlay_yaml or "").strip():
+        return {}
+    try:
+        parsed = yaml.safe_load(overlay_yaml)
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        where = f" (line {mark.line + 1})" if mark is not None else ""
+        raise ChartTemplateError(f"values.yaml is not valid YAML{where}.") from exc
+    if parsed is None:
+        return {}
+    if not isinstance(parsed, dict):
+        raise ChartTemplateError("values.yaml must be a YAML mapping (key: value), not a list or a scalar.")
+    return parsed
+
+
 def build_values_yaml(
     slug: str,
     answers: Dict[str, Any],
     version: str = "",
     values_file: str = "",
+    overlay_yaml: str = "",
 ) -> str:
+    """The values a chart is installed with: chart defaults, then the chosen
+    ``values-*.yaml``, then the person's own values.yaml (``overlay_yaml``),
+    then form answers. Required inputs (the passwords import blanked) are
+    checked against the result, so a values.yaml that fills them is enough."""
     row = _get_row(slug)
     definition = _definition_for(row, version)
     values = deepcopy(definition.get("values") or {})
@@ -2284,6 +2347,9 @@ def build_values_yaml(
                 f"Environment values file '{selected_values_file}' is not available for this chart version."
             )
         values = _merge_values(values, environment_values[selected_values_file])
+    overlay = parse_values_overlay(overlay_yaml)
+    if overlay:
+        values = _merge_values(values, overlay)
     variables = definition.get("variables") or []
     answer_map = answers if isinstance(answers, dict) else {}
     for variable in variables:
@@ -2344,6 +2410,15 @@ def prepare_chart_template_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     values_file = _clean_text(
         payload.get("valuesFile") or payload.get("values_file"), 500
     )
+    # A whole values.yaml layered on top: given inline, or — for a change that
+    # waits for approval — by reference to where it is kept encrypted, so the
+    # queued request never holds the passwords in it.
+    overlay_yaml = str(payload.get("valuesYaml") or payload.get("values_yaml") or "")
+    values_ref = str(payload.get("valuesRef") or "").strip()
+    if values_ref:
+        from .cluster_build.apps import values_for_ref
+
+        overlay_yaml = values_for_ref(values_ref, slug=slug, payload=payload)
     prepared.update(
         {
             "chartSource": "local",
@@ -2353,6 +2428,7 @@ def prepare_chart_template_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
                 payload.get("values") or {},
                 version,
                 values_file,
+                overlay_yaml,
             ),
             "chartName": row.name,
             "chartVersion": version or row.version,

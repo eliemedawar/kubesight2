@@ -12,12 +12,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Blueprint from "./Blueprint.jsx";
 import WorkloadsPicker from "./WorkloadsPicker.jsx";
+import AppsPicker from "./AppsPicker.jsx";
 import { ProvisionCard } from "./ProvisionPanels.jsx";
 import { CountsEditor, TemplateGallery } from "./TemplateStep.jsx";
 import VmwareMachines, { useVmwarePlacement } from "./VmwareMachines.jsx";
 import { Field } from "./common.jsx";
 import PreflightReport from "./PreflightReport.jsx";
 import { addonSelectionError, ipRangeListError } from "../../utils/addonConfig.js";
+import { appItemsFromBuild, appsError, appsPayload } from "../../utils/clusterApps.js";
 import {
   ROLE_LABELS,
   addonProvenance,
@@ -73,14 +75,14 @@ import {
 import { whenVisible } from "../../lib/visibleInterval";
 
 /** The steps this build walks, as [step, label]. A VMs-only build has no
-    cluster to put add-ons or workloads on, so it skips those two. */
+    cluster to put add-ons, workloads or Helm charts on, so it skips those. */
 function wizardSteps(machineSource, vmsOnly) {
   if (machineSource === "vmware" && vmsOnly) {
     return [[STEP_SHAPE, "Template"], [STEP_MACHINES, "Machines"], [STEP_VERIFY, "Plan & create"]];
   }
   return [
     [STEP_SHAPE, "Template"], [STEP_MACHINES, "Machines"], [STEP_ADDONS, "Add-ons"],
-    [STEP_WORKLOADS, "Workloads"],
+    [STEP_WORKLOADS, "Workloads"], [STEP_APPS, "Apps"],
     [STEP_VERIFY, machineSource === "vmware" ? "Plan & create" : "Verify & build"],
   ];
 }
@@ -101,6 +103,9 @@ const STEP_MACHINES = 1;
 const STEP_ADDONS = 2;
 const STEP_WORKLOADS = 3;
 const STEP_VERIFY = 4;
+// After Workloads in the rail; numbered last so a draft saved before the step
+// existed still reopens on the step it was on.
+const STEP_APPS = 5;
 
 const EMPTY_WORKLOADS = {
   sourceClusterId: "",
@@ -134,6 +139,7 @@ const EMPTY_BASICS = {
   diskCheckPath: DEFAULT_DISK_CHECK_PATH,
   addons: [],
   workloads: { ...EMPTY_WORKLOADS },
+  apps: [],
   vsphereConnectionId: "",
   buildProfileId: "",
   connectionProfileId: "",
@@ -171,6 +177,7 @@ function basicsFromBuild(build) {
     workloads: build.workloadSelection?.items?.length
       ? { ...EMPTY_WORKLOADS, ...build.workloadSelection }
       : { ...EMPTY_WORKLOADS },
+    apps: appItemsFromBuild(build),
     vsphereConnectionId: build.vsphereConnectionId
       ? String(build.vsphereConnectionId) : "",
     buildProfileId: build.buildProfileId ? String(build.buildProfileId) : "",
@@ -208,11 +215,14 @@ const ROLE_KEYS = [
 ];
 
 function StepRail({ current, onGoBack, steps }) {
+  // By position in the rail, not by step number: Apps sits before Verify but
+  // carries a later number so older saved drafts keep theirs.
+  const currentIndex = steps.findIndex(([step]) => step === current);
   return (
     <nav className="sg-cb-steps" aria-label="Build steps">
       {steps.map(([step, label], index) => {
-        const state = step === current ? "is-on" : step < current ? "is-done" : "";
-        const reachable = step < current;
+        const state = step === current ? "is-on" : index < currentIndex ? "is-done" : "";
+        const reachable = index < currentIndex;
         return (
           <span className="sg-cb-steps-cell" key={label}>
             {index > 0 ? <span className="sg-cb-steps-arrow" aria-hidden="true">→</span> : null}
@@ -1396,6 +1406,8 @@ export default function Wizard({
       buildProfileId: basics.buildProfileId || undefined,
       connectionProfileId: basics.connectionProfileId || undefined,
       workloads: !vmsOnly && basics.workloads.items.length ? basics.workloads : null,
+      // Inventory Helm charts, installed in this order once the cluster is up.
+      apps: vmsOnly ? [] : appsPayload(basics.apps || []),
     };
     if (vmware) {
       return {
@@ -1552,6 +1564,28 @@ export default function Wizard({
     ? storageRows(workloadPlan, basics.workloads.storage)
     : [];
   const workloadStorageErrors = storageErrors(workloadStorageRows);
+  const appsProblem = vmsOnly ? "" : appsError(basics.apps || []);
+  // What stops the steps after Machines from being saved, first one first.
+  const laterProblem = workloadStorageErrors[0] || appsProblem;
+  const appFacts = (basics.apps || []).map((item) => ({
+    label: item.releaseName || "chart",
+    value: item.chartSlug
+      ? `${item.chartSlug} ${item.chartVersion || ""} → ${item.namespace || "?"}`
+      : "no chart picked",
+  }));
+  const appsNote = (basics.apps || []).length
+    ? appsProblem
+      ? { tone: "warn", text: appsProblem }
+      : {
+        tone: "good",
+        text: "Installed in this order once the cluster is up, after add-ons and "
+          + "workloads. Preflight renders each chart with its values first.",
+      }
+    : {
+      tone: "plain",
+      text: "Optional. Pick charts from Inventory → Helm Charts to have the new "
+        + "cluster come up with your applications on it.",
+    };
 
   const workloadFacts = basics.workloads.items.length
     ? [
@@ -1660,8 +1694,8 @@ export default function Wizard({
     }
     const planFooter = (
       <>
-        {!vmsOnly && workloadStorageErrors.length ? (
-          <span className="sg-cb-field-error">{workloadStorageErrors[0]}</span>
+        {!vmsOnly && laterProblem ? (
+          <span className="sg-cb-field-error">{laterProblem}</span>
         ) : null}
         {!canExecute ? (
           <span className="muted">
@@ -1672,7 +1706,7 @@ export default function Wizard({
           className="primary sg-cb-bp-cta"
           type="button"
           disabled={busy || Boolean(vmProblem)
-            || (!vmsOnly && (Boolean(addonError) || workloadStorageErrors.length > 0))}
+            || (!vmsOnly && (Boolean(addonError) || Boolean(laterProblem)))}
           onClick={canExecute ? makePlan : saveDraft}
         >
           {canExecute ? (busy ? "Saving…" : "Make the plan") : "Save draft for review"}
@@ -1717,7 +1751,7 @@ export default function Wizard({
           Next — workloads
         </button>
       </>
-    ) : vmware ? planFooter : canExecute ? (
+    ) : step === STEP_WORKLOADS ? (
       <>
         {workloadStorageErrors.length ? (
           <span className="sg-cb-field-error">{workloadStorageErrors[0]}</span>
@@ -1725,8 +1759,22 @@ export default function Wizard({
         <button
           className="primary sg-cb-bp-cta"
           type="button"
+          disabled={workloadStorageErrors.length > 0}
+          onClick={() => setStep(STEP_APPS)}
+        >
+          Next — apps
+        </button>
+      </>
+    ) : vmware ? planFooter : canExecute ? (
+      <>
+        {laterProblem ? (
+          <span className="sg-cb-field-error">{laterProblem}</span>
+        ) : null}
+        <button
+          className="primary sg-cb-bp-cta"
+          type="button"
           disabled={busy || !countsOk || Boolean(addonError) || !nodesPayload.length
-            || workloadStorageErrors.length > 0}
+            || Boolean(laterProblem)}
           onClick={runPreflight}
         >
           {busy ? "Running preflight…" : "Run preflight"}
@@ -1734,8 +1782,8 @@ export default function Wizard({
       </>
     ) : (
       <>
-        {workloadStorageErrors.length ? (
-          <span className="sg-cb-field-error">{workloadStorageErrors[0]}</span>
+        {laterProblem ? (
+          <span className="sg-cb-field-error">{laterProblem}</span>
         ) : (
           <span className="muted">
             Save this draft for a reviewer with execute permission to run preflight and launch it.
@@ -1745,7 +1793,7 @@ export default function Wizard({
           className="primary sg-cb-bp-cta"
           type="button"
           disabled={busy || !countsOk || Boolean(addonError) || !nodesPayload.length
-            || workloadStorageErrors.length > 0}
+            || Boolean(laterProblem)}
           onClick={saveDraft}
         >
           Save draft for review
@@ -1763,9 +1811,11 @@ export default function Wizard({
             slotState: () => "set",
           })}
           caption="new VMs · outline"
-          facts={step === STEP_ADDONS ? addonFacts : step === STEP_WORKLOADS ? workloadFacts : vmwareFacts}
+          facts={step === STEP_ADDONS ? addonFacts : step === STEP_WORKLOADS ? workloadFacts
+            : step === STEP_APPS ? appFacts : vmwareFacts}
           note={step === STEP_WORKLOADS
             ? workloadNote
+            : step === STEP_APPS ? appsNote
             : step === STEP_MACHINES
               ? (vmProblem
                 ? { tone: "warn", text: vmProblem }
@@ -1785,6 +1835,7 @@ export default function Wizard({
         plan={plan}
         note={step === STEP_WORKLOADS
           ? workloadNote
+          : step === STEP_APPS ? appsNote
           : step === STEP_SHAPE
             ? {
               tone: "plain",
@@ -1792,7 +1843,8 @@ export default function Wizard({
             }
           : affinityNote}
         facts={step === STEP_ADDONS ? addonFacts
-          : step === STEP_WORKLOADS ? workloadFacts : []}
+          : step === STEP_WORKLOADS ? workloadFacts
+            : step === STEP_APPS ? appFacts : []}
         footer={footer}
       />
     );
@@ -1962,6 +2014,30 @@ export default function Wizard({
                 value={basics.workloads}
                 onChange={(next) => setBasic("workloads", next)}
                 onPlanChange={setWorkloadPlan}
+                notify={notify}
+              />
+            </div>
+          ) : null}
+
+          {step === STEP_APPS ? (
+            <div className="card sg-cb-card">
+              <div className="sg-cb-sect">
+                <h2>Helm charts from Inventory</h2>
+                <span className="sg-cb-sect-right">
+                  {(basics.apps || []).length
+                    ? `${basics.apps.length} chart${basics.apps.length === 1 ? "" : "s"} · installed as the last phase`
+                    : "Optional — skip to build an empty cluster"}
+                </span>
+              </div>
+              <p className="muted sg-cb-wl-lede">
+                Each chart goes in with your values.yaml layered over the chart&apos;s own
+                values (or one of its values-*.yaml files). Values are kept encrypted
+                and deleted once the chart is installed; preflight renders every chart
+                before any machine is touched.
+              </p>
+              <AppsPicker
+                value={basics.apps || []}
+                onChange={(next) => setBasic("apps", next)}
                 notify={notify}
               />
             </div>

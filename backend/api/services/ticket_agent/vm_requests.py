@@ -20,6 +20,13 @@ and how big. Nothing is created from that call:
    for the cluster. Then Hermes gets ONE follow-up with names and addresses and
    writes the requester the outcome.
 
+Apps: a request may name **app profiles** (admin-made Inventory Helm charts
+with their values) — with new VMs and Kubernetes, the charts are attached to the
+build and installed as its last phase, under the same single approval; or, with
+``kubesight_ticket_install_apps``, onto a cluster the Cluster Builder already
+built (``vmRequest.kind == "apps"``: approval first, then the build's day-two
+install, which still honours that cluster's own change-approval rule).
+
 The state lives on the ticket task (``decision["vmRequest"]``) and the build;
 :func:`advance` runs on every scheduler tick and moves each request along from
 what the build and its OpenTofu job say. That is restart-safe for free: the
@@ -59,8 +66,10 @@ PLACEMENT_KEYS = (
     "antiAffinity",
 )
 # Outcomes after which nothing more happens to the request.
-FINISHED = ("ready", "cluster_ready", "needs_attention", "failed", "plan_failed",
+FINISHED = ("ready", "cluster_ready", "apps_ready", "needs_attention", "failed", "plan_failed",
             "rejected", "expired", "withdrawn")
+# vmRequest.kind for a request that installs apps on a cluster that exists.
+APPS_KIND = "apps"
 
 
 class VmRequestError(ValueError):
@@ -300,6 +309,25 @@ def catalog() -> List[Dict[str, Any]]:
     return out
 
 
+def app_catalog() -> List[Dict[str, Any]]:
+    """App profiles Hermes may name — offered when VM requests are switched on
+    (the same approvers decide both)."""
+    from ..cluster_build import app_profiles
+
+    if not agent_settings.vm_requests_enabled():
+        return []
+    return app_profiles.catalog()
+
+
+def _app_profiles(names: Any):
+    from ..cluster_build import app_profiles
+
+    try:
+        return app_profiles.named(names)
+    except ValueError as exc:
+        raise VmRequestError(str(exc), 422) from exc
+
+
 # ---------------------------------------------------------------------------
 # The request (kubesight_ticket_request_vms)
 # ---------------------------------------------------------------------------
@@ -465,6 +493,9 @@ def parse(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "counts": counts,
             "version": _k8s_version((arguments.get("kubernetes") or {}).get("version")),
         }
+    app_rows = _app_profiles(arguments.get("apps"))
+    if app_rows and kubernetes is None:
+        raise VmRequestError("apps need a Kubernetes cluster: add kubernetes, or leave apps out.")
     try:
         confidence = str(arguments.get("confidence") or "").strip().capitalize()
         if confidence not in schema.CONFIDENCES:
@@ -482,6 +513,7 @@ def parse(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "count": count,
         "size": size,
         "kubernetes": kubernetes,
+        "apps": app_rows,
         "confidence": confidence,
         "understanding": understanding,
         "concerns": concerns,
@@ -577,6 +609,20 @@ def request(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[str, A
             422,
         )
     build = db.session.get(ClusterBuild, created["id"])
+    if req["apps"]:
+        # The charts ride with the build: installed as its last phase, once
+        # Kubernetes is up, under the one approval of this request.
+        from ..cluster_build import app_profiles
+        from ..cluster_build import apps as build_apps
+
+        try:
+            build_apps.append_apps(build, app_profiles.items_for(req["apps"]), actor=actor,
+                                   profile_ids=[row.id for row in req["apps"]])
+            db.session.commit()
+        except build_apps.AppsError as exc:
+            db.session.rollback()
+            _delete_draft(build.id)
+            raise engine.AgentError(f"Refused: the apps cannot be installed: {exc}", 422)
     try:
         job = provisioning_service.request_create_plan(build, actor=actor, user=user)
     except ValueError as exc:
@@ -604,6 +650,10 @@ def request(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[str, A
         "jobId": job.id,
         "requestedByUserId": getattr(user, "id", None),
     }
+    if req["apps"]:
+        from ..cluster_build import app_profiles
+
+        vm["apps"] = app_profiles.describe(req["apps"])
     task.decision = {
         "vmRequest": vm,
         "commentOnApprove": on_approve,
@@ -643,6 +693,134 @@ def request(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[str, A
             "then a VM approver approves it. You get ONE follow-up when the VMs are ready (with their "
             "addresses), or when the request is rejected, expires or fails. Do not set the ticket to "
             "done yourself now."
+        ),
+    }
+
+
+def _target_build(raw: Any) -> ClusterBuild:
+    """The Cluster Builder build behind a cluster a ticket names."""
+    wanted = str(raw or "").strip()
+    if not wanted:
+        raise VmRequestError("cluster is required: the name of a cluster the Cluster Builder built.")
+    build = (
+        ClusterBuild.query.filter(
+            (func.lower(ClusterBuild.name) == wanted.lower())
+            | (ClusterBuild.result_cluster_id == wanted)
+        )
+        .filter(ClusterBuild.status != "destroyed")
+        .order_by(ClusterBuild.id.desc())
+        .first()
+    )
+    if build is None or not build.result_cluster_id:
+        raise VmRequestError(
+            f"There is no cluster built by the Cluster Builder called {wanted!r}. Apps can be "
+            "installed from a ticket only on those.", 422,
+        )
+    if build.status != "completed":
+        raise VmRequestError(
+            f"Cluster {build.name} is {build.status.replace('_', ' ')} right now; apps can be "
+            "added once it is completed.", 409,
+        )
+    return build
+
+
+def request_apps(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[str, Any]:
+    """kubesight_ticket_install_apps: apps onto a cluster that exists; approval first."""
+    from . import engine
+
+    if not agent_settings.vm_requests_enabled():
+        raise engine.AgentError(
+            "App requests from tickets are switched off in KubeSight (with VM requests). Set the "
+            "ticket to impediment and say the DevOps team will install it.",
+            409,
+        )
+    ticket = engine._ticket(record_id)
+    try:
+        text = schema.comment(arguments.get("comment"))
+        on_approve = schema.comment(arguments.get("commentOnApprove"), "commentOnApprove")
+        confidence = str(arguments.get("confidence") or "").strip().capitalize()
+        if confidence not in schema.CONFIDENCES:
+            raise schema.ContractError("confidence must be High, Medium or Low.")
+        understanding = schema.opt_str(arguments.get("understanding"), "understanding", schema.MAX_UNDERSTANDING)
+        if not understanding:
+            raise schema.ContractError("understanding is required.")
+        concerns = schema.str_list(arguments.get("concerns"), "concerns")
+        reasons = schema.str_list(arguments.get("reasons"), "reasons")
+    except schema.ContractError as exc:
+        raise engine.AgentError(str(exc), 400)
+    try:
+        build = _target_build(arguments.get("cluster"))
+        rows = _app_profiles(arguments.get("apps"))
+        if not rows:
+            raise VmRequestError("apps is required: one or more names copied from appProfiles.")
+        taken = {(a.namespace, a.release_name) for a in build.apps}
+        clash = [r.release_name for r in rows if (r.namespace, r.release_name) in taken]
+        if clash:
+            raise VmRequestError(
+                f"Cluster {build.name} already has {', '.join(clash)} from its build.", 409,
+            )
+    except VmRequestError as exc:
+        raise engine.AgentError(
+            f"Refused: {exc} Fix the arguments, or set the ticket to impediment and ask the requester.",
+            exc.status,
+        )
+    waiting = _open_vm_task(ticket)
+    if waiting is not None:
+        raise engine.AgentError(
+            f"Task #{waiting.id} is already a VM or app request for this ticket ({_vm(waiting).get('phase')}).", 409
+        )
+    approval = TicketInterpretation.query.filter_by(
+        ticket_record_id=ticket.id, status="awaiting_approval"
+    ).first()
+    if approval is not None:
+        raise engine.AgentError(f"Task #{approval.id} is already waiting for approval on this ticket.", 409)
+
+    from ..cluster_build import app_profiles
+
+    task = engine._current_task(ticket, user)
+    vm = {
+        "kind": APPS_KIND,
+        "phase": "awaiting_approval",
+        "name": build.name,
+        "buildId": build.id,
+        "clusterId": build.result_cluster_id,
+        "apps": app_profiles.describe(rows),
+        "requestedByUserId": getattr(user, "id", None),
+    }
+    task.decision = {
+        "vmRequest": vm,
+        "commentOnApprove": on_approve,
+        "confidence": confidence,
+        "understanding": understanding,
+        "concerns": concerns,
+    }
+    task.confidence, task.understanding = confidence, understanding
+    task.reasons = (reasons + concerns)[:10] or None
+    task.route, task.status = ROUTE, PLANNING
+    task.comment, task.error, task.finished_at = text, None, None
+    db.session.commit()
+    engine._post(ticket, text)
+    log_audit(
+        "ticket_agent_apps_requested",
+        actor=user,
+        target_type="ticket_interpretation",
+        target_id=str(task.id),
+        details={"ticket": task.ticket_number, "buildId": build.id, "cluster": build.result_cluster_id,
+                 "apps": [a["profile"] for a in vm["apps"]]},
+    )
+    _send_for_approval(task)
+    db.session.refresh(task)
+    return {
+        "requested": True,
+        "taskId": task.id,
+        "cluster": build.result_cluster_id,
+        "apps": [f"{a['release']} in {a['namespace']}" for a in vm["apps"]],
+        "status": _vm(task).get("phase"),
+        "note": (
+            "Your comment is posted. Nothing is installed yet: an approver approves first. If the "
+            "cluster itself needs approval for changes, its approvers are asked after that. You get "
+            "ONE follow-up when the apps are installed, or when the request is rejected, expires or "
+            "fails. Do not set the ticket to done yourself now."
         ),
     }
 
@@ -718,6 +896,8 @@ def _advance_one(task: TicketInterpretation) -> bool:
     build = db.session.get(ClusterBuild, vm.get("buildId") or 0)
     if build is None:
         return _finish(task, "failed", error="The build was deleted in Cluster Builder before the request finished.")
+    if vm.get("kind") == APPS_KIND:
+        return _advance_apps(task, vm, build)
 
     if task.status == PLANNING:
         job = _latest_job(build.id)
@@ -781,6 +961,83 @@ def _advance_one(task: TicketInterpretation) -> bool:
     if status in ("destroying", "destroyed"):
         return _finish(task, "failed", build=build, error="The VMs were destroyed before the request finished.")
     return False
+
+
+def _apps_of(build: ClusterBuild, vm: Dict[str, Any]):
+    ids = set(vm.get("appIds") or [])
+    return [app for app in build.apps if app.id in ids]
+
+
+def _advance_apps(task: TicketInterpretation, vm: Dict[str, Any], build: ClusterBuild) -> bool:
+    """An apps request after approval: wait for the charts' outcome."""
+    if task.status != "executed":
+        return False
+    db.session.refresh(build)
+    rows = _apps_of(build, vm)
+    if any(app.status == "awaiting_approval" for app in rows):
+        # The cluster's approvers may have decided since: take the bundle's
+        # outcome now rather than on the Cluster Builder's own tick.
+        from ..cluster_build import apps as build_apps
+
+        build_apps.advance_queued()
+        db.session.refresh(build)
+        rows = _apps_of(build, vm)
+    if not rows:
+        return _finish(task, "failed", build=build, error="The charts were withdrawn in Cluster Builder.")
+    statuses = {app.status for app in rows}
+    if statuses == {"installed"}:
+        return _finish(task, "apps_ready", build=build)
+    bad = [app for app in rows if app.status in ("failed", "rejected")]
+    if bad and build.status != "building":
+        return _finish(task, "failed", build=build, error="; ".join(
+            f"{app.release_name}: {app.error or app.status}" for app in bad
+        ))
+    phase = "waiting_cluster_approval" if "awaiting_approval" in statuses else "installing"
+    if vm.get("phase") != phase:
+        vm["phase"] = phase
+        _save(task, vm)
+        return True
+    return False
+
+
+def _approve_apps(task: TicketInterpretation, by: str) -> None:
+    """Install the profiles' charts as the day-two install of that build."""
+    from ...models import AppProfile, User
+    from ..cluster_build import app_profiles
+    from ..cluster_build import service as build_service
+
+    vm = _vm(task)
+    build = db.session.get(ClusterBuild, vm.get("buildId") or 0)
+    if build is None:
+        raise VmRequestError("The cluster's build is gone (deleted in Cluster Builder).", 409)
+    rows = []
+    for entry in vm.get("apps") or []:
+        row = db.session.get(AppProfile, entry.get("profileId") or 0)
+        if row is None or not row.enabled:
+            raise VmRequestError(f"App profile {entry.get('profile')} was deleted or switched off.", 409)
+        rows.append(row)
+    # The account Hermes asked with owns it: if the cluster needs approval for
+    # changes, its own approvers are asked next, in that account's name.
+    requester = db.session.get(User, vm.get("requestedByUserId") or 0)
+    before = {app.id for app in build.apps}
+    vm.update(phase="installing", approvedBy=by)
+    _save(task, vm)
+    try:
+        data = build_service.add_apps(
+            build.id, {"apps": app_profiles.items_for(rows)}, user=requester,
+            actor=f"{by} (approved {task.ticket_number or 'ticket'})"[:120],
+            profile_ids=[row.id for row in rows],
+        )
+    except (ValueError, LookupError) as exc:
+        db.session.rollback()
+        raise VmRequestError(str(exc), 409) from exc
+    task = db.session.get(TicketInterpretation, task.id)
+    vm = _vm(task)
+    vm["appIds"] = [app["id"] for app in data.get("apps") or [] if app["id"] not in before]
+    if data.get("pendingApproval"):
+        vm["phase"] = "waiting_cluster_approval"
+        vm["bundleIds"] = data.get("bundleIds") or []
+    _save(task, vm)
 
 
 def _install_in_app(app, task_id: int) -> None:
@@ -854,7 +1111,6 @@ def _plan_warnings(job) -> List[str]:
 
 def _offer(task: TicketInterpretation, build: ClusterBuild, job) -> None:
     """The plan is ready: send it to the VM approvers."""
-    row = agent_settings.get_or_create()
     vm = _vm(task)
     summary = job.plan_summary_json or {}
     vm.update(
@@ -864,6 +1120,23 @@ def _offer(task: TicketInterpretation, build: ClusterBuild, job) -> None:
         warnings=_plan_warnings(job),
         plan={"add": summary.get("add"), "change": summary.get("change"), "destroy": summary.get("destroy")},
     )
+    _save(task, vm, commit=False)
+    _send_for_approval(task)
+    log_audit(
+        "ticket_agent_vm_plan_ready",
+        actor=None,
+        target_type="ticket_interpretation",
+        target_id=str(task.id),
+        details={"ticket": task.ticket_number, "buildId": build.id, "jobId": job.id,
+                 "vms": [m["name"] for m in vm["machines"]]},
+    )
+
+
+def _send_for_approval(task: TicketInterpretation) -> None:
+    """Open the approval: KubeSight's inbox, and Telegram to the VM approvers."""
+    row = agent_settings.get_or_create()
+    vm = _vm(task)
+    vm["phase"] = "awaiting_approval"
     _save(task, vm, commit=False)
     task.status = "awaiting_approval"
     task.approval_nonce = secrets.token_hex(4)
@@ -876,7 +1149,8 @@ def _offer(task: TicketInterpretation, build: ClusterBuild, job) -> None:
     if agent_settings.telegram_ready(row):
         approvers = agent_settings.vm_approvers(row)
         buttons = [[
-            {"text": "✅ Approve and create", "callback_data": f"ka:{task.id}:a:{task.approval_nonce}"},
+            {"text": "✅ Approve and install" if vm.get("kind") == APPS_KIND else "✅ Approve and create",
+             "callback_data": f"ka:{task.id}:a:{task.approval_nonce}"},
             {"text": "❌ Reject", "callback_data": f"ka:{task.id}:r:{task.approval_nonce}"},
         ]] if approvers else None
         body = approval_text(task, ticket)
@@ -889,20 +1163,47 @@ def _offer(task: TicketInterpretation, build: ClusterBuild, job) -> None:
         except telegram.TelegramError as exc:
             task.error = f"Telegram: {exc} — approve it in KubeSight instead."
         db.session.commit()
-    log_audit(
-        "ticket_agent_vm_plan_ready",
-        actor=None,
-        target_type="ticket_interpretation",
-        target_id=str(task.id),
-        details={"ticket": task.ticket_number, "buildId": build.id, "jobId": job.id,
-                 "vms": [m["name"] for m in vm["machines"]]},
-    )
+
+
+def _app_lines(apps: List[Dict[str, Any]]) -> List[str]:
+    lines = []
+    for app in apps or []:
+        keys = ", ".join(app.get("valueKeys") or []) or "chart defaults"
+        lines.append(
+            f"• {app.get('release')} → {app.get('namespace')}: {app.get('chart')} {app.get('version')}"
+            + (f", from {app['valuesFile']}" if app.get("valuesFile") else "")
+            + f" (profile {app.get('profile')}; values set: {keys})"
+        )
+    return lines
+
+
+def _apps_approval_text(task: TicketInterpretation, ticket: Optional[ZohoInboundTicket]) -> str:
+    from . import engine
+
+    vm = _vm(task)
+    lines = [
+        f"📦 {task.ticket_number or 'Ticket'} — Hermes asks to install apps",
+        ((ticket.subject if ticket else "") or "").strip(),
+        "",
+        f"Understood: {task.understanding or '-'}",
+        f"On cluster {vm.get('clusterId')} (Cluster Builder build {vm.get('name')}), with Helm:",
+        *_app_lines(vm.get("apps")),
+        "If the cluster needs approval for changes, its approvers are asked after you.",
+        f"Confidence: {task.confidence or '-'}",
+    ]
+    if task.reasons:
+        lines += ["", "Hermes notes:"] + [f"• {r}" for r in task.reasons]
+    hours = max(1, int(((engine._aware(task.expires_at) or engine._now()) - engine._now()).total_seconds() // 3600))
+    lines += ["", f"Expires in {hours}h."]
+    return "\n".join(lines)
 
 
 def approval_text(task: TicketInterpretation, ticket: Optional[ZohoInboundTicket]) -> str:
     from . import engine
 
     vm = _vm(task)
+    if vm.get("kind") == APPS_KIND:
+        return _apps_approval_text(task, ticket)
     machines = vm.get("machines") or []
     lines = [
         f"🖥 {task.ticket_number or 'Ticket'} — Hermes asks for new VMs",
@@ -925,6 +1226,9 @@ def approval_text(task: TicketInterpretation, ticket: Optional[ZohoInboundTicket
             f"Then Kubernetes {kubernetes.get('version')}: {counts.get('controlPlane', 0)} control plane(s), "
             f"{counts.get('worker', 0)} worker(s), {counts.get('loadbalancer', 0)} load balancer(s)."
         )
+    if vm.get("apps"):
+        lines.append("Then these apps, with Helm:")
+        lines += _app_lines(vm["apps"])
     plan = vm.get("plan") or {}
     lines.append(f"OpenTofu plan #{vm.get('jobId')}: {plan.get('add', 0)} to add, "
                  f"{plan.get('change', 0)} to change, {plan.get('destroy', 0)} to destroy.")
@@ -940,10 +1244,15 @@ def approval_text(task: TicketInterpretation, ticket: Optional[ZohoInboundTicket
 
 def describe(task: TicketInterpretation) -> str:
     vm = _vm(task)
+    apps = ", ".join(f"{a.get('release')} ({a.get('profile')})" for a in vm.get("apps") or [])
+    if vm.get("kind") == APPS_KIND:
+        return f"install {apps} on cluster {vm.get('clusterId')}"
     count = vm.get("count") or len(vm.get("machines") or [])
     what = f"create {count} VM{'' if count == 1 else 's'} ({vm.get('name')}-vm-1…) from profile {vm.get('profile')}"
     if vm.get("kubernetes"):
         what += f" and install Kubernetes {vm['kubernetes'].get('version')} on them"
+    if apps:
+        what += f", then the apps {apps}"
     return what
 
 
@@ -961,6 +1270,9 @@ def approve(task: TicketInterpretation, by: str, user=None) -> None:
 
     task_id = task.id
     vm = _vm(task)
+    if vm.get("kind") == APPS_KIND:
+        _approve_apps(task, by)
+        return
     build = db.session.get(ClusterBuild, vm.get("buildId") or 0)
     if build is None:
         raise VmRequestError("The draft build is gone (deleted in Cluster Builder).", 409)
@@ -1023,12 +1335,15 @@ def _release(task: TicketInterpretation, phase: str, *, note: str = "",
 
     vm = _vm(task)
     build_id = vm.get("buildId") or 0
-    kept = _delete_draft(build_id)
+    # An apps request points at a cluster that exists: there is no draft.
+    kept = None if vm.get("kind") == APPS_KIND else _delete_draft(build_id)
     vm["phase"] = phase
     vm["finished"] = True
     if note:
         vm["note"] = note[:1500]
-    if kept and kept == "OpenTofu is still working on it":
+    if vm.get("kind") == APPS_KIND:
+        pass
+    elif kept and kept == "OpenTofu is still working on it":
         vm["cleanup"] = True  # the plan worker is still running: next tick
     elif kept:
         vm["draftKept"] = kept
@@ -1093,6 +1408,15 @@ def _finish(task: TicketInterpretation, outcome: str, *, build: Optional[Cluster
         vm["note"] = str(note)[:1500]
     if build is not None and build.result_cluster_id:
         vm["clusterId"] = build.result_cluster_id
+    if build is not None and vm.get("apps"):
+        wanted = set(vm.get("appIds") or []) or {a.get("profileId") for a in vm["apps"]}
+        by_id = vm.get("appIds")
+        vm["appResults"] = [
+            {"release": app.release_name, "namespace": app.namespace, "status": app.status,
+             "error": app.error}
+            for app in build.apps
+            if (app.id in wanted if by_id else app.profile_id in wanted)
+        ]
     _save(task, vm)
     log_audit(
         "ticket_agent_vm_request_finished",
@@ -1106,16 +1430,26 @@ def _finish(task: TicketInterpretation, outcome: str, *, build: Optional[Cluster
         f"{m['name']}: {m.get('address')} ({m.get('cpu')} vCPU, {m.get('memoryGb')} GB, {m.get('diskGb')} GB disk)"
         for m in machines
     )
-    if outcome == "ready":
+    apps_listed = "\n".join(
+        f"{a['release']} in {a['namespace']}: {a['status']}" for a in vm.get("appResults") or []
+    )
+    if outcome == "apps_ready":
+        fallback = {"outcome": "deployed",
+                    "comment": f"Installed on cluster {vm.get('clusterId')}:\n{apps_listed}"}
+    elif outcome == "ready":
         fallback = {"outcome": "deployed",
                     "comment": f"The VMs are ready:\n{listed}"}
     elif outcome == "cluster_ready":
         fallback = {"outcome": "deployed",
-                    "comment": f"The Kubernetes cluster {vm.get('clusterId') or vm.get('name')} is ready on:\n{listed}"}
+                    "comment": f"The Kubernetes cluster {vm.get('clusterId') or vm.get('name')} is ready on:\n{listed}"
+                               + (f"\nApps installed:\n{apps_listed}" if apps_listed else "")}
     elif outcome == "needs_attention":
         fallback = {"outcome": "on_hold",
                     "comment": f"The VMs are created:\n{listed}\nKubernetes is waiting for the DevOps team: "
                                f"{vm.get('note') or ''}".strip()}
+    elif vm.get("kind") == APPS_KIND:
+        fallback = {"outcome": "failed",
+                    "comment": f"Installing the apps failed: {vm.get('error') or 'see KubeSight'}"[:2000]}
     else:
         fallback = {"outcome": "failed",
                     "comment": f"Creating the VMs failed: {vm.get('error') or 'see KubeSight'}"[:2000]}
@@ -1126,6 +1460,7 @@ def _finish(task: TicketInterpretation, outcome: str, *, build: Optional[Cluster
         "vms": machines,
         "clusterId": vm.get("clusterId"),
         "kubernetesVersion": (vm.get("kubernetes") or {}).get("version"),
+        "apps": vm.get("appResults") or None,
         "error": vm.get("error"),
         "note": vm.get("note"),
         "fallback": fallback,

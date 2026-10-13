@@ -667,8 +667,20 @@ def _helm_preview(header: str, rendered: Optional[str], values_yaml: str) -> str
         if body.strip():
             lines.append("# Rendered manifest (helm template; Secret values redacted):")
             return "\n".join(lines) + "\n" + body
-    lines.append("# The chart could not be rendered for a preview. Values:")
-    return "\n".join(lines) + "\n" + (values_yaml or "# (chart defaults)\n")
+    lines.append("# The chart could not be rendered for a preview. Values (credentials hidden):")
+    return "\n".join(lines) + "\n" + (_masked_values_text(values_yaml) or "# (chart defaults)\n")
+
+
+def _masked_values_text(values_yaml: str) -> str:
+    """values.yaml with credential-looking values hidden: a queued change's
+    preview is read by every approver and kept with the bundle."""
+    if not (values_yaml or "").strip():
+        return ""
+    try:
+        parsed = yaml.safe_load(values_yaml)
+    except yaml.YAMLError:
+        return "# (values could not be shown)\n"
+    return yaml.safe_dump(_mask_sensitive_values(parsed), sort_keys=False, default_flow_style=False)
 
 
 def install_or_upgrade_release(

@@ -23,6 +23,17 @@ def _actor_name():
     return getattr(user, "username", "") or ""
 
 
+def _apps_refusal(payload):
+    """Choosing Helm charts installs them: it takes helm:install as well."""
+    if not (isinstance(payload, dict) and payload.get("apps")):
+        return None
+    from ..access_engine import user_has_permission
+
+    if not user_has_permission(get_current_user(), "helm:install"):
+        return error_response("Installing Helm charts needs the helm:install permission.", 403)
+    return None
+
+
 def _day_two_approval_refusal(build_id: int, action: str, *, day_two_only: bool = False):
     """The cluster's approval rule for a day-two change to a built cluster.
 
@@ -82,6 +93,9 @@ def list_builds():
 @require_permission("cluster_builds:create")
 def create_build():
     payload = request.get_json(silent=True) or {}
+    refused = _apps_refusal(payload)
+    if refused is not None:
+        return refused
     try:
         data = svc.create_build(
             payload, created_by=_actor_name(), user=get_current_user()
@@ -121,6 +135,9 @@ def get_build(build_id: int):
 @require_permission("cluster_builds:create")
 def update_build(build_id: int):
     payload = request.get_json(silent=True) or {}
+    refused = _apps_refusal(payload)
+    if refused is not None:
+        return refused
     try:
         data = svc.update_build(build_id, payload, user=get_current_user())
     except LookupError:
@@ -574,3 +591,180 @@ def build_logs(build_id: int):
     except LookupError:
         return error_response("Cluster build not found.", 404)
     return success_response({"items": items})
+
+
+# ---------------------------------------------------------------------------
+# Inventory Helm charts on the cluster
+# ---------------------------------------------------------------------------
+
+@cluster_builds_bp.route("/app-values", methods=["GET"])
+@require_permission("cluster_builds:create")
+def app_starting_values():
+    """What the values editor opens with: the chart's defaults, with the
+    chosen values-*.yaml merged in (passwords blank — they were never kept)."""
+    try:
+        data = svc.app_starting_values(
+            request.args.get("chart", ""),
+            request.args.get("version", ""),
+            request.args.get("valuesFile", ""),
+        )
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    return success_response(data)
+
+
+@cluster_builds_bp.route("/<int:build_id>/apps", methods=["POST"])
+@require_permission("cluster_builds:execute")
+def add_build_apps(build_id: int):
+    """Day two: install Inventory Helm charts. On a cluster that needs
+    approval they are sent for it (202) instead of refused."""
+    payload = request.get_json(silent=True) or {}
+    refused = _apps_refusal(payload)
+    if refused is not None:
+        return refused
+    try:
+        data = svc.add_apps(build_id, payload, user=get_current_user(), actor=_actor_name())
+    except LookupError:
+        return error_response("Cluster build not found.", 404)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    log_audit(
+        "cluster_build_apps_added",
+        actor=get_current_user(),
+        target_type="cluster_build",
+        target_id=str(build_id),
+        details={
+            "name": data.get("name"),
+            "clusterId": data.get("resultClusterId"),
+            "apps": [
+                {"chart": a.get("chartSlug"), "version": a.get("chartVersion"),
+                 "namespace": a.get("namespace"), "release": a.get("releaseName")}
+                for a in data.get("apps") or [] if a.get("status") != "installed"
+            ],
+            "pendingApproval": bool(data.get("pendingApproval")),
+        },
+    )
+    return success_response(data, status_code=202 if data.get("pendingApproval") else 200)
+
+
+@cluster_builds_bp.route("/<int:build_id>/apps/<int:app_id>", methods=["PUT"])
+@require_permission("cluster_builds:create")
+def update_build_app(build_id: int, app_id: int):
+    payload = request.get_json(silent=True) or {}
+    refused = _apps_refusal({"apps": [payload]})
+    if refused is not None:
+        return refused
+    try:
+        data = svc.update_app_values(build_id, app_id, payload, actor=_actor_name())
+    except LookupError:
+        return error_response("Cluster build not found.", 404)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    log_audit(
+        "cluster_build_app_updated",
+        actor=get_current_user(),
+        target_type="cluster_build",
+        target_id=str(build_id),
+        details={"app": app_id, "valuesChanged": "valuesYaml" in payload},
+    )
+    return success_response(data)
+
+
+@cluster_builds_bp.route("/<int:build_id>/apps/<int:app_id>", methods=["DELETE"])
+@require_permission("cluster_builds:create")
+def remove_build_app(build_id: int, app_id: int):
+    try:
+        data = svc.remove_app(build_id, app_id)
+    except LookupError:
+        return error_response("Cluster build not found.", 404)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    log_audit(
+        "cluster_build_app_withdrawn",
+        actor=get_current_user(),
+        target_type="cluster_build",
+        target_id=str(build_id),
+        details={"app": app_id},
+    )
+    return success_response(data)
+
+
+# ---------------------------------------------------------------------------
+# App profiles — the applications a ticket may ask for
+# ---------------------------------------------------------------------------
+
+app_profiles_bp = Blueprint("app_profiles", __name__, url_prefix="/api/app-profiles")
+
+
+def _profiles():
+    from ..services.cluster_build import app_profiles
+
+    return app_profiles
+
+
+def _needs_helm_install():
+    from ..access_engine import user_has_permission
+
+    if not user_has_permission(get_current_user(), "helm:install"):
+        return error_response("App profiles install Helm charts: that needs the helm:install permission.", 403)
+    return None
+
+
+@app_profiles_bp.route("", methods=["GET"])
+@require_permission("cluster_builds:view")
+def list_app_profiles():
+    return success_response({"items": _profiles().list_profiles()})
+
+
+@app_profiles_bp.route("", methods=["POST"])
+@require_permission("cluster_builds:create")
+def create_app_profile():
+    refused = _needs_helm_install()
+    if refused is not None:
+        return refused
+    try:
+        data = _profiles().create(request.get_json(silent=True) or {}, created_by=_actor_name())
+    except ValueError as exc:
+        from ..db import db
+
+        db.session.rollback()
+        return error_response(str(exc), 400)
+    log_audit("app_profile_created", actor=get_current_user(), target_type="app_profile",
+              target_id=str(data["id"]), details={"name": data["name"], "chart": data["chartSlug"],
+                                                  "version": data["chartVersion"],
+                                                  "release": data["releaseName"], "namespace": data["namespace"]})
+    return success_response(data, status_code=201)
+
+
+@app_profiles_bp.route("/<int:profile_id>", methods=["PUT"])
+@require_permission("cluster_builds:create")
+def update_app_profile(profile_id: int):
+    refused = _needs_helm_install()
+    if refused is not None:
+        return refused
+    payload = request.get_json(silent=True) or {}
+    try:
+        data = _profiles().update(profile_id, payload)
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    except ValueError as exc:
+        from ..db import db
+
+        db.session.rollback()
+        return error_response(str(exc), 400)
+    log_audit("app_profile_updated", actor=get_current_user(), target_type="app_profile",
+              target_id=str(profile_id), details={"name": data["name"], "enabled": data["enabled"],
+                                                  "valuesChanged": "valuesYaml" in payload})
+    return success_response(data)
+
+
+@app_profiles_bp.route("/<int:profile_id>", methods=["DELETE"])
+@require_permission("cluster_builds:create")
+def delete_app_profile(profile_id: int):
+    try:
+        summary = _profiles().delete(profile_id)
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    log_audit("app_profile_deleted", actor=get_current_user(), target_type="app_profile",
+              target_id=str(profile_id), details=summary)
+    return success_response({"deleted": True})

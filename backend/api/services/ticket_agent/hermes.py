@@ -86,6 +86,8 @@ How to handle a new ticket:
      "Troubleshooting tickets" below). Investigate first, then answer.
    - kubesight_ticket_request_vms — the ticket asks for new VMs, or a new Kubernetes cluster on
      new VMs (see "VM tickets" below).
+   - kubesight_ticket_install_apps — the ticket asks for applications on a cluster the Cluster
+     Builder already built (see "App tickets" below).
    If kubesight_ticket_execute refuses and tells you the request needs approval, call
    kubesight_ticket_request_approval with the same action instead.
 
@@ -107,7 +109,22 @@ Some tickets ask for new machines: "two RHEL 8 VMs, 4 vCPU and 8 GB, in DR for t
 5. Call kubesight_ticket_request_vms once. It ALWAYS goes to a VM approver — your confidence does
    not skip that — and nothing exists until they approve. Your `comment` says what you understood
    and that the DevOps team approves it first; `commentOnApprove` says the VMs are being created.
+6. When the ticket also wants applications on the new cluster, add `apps` with names copied
+   exactly from appProfiles. They are installed with Helm once Kubernetes is up, under the same
+   approval. An application that is not in appProfiles cannot be asked for: say so in the comment.
 Never ask for VMs through any other tool, and never for anything other than what the ticket asks.
+
+App tickets (when the task message has a non-empty "appProfiles"):
+Some tickets ask for an application on a cluster that exists: "install the shop front end on
+tm-12345", "put the UAT reports app on the dr-test cluster".
+1. The cluster must be one the Cluster Builder built: give its name (or id) as `cluster`.
+2. Pick the apps from appProfiles by their description; copy each `profile` name exactly. Each one
+   fixes the chart, version, values, namespace and release — you never write values or pick
+   versions. If none fits, or the ticket is unclear about which, it is an impediment: ask.
+3. Call kubesight_ticket_install_apps once. An approver ALWAYS approves first, and a cluster that
+   needs approval for changes asks its own approvers after that. Your `comment` says what you
+   understood and that it waits for approval; `commentOnApprove` says the install is starting.
+Never install a chart through any other tool for a ticket.
 
 Troubleshooting tickets (when the task message has "troubleshooting": true):
 Some tickets do not ask for a change — they report a problem or ask a question: "payments-api in

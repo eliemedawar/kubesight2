@@ -9,7 +9,7 @@ import { parseApiTime } from "../lib/apiTime";
 
 export const PHASE_ORDER = [
   "base_prep", "loadbalancer", "pull_images", "init", "cni", "etcd_backup",
-  "join_cp", "join_workers", "verify", "onboard", "addons", "workloads",
+  "join_cp", "join_workers", "verify", "onboard", "addons", "workloads", "apps",
 ];
 
 export const PHASE_LABELS = {
@@ -25,6 +25,7 @@ export const PHASE_LABELS = {
   onboard: "Register in KubeSight",
   addons: "Install add-ons",
   workloads: "Bring workloads over",
+  apps: "Install Helm apps",
 };
 
 /** Short form for the horizontal rail, where a cell is ~80px wide. */
@@ -41,6 +42,7 @@ export const PHASE_SHORT = {
   onboard: "Register",
   addons: "Add-ons",
   workloads: "Workloads",
+  apps: "Apps",
 };
 
 export const PHASE_NOTES = {
@@ -56,6 +58,7 @@ export const PHASE_NOTES = {
   onboard: "admin.conf → Clusters page, no manual step",
   addons: "selected add-ons, pinned and verified",
   workloads: "namespaces and workloads copied from an existing cluster",
+  apps: "Inventory Helm charts, in order, with your values",
 };
 
 export const ROLE_LABELS = {
@@ -188,6 +191,7 @@ export function expectedPhases(build) {
     if (phase === "join_workers") return (build?.nodeCounts?.worker || 0) > 0;
     if (phase === "addons") return (build?.addons || []).length > 0;
     if (phase === "workloads") return (build?.workloads?.itemCount || 0) > 0;
+    if (phase === "apps") return (build?.apps || []).length > 0;
     return true;
   });
 }

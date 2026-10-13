@@ -1208,3 +1208,49 @@ button.sg-cb-step:hover { border-color: var(--accent); color: var(--accent-stron
   border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-panel);
 }
 .sg-cb-vmprofile-h { margin: 6px 0 0; font-size: 12px; font-weight: 700; color: var(--text-strong); }
+
+/* Helm apps (wizard Apps step, day-two Install apps, build page card). */
+.sg-cb-apps { display: grid; gap: 12px; }
+.sg-cb-app {
+  display: grid; gap: 12px; padding: 14px;
+  border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-panel);
+}
+.sg-cb-app-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.sg-cb-app-head b { color: var(--text-strong); font-size: 14px; }
+.sg-cb-app-head .muted { font-size: 12.5px; }
+.sg-cb-app-n {
+  display: inline-grid; place-items: center; width: 22px; height: 22px; flex: none;
+  border-radius: var(--radius-full); background: var(--bg-panel-strong);
+  color: var(--text-strong); font-size: 12px; font-weight: 700;
+}
+.sg-cb-app-tools { margin-left: auto; display: inline-flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.sg-cb-app-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 14px;
+}
+.sg-cb-input.sg-cb-app-values {
+  min-height: 220px; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55; tab-size: 2;
+}
+.sg-cb-app-missing {
+  margin: 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline;
+  font-size: 12px; color: var(--warn);
+}
+.sg-cb-app-missing .sg-cb-mono {
+  padding: 1px 7px; border-radius: var(--radius-chip); background: var(--bg-panel-strong);
+  color: var(--text-strong);
+}
+.sg-cb-app-add { justify-self: start; }
+.sg-cb-app-installed { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.sg-cb-app-installed li { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; font-size: 12.5px; }
+.sg-cb-app-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.sg-cb-app-list > li {
+  display: grid; gap: 8px; padding: 10px 12px;
+  border: 1px solid var(--border-soft); border-radius: var(--radius-md);
+}
+.sg-cb-app-list > li.is-failed { border-color: var(--danger); }
+.sg-cb-app-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.sg-cb-app-row .muted { font-size: 12.5px; overflow-wrap: anywhere; }
+.sg-cb-app-error {
+  margin: 0; font-family: var(--font-mono); font-size: 12px; color: var(--danger);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.sg-cb-app-edit { display: grid; gap: 8px; }

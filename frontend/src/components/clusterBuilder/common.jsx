@@ -27,6 +27,11 @@ const STATUS_PILLS = {
   warn: ["Warning", "is-warn"],
   fail: ["Fail", "is-bad"],
   ok: ["OK", "is-ok"],
+  // Helm apps
+  installing: ["Installing…", "is-live"],
+  installed: ["Installed", "is-ok"],
+  awaiting_approval: ["Waiting for approval", "is-warn"],
+  rejected: ["Not approved", "is-bad"],
 };
 
 export function StatusPill({ status, children }) {

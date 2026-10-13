@@ -188,6 +188,36 @@ class VmRequestProfile(db.Model):
     )
 
 
+class AppProfile(db.Model):
+    """An application a ticket may ask for — the values Hermes may not write.
+
+    A ticket says "and put the shop front end on it"; Hermes picks the profile
+    by name. The chart, its version, where its values start, the whole
+    values.yaml (encrypted: it usually carries passwords) and the namespace and
+    release are all set here by an administrator.
+    """
+
+    __tablename__ = "app_profiles"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False, unique=True)
+    # What Hermes reads to choose: "shop front end, UAT settings".
+    description = db.Column(db.Text, nullable=True)
+    enabled = db.Column(db.Boolean, nullable=False, default=True)
+    chart_slug = db.Column(db.String(120), nullable=False)
+    chart_name = db.Column(db.String(255), nullable=True)
+    chart_version = db.Column(db.String(64), nullable=False, default="")
+    values_file = db.Column(db.String(500), nullable=False, default="")
+    values_cipher = db.Column(db.Text, nullable=True)
+    namespace = db.Column(db.String(63), nullable=False)
+    release_name = db.Column(db.String(53), nullable=False)
+    created_by = db.Column(db.String(120), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
 class SshCredential(db.Model):
     """A reusable SSH identity (who we log in as and how we escalate)."""
 
@@ -447,6 +477,58 @@ class ClusterBuild(db.Model):
         cascade="all, delete-orphan",
         order_by="ClusterBuildStep.id",
     )
+    apps = db.relationship(
+        "ClusterBuildApp",
+        backref="build",
+        cascade="all, delete-orphan",
+        order_by="ClusterBuildApp.position",
+    )
+
+
+class ClusterBuildApp(db.Model):
+    """One Inventory Helm chart installed on the cluster a build makes.
+
+    Picked in the wizard (installed by the ``apps`` phase, after add-ons and
+    workloads) or on day two. The values are the person's whole values.yaml,
+    layered over the chart's defaults and the chosen ``values-*.yaml``; they
+    usually carry passwords, so they are kept encrypted and dropped once the
+    chart is installed — nothing reads them after that.
+    """
+
+    __tablename__ = "cluster_build_apps"
+    __table_args__ = (
+        db.Index("ix_cluster_build_app_build", "build_id", "position"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    build_id = db.Column(
+        db.Integer,
+        db.ForeignKey("cluster_builds.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    position = db.Column(db.Integer, nullable=False, default=0)
+    # HelmChartTemplate.slug + the version picked; the chart is re-read from
+    # the Inventory at install time.
+    chart_slug = db.Column(db.String(120), nullable=False)
+    chart_name = db.Column(db.String(255), nullable=True)
+    chart_version = db.Column(db.String(64), nullable=False, default="")
+    # One of the chart's stored values-*.yaml, or "" for the chart defaults.
+    values_file = db.Column(db.String(500), nullable=False, default="")
+    # Fernet ciphertext of the person's values.yaml; None once installed.
+    values_cipher = db.Column(db.Text, nullable=True)
+    namespace = db.Column(db.String(63), nullable=False)
+    release_name = db.Column(db.String(53), nullable=False)
+    # pending | installing | installed | failed | awaiting_approval | rejected
+    status = db.Column(db.String(24), nullable=False, default="pending")
+    error = db.Column(db.Text, nullable=True)
+    # The change bundle a day-two install waits in, on a cluster that needs
+    # approval for changes.
+    bundle_id = db.Column(db.Integer, nullable=True)
+    # The app profile it came from, when Hermes asked for it on a ticket.
+    profile_id = db.Column(db.Integer, nullable=True)
+    created_by = db.Column(db.String(120), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_utcnow)
+    installed_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
 
 class ClusterBuildNode(db.Model):

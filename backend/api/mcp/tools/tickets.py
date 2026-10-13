@@ -291,6 +291,8 @@ _SIZE_PROPS = {
         "<name>-vm-2 …; use what the ticket says or the ticket number, e.g. tm-12345), `count`, and "
         "`size` only when the ticket states one. For a cluster, add `kubernetes` with a `shape` "
         "(lab = 2 VMs, small = 4, standard-ha = 8) or `counts`; count then follows the shape. "
+        "When the ticket also wants applications on that cluster, add `apps`: names copied exactly "
+        "from appProfiles (installed with Helm once Kubernetes is up, under the same approval). "
         "Nothing is created by this call: KubeSight makes the OpenTofu plan and a VM approver "
         "approves it first, ALWAYS, whatever your confidence. `comment` is posted now; "
         "`commentOnApprove` when it is approved. You get ONE follow-up when the VMs are ready "
@@ -326,6 +328,11 @@ _SIZE_PROPS = {
                     "version": {"type": "string", "description": "e.g. 1.32 — only if the ticket names one."},
                 },
             },
+            "apps": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Only with kubernetes: app profile names copied exactly from appProfiles.",
+            },
             "confidence": {"type": "string", "enum": ["High", "Medium", "Low"]},
             "understanding": {"type": "string", "description": "One or two sentences, for the approver, on what the ticket asks."},
             "concerns": {"type": "array", "items": {"type": "string"}, "description": "Anything the approver should know."},
@@ -344,6 +351,48 @@ def _ticket_request_vms(arguments: Dict[str, Any], *, user=None) -> Dict[str, An
     return {"changed": f"asked for {len(result.get('vmNames') or [])} VM(s) on ticket record "
                        f"{arguments.get('ticketRecordId')} — planned, waiting for a VM approver; "
                        "nothing created yet", **result}
+
+
+@tool(
+    "kubesight_ticket_install_apps",
+    permission="ticketing:agent",
+    description=(
+        "Install applications a ticket asks for on a cluster the Cluster Builder already built. "
+        "`cluster` is that cluster's name (or its id); `apps` are app profile names copied exactly "
+        "from appProfiles — each is an administrator's Inventory Helm chart with its version, values "
+        "and namespace, so you never write values. Nothing is installed by this call: a VM approver "
+        "approves first, ALWAYS, and if the cluster needs approval for changes its own approvers are "
+        "asked after that. An app that is not in appProfiles cannot be installed from a ticket: set "
+        "the ticket to impediment instead. `comment` is posted now; `commentOnApprove` when it is "
+        "approved. You get ONE follow-up when the apps are installed, or rejected, expired or failed."
+    ),
+    approval="Never installs anything itself: an approver approves first, then the cluster's own rule applies.",
+    write=True,
+    schema={
+        "type": "object",
+        "properties": {
+            "ticketRecordId": _RECORD,
+            "cluster": {"type": "string", "description": "A cluster the Cluster Builder built: its name or id."},
+            "apps": {"type": "array", "items": {"type": "string"},
+                     "description": "App profile names copied exactly from appProfiles."},
+            "confidence": {"type": "string", "enum": ["High", "Medium", "Low"]},
+            "understanding": {"type": "string", "description": "One or two sentences, for the approver, on what the ticket asks."},
+            "concerns": {"type": "array", "items": {"type": "string"}},
+            "reasons": {"type": "array", "items": {"type": "string"}},
+            "comment": {"type": "string", "description": "Posted now: what you understood, and that it waits for approval."},
+            "commentOnApprove": {"type": "string", "description": "Posted when it is approved and the install starts."},
+        },
+        "required": ["ticketRecordId", "cluster", "apps", "confidence", "understanding", "comment",
+                     "commentOnApprove"],
+    },
+)
+def _ticket_install_apps(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
+    from ...services.ticket_agent import vm_requests
+
+    result = _call(vm_requests.request_apps, arguments.get("ticketRecordId"), arguments, user=user)
+    return {"changed": f"asked to install {len(result.get('apps') or [])} app(s) on "
+                       f"{result.get('cluster')} for ticket record {arguments.get('ticketRecordId')} "
+                       "— waiting for approval; nothing installed yet", **result}
 
 
 @tool(

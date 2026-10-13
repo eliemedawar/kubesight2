@@ -444,6 +444,7 @@ export default function ClusterBuilderPage({
           canManageVSphere={canManageVSphere}
           canManageSSH={canManageSSH}
           canManageBuildProfiles={canManageBuildProfiles}
+          canManageApps={canCreate}
           onOptionsChanged={reloadOptions}
         />
       ) : null}
