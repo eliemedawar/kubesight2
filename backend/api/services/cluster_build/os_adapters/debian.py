@@ -64,11 +64,26 @@ _apt update -qq
 _apt install -y -qq ca-certificates curl gpg
 mkdir -p /etc/apt/keyrings
 curl -fsSL "{key_url}" | gpg --dearmor --yes -o /etc/apt/keyrings/kubesight-kubernetes.gpg
+# A machine (or the VM template it was cloned from) that already lists this
+# repository under another key file makes every apt update fail with
+# "Conflicting values set for option Signed-By". Set its copy aside; apt
+# ignores files without a .list/.sources extension.
+for f in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+  [ -f "$f" ] || continue
+  [ "$f" = /etc/apt/sources.list.d/kubesight-kubernetes.list ] && continue
+  if grep -qF "{repo.rstrip('/')}" "$f"; then
+    echo "Setting aside $f: it lists the same Kubernetes repository"
+    mv -f -- "$f" "$f.kubesight-disabled"
+  fi
+done
 echo "deb [signed-by=/etc/apt/keyrings/kubesight-kubernetes.gpg] {repo} /" \\
   > /etc/apt/sources.list.d/kubesight-kubernetes.list
 apt-mark unhold kubelet kubeadm kubectl 2>/dev/null || true
 _apt update -qq
-_apt install -y -qq kubelet="${{K8S_VER}}-*" kubeadm="${{K8S_VER}}-*" kubectl="${{K8S_VER}}-*"
+# Packages that came with the machine may be held, or newer than the pinned
+# version: the pin wins either way.
+_apt install -y -qq --allow-downgrades --allow-change-held-packages \\
+  kubelet="${{K8S_VER}}-*" kubeadm="${{K8S_VER}}-*" kubectl="${{K8S_VER}}-*"
 apt-mark hold kubelet kubeadm kubectl
 # crictl is installed explicitly rather than inherited: it is a kubeadm package
 # dependency on some minors and not on others, and the image pre-pull phase

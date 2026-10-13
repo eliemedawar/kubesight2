@@ -73,6 +73,9 @@ EOF
 # kubeadm preflight requires SELinux permissive (upstream documented step).
 setenforce 0 2>/dev/null || true
 sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config 2>/dev/null || true
+# Packages that came with the machine may be version-locked; dnf install of an
+# exact version up- or downgrades to it once the lock is gone.
+dnf versionlock delete kubelet kubeadm kubectl >/dev/null 2>&1 || true
 dnf install -y "kubelet-${{K8S_VER}}" "kubeadm-${{K8S_VER}}" "kubectl-${{K8S_VER}}" \\
   --disableexcludes=kubesight-kubernetes
 # crictl is installed explicitly rather than inherited: it is a kubeadm package

@@ -159,9 +159,15 @@ def assert_ha_tier(calls, *, balancers, control_planes, master, new_balancer):
     assert all(CERT_KEY in s for _, s in joins)
     # The secrets were re-minted: the ones from the original build are gone.
     assert any("kubeadm init phase upload-certs" in s for _, s in scripts)
-    # Nothing was re-initialised or reset on the running cluster.
+    # Nothing was re-initialised or reset on the running cluster. A new VM
+    # only gets the guarded wipe of what its template may have carried.
+    serving = (set(balancers) - {new_balancer}) | {control_planes[0]}
     assert not any("kubeadm init --config" in s for _, s in scripts)
-    assert not any("kubeadm reset" in s for _, s in scripts)
+    assert not any("kubeadm reset" in s for host, s in scripts if host in serving)
+    assert all(
+        "carried over from the VM template" in s
+        for _, s in scripts if "kubeadm reset" in s
+    )
 
 
 # ---------------------------------------------------------------------------

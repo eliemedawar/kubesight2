@@ -25,6 +25,7 @@ from . import addons as addon_registry
 from . import cni as cni_registry
 from . import k8s_versions, kubeadm, os_adapters
 from .os_adapters import OsFacts
+from .os_adapters.base import k8s_state_probe
 from .profiles import ResolvedProfile, registry_authority
 from .scrub import scrub
 
@@ -531,6 +532,18 @@ else
 fi
 echo "KS_EPOCH=$(date +%s)"
 command -v crictl >/dev/null 2>&1 && echo "KS_CRICTL=present"
+# Kubernetes the machine already has — common on a VM template prepared ahead.
+for tool in kubeadm kubelet kubectl; do
+  command -v $tool >/dev/null 2>&1 || continue
+  case $tool in
+    kubeadm) KS_V=$(kubeadm version -o short 2>/dev/null) ;;
+    kubelet) KS_V=$(kubelet --version 2>/dev/null) ;;
+    kubectl) KS_V=$(kubectl version --client 2>/dev/null) ;;
+  esac
+  echo "KS_HAS_$tool=$(echo "$KS_V" | grep -oE 'v[0-9]+[.][0-9]+[.][0-9]+' | head -1)"
+done
+{k8s_state_probe()}
+[ -n "$KS_STATE" ] && echo "KS_K8S_STATE=$KS_STATE"
 for mod in overlay br_netfilter; do
   if modprobe -n $mod >/dev/null 2>&1 || grep -q "^$mod" /proc/modules; then
     echo "KS_MOD_$mod=ok"
@@ -540,7 +553,13 @@ for mod in overlay br_netfilter; do
 done
 if command -v ss >/dev/null 2>&1; then
   for port in {ports}; do
-    if ss -Hln 2>/dev/null | grep -q ":$port "; then echo "KS_PORT_$port=busy"; else echo "KS_PORT_$port=free"; fi
+    if ss -Hln 2>/dev/null | grep -q ":$port "; then
+      # Who holds it: "kubelet" or "etcd" means Kubernetes is already here.
+      KS_OWNER=$(ss -Hlnp 2>/dev/null | grep ":$port " | grep -oE 'users:[(][(]"[^"]+"' | head -1 | cut -d'"' -f2)
+      echo "KS_PORT_$port=busy:$KS_OWNER"
+    else
+      echo "KS_PORT_$port=free"
+    fi
   done
 fi
 if command -v curl >/dev/null 2>&1; then
@@ -673,6 +692,69 @@ def _parse_probe(output: str) -> Dict[str, Any]:
     return facts
 
 
+_K8S_PROCESSES = (
+    "kubelet", "kube-apiserver", "kube-controller", "kube-scheduler",
+    "kube-proxy", "etcd",
+)
+
+
+def _is_k8s_process(owner: str) -> bool:
+    return any(owner.startswith(name) for name in _K8S_PROCESSES)
+
+
+def _installed_tools_check(build: ClusterBuild, facts: Dict[str, Any]) -> Dict[str, Any]:
+    """Kubernetes tools the machine already has. Never a blocker: base prep
+    installs the pinned version over whatever is there, up or down."""
+    wanted = f"v{build.k8s_version.lstrip('v')}"
+    found = {
+        tool: str(facts.get(f"KS_HAS_{tool}") or "")
+        for tool in ("kubeadm", "kubelet", "kubectl")
+        if f"KS_HAS_{tool}" in facts
+    }
+    label = "Kubernetes tools on the machine"
+    if not found:
+        return _check(
+            "k8s_tools", label, "pass",
+            f"None installed yet; base prep installs kubeadm, kubelet and "
+            f"kubectl {wanted}.",
+        )
+    if len(found) == 3 and all(version == wanted for version in found.values()):
+        return _check(
+            "k8s_tools", label, "pass",
+            f"kubeadm, kubelet and kubectl {wanted} are already installed and kept.",
+        )
+    listed = ", ".join(f"{tool} {version or '(version unknown)'}" for tool, version in found.items())
+    return _check(
+        "k8s_tools", label, "pass",
+        f"Already installed: {listed}. Base prep replaces them with {wanted}.",
+    )
+
+
+def _leftover_state_check(leftover: List[str], template_wipe: bool) -> Dict[str, Any]:
+    """A previous cluster's certificates, static pods or etcd data. kubeadm
+    refuses to start over them, so they are a blocker — unless KubeSight
+    created this VM for this build and may therefore clear them itself."""
+    label = "No earlier Kubernetes state"
+    if not leftover:
+        return _check("k8s_state", label, "pass",
+                      "No cluster configuration or etcd data on the machine.")
+    paths = ", ".join(leftover)
+    if template_wipe:
+        return _check(
+            "k8s_state", label, "pass",
+            f"Found {paths}, carried over from the VM template. KubeSight "
+            "created this VM for this build, so base prep clears it "
+            "(kubeadm reset) before installing.",
+        )
+    return _check(
+        "k8s_state", label, "fail",
+        f"Found {paths}: this machine is, or was, part of a Kubernetes cluster.",
+        "If that cluster is gone, run 'sudo kubeadm reset -f' and remove "
+        "/etc/cni/net.d and /var/lib/etcd on this machine, then re-run "
+        "preflight. KubeSight does not wipe a machine it did not create.",
+    )
+
+
 def _node_checks(
     build: ClusterBuild,
     node: ClusterBuildNode,
@@ -798,15 +880,31 @@ def _node_checks(
             "" if state == "ok" else f"{module} is unavailable on this kernel.",
         ))
 
+    leftover = str(facts.get("KS_K8S_STATE") or "").split()
+    template_wipe = node.address_source == "provisioned" and node.role != "loadbalancer"
     for port in _required_ports(build, node):
-        state = facts.get(f"KS_PORT_{port}")
-        if state == "busy":
+        state = str(facts.get(f"KS_PORT_{port}") or "")
+        if state.startswith("busy"):
+            owner = state.partition(":")[2].strip()
+            if template_wipe and leftover and _is_k8s_process(owner):
+                checks.append(_check(
+                    f"port_{port}", f"Port {port} free", "pass",
+                    f"Held by {owner} from the Kubernetes the VM template "
+                    "carried; freed when base prep clears it.",
+                ))
+                continue
             checks.append(_check(
                 f"port_{port}", f"Port {port} free", "fail",
-                f"Something is already listening on :{port}.",
+                f"{owner or 'Something'} is already listening on :{port}.",
+                "That is Kubernetes already running on this machine — see "
+                "'No earlier Kubernetes state'." if _is_k8s_process(owner) else "",
             ))
         elif state == "free":
             checks.append(_check(f"port_{port}", f"Port {port} free", "pass"))
+
+    if node.role != "loadbalancer":
+        checks.append(_installed_tools_check(build, facts))
+        checks.append(_leftover_state_check(leftover, template_wipe))
 
     try:
         node_epoch = int(facts.get("KS_EPOCH", 0))

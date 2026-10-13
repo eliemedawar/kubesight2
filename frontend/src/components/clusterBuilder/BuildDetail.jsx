@@ -12,6 +12,7 @@ import AddonsPanel from "./AddonsPanel.jsx";
 import GrowPanel from "./GrowPanel.jsx";
 import WorkloadsPanel from "./WorkloadsPanel.jsx";
 import PhaseRail from "./PhaseRail.jsx";
+import PreflightReport from "./PreflightReport.jsx";
 import {
   DestroyPanel,
   ProvisionCard,
@@ -32,6 +33,7 @@ import {
   deletePolicy,
   failurePoint,
   formatClock,
+  groupChecks,
   isGrowing,
   runStartedAt,
   addonDisplayName,
@@ -572,6 +574,25 @@ export default function BuildDetail({
     return buildBlueprint(build);
   }, [build]);
   const progress = useMemo(() => (build ? buildProgress(build) : null), [build]);
+  // Preflight that ran outside the wizard — on VMs OpenTofu just created, or
+  // from "Run preflight" here — leaves its verdict on each node. Without this
+  // the page said "preflight failed" and nothing about why.
+  const preflight = useMemo(() => {
+    if (!build || !["preflight_failed", "preflight_passed"].includes(build.status)) return null;
+    const nodes = (build.nodes || [])
+      .filter((node) => node.preflight?.checks?.length)
+      .map((node) => ({
+        nodeId: node.id,
+        hostname: node.hostname || node.vsphereVmName,
+        address: node.address,
+        role: node.role,
+        status: node.preflight.status,
+        checks: node.preflight.checks,
+      }));
+    if (!nodes.length) return null;
+    const result = { nodes };
+    return { result, grouped: groupChecks(result) };
+  }, [build]);
   const point = useMemo(
     () => (build && (build.status === "failed" || build.status === "cancelled")
       ? failurePoint(build)
@@ -817,6 +838,14 @@ export default function BuildDetail({
 
       {destroyOpen && destroyable ? (
         <DestroyPanel build={build} notify={notify} onChanged={load} onClose={() => setDestroyOpen(false)} />
+      ) : null}
+
+      {preflight ? (
+        <PreflightReport
+          grouped={preflight.grouped}
+          preflightResult={preflight.result}
+          warnNote="Start build asks you to acknowledge them, and the acknowledgement is recorded against the build."
+        />
       ) : null}
 
       {progress?.timeline?.length && !destroyed && !build.vmsOnly ? (

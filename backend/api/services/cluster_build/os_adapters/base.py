@@ -183,6 +183,69 @@ exit 0
 """
 
 
+# What a machine that already ran Kubernetes carries, and what kubeadm's own
+# preflight refuses to overwrite. Preflight looks for exactly these; the
+# template cleanup below removes exactly these.
+K8S_STATE_FILES = (
+    "/etc/kubernetes/admin.conf",
+    "/etc/kubernetes/kubelet.conf",
+    "/etc/kubernetes/pki/ca.crt",
+    "/var/lib/kubelet/config.yaml",
+)
+K8S_STATE_DIRS = ("/etc/kubernetes/manifests", "/var/lib/etcd")
+
+
+def k8s_state_probe() -> str:
+    """POSIX fragment that sets ``KS_STATE`` to the leftover paths found."""
+    files = " ".join(K8S_STATE_FILES)
+    dirs = " ".join(K8S_STATE_DIRS)
+    return f"""KS_STATE=""
+for f in {files}; do
+  [ -e "$f" ] && KS_STATE="$KS_STATE $f"
+done
+for d in {dirs}; do
+  [ -d "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ] && KS_STATE="$KS_STATE $d"
+done
+KS_STATE="${{KS_STATE# }}"
+"""
+
+
+def clear_template_state_script(_ctx: ScriptContext) -> str:
+    """Remove a previous cluster's state from a VM cloned for this build.
+
+    Only ever generated for machines OpenTofu created for this build: a VM
+    template made from a machine that once ran Kubernetes hands every clone
+    that cluster's certificates, static pods and etcd data, and kubeadm will
+    not start over them. A no-op when the machine is clean.
+    """
+    return f"""
+set +e
+{k8s_state_probe()}
+if [ -z "$KS_STATE" ]; then
+  echo "No earlier Kubernetes state on this machine."
+  exit 0
+fi
+echo "Clearing Kubernetes state carried over from the VM template: $KS_STATE"
+if command -v kubeadm >/dev/null 2>&1; then
+  kubeadm reset -f
+fi
+systemctl stop kubelet 2>/dev/null
+# Static pods keep running inside containerd after the kubelet stops, and keep
+# holding :6443 and :2379 — stop them too.
+if command -v crictl >/dev/null 2>&1; then
+  crictl --runtime-endpoint unix:///run/containerd/containerd.sock rmp -af 2>/dev/null
+fi
+rm -rf /etc/kubernetes/manifests /etc/kubernetes/pki /etc/kubernetes/admin.conf \\
+  /etc/kubernetes/kubelet.conf /etc/kubernetes/controller-manager.conf \\
+  /etc/kubernetes/scheduler.conf /etc/kubernetes/super-admin.conf
+rm -rf /var/lib/kubelet/config.yaml /var/lib/kubelet/kubeadm-flags.env /var/lib/kubelet/pki
+rm -rf /var/lib/etcd /etc/cni/net.d /var/lib/cni
+iptables -F 2>/dev/null; iptables -t nat -F 2>/dev/null; iptables -t mangle -F 2>/dev/null
+ipvsadm --clear 2>/dev/null
+exit 0
+"""
+
+
 class OsAdapter:
     """Interface. Subclasses override everything below."""
 
@@ -220,3 +283,6 @@ class OsAdapter:
 
     def script_reset_node(self, ctx: ScriptContext) -> str:
         return reset_node_script(ctx)
+
+    def script_clear_template_state(self, ctx: ScriptContext) -> str:
+        return clear_template_state_script(ctx)

@@ -376,6 +376,14 @@ def _phase_base_prep(build: ClusterBuild, resolved) -> None:
         if node.role == "loadbalancer":
             scripts.append(("haproxy + keepalived install", adapter.script_install_haproxy_keepalived(ctx)))
         else:
+            # A VM cloned for this build from a template that once ran
+            # Kubernetes carries that cluster's state. Only machines KubeSight
+            # created are wiped; preflight fails any other machine that has it.
+            if node.address_source == "provisioned" and node.status != "joined":
+                scripts.append((
+                    "Clear Kubernetes left by the VM template",
+                    adapter.script_clear_template_state(ctx),
+                ))
             scripts.append(("Kernel modules + sysctl + swap off", adapter.script_kernel_prep(ctx)))
             scripts.append(("containerd install + config", adapter.script_install_containerd(ctx)))
             scripts.append(("Kubernetes packages (kubeadm, kubelet, kubectl)", adapter.script_install_kube_packages(ctx)))
