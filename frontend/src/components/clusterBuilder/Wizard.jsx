@@ -495,6 +495,13 @@ function ShapeStep({ options, basics, setBasic }) {
   // CNI support windows move with Kubernetes, so only plugins with a version
   // validated on the selected release are offered.
   const compatibleCnis = cniPluginsForK8s(options.cniPlugins || [], basics.k8sVersion);
+  // Minors upstream released after this KubeSight build are offered too, on
+  // the newest validated minor's CNI and add-on versions.
+  const autoDiscovered = new Set(options.k8sVersionInfo?.autoDiscoveredMinors || []);
+  const minorOf = (version) => String(version || "").split(".").slice(0, 2).join(".");
+  const versionHint = autoDiscovered.has(minorOf(basics.k8sVersion))
+    ? `v${minorOf(basics.k8sVersion)} is new upstream and not yet validated by KubeSight — its add-ons are carried over from the newest validated release.`
+    : "Newest first, fetched from upstream. Preflight confirms your sources carry it.";
   return (
     <div className="card sg-cb-card sg-cb-fields">
       <Field
@@ -514,7 +521,7 @@ function ShapeStep({ options, basics, setBasic }) {
         />
       </Field>
 
-      <Field label="Kubernetes version" hint="Newest first. Preflight confirms your sources carry it.">
+      <Field label="Kubernetes version" hint={versionHint}>
         {(options.k8sVersions || []).length ? (
           <div className="sg-cb-seg" role="group" aria-label="Kubernetes version">
             {options.k8sVersions.map((version) => (
@@ -523,8 +530,9 @@ function ShapeStep({ options, basics, setBasic }) {
                 type="button"
                 aria-pressed={basics.k8sVersion === version}
                 onClick={() => setBasic("k8sVersion", version)}
+                title={autoDiscovered.has(minorOf(version)) ? "New upstream release, not yet validated" : undefined}
               >
-                v{version}
+                v{version}{autoDiscovered.has(minorOf(version)) ? " · new" : ""}
               </button>
             ))}
           </div>

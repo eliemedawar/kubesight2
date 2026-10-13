@@ -9,8 +9,15 @@ Two separate ideas that must never be collapsed into one:
     tests against it.
   * **Discovery** is upstream's answer to "what is the newest stable patch of
     minor X", read from the official ``https://dl.k8s.io/release/stable-<minor>.txt``
-    endpoints. Discovery only ever chooses *which patch* of an already-supported
-    minor to offer — a newly published minor never becomes selectable on its own.
+    endpoints. For the table's minors, discovery only chooses *which patch* to
+    offer.
+
+A minor upstream publishes *after* the table was written is discovered too, by
+probing ``stable-<next minor>.txt`` past the newest table entry. It is offered
+only once its pause tag has been read from kubeadm's own source at that exact
+patch, and the newest table minor's CNI and add-on versions are carried forward
+to it. Such a minor is marked auto-discovered: the wizard says so and preflight
+warns, because nobody has validated that pairing yet.
 
 Validation is therefore minor-scoped, not list-scoped: any well-formed patch of
 an enabled minor is accepted. That is deliberate — a build pinned to 1.32.4 must
@@ -59,6 +66,18 @@ def _retry_after_failure_s() -> float:
 # The payload is one version string. Anything larger is not a release file.
 _MAX_RESPONSE_BYTES = 64
 
+# kubeadm's PauseVersion constant, read at the exact discovered patch so an
+# auto-discovered minor never guesses its sandbox image tag.
+PAUSE_SOURCE_URL_TEMPLATE = (
+    "https://raw.githubusercontent.com/kubernetes/kubernetes/"
+    "v{version}/cmd/kubeadm/app/constants/constants.go"
+)
+_PAUSE_RE = re.compile(r'PauseVersion\s*=\s*"(\d+\.\d+(?:\.\d+)?)"')
+_MAX_SOURCE_BYTES = 512 * 1024
+# How far past the newest table minor discovery looks. Upstream ships three
+# minors a year, so this covers a year of KubeSight not being updated.
+_MAX_MINORS_AHEAD = 3
+
 # Kubeadm configuration API versions. v1beta4 exists from kubeadm 1.31; v1beta3
 # is deprecated upstream and only kept here for minors that predate v1beta4.
 KUBEADM_API_V1BETA3 = "kubeadm.k8s.io/v1beta3"
@@ -90,6 +109,9 @@ class MinorSupport:
     fallback_patch: str
     enabled: bool = False
     blockers: Tuple[str, ...] = field(default_factory=tuple)
+    # True for a minor found upstream after this table was written: offered,
+    # but carried on the newest table minor's CNI/add-on versions untested.
+    auto_discovered: bool = False
 
 
 # Which CNI plugins and add-ons cover which minor is declared on the
@@ -200,13 +222,27 @@ def minor_of(value: str) -> str:
 
 
 def record_for(value: str) -> Optional[MinorSupport]:
-    """The support record covering ``value``'s minor, enabled or not."""
+    """The support record covering ``value``'s minor, enabled or not.
+
+    A minor newer than the table is looked up among auto-discovered minors,
+    discovering it on demand when it has not been seen yet — so a build pinned
+    to one keeps resolving after a restart.
+    """
     minor = minor_of(value)
-    return _BY_MINOR.get(minor) if minor else None
+    if not minor:
+        return None
+    record = _BY_MINOR.get(minor)
+    if record is not None or not _is_ahead_of_table(minor):
+        return record
+    return _discover_record(minor, allow_network=not _network_disabled())
 
 
 def enabled_records() -> List[MinorSupport]:
-    return [record for record in SUPPORTED_MINORS if record.enabled]
+    """Enabled minors, newest first: auto-discovered ones, then the table."""
+    with _lock:
+        discovered = list(_discovered.values())
+    discovered.sort(key=lambda record: _minor_key(record.minor), reverse=True)
+    return discovered + [record for record in SUPPORTED_MINORS if record.enabled]
 
 
 def enabled_minors() -> List[str]:
@@ -222,7 +258,7 @@ def is_supported(value: str) -> bool:
 # still exactly what it always was — the versions KubeSight ships when it cannot
 # reach upstream — and it remains the last line of defence for the wizard.
 STATIC_FALLBACK_VERSIONS: Tuple[str, ...] = tuple(
-    record.fallback_patch for record in enabled_records()
+    record.fallback_patch for record in SUPPORTED_MINORS if record.enabled
 )
 
 
@@ -242,7 +278,7 @@ def validate_version(value: str) -> str:
             "(release candidates and prereleases are not supported); "
             f"got '{raw}'."
         )
-    record = _BY_MINOR.get(minor_of(normalized))
+    record = record_for(normalized)
     if record is None or not record.enabled:
         supported = ", ".join(enabled_minors()) or "none"
         raise ValueError(
@@ -277,6 +313,11 @@ _cache: Dict[str, Tuple[float, str]] = {}
 _last_known_good: Dict[str, str] = {}
 # minor -> monotonic time before which a failed minor is not fetched again.
 _failed_until: Dict[str, float] = {}
+# minor -> record synthesized for a minor newer than the table. Never expires:
+# a released minor's pause tag does not change.
+_discovered: Dict[str, MinorSupport] = {}
+# Monotonic time before which minors past the table are not probed again.
+_newer_probe_until: float = 0.0
 
 
 def reset_cache() -> None:
@@ -285,6 +326,9 @@ def reset_cache() -> None:
         _cache.clear()
         _last_known_good.clear()
         _failed_until.clear()
+        _discovered.clear()
+        global _newer_probe_until
+        _newer_probe_until = 0.0
 
 
 def _network_disabled() -> bool:
@@ -307,6 +351,12 @@ def _http_get_text(url: str, timeout: float) -> str:
         return response.read(_MAX_RESPONSE_BYTES).decode("utf-8", "replace")
 
 
+def _http_get_source(url: str, timeout: float) -> str:
+    """Read a source file (kubeadm's constants.go). Isolated for tests."""
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        return response.read(_MAX_SOURCE_BYTES).decode("utf-8", "replace")
+
+
 def _fetch_stable_patch(minor: str) -> Optional[str]:
     """Newest stable patch upstream publishes for ``minor``, else ``None``.
 
@@ -318,8 +368,10 @@ def _fetch_stable_patch(minor: str) -> Optional[str]:
     try:
         body = _http_get_text(url, HTTP_TIMEOUT_S)
     except (urllib.error.URLError, OSError, ValueError, TimeoutError) as exc:
-        logger.warning(
-            "Kubernetes release discovery failed for minor %s: %s", minor, exc
+        # 404 is the normal answer when probing for a minor not released yet.
+        level = logging.INFO if getattr(exc, "code", None) == 404 else logging.WARNING
+        logger.log(
+            level, "Kubernetes release discovery failed for minor %s: %s", minor, exc
         )
         return None
     normalized = normalize_version(body.strip())
@@ -336,6 +388,115 @@ def _fetch_stable_patch(minor: str) -> Optional[str]:
         )
         return None
     return normalized
+
+
+def _minor_key(minor: str) -> Tuple[int, int]:
+    major, _, rest = minor.partition(".")
+    return (int(major), int(rest))
+
+
+def _newest_table_minor() -> str:
+    return max((record.minor for record in SUPPORTED_MINORS if record.enabled),
+               key=_minor_key)
+
+
+def _next_minor(minor: str) -> str:
+    major, number = _minor_key(minor)
+    return f"{major}.{number + 1}"
+
+
+def _is_ahead_of_table(minor: str) -> bool:
+    if not _MINOR_RE.match(minor):
+        return False
+    newest = _minor_key(_newest_table_minor())
+    major, number = _minor_key(minor)
+    return major == newest[0] and newest[1] < number <= newest[1] + _MAX_MINORS_AHEAD
+
+
+def _fetch_pause_tag(version: str) -> Optional[str]:
+    """kubeadm's PauseVersion at ``version``, else ``None``. Never raises."""
+    url = PAUSE_SOURCE_URL_TEMPLATE.format(version=version)
+    try:
+        body = _http_get_source(url, HTTP_TIMEOUT_S)
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError) as exc:
+        logger.warning("Reading kubeadm's pause tag for %s failed: %s", version, exc)
+        return None
+    match = _PAUSE_RE.search(body)
+    if match is None:
+        logger.warning("kubeadm %s source names no PauseVersion; not offering it", version)
+        return None
+    return match.group(1)
+
+
+def _discover_record(minor: str, allow_network: bool) -> Optional[MinorSupport]:
+    """The record for a minor newer than the table, discovering it if needed.
+
+    ``None`` unless upstream publishes a stable patch for ``minor`` *and*
+    kubeadm's source at that patch names its pause tag.
+    """
+    now = time.monotonic()
+    with _lock:
+        known = _discovered.get(minor)
+        if known is not None:
+            return known
+        if not allow_network or _failed_until.get(minor, 0.0) > now:
+            return None
+    patch = _fetch_stable_patch(minor)
+    pause = _fetch_pause_tag(patch) if patch else None
+    with _lock:
+        if not (patch and pause):
+            _failed_until[minor] = time.monotonic() + _retry_after_failure_s()
+            return None
+        record = _discovered.setdefault(minor, MinorSupport(
+            minor=minor,
+            pause_image_tag=pause,
+            # v1beta4 is current kubeadm's only supported config API.
+            kubeadm_config_api=KUBEADM_API_V1BETA4,
+            fallback_patch=patch,
+            enabled=True,
+            auto_discovered=True,
+        ))
+        _cache[minor] = (time.monotonic() + CACHE_TTL_S, patch)
+        _last_known_good[minor] = patch
+        _failed_until.pop(minor, None)
+    logger.info("Discovered Kubernetes %s upstream (v%s, pause %s)", minor, patch, pause)
+    return record
+
+
+def _discover_newer_minors(allow_network: bool) -> None:
+    """Probe upstream for minors released after the table, at most every TTL.
+
+    Walks ``stable-<next>.txt`` until the first minor upstream has not
+    published. Minors already found get their newest patch refreshed on the way.
+    """
+    global _newer_probe_until
+    now = time.monotonic()
+    with _lock:
+        if not allow_network or _newer_probe_until > now:
+            return
+        _newer_probe_until = now + CACHE_TTL_S
+    minor = _next_minor(_newest_table_minor())
+    for _ in range(_MAX_MINORS_AHEAD):
+        record = _discover_record(minor, allow_network)
+        if record is None:
+            return
+        latest_patch(record, allow_network)
+        minor = _next_minor(minor)
+
+
+def carry_forward(minors) -> Tuple[str, ...]:
+    """A CNI/add-on version's minors, extended to auto-discovered minors.
+
+    A version validated on the newest table minor is the best-tested choice for
+    the minors upstream shipped after it, so it is offered there too.
+    Preflight warns on those pairings rather than silently trusting them.
+    """
+    minors = tuple(minors)
+    if not _discovered or _newest_table_minor() not in minors:
+        return minors
+    with _lock:
+        newer = sorted(_discovered, key=_minor_key)
+    return minors + tuple(minor for minor in newer if minor not in minors)
 
 
 def latest_patch(
@@ -384,23 +545,28 @@ def discover_versions() -> List[Dict[str, str]]:
     Minors are fetched concurrently so the wizard waits roughly one timeout in
     the worst case rather than one per minor.
     """
-    records = enabled_records()
-    if not records:
-        return []
+    table = [record for record in SUPPORTED_MINORS if record.enabled]
     # Decided here, on the caller's thread, while the app context still exists.
     allow_network = not _network_disabled()
-    if len(records) == 1:
-        results = [latest_patch(records[0], allow_network)]
-    else:
-        with ThreadPoolExecutor(
-            max_workers=len(records), thread_name_prefix="k8s-version-discovery"
-        ) as pool:
-            results = list(pool.map(
-                lambda record: latest_patch(record, allow_network), records
-            ))
+    with ThreadPoolExecutor(
+        max_workers=len(table) + 1, thread_name_prefix="k8s-version-discovery"
+    ) as pool:
+        # The probe for newer minors runs beside the per-minor fetches, so it
+        # adds no wall-clock time in the common case.
+        newer = pool.submit(_discover_newer_minors, allow_network)
+        results = list(pool.map(
+            lambda record: latest_patch(record, allow_network), table
+        ))
+        newer.result()
 
+    with _lock:
+        discovered = list(_discovered.values())
+    records = discovered + table
+    # The probe has just refreshed these, so this is a cache read.
+    results = [latest_patch(record, False) for record in discovered] + results
     entries = [
-        {"minor": record.minor, "version": version, "source": source}
+        {"minor": record.minor, "version": version, "source": source,
+         "validated": not record.auto_discovered}
         for record, (version, source) in zip(records, results)
     ]
     order = {version: index for index, version in enumerate(
@@ -422,7 +588,7 @@ def releases() -> List[Dict[str, str]]:
         logger.exception("Kubernetes version discovery failed; using the static set")
         return [
             {"minor": record.minor, "version": record.fallback_patch,
-             "source": "fallback"}
+             "source": "fallback", "validated": not record.auto_discovered}
             for record in enabled_records()
         ]
 
@@ -443,6 +609,9 @@ def version_metadata(
     entries = releases() if entries is None else entries
     return {
         "supportedMinors": [entry["minor"] for entry in entries],
+        "autoDiscoveredMinors": [
+            entry["minor"] for entry in entries if not entry.get("validated", True)
+        ],
         "releases": entries,
         "staticFallback": list(STATIC_FALLBACK_VERSIONS),
         "source": STABLE_URL_TEMPLATE,

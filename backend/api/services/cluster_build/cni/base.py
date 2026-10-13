@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .. import k8s_versions
 from ..profiles import ResolvedProfile
 
 _FETCH_TIMEOUT_SECONDS = 30
@@ -80,7 +81,8 @@ class CniDescriptor:
     # window, so Calico 3.32 covers 1.34-1.36 while 3.28.2 covers the older
     # minors and neither covers the other's. Preflight fails a build whose minor
     # is absent, so a newly enabled Kubernetes minor cannot quietly reuse a
-    # manifest nobody tested on it.
+    # manifest nobody tested on it. The one exception is a minor auto-discovered
+    # upstream (see k8s_versions.carry_forward), which preflight flags as a warning.
     k8s_minors_by_version: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
     # DaemonSet the readiness gate waits on: (namespace, name).
     readiness_daemonset: Tuple[str, str] = ("kube-system", "")
@@ -94,7 +96,9 @@ class CniDescriptor:
         return _data_dir() / self.id / version / filename
 
     def supported_k8s_minors(self, version: str) -> Tuple[str, ...]:
-        return self.k8s_minors_by_version.get(version, ())
+        # Minors upstream shipped after the support table inherit the version
+        # validated on its newest minor; preflight warns on that pairing.
+        return k8s_versions.carry_forward(self.k8s_minors_by_version.get(version, ()))
 
     def supports_k8s_minor(self, version: str, minor: str) -> bool:
         return minor in self.supported_k8s_minors(version)

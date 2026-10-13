@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from .. import k8s_versions
 from ..cni.base import extract_images, rewrite_manifest_images
 from ..profiles import ResolvedProfile
 
@@ -69,7 +70,9 @@ class AddonDescriptor:
         return self.manifest_sha256.get(version, ())
 
     def supported_k8s_minors(self, version: str) -> Tuple[str, ...]:
-        return self.k8s_minors_by_version.get(version, ())
+        # Minors upstream shipped after the support table inherit the version
+        # validated on its newest minor; preflight warns on that pairing.
+        return k8s_versions.carry_forward(self.k8s_minors_by_version.get(version, ()))
 
     def supports_k8s_minor(self, version: str, minor: str) -> bool:
         return minor in self.supported_k8s_minors(version)

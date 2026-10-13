@@ -373,11 +373,22 @@ def version_checks(
             f"{', '.join(k8s_versions.enabled_minors()) or 'none'}.",
         )]
 
-    checks = [_check(
-        "k8s_version", "Kubernetes version supported", "pass",
+    detail = (
         f"v{build.k8s_version} (minor {record.minor}; pause image "
-        f"{record.pause_image_tag}; {record.kubeadm_config_api}).",
-    )]
+        f"{record.pause_image_tag}; {record.kubeadm_config_api})."
+    )
+    if record.auto_discovered:
+        checks = [_check(
+            "k8s_version", "Kubernetes version supported", "warn",
+            f"{detail} Kubernetes {record.minor} was picked up from upstream "
+            "after this KubeSight release, so its CNI and add-on versions are "
+            "carried over from the newest validated minor without testing.",
+            "Pick the newest validated minor for a production cluster.",
+        )]
+    else:
+        checks = [_check(
+            "k8s_version", "Kubernetes version supported", "pass", detail,
+        )]
     checks.append(_kubeadm_config_check(build, profile))
 
     descriptor = cni_registry.get(build.cni_plugin)

@@ -35,6 +35,9 @@ def auth_headers(token: str) -> dict:
 
 
 ENABLED_MINORS = k8s_versions.enabled_minors()
+# The one minor past the table that discovery probes for when nothing newer
+# has been published.
+NEXT_MINOR = k8s_versions._next_minor(k8s_versions._newest_table_minor())
 
 
 @pytest.fixture(autouse=True)
@@ -159,7 +162,7 @@ class TestDiscovery:
         assert versions == k8s_versions.sort_versions(
             f"{minor}.77" for minor in ENABLED_MINORS
         )
-        assert sorted(discovery.calls) == sorted(ENABLED_MINORS)
+        assert sorted(discovery.calls) == sorted(ENABLED_MINORS + [NEXT_MINOR])
 
     def test_results_are_sorted_newest_first_semantically(self, discovery):
         for index, minor in enumerate(ENABLED_MINORS):
@@ -200,7 +203,7 @@ class TestDiscovery:
             discovery.responses[minor] = urllib.error.URLError("no route")
         first = k8s_versions.supported_versions()
         first_round = len(discovery.calls)
-        assert first_round == len(ENABLED_MINORS)
+        assert first_round == len(ENABLED_MINORS) + 1  # + the NEXT_MINOR probe
         assert k8s_versions.supported_versions() == first
         assert len(discovery.calls) == first_round
 
@@ -373,7 +376,7 @@ class TestOptionsContract:
         """The version list and its provenance share a single discovery pass."""
         _all_minors_respond(discovery)
         client.get("/api/cluster-builds/options", headers=auth_headers(admin_token))
-        assert sorted(discovery.calls) == sorted(ENABLED_MINORS)
+        assert sorted(discovery.calls) == sorted(ENABLED_MINORS + [NEXT_MINOR])
 
     def test_options_survive_an_upstream_outage(
         self, client, admin_token, discovery
@@ -1205,3 +1208,88 @@ class TestPreflightNodeProbe:
                 default_profile(),
             )
         assert _statuses(checks)["k8s_images"] == "fail"
+
+
+# ---------------------------------------------------------------------------
+# Minors released after the support table
+# ---------------------------------------------------------------------------
+
+PAUSE_SOURCE = 'const (\n\tPauseVersion = "3.10.9"\n)\n'
+
+
+class TestNewMinorDiscovery:
+    @pytest.fixture()
+    def kubeadm_source(self, monkeypatch):
+        fetched = []
+
+        def _get(url, timeout):
+            fetched.append(url)
+            return PAUSE_SOURCE
+
+        monkeypatch.setattr(k8s_versions, "_http_get_source", _get)
+        return fetched
+
+    def test_a_minor_released_upstream_is_offered_first(
+        self, discovery, kubeadm_source
+    ):
+        _all_minors_respond(discovery)
+        discovery.responses[NEXT_MINOR] = f"v{NEXT_MINOR}.1"
+
+        entries = k8s_versions.releases()
+
+        assert entries[0] == {"minor": NEXT_MINOR, "version": f"{NEXT_MINOR}.1",
+                              "source": "cache", "validated": False}
+        assert all(entry["validated"] for entry in entries[1:])
+        assert kubeadm_source == [
+            k8s_versions.PAUSE_SOURCE_URL_TEMPLATE.format(version=f"{NEXT_MINOR}.1")
+        ]
+        record = k8s_versions.record_for(f"{NEXT_MINOR}.1")
+        assert record.auto_discovered and record.pause_image_tag == "3.10.9"
+        assert record.kubeadm_config_api == k8s_versions.KUBEADM_API_V1BETA4
+        assert k8s_versions.validate_version(f"{NEXT_MINOR}.0") == f"{NEXT_MINOR}.0"
+        meta = k8s_versions.version_metadata(entries)
+        assert meta["autoDiscoveredMinors"] == [NEXT_MINOR]
+
+    def test_newest_cni_and_addon_versions_carry_forward(
+        self, discovery, kubeadm_source
+    ):
+        from api.services.cluster_build import addons, cni
+
+        _all_minors_respond(discovery)
+        discovery.responses[NEXT_MINOR] = f"v{NEXT_MINOR}.1"
+        k8s_versions.releases()
+
+        newest = k8s_versions._newest_table_minor()
+        for descriptor in list(cni.available()) + list(addons.available()):
+            for version in descriptor.versions:
+                minors = descriptor.supported_k8s_minors(version)
+                assert (NEXT_MINOR in minors) == (newest in minors),                     (descriptor.id, version)
+
+    def test_a_minor_without_a_readable_pause_tag_is_not_offered(
+        self, discovery, monkeypatch
+    ):
+        _all_minors_respond(discovery)
+        discovery.responses[NEXT_MINOR] = f"v{NEXT_MINOR}.1"
+        monkeypatch.setattr(
+            k8s_versions, "_http_get_source", lambda url, timeout: "no constant"
+        )
+        assert NEXT_MINOR not in k8s_versions.enabled_minors() + [
+            entry["minor"] for entry in k8s_versions.releases()
+        ]
+        with pytest.raises(ValueError):
+            k8s_versions.validate_version(f"{NEXT_MINOR}.1")
+
+    def test_unreleased_minors_stay_rejected(self, discovery):
+        _all_minors_respond(discovery)
+        assert NEXT_MINOR not in [e["minor"] for e in k8s_versions.releases()]
+        with pytest.raises(ValueError):
+            k8s_versions.validate_version(f"{NEXT_MINOR}.0")
+
+    def test_the_probe_for_newer_minors_is_throttled(self, discovery):
+        _all_minors_respond(discovery)
+        k8s_versions.releases()
+        with k8s_versions._lock:
+            k8s_versions._cache.clear()
+        k8s_versions.releases()
+        assert discovery.calls.count(NEXT_MINOR) == 1
+
