@@ -896,7 +896,8 @@ def advance() -> int:
         TicketInterpretation.query.filter(
             TicketInterpretation.route == ROUTE,
             or_(
-                TicketInterpretation.status.in_((PLANNING, "executed")),
+                # awaiting_approval: its plan may have been applied in Cluster Builder.
+                TicketInterpretation.status.in_((PLANNING, "executed", "awaiting_approval")),
                 decision.like('%"cleanup": true%'),
                 decision.like('%"cleanup":true%'),
             ),
@@ -948,6 +949,11 @@ def _advance_one(task: TicketInterpretation) -> bool:
             "error": error[:1500],
         })
 
+    if task.status == "awaiting_approval" and _plan_applied_elsewhere(vm):
+        # Someone applied this plan in Cluster Builder instead of approving the
+        # ticket: that is the approval. Without this the VMs got created and
+        # the request sat "awaiting approval", never installing Kubernetes.
+        return _adopt_applied_plan(task, vm)
     if task.status in ("awaiting_approval", "deciding"):
         return False  # a person decides; expiry is engine.expire_approvals
     if task.status != "executed":
@@ -1131,6 +1137,51 @@ def _install_guarded(task_id: int) -> None:
         except Exception:  # noqa: BLE001
             db.session.rollback()
             logger.exception("Could not record the failed install of VM request task %s", task_id)
+
+
+def _plan_applied_elsewhere(vm: Dict[str, Any]) -> bool:
+    from ...models import ClusterProvisionJob
+
+    if vm.get("kind") == APPS_KIND or not vm.get("jobId"):
+        return False
+    job = db.session.get(ClusterProvisionJob, vm["jobId"])
+    return job is not None and job.status in ("applying", "connecting", "succeeded")
+
+
+def _adopt_applied_plan(task: TicketInterpretation, vm: Dict[str, Any]) -> bool:
+    """The plan this request waited on was applied from the build page: carry
+    on as if the ticket's approval had been given — by whoever applied it."""
+    from ...models import ClusterProvisionJob
+    from . import engine
+
+    job = db.session.get(ClusterProvisionJob, vm["jobId"])
+    by = (job.applied_by or "Cluster Builder") if job is not None else "Cluster Builder"
+    won = TicketInterpretation.query.filter_by(id=task.id, status="awaiting_approval").update(
+        {"status": "executed", "decided_by": by[:120], "decided_at": engine._now(),
+         "finished_at": engine._now(), "error": None},
+        synchronize_session=False,
+    )
+    db.session.commit()
+    if not won:
+        return False  # an approval through the ticket got there first
+    db.session.refresh(task)
+    vm = _vm(task)
+    vm.update(phase="creating", approvedBy=by, approvedIn="cluster_builder")
+    _save(task, vm)
+    ticket = db.session.get(ZohoInboundTicket, task.ticket_record_id) if task.ticket_record_id else None
+    on_approve = (task.decision or {}).get("commentOnApprove")
+    if ticket is not None and on_approve:
+        engine._post(ticket, on_approve)
+    engine._edit_telegram(task, f"✅ Applied by {by} in Cluster Builder — the VMs are being created.")
+    log_audit(
+        "ticket_agent_vms_approved",
+        actor=None,
+        target_type="ticket_interpretation",
+        target_id=str(task.id),
+        details={"ticket": task.ticket_number, "by": by, "buildId": vm.get("buildId"),
+                 "jobId": vm.get("jobId"), "via": "cluster_builder"},
+    )
+    return True
 
 
 def _install_in_app(app, task_id: int) -> None:
@@ -1366,6 +1417,11 @@ def approve(task: TicketInterpretation, by: str, user=None) -> None:
     build = db.session.get(ClusterBuild, vm.get("buildId") or 0)
     if build is None:
         raise VmRequestError("The draft build is gone (deleted in Cluster Builder).", 409)
+    if _plan_applied_elsewhere(vm):
+        # Already applied from the build page: approving just agrees with it.
+        vm.update(phase="creating", approvedBy=by)
+        _save(task, vm)
+        return
     job = jobs.open_job(build.id)
     if job is None or job.id != vm.get("jobId") or job.status != "planned":
         raise VmRequestError(

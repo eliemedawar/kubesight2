@@ -1239,6 +1239,10 @@ def expire_approvals() -> int:
         TicketInterpretation.expires_at <= now,
     ).order_by(TicketInterpretation.id.asc()).all()
     for task in overdue:
+        if task.route == vm_requests.ROUTE and vm_requests._plan_applied_elsewhere(
+            (task.decision or {}).get("vmRequest") or {}
+        ):
+            continue  # applied in Cluster Builder: vm_requests.advance carries it on
         won = TicketInterpretation.query.filter_by(id=task.id, status="awaiting_approval").update(
             {"status": "impediment", "finished_at": now,
              "decision_note": "No one approved it in time."},

@@ -526,6 +526,41 @@ class TestKubernetes:
         build = db.session.get(ClusterBuild, _vm(task)["buildId"])
         assert build.k8s_version == (newest if ticket_names_a_version else carried)
 
+    def test_applying_the_plan_in_cluster_builder_counts_as_the_approval(
+        self, client, app, vm_agent, writes, monkeypatch, fake_ssh,
+    ):
+        """The VMs were created from the build page, not by approving the
+        ticket: the request must still go on to Kubernetes."""
+        vm_requests.update_profile(vm_agent["id"], {"allowKubernetes": True})
+        ticket = _ticket(subject="A lab cluster please")
+        _ask(ticket, name="tm-631", count=None, kubernetes={"shape": "lab"})
+        task = _task(ticket)
+        vm = _vm(task)
+        set_transport_factory(lambda: build_default_fake({
+            "10.20.30.50": ("tm-631-vm-1", "control_plane"),
+            "10.20.30.51": ("tm-631-vm-2", "worker"),
+        }))
+        other = second_admin_token(client, app)
+        response = client.post(
+            f"/api/cluster-builds/{vm['buildId']}/provision/jobs/{vm['jobId']}/apply",
+            headers=auth_headers(other),
+        )
+        assert response.status_code in (200, 202), response.get_json()
+        db.session.refresh(task)
+        assert task.status == "awaiting_approval"  # the ticket was not touched yet
+
+        followups = []
+        _fake_hermes(monkeypatch, lambda message: followups.append(message) and None)
+        engine.tick()  # the applied plan is taken as the approval
+        db.session.refresh(task)
+        assert task.status == "executed" and _vm(task)["approvedIn"] == "cluster_builder"
+        assert any(w.get("comment") == "Approved — the VMs are being created now." for w in writes)
+        engine.tick()  # vms_ready → Kubernetes
+        engine.tick()  # completed → follow-up
+        build = db.session.get(ClusterBuild, vm["buildId"])
+        assert build.status == "completed", (build.error, _vm(task))
+        assert _vm(task)["phase"] == "cluster_ready"
+
     def test_kubernetes_needs_big_enough_vms(self, vm_agent, writes):
         vm_requests.update_profile(vm_agent["id"], {"allowKubernetes": True})
         with pytest.raises(engine.AgentError, match="Kubernetes needs every VM"):
