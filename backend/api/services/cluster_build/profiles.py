@@ -24,7 +24,7 @@ from ...secret_encryption import (
     secret_encryption_key_configured,
 )
 
-_REPO_MODES = {"internet", "mirror", "offline"}
+_REPO_MODES = {"internet", "mirror", "satellite", "offline"}
 
 # Internet-mode defaults (dev/test). {minor} is e.g. "1.32".
 DEFAULT_K8S_PKG_REPO_DEB = "https://pkgs.k8s.io/core:/stable:/v{minor}/deb/"
@@ -65,6 +65,22 @@ class ResolvedProfile:
     extra_ca_certs_pem: str
     offline_bundle_path: str
     offline_bundle_checksum: str
+    satellite_register_url: str = ""
+    satellite_token: str = ""
+
+    @property
+    def registers_with_satellite(self) -> bool:
+        return bool(self.satellite_register_url and self.satellite_token)
+
+    @property
+    def satellite_host(self) -> str:
+        """The capsule's hostname, without the registration port."""
+        return urlsplit(self.satellite_register_url).hostname or ""
+
+    @property
+    def satellite_ca_url(self) -> str:
+        """Where every Satellite and Capsule publishes its CA certificate."""
+        return f"https://{self.satellite_host}/pub/katello-server-ca.crt"
 
     def k8s_pkg_repo(self, os_family: str, minor: str) -> str:
         template = self.k8s_pkg_repo_url
@@ -255,6 +271,68 @@ def _normalize_repo_url(value: Any, field: str) -> Optional[str]:
     return raw
 
 
+_SATELLITE_URL_IN_TEXT_RE = re.compile(r"https://[^\s'\"]+")
+
+
+def _normalize_satellite_register_url(value: Any) -> Optional[str]:
+    """Validate the URL Satellite's "Register Host" page generates.
+
+    The whole generated command is accepted too — people copy it as one block
+    — and only its URL is kept: the bearer token in that command is a secret
+    with its own encrypted field, and nothing else in the command is used.
+    The URL reaches a root shell, shell-quoted; quoting characters are refused
+    rather than escaped into surprising semantics.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if not raw.startswith("https://") or any(char.isspace() for char in raw):
+        match = _SATELLITE_URL_IN_TEXT_RE.search(raw)
+        if not match:
+            raise ValueError(
+                "satelliteRegisterUrl must be the https:// registration URL "
+                "from Satellite's Register Host page."
+            )
+        raw = match.group(0)
+    if len(raw) > 2048:
+        raise ValueError("satelliteRegisterUrl must be 2048 characters or fewer.")
+    if any(ord(char) < 32 or ord(char) == 127 for char in raw):
+        raise ValueError("satelliteRegisterUrl must not contain control characters.")
+    if any(char in raw for char in "\"'`$;|<>\\"):
+        raise ValueError("satelliteRegisterUrl contains an unsupported character.")
+    parsed = urlsplit(raw)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("satelliteRegisterUrl must be an https:// URL.")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("satelliteRegisterUrl must not contain credentials.")
+    if not _REGISTRY_HOST_RE.fullmatch(parsed.hostname):
+        raise ValueError("satelliteRegisterUrl has an invalid host name.")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("satelliteRegisterUrl has an invalid port.") from exc
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("satelliteRegisterUrl port must be 1-65535.")
+    if parsed.path.rstrip("/") != "/register":
+        raise ValueError(
+            "satelliteRegisterUrl must point at Satellite's /register endpoint."
+        )
+    if parsed.fragment:
+        raise ValueError("satelliteRegisterUrl must not contain a fragment.")
+    if "activation_keys=" not in parsed.query:
+        raise ValueError(
+            "satelliteRegisterUrl must name an activation key (activation_keys=…)."
+        )
+    return raw
+
+
+def _satellite_url_display(value: Any) -> Optional[str]:
+    try:
+        return _normalize_satellite_register_url(value)
+    except ValueError:
+        return None
+
+
 def _normalize_ca_bundle(value: Any) -> Optional[str]:
     """Parse and canonicalize a PEM certificate bundle with no extra text."""
     raw = str(value or "").strip()
@@ -310,7 +388,9 @@ def resolve(row: Optional[BuildProfile]) -> ResolvedProfile:
         return default_profile()
     repo_mode = str(row.repo_mode or "internet").strip()
     if repo_mode not in _REPO_MODES:
-        raise ValueError("repoMode must be 'internet', 'mirror', or 'offline'.")
+        raise ValueError(
+            "repoMode must be 'internet', 'mirror', 'satellite', or 'offline'."
+        )
     k8s_registry = _normalize_registry_prefix(
         row.k8s_image_registry, "k8sImageRegistry"
     )
@@ -348,6 +428,19 @@ def resolve(row: Optional[BuildProfile]) -> ResolvedProfile:
         raise ValueError("mirror mode requires k8sPkgRepoUrl.")
     if repo_mode == "offline" and not offline_bundle_path:
         raise ValueError("offline mode requires offlineBundlePath.")
+    satellite_url = _normalize_satellite_register_url(row.satellite_register_url) or ""
+    if row.satellite_token_cipher and not secret_encryption_key_configured():
+        raise ValueError(
+            "The Satellite registration token requires KUBESIGH_SECRET_KEY (or "
+            "a real JWT_SECRET_KEY) to be configured securely."
+        )
+    satellite_token = decrypt_secret(row.satellite_token_cipher or "")
+    if bool(satellite_url) != bool(satellite_token):
+        raise ValueError(
+            "satelliteRegisterUrl and satelliteToken must be configured together."
+        )
+    if repo_mode == "satellite" and not satellite_url:
+        raise ValueError("satellite mode requires a Satellite registration.")
     return ResolvedProfile(
         repo_mode=repo_mode,
         k8s_pkg_repo_url=k8s_pkg_repo_url,
@@ -369,6 +462,8 @@ def resolve(row: Optional[BuildProfile]) -> ResolvedProfile:
         extra_ca_certs_pem=_normalize_ca_bundle(row.extra_ca_certs_pem) or "",
         offline_bundle_path=offline_bundle_path,
         offline_bundle_checksum=row.offline_bundle_checksum or "",
+        satellite_register_url=satellite_url,
+        satellite_token=satellite_token,
     )
 
 
@@ -395,6 +490,7 @@ def serialize(row: BuildProfile) -> Dict[str, Any]:
     addon_image_registry = _registry_display(
         row.addon_image_registry, "addonImageRegistry"
     )
+    satellite_register_url = _satellite_url_display(row.satellite_register_url)
     return {
         "id": row.id,
         "name": row.name,
@@ -418,6 +514,11 @@ def serialize(row: BuildProfile) -> Dict[str, Any]:
         ),
         "offlineBundlePath": row.offline_bundle_path,
         "offlineBundleChecksum": row.offline_bundle_checksum,
+        "satelliteRegisterUrl": satellite_register_url,
+        "satelliteHost": (
+            urlsplit(satellite_register_url).hostname if satellite_register_url else None
+        ),
+        "satelliteTokenConfigured": bool(row.satellite_token_cipher),
         "createdAt": _iso(row.created_at),
         "updatedAt": _iso(row.updated_at),
     }
@@ -441,7 +542,9 @@ def _apply_payload(row: BuildProfile, payload: Dict[str, Any]) -> None:
         raise ValueError("name is required.")
     repo_mode = str(payload.get("repoMode", row.repo_mode or "internet")).strip()
     if repo_mode not in _REPO_MODES:
-        raise ValueError("repoMode must be 'internet', 'mirror', or 'offline'.")
+        raise ValueError(
+            "repoMode must be 'internet', 'mirror', 'satellite', or 'offline'."
+        )
     row.name = name
     row.repo_mode = repo_mode
 
@@ -493,6 +596,20 @@ def _apply_payload(row: BuildProfile, payload: Dict[str, Any]) -> None:
     if payload.get("clearRegistryPassword"):
         row.registry_password_cipher = None
 
+    if "satelliteRegisterUrl" in payload:
+        row.satellite_register_url = _normalize_satellite_register_url(
+            payload.get("satelliteRegisterUrl")
+        )
+    _apply_satellite_token(row, payload)
+    if bool(row.satellite_register_url) != bool(row.satellite_token_cipher):
+        raise ValueError(
+            "satelliteRegisterUrl and satelliteToken must be configured together."
+        )
+    if repo_mode == "satellite" and not row.satellite_register_url:
+        raise ValueError(
+            "satellite mode requires a Satellite registration URL and token."
+        )
+
     if bool(row.registry_username) != bool(row.registry_password_cipher):
         raise ValueError(
             "registryUsername and registryPassword must be configured together."
@@ -520,6 +637,23 @@ def _apply_payload(row: BuildProfile, payload: Dict[str, Any]) -> None:
         raise ValueError("offline mode requires offlineBundlePath.")
 
 
+def _apply_satellite_token(row: BuildProfile, payload: Dict[str, Any]) -> None:
+    token = str(payload.get("satelliteToken") or "").strip()
+    if token.lower().startswith("bearer "):
+        token = token[len("bearer "):].strip()
+    if token:
+        if any(char.isspace() or ord(char) < 32 for char in token):
+            raise ValueError("satelliteToken must be a single token, without spaces.")
+        if not secret_encryption_key_configured():
+            raise ValueError(
+                "The Satellite registration token requires KUBESIGH_SECRET_KEY "
+                "(or a real JWT_SECRET_KEY) to be configured securely."
+            )
+        row.satellite_token_cipher = encrypt_secret(token)
+    if payload.get("clearSatelliteToken"):
+        row.satellite_token_cipher = None
+
+
 def create_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     row = BuildProfile()
     _apply_payload(row, payload)
@@ -532,6 +666,15 @@ def update_profile(profile_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     row = get_profile(profile_id)
     from ...models import ClusterBuild
 
+    # Satellite registration tokens expire. Replacing one changes no reviewed
+    # setting — the URL, activation key and sources stay as they were — so it
+    # is the one change allowed on a profile builds already use.
+    if set(payload) == {"satelliteToken"} and str(payload["satelliteToken"] or "").strip():
+        if not row.satellite_register_url:
+            raise ValueError("This profile does not register with Satellite.")
+        _apply_satellite_token(row, payload)
+        db.session.commit()
+        return serialize(row)
     if ClusterBuild.query.filter_by(build_profile_id=profile_id).count():
         raise ValueError(
             "Build profiles are immutable once referenced by a cluster build. "

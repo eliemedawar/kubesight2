@@ -8,6 +8,8 @@ module plus a registry entry, with zero engine changes.
 from __future__ import annotations
 
 import base64
+import hashlib
+import shlex
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -149,6 +151,79 @@ systemctl restart containerd
 """
 
 
+SATELLITE_MARKER = "/etc/kubesight/satellite-registration"
+
+
+def satellite_registration_script(ctx: ScriptContext) -> str:
+    """Register the machine with Red Hat Satellite through its global
+    registration endpoint, the way Satellite's "Register Host" page does:
+    trust the capsule's CA, clean any identity the VM template carried, then
+    run the script Satellite returns for the token and activation key.
+
+    The script is downloaded first rather than piped into bash, so an expired
+    token reads as one instead of as bash choking on an error page. The token
+    reaches curl through a root-only header file, never the command line.
+    A marker of (URL, machine UUID) skips the work on a retry; a clone of a
+    registered machine has a different UUID and registers afresh.
+    """
+    url = ctx.profile.satellite_register_url
+    url_id = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+    header_b64 = base64.b64encode(
+        f"Authorization: Bearer {ctx.profile.satellite_token}".encode("utf-8")
+    ).decode("ascii")
+    host = shlex.quote(ctx.profile.satellite_host)
+    ca_url = shlex.quote(ctx.profile.satellite_ca_url)
+    return f"""{shell_preamble(ctx)}
+KS_MARK={SATELLITE_MARKER}
+KS_WANT="{url_id} $(cat /sys/class/dmi/id/product_uuid 2>/dev/null)"
+if [ -f "$KS_MARK" ] && [ "$(cat "$KS_MARK")" = "$KS_WANT" ] \\
+   && subscription-manager identity >/dev/null 2>&1; then
+  echo "Already registered with Satellite ({ctx.profile.satellite_host}) for this build: keeping it"
+  exit 0
+fi
+if ! command -v subscription-manager >/dev/null 2>&1; then
+  echo "subscription-manager is not installed; Satellite registration needs it." >&2
+  exit 1
+fi
+echo "Trusting the CA of {ctx.profile.satellite_host}"
+curl -k -sS --fail -m 60 -o /etc/pki/ca-trust/source/anchors/katello-server-ca.crt {ca_url}
+update-ca-trust
+# A VM cloned from a registered template carries the template's identity.
+subscription-manager clean
+umask 077
+KS_DIR="$(mktemp -d /run/.kubesight-satellite.XXXXXX)"
+trap 'rm -rf -- "$KS_DIR"' EXIT
+echo "{header_b64}" | base64 -d > "$KS_DIR/header"
+KS_CODE=$(curl -sS -m 120 -o "$KS_DIR/register.sh" -w '%{{http_code}}' \\
+  --header @"$KS_DIR/header" {shlex.quote(url)}) || {{
+  echo "Could not reach Satellite at {ctx.profile.satellite_host} to fetch the registration script." >&2
+  exit 1
+}}
+rm -f -- "$KS_DIR/header"
+case "$KS_CODE" in
+  2??) ;;
+  401|403)
+    echo "Satellite refused the registration token (HTTP $KS_CODE). Registration tokens expire: generate a new one in Satellite (Hosts > Register Host) and replace it on this source profile." >&2
+    exit 1 ;;
+  *)
+    echo "Satellite answered HTTP $KS_CODE instead of a registration script:" >&2
+    head -c 600 "$KS_DIR/register.sh" >&2
+    exit 1 ;;
+esac
+if ! head -1 "$KS_DIR/register.sh" | grep -q '^#!'; then
+  echo "Satellite did not return a registration script:" >&2
+  head -c 600 "$KS_DIR/register.sh" >&2
+  exit 1
+fi
+echo "Registering with Satellite through {ctx.profile.satellite_host}"
+bash "$KS_DIR/register.sh"
+subscription-manager identity
+mkdir -p "$(dirname "$KS_MARK")"
+echo "$KS_WANT" > "$KS_MARK"
+dnf repolist --enabled 2>/dev/null || true
+"""
+
+
 def kernel_prep_script(_ctx: ScriptContext) -> str:
     """Swap off + kernel modules + sysctl — identical across supported distros."""
     return """
@@ -272,9 +347,17 @@ class OsAdapter:
     id = ""
     display_name = ""
     validated_versions: tuple = ()
+    # Red Hat Satellite registers RHEL-family machines only.
+    supports_satellite = False
 
     def matches(self, facts: OsFacts) -> bool:
         raise NotImplementedError
+
+    def script_register_satellite(self, ctx: ScriptContext) -> Optional[str]:
+        """None when the profile does not register with Satellite."""
+        if not ctx.profile.registers_with_satellite:
+            return None
+        return satellite_registration_script(ctx)
 
     def version_validated(self, facts: OsFacts) -> bool:
         return any(facts.version_id.startswith(v) for v in self.validated_versions)

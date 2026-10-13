@@ -16,6 +16,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 
@@ -475,7 +476,9 @@ def _probe_script(build: ClusterBuild, node: ClusterBuildNode, profile: Resolved
     repo_urls = []
     image_urls = []
     if profile.repo_mode != "offline":
-        repo_urls.append(deb_repo)
+        # Satellite repositories only exist once the node has registered.
+        if profile.repo_mode != "satellite":
+            repo_urls.append(deb_repo)
         if node.role != "loadbalancer":
             for host in profile.registry_hosts():
                 repo_urls.append(f"https://{host}/v2/")
@@ -493,8 +496,19 @@ def _probe_script(build: ClusterBuild, node: ClusterBuildNode, profile: Resolved
     # Load balancers never install kubelet/kubeadm/kubectl, and an offline
     # build must not carry an outbound URL into the script at all.
     probe_packages = (
-        node.role != "loadbalancer" and profile.repo_mode != "offline"
+        node.role != "loadbalancer"
+        and profile.repo_mode not in ("offline", "satellite")
     )
+    # Reachability only: the capsule's CA is not trusted until base prep
+    # installs it, so these two requests skip verification and send nothing.
+    satellite_probe = ""
+    if profile.registers_with_satellite:
+        parts = urlsplit(profile.satellite_register_url)
+        register_base = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+        satellite_probe = f"""
+  echo "KS_SAT_CA=$(curl -k -m 8 -s -o /dev/null -w '%{{http_code}}' {shlex.quote(profile.satellite_ca_url)} 2>/dev/null)"
+  echo "KS_SAT_REG=$(curl -k -m 8 -s -o /dev/null -w '%{{http_code}}' {shlex.quote(register_base)} 2>/dev/null)"
+"""
     pkg_probe = "1" if probe_packages else "0"
     deb_packages_url = shlex.quote(
         deb_repo.rstrip("/") + "/Packages" if probe_packages else ""
@@ -643,9 +657,11 @@ if command -v curl >/dev/null 2>&1; then
   fi
   [ -z "$KS_CA_FILE" ] || rm -f -- "$KS_CA_FILE"
   KS_CA_FILE=""
+{satellite_probe}
 else
   echo "KS_CURL=missing"
 fi
+command -v subscription-manager >/dev/null 2>&1 && echo "KS_SUBMAN=present"
 if [ "{fsync_test}" = "1" ] && command -v dd >/dev/null 2>&1; then
   KS_FSYNC_FILE="$(mktemp /var/tmp/.kubesight-fsync.XXXXXX)" || exit 1
   start=$(date +%s%N 2>/dev/null || echo 0)
@@ -766,6 +782,56 @@ def _leftover_state_check(leftover: List[str], template_wipe: bool) -> Dict[str,
     )
 
 
+def _satellite_check(adapter, facts: Dict[str, Any], profile: ResolvedProfile):
+    """Can this node register with Satellite? Asked before anything is
+    installed: in Satellite mode every package depends on it."""
+    if not (profile.registers_with_satellite or profile.repo_mode == "satellite"):
+        return None
+    name = "Red Hat Satellite registration"
+    host = profile.satellite_host
+    if not adapter.supports_satellite:
+        return _check(
+            "satellite", name, "fail",
+            f"{adapter.display_name} cannot register with Red Hat Satellite.",
+            "This source profile registers machines with Satellite; use "
+            "RHEL-family machines, or a profile without Satellite.",
+        )
+    if "KS_SUBMAN" not in facts:
+        return _check(
+            "satellite", name, "fail",
+            "subscription-manager is not installed on this node.",
+            "Install subscription-manager in the VM template; Satellite's "
+            "registration script needs it.",
+        )
+    if facts.get("KS_CURL") == "missing":
+        return _check(
+            "satellite", name, "warn",
+            "curl is not installed; the capsule's reachability could not be probed.",
+        )
+    ca_code = str(facts.get("KS_SAT_CA", "")).strip()
+    reg_code = str(facts.get("KS_SAT_REG", "")).strip()
+    if not ca_code.startswith("2"):
+        return _check(
+            "satellite", name, "fail",
+            f"The CA certificate at {profile.satellite_ca_url} is not reachable "
+            f"from this node (HTTP {ca_code or 'no answer'}).",
+            f"Open HTTPS (443) from the node to {host}.",
+        )
+    if not reg_code or reg_code == "000":
+        return _check(
+            "satellite", name, "fail",
+            f"The registration endpoint on {urlsplit(profile.satellite_register_url).netloc} "
+            "does not answer from this node.",
+            "Open the registration port from the node to the capsule "
+            "(9090 by default).",
+        )
+    return _check(
+        "satellite", name, "pass",
+        f"{host} answers; base prep registers this node with the profile's "
+        "activation key before installing anything.",
+    )
+
+
 def _node_checks(
     build: ClusterBuild,
     node: ClusterBuildNode,
@@ -809,6 +875,10 @@ def _node_checks(
             f"this version is outside the validated set "
             f"({', '.join(adapter.validated_versions)}).",
         ))
+
+    satellite_check = _satellite_check(adapter, facts, profile)
+    if satellite_check is not None:
+        checks.append(satellite_check)
 
     if os_facts.arch not in ("x86_64", "amd64"):
         checks.append(_check(
@@ -986,6 +1056,14 @@ def _node_checks(
                 f"kubelet/kubeadm/kubectl {build.k8s_version} are already installed "
                 "on this machine; nothing is downloaded.",
             ))
+        elif profile.repo_mode == "satellite" and node.role != "loadbalancer":
+            checks.append(_check(
+                "k8s_packages", "Exact Kubernetes packages available", "warn",
+                f"kubelet/kubeadm/kubectl {build.k8s_version} and containerd.io "
+                "come from the repositories the activation key enables, which "
+                "only become visible once the node registers. Base prep stops "
+                "with a clear message if the key does not carry them.",
+            ))
         elif package_state == "ok":
             checks.append(_check(
                 "k8s_packages", "Exact Kubernetes packages available", "pass",
@@ -1025,6 +1103,12 @@ def _node_checks(
                 "cri_tools", "crictl available", "warn",
                 "crictl is not installed yet; base prep installs cri-tools "
                 "from the offline bundle, which must therefore carry it.",
+            ))
+        elif profile.repo_mode == "satellite":
+            checks.append(_check(
+                "cri_tools", "crictl available", "warn",
+                "crictl is not installed yet; base prep installs cri-tools "
+                "from the activation key's repositories, which must carry it.",
             ))
         elif cri_tools_state in ("ok", "repo_only"):
             checks.append(_check(

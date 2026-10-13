@@ -25,6 +25,9 @@ import {
   runStartedAt,
   shortDigest,
   sourceProfileSummary,
+  satelliteActivationKey,
+  satelliteUrlError,
+  splitSatelliteCommand,
   sshPosture,
   timeAgo,
   imageStatusText,
@@ -1139,5 +1142,40 @@ describe("deletePolicy", () => {
       provisioning: { vmCount: 0 } }).allowed).toBe(true);
     expect(deletePolicy({ status: "provision_failed", machineSource: "vmware",
       provisioning: { vmCount: 1 } })).toMatchObject({ allowed: false, destroyFirst: true });
+  });
+});
+
+describe("Satellite registration", () => {
+  const url = "https://capsule.example:9090/register?activation_keys=LEB-DOPS-9-DR_AK&organization_id=1";
+
+  it("splits the generated command into URL and token", () => {
+    const pasted = `set -o pipefail && curl --silent --show-error '${url}' --header 'Authorization: Bearer eyJabc.def.ghi'`;
+    expect(splitSatelliteCommand(pasted)).toEqual({ url, token: "eyJabc.def.ghi" });
+  });
+
+  it("leaves a bare URL alone", () => {
+    expect(splitSatelliteCommand(url)).toEqual({ url, token: "" });
+  });
+
+  it("validates the registration URL", () => {
+    expect(satelliteUrlError(url)).toBe("");
+    expect(satelliteUrlError("", true)).not.toBe("");
+    expect(satelliteUrlError(url.replace("https", "http"))).not.toBe("");
+    expect(satelliteUrlError(url.replace("/register", "/hosts"))).not.toBe("");
+    expect(satelliteUrlError("https://capsule.example:9090/register?organization_id=1")).not.toBe("");
+  });
+
+  it("names the activation key and the capsule in the summary", () => {
+    expect(satelliteActivationKey(url)).toBe("LEB-DOPS-9-DR_AK");
+    const summary = sourceProfileSummary({
+      repoMode: "satellite",
+      satelliteHost: "capsule.example",
+      satelliteRegisterUrl: url,
+      satelliteTokenConfigured: true,
+    });
+    expect(summary.packages).toBe("Red Hat Satellite");
+    expect(summary.registration).toBe("capsule.example · activation key LEB-DOPS-9-DR_AK");
+    expect(summary.incomplete).toBe("");
+    expect(sourceProfileSummary({ repoMode: "satellite" }).incomplete).not.toBe("");
   });
 });

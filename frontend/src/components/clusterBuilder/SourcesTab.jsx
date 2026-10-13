@@ -19,7 +19,9 @@ import AppProfiles from "./AppProfiles.jsx";
 import {
   bundleCoverage,
   freshness,
+  satelliteUrlError,
   sourceProfileSummary,
+  splitSatelliteCommand,
   sshPosture,
   timeAgo,
 } from "../../utils/clusterBuilder.js";
@@ -34,6 +36,7 @@ import {
   deleteVSphereConnection,
   testSshProfile,
   testVSphereConnection,
+  updateBuildProfile,
 } from "../../api/clusterBuildsApi.js";
 import { confirmDialog } from "../../lib/dialogs.js";
 
@@ -100,6 +103,8 @@ const EMPTY_SOURCE = {
   httpsProxy: "",
   noProxy: "",
   extraCaCertsPem: "",
+  satelliteRegisterUrl: "",
+  satelliteToken: "",
 };
 
 function imagePrefixError(value, required = false) {
@@ -130,12 +135,23 @@ function forwardProxyError(value) {
   }
 }
 
-/** The three questions, in the order someone actually answers them. */
+/** The four questions, in the order someone actually answers them. */
 function SourceProfileForm({ onSave, onClose, busy }) {
   const [form, setForm] = useState({ ...EMPTY_SOURCE });
   const [useProxy, setUseProxy] = useState(false);
   const [samePrefix, setSamePrefix] = useState(true);
+  const [registerSatellite, setRegisterSatellite] = useState(false);
   const set = (key, value) => setForm((previous) => ({ ...previous, [key]: value }));
+  // Packages from Satellite only exist once a machine has registered.
+  const useSatellite = registerSatellite || form.repoMode === "satellite";
+  const setSatelliteUrl = (text) => {
+    const { url, token } = splitSatelliteCommand(text);
+    setForm((previous) => ({
+      ...previous,
+      satelliteRegisterUrl: token ? url : text,
+      satelliteToken: token || previous.satelliteToken,
+    }));
+  };
 
   const k8sImageError = useProxy ? imagePrefixError(form.k8sImageRegistry, true) : "";
   const cniImageError = useProxy && !samePrefix ? imagePrefixError(form.cniImageRegistry) : "";
@@ -161,6 +177,7 @@ function SourceProfileForm({ onSave, onClose, busy }) {
       || !form.extraCaCertsPem.includes("-----END CERTIFICATE-----"))
     ? "Paste a PEM-encoded CA certificate."
     : "";
+  const satelliteError = useSatellite ? satelliteUrlError(form.satelliteRegisterUrl, true) : "";
 
   const valid = Boolean(
     form.name.trim()
@@ -168,6 +185,7 @@ function SourceProfileForm({ onSave, onClose, busy }) {
     && (form.repoMode !== "offline" || form.offlineBundlePath.trim())
     && !k8sImageError && !cniImageError && !addonImageError
     && !registryAuthError && !extraCaError && !httpProxyError && !httpsProxyError
+    && !satelliteError && (!useSatellite || form.satelliteToken.trim())
   );
 
   const save = () => {
@@ -190,6 +208,8 @@ function SourceProfileForm({ onSave, onClose, busy }) {
       httpProxy: form.httpProxy.trim(),
       httpsProxy: form.httpsProxy.trim(),
       noProxy: form.noProxy.trim(),
+      satelliteRegisterUrl: useSatellite ? form.satelliteRegisterUrl.trim() : "",
+      satelliteToken: useSatellite ? form.satelliteToken.trim() : "",
     });
   };
 
@@ -211,6 +231,7 @@ function SourceProfileForm({ onSave, onClose, busy }) {
           {[
             ["internet", "Upstream internet"],
             ["mirror", "Internal mirror"],
+            ["satellite", "Red Hat Satellite"],
             ["offline", "Offline bundle"],
           ].map(([value, label]) => (
             <button
@@ -237,6 +258,13 @@ function SourceProfileForm({ onSave, onClose, busy }) {
             />
           </Field>
         ) : null}
+        {form.repoMode === "satellite" ? (
+          <p className="a muted">
+            containerd.io, kubelet, kubeadm, kubectl and cri-tools come from the repositories
+            the activation key enables, so the key&apos;s content view must carry them.
+            RHEL machines only.
+          </p>
+        ) : null}
         {form.repoMode === "offline" ? (
           <Field htmlFor="src-bundle" hint="A directory on the KubeSight host holding the packages.">
             <input
@@ -247,6 +275,57 @@ function SourceProfileForm({ onSave, onClose, busy }) {
               placeholder="/srv/kubesight/bundles/k8s"
             />
           </Field>
+        ) : null}
+      </div>
+
+      <div className="sg-cb-qa">
+        <div className="q">Register RHEL machines with Red Hat Satellite?</div>
+        <div className="sg-cb-seg" role="group" aria-label="Satellite registration">
+          <button
+            type="button"
+            aria-pressed={!useSatellite}
+            disabled={form.repoMode === "satellite"}
+            onClick={() => setRegisterSatellite(false)}
+          >
+            No
+          </button>
+          <button type="button" aria-pressed={useSatellite} onClick={() => setRegisterSatellite(true)}>
+            Yes, before installing anything
+          </button>
+        </div>
+        {useSatellite ? (
+          <div className="sg-cb-qgrid">
+            <Field
+              label="Registration URL"
+              htmlFor="src-sat-url"
+              hint="From Satellite: Hosts → Register Host → Generate. Paste the URL or the whole command; a token in it moves to the token field."
+              error={form.satelliteRegisterUrl.trim() ? satelliteError : ""}
+            >
+              <textarea
+                id="src-sat-url"
+                rows={3}
+                className="sg-cb-input sg-cb-mono"
+                value={form.satelliteRegisterUrl}
+                onChange={(event) => setSatelliteUrl(event.target.value)}
+                placeholder="https://capsule.example:9090/register?activation_keys=…&organization_id=1"
+                aria-invalid={Boolean(form.satelliteRegisterUrl.trim() && satelliteError)}
+              />
+            </Field>
+            <Field
+              label="Registration token"
+              htmlFor="src-sat-token"
+              hint="Stored encrypted. Satellite tokens expire (4 hours by default): generate one with a long or unlimited life. It can be replaced later on this profile."
+            >
+              <input
+                id="src-sat-token"
+                type="password"
+                className="sg-cb-input sg-cb-mono"
+                value={form.satelliteToken}
+                onChange={(event) => set("satelliteToken", event.target.value)}
+                autoComplete="new-password"
+              />
+            </Field>
+          </div>
         ) : null}
       </div>
 
@@ -423,6 +502,9 @@ export default function SourcesTab({
   // The row whose connection test is running ("vs-3", "ssh-1"): a test can
   // take a while, and a second click would only queue another one.
   const [testing, setTesting] = useState(null);
+  // The source profile whose Satellite token is being replaced.
+  const [tokenFor, setTokenFor] = useState(null);
+  const [newToken, setNewToken] = useState("");
 
   const run = async (fn, after) => {
     setBusy(true);
@@ -827,7 +909,7 @@ export default function SourcesTab({
       {canManageBuildProfiles ? (
       <Group
         title="Packages & images"
-        description="Three questions decide a source profile: where packages come from, where images come from, and what stands in the way."
+        description="Four questions decide a source profile: where packages come from, whether machines register with Satellite, where images come from, and what stands in the way."
         action={(
           <button className="btn-outline" type="button"
                   onClick={() => setOpen(open === "source" ? null : "source")}>
@@ -859,6 +941,13 @@ export default function SourcesTab({
                     {summary.incomplete
                       ? <StatusPill status="fail">{summary.incomplete}</StatusPill>
                       : <StatusPill status="ok">complete</StatusPill>}
+                    {row.satelliteHost ? (
+                      <button className="btn-ghost btn-sm" type="button" disabled={busy}
+                              aria-expanded={tokenFor === row.id}
+                              onClick={() => { setTokenFor(tokenFor === row.id ? null : row.id); setNewToken(""); }}>
+                        Replace token
+                      </button>
+                    ) : null}
                     <button className="btn-ghost btn-sm" type="button" disabled={busy}
                             onClick={() => remove("source profile", row.name, () => deleteBuildProfile(row.id))}>
                       Remove
@@ -885,11 +974,49 @@ export default function SourcesTab({
                       : null}
                   </dd>
                 </div>
+                {summary.registration ? (
+                  <div>
+                    <dt>Registers with</dt>
+                    <dd className="sg-cb-mono">{summary.registration}</dd>
+                  </div>
+                ) : null}
                 <div>
                   <dt>In the way</dt>
                   <dd>{summary.obstacles.join(" · ")}</dd>
                 </div>
               </dl>
+              {tokenFor === row.id ? (
+                <div className="sg-cb-qform">
+                  <Field
+                    label="New Satellite registration token"
+                    htmlFor={`src-sat-new-${row.id}`}
+                    hint="Builds already using this profile pick it up on their next run or retry."
+                  >
+                    <input
+                      id={`src-sat-new-${row.id}`}
+                      type="password"
+                      className="sg-cb-input sg-cb-mono"
+                      value={newToken}
+                      onChange={(event) => setNewToken(event.target.value)}
+                      autoComplete="new-password"
+                    />
+                  </Field>
+                  <div className="sg-cb-actions">
+                    <button className="btn-ghost" type="button" onClick={() => setTokenFor(null)}>Cancel</button>
+                    <button
+                      className="primary"
+                      type="button"
+                      disabled={busy || !newToken.trim()}
+                      onClick={() => run(
+                        () => updateBuildProfile(row.id, { satelliteToken: newToken.trim() }),
+                        () => { setTokenFor(null); setNewToken(""); notify(`Satellite token replaced on ${row.name}.`); }
+                      )}
+                    >
+                      Save token
+                    </button>
+                  </div>
+                </div>
+              ) : null}
             </div>
           );
         })}

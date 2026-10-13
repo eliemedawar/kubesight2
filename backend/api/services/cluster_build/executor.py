@@ -374,6 +374,19 @@ def _phase_base_prep(build: ClusterBuild, resolved) -> None:
         ca_script = adapter.script_configure_ca(ctx)
         if ca_script:
             scripts.append(("Trusted CA certificates", ca_script))
+        if resolved.registers_with_satellite or resolved.repo_mode == "satellite":
+            if not adapter.supports_satellite:
+                raise _PhaseFailed(
+                    f"{node.hostname or node.address}: {adapter.display_name} "
+                    "cannot register with Red Hat Satellite; this source "
+                    "profile needs RHEL-family machines."
+                )
+            # Before any package: on RHEL every repository, the base ones
+            # included, arrives with the activation key.
+            scripts.append((
+                "Register with Red Hat Satellite",
+                adapter.script_register_satellite(ctx),
+            ))
         if node.role == "loadbalancer":
             scripts.append(("haproxy + keepalived install", adapter.script_install_haproxy_keepalived(ctx)))
         else:

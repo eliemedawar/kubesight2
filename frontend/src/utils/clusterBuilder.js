@@ -692,6 +692,47 @@ export function sshPosture(profile, credentials = []) {
 }
 
 /** The three questions a source profile answers, as answers. */
+/** Satellite's "Register Host" page hands out one command holding both the
+ *  registration URL and the bearer token. Split it so the token lands in the
+ *  password field and never sits visible in the URL field. Text that is not
+ *  that command comes back unchanged as the URL. */
+export function splitSatelliteCommand(text) {
+  const raw = String(text || "");
+  const token = (raw.match(/Bearer\s+([^\s'"]+)/i) || [])[1] || "";
+  const url = /\s/.test(raw.trim()) || token
+    ? (raw.match(/https:\/\/[^\s'"]+/) || [raw.trim()])[0]
+    : raw.trim();
+  return { url, token };
+}
+
+export function satelliteUrlError(value, required = false) {
+  const raw = String(value || "").trim();
+  if (!raw) return required ? "Paste the registration URL from Satellite." : "";
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return "Paste the https:// registration URL from Satellite's Register Host page.";
+  }
+  if (parsed.protocol !== "https:") return "The registration URL must use https://.";
+  if (parsed.pathname.replace(/\/+$/, "") !== "/register") {
+    return "The URL must point at Satellite's /register endpoint.";
+  }
+  if (!parsed.searchParams.get("activation_keys")) {
+    return "The URL must name an activation key (activation_keys=…).";
+  }
+  return "";
+}
+
+/** The activation key(s) a registration URL names, for display. */
+export function satelliteActivationKey(url) {
+  try {
+    return new URL(url).searchParams.get("activation_keys") || "";
+  } catch {
+    return "";
+  }
+}
+
 export function sourceProfileSummary(profile) {
   if (!profile) {
     return {
@@ -700,20 +741,29 @@ export function sourceProfileSummary(profile) {
       images: "Their upstream registries",
       imagesDetail: "",
       obstacles: ["No outbound proxy"],
+      registration: "",
       incomplete: "",
     };
   }
   const mode = profile.repoMode || "internet";
   const packages = mode === "mirror"
     ? "Internal package mirror"
-    : mode === "offline"
-      ? "Offline bundle"
-      : "Upstream internet repositories";
+    : mode === "satellite"
+      ? "Red Hat Satellite"
+      : mode === "offline"
+        ? "Offline bundle"
+        : "Upstream internet repositories";
   const packagesDetail = mode === "mirror"
     ? profile.k8sPkgRepoUrl || ""
-    : mode === "offline"
-      ? profile.offlineBundlePath || ""
-      : "";
+    : mode === "satellite"
+      ? profile.satelliteHost || ""
+      : mode === "offline"
+        ? profile.offlineBundlePath || ""
+        : "";
+  const activationKey = satelliteActivationKey(profile.satelliteRegisterUrl);
+  const registration = profile.satelliteHost
+    ? `${profile.satelliteHost}${activationKey ? ` · activation key ${activationKey}` : ""}`
+    : "";
   const proxied = Boolean(profile.k8sImageRegistry);
   const obstacles = [];
   if (profile.httpProxy || profile.httpsProxy) {
@@ -727,6 +777,8 @@ export function sourceProfileSummary(profile) {
   let incomplete = "";
   if (mode === "mirror" && !profile.k8sPkgRepoUrl) incomplete = "Mirror URL is missing.";
   if (mode === "offline" && !profile.offlineBundlePath) incomplete = "Bundle path is missing.";
+  if (mode === "satellite" && !profile.satelliteHost) incomplete = "Satellite registration is missing.";
+  if (profile.satelliteHost && !profile.satelliteTokenConfigured) incomplete = "Satellite token is missing.";
 
   return {
     packages,
@@ -734,6 +786,7 @@ export function sourceProfileSummary(profile) {
     images: proxied ? "A registry proxy" : "Their upstream registries",
     imagesDetail: proxied ? profile.k8sImageRegistry : "",
     obstacles,
+    registration,
     incomplete,
   };
 }

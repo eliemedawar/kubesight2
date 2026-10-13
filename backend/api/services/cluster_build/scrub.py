@@ -31,6 +31,8 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _BEARER_RE = re.compile(r"(Authorization:\s*Bearer\s+)\S+", re.IGNORECASE)
+# A bare JWT, e.g. a Satellite registration token echoed without its header.
+_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+")
 # Credentials embedded in an outbound proxy URL, e.g. http://user:pass@proxy.
 _URI_PASSWORD_RE = re.compile(
     r"((?:https?://)[^/\s:@]+:)[^@\s/]+(@)", re.IGNORECASE
@@ -56,6 +58,7 @@ def scrub(text: str) -> str:
     text = _PASSWORD_LINE_RE.sub(rf"\1{_REDACTED}", text)
     text = _SECRET_ASSIGNMENT_RE.sub(rf"\1{_REDACTED}", text)
     text = _BEARER_RE.sub(rf"\1{_REDACTED}", text)
+    text = _JWT_RE.sub(_REDACTED, text)
     text = _URI_PASSWORD_RE.sub(rf"\1{_REDACTED}\2", text)
     text = _PRIVATE_KEY_BLOCK_RE.sub(_REDACTED, text)
     text = _KUBECONFIG_KEY_RE.sub(rf"\1{_REDACTED}", text)

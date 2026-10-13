@@ -303,14 +303,20 @@ class SshHostKey(db.Model):
 
 
 class BuildProfile(db.Model):
-    """Where packages and images come from: internet | mirror | offline."""
+    """Where packages and images come from: internet | mirror | satellite | offline."""
 
     __tablename__ = "build_profiles"
 
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False, default="")
-    # internet | mirror | offline
+    # internet | mirror | satellite | offline
     repo_mode = db.Column(db.String(16), nullable=False, default="internet")
+    # Red Hat Satellite global registration: the URL Satellite's "Register
+    # Host" page generates (activation key, org, location, host group) and the
+    # bearer token it is called with. Every RHEL node registers before any
+    # package is installed.
+    satellite_register_url = db.Column(db.String(2048), nullable=True)
+    satellite_token_cipher = db.Column(db.Text, nullable=True)
     k8s_pkg_repo_url = db.Column(db.String(512), nullable=True)
     k8s_pkg_gpg_key_url = db.Column(db.String(512), nullable=True)
     cri_pkg_repo_url = db.Column(db.String(512), nullable=True)
