@@ -120,8 +120,10 @@ RHEL VMs, 4 vCPU / 8 GB, in DR", or "a small Kubernetes cluster for team X".
 Pick the `profile` from `vmProfiles` in the task (or `kubesight_ticket_get`) —
 copied exactly; each says where the VMs go, their OS, the default and largest
 size, how many one ticket may ask for, and whether Kubernetes is allowed. Give a
-`name` (lowercase, hyphens; the ticket's own name or its number, e.g.
-`tm-12345`), `count`, and `size` only for what the ticket states. For a cluster
+`name` — the name the ticket gives the VMs (lowercase, hyphens; they become
+`<name>-vm-1` …). A ticket that does not name them is an `impediment`: ask the
+requester for a name; never make one up and never use the ticket number. Then
+`count`, and `size` only for what the ticket states. For a cluster
 add `kubernetes: {shape: lab|small|standard-ha}` (2, 4 or 8 VMs) or `counts`.
 Nothing is created by the call: KubeSight makes the OpenTofu plan and a VM
 approver ALWAYS approves it first — no confidence skips that. If no profile

@@ -397,6 +397,18 @@ def retry_connect(build_id: int, job_id: int):
 
 
 @cluster_provisioning_bp.route(
+    "/api/cluster-builds/<int:build_id>/provision/installed-kubernetes", methods=["GET"]
+)
+@require_permission("cluster_builds:execute")
+def installed_kubernetes(build_id: int):
+    """What Kubernetes the build's VMs already have (asked over SSH)."""
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    return success_response(provisioning.installed_kubernetes(build))
+
+
+@cluster_provisioning_bp.route(
     "/api/cluster-builds/<int:build_id>/provision/install-kubernetes", methods=["POST"]
 )
 @require_permission("cluster_builds:execute")

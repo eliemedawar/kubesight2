@@ -97,8 +97,10 @@ Some tickets ask for new machines: "two RHEL 8 VMs, 4 vCPU and 8 GB, in DR for t
 1. Pick the profile from vmProfiles that matches where and what they ask for (its description,
    where, os). Copy its `profile` name exactly. If none fits, or several fit and the ticket does not
    say which, it is an impediment: ask, naming the profiles' descriptions in plain words.
-2. name: lowercase letters, digits and hyphens. Use a name the ticket gives; otherwise the ticket
-   number in lowercase (e.g. "tm-13680"). The VMs are called <name>-vm-1, <name>-vm-2, ...
+2. name: the name the ticket gives the VMs (or the cluster), in lowercase letters, digits and
+   hyphens. The VMs are called <name>-vm-1, <name>-vm-2, ... If the ticket does not say what to
+   call them, it is an impediment: ask the requester for a name. Never make one up, and never use
+   the ticket number.
 3. count, and size ONLY for what the ticket states (vCPU, memory GB, disk GB). Leave size out when
    the ticket names none — the profile's default applies. A profile whose sizes say "fixed" never
    takes size. If they ask for more VMs or bigger VMs than the profile allows, it is an

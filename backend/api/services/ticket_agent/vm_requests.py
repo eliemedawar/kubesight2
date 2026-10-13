@@ -36,9 +36,10 @@ provisioning jobs recover themselves, and this only ever reads where they are.
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import threading
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import func
@@ -70,6 +71,10 @@ FINISHED = ("ready", "cluster_ready", "apps_ready", "needs_attention", "failed",
             "rejected", "expired", "withdrawn")
 # vmRequest.kind for a request that installs apps on a cluster that exists.
 APPS_KIND = "apps"
+# A started Kubernetes install leaves 'vms_ready' within seconds (the build
+# turns into a draft and preflights). Still there after this long, the install
+# thread died — a backend restart, or a crash — and nobody would ever be told.
+INSTALL_STALL = timedelta(minutes=10)
 
 
 class VmRequestError(ValueError):
@@ -410,10 +415,33 @@ def _profile_named(name: Any) -> VmRequestProfile:
     return row
 
 
-def _name(raw: Any) -> str:
+# What Hermes must not fall back to when the ticket names no VMs: the VMs
+# would carry the ticket's number for their whole life.
+ASK_FOR_A_NAME = (
+    "The ticket must say what to call the VMs. Set it to impediment and ask the requester "
+    "for a name (lowercase letters, digits and hyphens; the VMs become <name>-vm-1, "
+    "<name>-vm-2 …) — never use the ticket number."
+)
+
+
+def _ticket_names(ticket: Optional[ZohoInboundTicket]) -> set:
+    """The ticket's own number and id, as a VM name would spell them."""
+    names = set()
+    for value in (getattr(ticket, "ticket_number", None), getattr(ticket, "ticket_id", None)):
+        text = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+        if text:
+            names.add(text)
+    return names
+
+
+def _name(raw: Any, ticket: Optional[ZohoInboundTicket] = None) -> str:
     from ..cluster_build.provisioning import service as provisioning_service
 
     name = str(raw or "").strip().lower()
+    if not name:
+        raise VmRequestError(f"name is required. {ASK_FOR_A_NAME}", 422)
+    if name in _ticket_names(ticket):
+        raise VmRequestError(f"name: {name} is the ticket's number. {ASK_FOR_A_NAME}", 422)
     try:
         provisioning_service.validate_cluster_name(name)
     except ValueError as exc:
@@ -424,13 +452,13 @@ def _name(raw: Any) -> str:
     if taken is not None:
         raise VmRequestError(
             f"name: a Cluster Builder build called {name} already exists (#{taken.id}, {taken.status}). "
-            "Choose another name — the ticket number works, e.g. tm-12345.",
+            "Set the ticket to impediment and ask the requester for another name.",
             409,
         )
     return name
 
 
-def parse(arguments: Dict[str, Any]) -> Dict[str, Any]:
+def parse(arguments: Dict[str, Any], ticket: Optional[ZohoInboundTicket] = None) -> Dict[str, Any]:
     """The request, checked against its profile. Raises VmRequestError."""
     from ..cluster_build.provisioning import templates
 
@@ -489,9 +517,13 @@ def parse(arguments: Dict[str, Any]) -> Dict[str, Any]:
                 f"Kubernetes needs every VM at least {_describe_size(KUBERNETES_MINIMUM)}; "
                 f"this asks for {_describe_size(size)}.", 422,
             )
+        asked = (arguments.get("kubernetes") or {}).get("version")
         kubernetes = {
             "counts": counts,
-            "version": _k8s_version((arguments.get("kubernetes") or {}).get("version")),
+            "version": _k8s_version(asked),
+            # Not named on the ticket: the VMs' own Kubernetes is used when
+            # their template carries a version the Cluster Builder can build.
+            "versionAsked": bool(str(asked or "").strip()),
         }
     app_rows = _app_profiles(arguments.get("apps"))
     if app_rows and kubernetes is None:
@@ -509,7 +541,7 @@ def parse(arguments: Dict[str, Any]) -> Dict[str, Any]:
         raise VmRequestError(str(exc)) from exc
     return {
         "profile": profile,
-        "name": _name(arguments.get("name")),
+        "name": _name(arguments.get("name"), ticket),
         "count": count,
         "size": size,
         "kubernetes": kubernetes,
@@ -566,7 +598,7 @@ def request(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[str, A
     except schema.ContractError as exc:
         raise engine.AgentError(str(exc), 400)
     try:
-        req = parse(arguments)
+        req = parse(arguments, ticket)
     except VmRequestError as exc:
         raise engine.AgentError(
             f"Refused: {exc} Fix the arguments, or set the ticket to impediment and ask the requester.",
@@ -933,11 +965,20 @@ def _advance_one(task: TicketInterpretation) -> bool:
     if status == "vms_ready":
         if vm.get("kubernetes") and not vm.get("installStarted"):
             vm["installStarted"] = True
+            vm["installStartedAt"] = engine_now().isoformat()
             vm["phase"] = "installing"
             _save(task, vm)
             _start_install(task.id)
             return True
         if vm.get("kubernetes"):
+            if _install_stalled(vm):
+                _install_failed(
+                    task.id,
+                    "The Kubernetes install stopped before it started on the VMs (the KubeSight "
+                    "backend restarted, or the install crashed — its log says why). Use Install "
+                    "Kubernetes on the build to continue; its Helm apps install after it.",
+                )
+                return True
             return False  # the install thread is on it
         return _finish(task, "ready", build=build)
     if status in ("preflighting", "preflight_passed", "building"):
@@ -1040,13 +1081,62 @@ def _approve_apps(task: TicketInterpretation, by: str) -> None:
     _save(task, vm)
 
 
+def engine_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _install_stalled(vm: Dict[str, Any]) -> bool:
+    raw = vm.get("installStartedAt")
+    if not raw:
+        return True  # started before the time was recorded, and still not moving
+    try:
+        started = datetime.fromisoformat(raw)
+    except ValueError:
+        return True
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return engine_now() - started > INSTALL_STALL
+
+
+def _install_failed(task_id: int, note: str) -> None:
+    """Kubernetes did not go on: say why on the request, on the build page,
+    and to Hermes (one follow-up) — never a request that just stops."""
+    from ..cluster_build.provisioning import jobs
+    from ..cluster_build.scrub import scrub
+
+    note = scrub(note)[:1500]
+    task = db.session.get(TicketInterpretation, task_id)
+    vm = _vm(task)
+    vm["installNote"] = note
+    _save(task, vm)
+    build = db.session.get(ClusterBuild, vm.get("buildId") or 0)
+    if build is not None:
+        # The build page shows the VM job's hand-off note under OpenTofu.
+        job = next((j for j in jobs.jobs_for(build.id) if j.operation == "create"), None)
+        if job is not None:
+            job.progress_json = {**(job.progress_json or {}), "handoffNote": note[:1000]}
+            db.session.commit()
+    _finish(task, "needs_attention", build=build, note=note)
+
+
+def _install_guarded(task_id: int) -> None:
+    """The install, with any crash reported instead of only logged."""
+    try:
+        _install(task_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Installing Kubernetes for VM request task %s crashed", task_id)
+        db.session.rollback()
+        try:
+            _install_failed(task_id, f"Kubernetes could not be installed: {exc}")
+        except Exception:  # noqa: BLE001
+            db.session.rollback()
+            logger.exception("Could not record the failed install of VM request task %s", task_id)
+
+
 def _install_in_app(app, task_id: int) -> None:
     with app.app_context():
         try:
-            _install(task_id)
-        except Exception:  # noqa: BLE001
-            logger.exception("Installing Kubernetes for VM request task %s crashed", task_id)
-            db.session.rollback()
+            _install_guarded(task_id)
         finally:
             db.session.remove()
 
@@ -1057,7 +1147,7 @@ def _start_install(task_id: int) -> None:
 
     app = current_app._get_current_object()
     if app.config.get("TESTING"):
-        _install(task_id)
+        _install_guarded(task_id)
         return
     threading.Thread(target=_install_in_app, args=(app, task_id),
                      name=f"vm-request-{task_id}-install", daemon=True).start()
@@ -1075,18 +1165,14 @@ def _install(task_id: int) -> None:
     try:
         note = provisioning_service.install_kubernetes(
             build,
-            {"counts": kubernetes.get("counts"), "k8sVersion": kubernetes.get("version")},
+            {"counts": kubernetes.get("counts"),
+             "k8sVersion": kubernetes.get("version") if kubernetes.get("versionAsked", True) else None},
             actor=f"hermes · {task.ticket_number}"[:120],
             user=None,
         )
     except ValueError as exc:
         db.session.rollback()
-        task = db.session.get(TicketInterpretation, task_id)
-        vm = _vm(task)
-        vm["installNote"] = f"Kubernetes could not be installed: {exc}"
-        _save(task, vm)
-        build = db.session.get(ClusterBuild, vm.get("buildId") or 0)
-        _finish(task, "needs_attention", build=build, note=vm["installNote"])
+        _install_failed(task_id, f"Kubernetes could not be installed: {exc}")
         return
     task = db.session.get(TicketInterpretation, task_id)
     vm = _vm(task)
@@ -1222,8 +1308,12 @@ def approval_text(task: TicketInterpretation, ticket: Optional[ZohoInboundTicket
     kubernetes = vm.get("kubernetes")
     if kubernetes:
         counts = kubernetes.get("counts") or {}
+        version = (
+            kubernetes.get("version") if kubernetes.get("versionAsked", True)
+            else f"(the version already on the VMs, else {kubernetes.get('version')})"
+        )
         lines.append(
-            f"Then Kubernetes {kubernetes.get('version')}: {counts.get('controlPlane', 0)} control plane(s), "
+            f"Then Kubernetes {version}: {counts.get('controlPlane', 0)} control plane(s), "
             f"{counts.get('worker', 0)} worker(s), {counts.get('loadbalancer', 0)} load balancer(s)."
         )
     if vm.get("apps"):

@@ -187,6 +187,18 @@ class TestRefusals:
         with pytest.raises(engine.AgentError, match="already exists"):
             _ask(_ticket(subject="second"))
 
+    @pytest.mark.parametrize("name", [None, "", "dr-7001", "DR-7001"])
+    def test_the_ticket_must_name_the_vms(self, vm_agent, writes, name):
+        """No name, or the ticket's own number: Hermes asks the requester instead."""
+        ticket = _ticket(subject="Need VMs")  # ticket number DR-7001
+        with pytest.raises(engine.AgentError, match="ask the requester for a name"):
+            _ask(ticket, name=name)
+        assert ClusterBuild.query.count() == 0 and writes == []
+
+    def test_a_name_the_ticket_gives_is_used(self, vm_agent, writes):
+        result = _ask(_ticket(subject="Two VMs called batch-dr"), name="batch-dr")
+        assert result["vmNames"] == ["batch-dr-vm-1", "batch-dr-vm-2"]
+
     def test_one_request_at_a_time_per_ticket(self, vm_agent, writes):
         ticket = _ticket(subject="Need VMs")
         _ask(ticket)
@@ -431,6 +443,88 @@ class TestKubernetes:
         event = followups[-1]["event"]
         assert event["result"] == "cluster_ready" and event["clusterId"]
         assert {v["role"] for v in event["vms"]} == {"controlPlane", "worker"}
+
+    def _approved_lab(self, client, app, vm_agent, name):
+        vm_requests.update_profile(vm_agent["id"], {"allowKubernetes": True})
+        ticket = _ticket(subject="A lab cluster please")
+        _ask(ticket, name=name, count=None, kubernetes={"shape": "lab"})
+        task = _task(ticket)
+        other = second_admin_token(client, app)
+        response = client.post(f"/api/ticket-agent/tasks/{task.id}/approve", headers=auth_headers(other))
+        assert response.status_code == 200, response.get_json()
+        return ticket, task
+
+    def test_a_crashed_install_is_reported_not_silent(
+        self, client, app, vm_agent, writes, monkeypatch, fake_ssh,
+    ):
+        from api.services.cluster_build.provisioning import service as provisioning_service
+        from api.services.cluster_build.provisioning import jobs
+
+        ticket, task = self._approved_lab(client, app, vm_agent, "tm-611")
+        monkeypatch.setattr(provisioning_service, "install_kubernetes",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("kaboom")))
+        followups = []
+        _fake_hermes(monkeypatch, lambda message: followups.append(message) and None)
+        engine.tick()
+        vm = _vm(task)
+        assert vm["phase"] == "needs_attention" and "kaboom" in vm["installNote"]
+        build = db.session.get(ClusterBuild, vm["buildId"])
+        job = next(j for j in jobs.jobs_for(build.id) if j.operation == "create")
+        assert "kaboom" in job.progress_json["handoffNote"]
+        engine.tick()
+        assert followups[-1]["event"]["result"] == "needs_attention"
+
+    def test_an_install_that_never_moved_is_reported(
+        self, client, app, vm_agent, writes, monkeypatch, fake_ssh,
+    ):
+        # The install thread dies with the backend: started, never moved.
+        monkeypatch.setattr(vm_requests, "_start_install", lambda task_id: None)
+        ticket, task = self._approved_lab(client, app, vm_agent, "tm-612")
+        _fake_hermes(monkeypatch, lambda message: None)
+        engine.tick()
+        vm = _vm(task)
+        assert vm["phase"] == "installing" and vm["installStarted"]
+        engine.tick()  # not stalled yet: still waiting
+        assert _vm(task)["phase"] == "installing"
+        vm["installStartedAt"] = "2026-01-01T00:00:00+00:00"
+        task.decision = {**task.decision, "vmRequest": vm}
+        db.session.commit()
+        engine.tick()
+        vm = _vm(task)
+        assert vm["phase"] == "needs_attention" and "Install Kubernetes" in vm["installNote"]
+
+    @pytest.mark.parametrize("ticket_names_a_version", [False, True])
+    def test_the_vms_own_kubernetes_is_used_unless_the_ticket_names_one(
+        self, client, app, vm_agent, writes, monkeypatch, fake_ssh, ticket_names_a_version,
+    ):
+        from api.services.cluster_build import k8s_versions
+
+        offered = k8s_versions.supported_versions()
+        newest, carried = offered[0], offered[-1]
+        vm_requests.update_profile(vm_agent["id"], {"allowKubernetes": True})
+        ticket = _ticket(subject="A lab cluster")
+        kubernetes = {"shape": "lab", **({"version": newest} if ticket_names_a_version else {})}
+        _ask(ticket, name="tm-621", count=None, kubernetes=kubernetes)
+        task = _task(ticket)
+        assert _vm(task)["kubernetes"]["versionAsked"] is ticket_names_a_version
+
+        fake = build_default_fake({
+            "10.20.30.50": ("tm-621-vm-1", "control_plane"),
+            "10.20.30.51": ("tm-621-vm-2", "worker"),
+        })
+        # The template carries an older Kubernetes on every VM.
+        fake.responders.insert(0, (
+            lambda h, s: "KS_HAS_$tool" in s and "preflight probe" not in s,
+            "".join(f"KS_HAS_{t}=v{carried}\n" for t in ("kubeadm", "kubelet", "kubectl")),
+        ))
+        set_transport_factory(lambda: fake)
+        other = second_admin_token(client, app)
+        assert client.post(f"/api/ticket-agent/tasks/{task.id}/approve",
+                           headers=auth_headers(other)).status_code == 200
+        _fake_hermes(monkeypatch, lambda message: None)
+        engine.tick()
+        build = db.session.get(ClusterBuild, _vm(task)["buildId"])
+        assert build.k8s_version == (newest if ticket_names_a_version else carried)
 
     def test_kubernetes_needs_big_enough_vms(self, vm_agent, writes):
         vm_requests.update_profile(vm_agent["id"], {"allowKubernetes": True})

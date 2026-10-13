@@ -128,3 +128,39 @@ class TestScripts:
             )
         assert 'if [ -z "$KS_STATE" ]' in script
         assert script.index("exit 0") < script.index("kubeadm reset -f")
+
+
+class TestKubernetesTheTemplateCarries:
+    """The VMs already have this exact Kubernetes: nothing is downloaded."""
+
+    READY = {f"KS_HAS_{tool}": f"v{VERSION}" for tool in ("kubeadm", "kubelet", "kubectl")}
+
+    def test_packages_need_no_repository(self, app):
+        with app.app_context():
+            repo = default_profile().k8s_pkg_repo("debian", MINOR)
+        checks = _checks(app, _cp(), KS_CRICTL="present", KS_PKG_EXACT="missing",
+                         repo_fail=[repo], **self.READY)
+        assert checks["k8s_packages"]["status"] == "pass"
+        assert "nothing is downloaded" in checks["k8s_packages"]["detail"]
+        assert "repo" not in checks  # the unreachable package repo is not needed
+
+    def test_another_version_still_needs_the_repository(self, app):
+        with app.app_context():
+            repo = default_profile().k8s_pkg_repo("debian", MINOR)
+        older = {f"KS_HAS_{tool}": "v1.20.0" for tool in ("kubeadm", "kubelet", "kubectl")}
+        checks = _checks(app, _cp(), KS_CRICTL="present", KS_PKG_EXACT="missing",
+                         repo_fail=[repo], **older)
+        assert checks["k8s_packages"]["status"] == "fail"
+        assert checks["repo"]["status"] == "fail"
+
+    @pytest.mark.parametrize("os_id,like", [("ubuntu", "debian"), ("rocky", "rhel fedora")])
+    def test_base_prep_keeps_what_is_there(self, app, os_id, like):
+        adapter = os_adapters.detect(OsFacts(os_id=os_id, os_id_like=like, version_id="24.04"))
+        with app.app_context():
+            ctx = ScriptContext(profile=default_profile(), k8s_version=VERSION)
+            packages = adapter.script_install_kube_packages(ctx)
+            containerd = adapter.script_install_containerd(ctx)
+        # The early exit comes before any repository is touched.
+        assert "already installed" in packages
+        assert packages.index("exit 0") < packages.index("kubesight-kubernetes")
+        assert "containerd is already installed" in containerd

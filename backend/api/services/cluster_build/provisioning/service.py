@@ -685,6 +685,70 @@ def _reserve_vip(build: ClusterBuild) -> str:
     raise ValueError(f"No free API address on {spec.get('networkName')}: the ones tried all answer.")
 
 
+# Prints what Kubernetes a machine already has — a VM template is often made
+# with kubeadm, kubelet and kubectl on it.
+_INSTALLED_PROBE = """
+for tool in kubeadm kubelet kubectl; do
+  command -v $tool >/dev/null 2>&1 || continue
+  case $tool in
+    kubeadm) KS_V=$(kubeadm version -o short 2>/dev/null) ;;
+    kubelet) KS_V=$(kubelet --version 2>/dev/null) ;;
+    kubectl) KS_V=$(kubectl version --client 2>/dev/null) ;;
+  esac
+  echo "KS_HAS_$tool=$(echo "$KS_V" | grep -oE 'v[0-9]+[.][0-9]+[.][0-9]+' | head -1)"
+done
+exit 0
+"""
+
+
+def installed_kubernetes(build: ClusterBuild) -> Dict[str, Any]:
+    """What Kubernetes the build's VMs already carry, asked over SSH.
+
+    ``version`` is set when every VM has kubeadm and kubelet at one version
+    ("1.33.2"); ``supported`` says whether the Cluster Builder can build that
+    version. Never raises for a machine that cannot be asked: it is listed
+    with its error.
+    """
+    from ...ssh import get_transport
+    from .. import k8s_versions
+    from ..executor import _target_for
+    from ..scrub import scrub
+
+    transport = get_transport()
+    machines: List[Dict[str, Any]] = []
+    for node in sorted(build.nodes, key=lambda n: n.position):
+        row: Dict[str, Any] = {"name": node.vsphere_vm_name or node.hostname, "address": node.address}
+        try:
+            output = transport.run(_target_for(build, node), _INSTALLED_PROBE, timeout_s=60).output
+        except Exception as exc:  # noqa: BLE001 — a machine that cannot answer is reported
+            row["error"] = scrub(str(exc))[:300]
+            machines.append(row)
+            continue
+        for line in (output or "").splitlines():
+            key, _, value = line.strip().partition("=")
+            if key.startswith("KS_HAS_"):
+                row[key[len("KS_HAS_"):]] = value.lstrip("v") or "unknown"
+        machines.append(row)
+
+    versions = {
+        (m.get("kubeadm"), m.get("kubelet")) for m in machines if not m.get("error")
+    }
+    version = None
+    if machines and len(versions) == 1 and not any(m.get("error") for m in machines):
+        kubeadm, kubelet = next(iter(versions))
+        if kubeadm and kubeadm == kubelet and kubeadm != "unknown":
+            version = kubeadm
+    supported = False
+    reason = ""
+    if version:
+        try:
+            k8s_versions.validate_version(version)
+            supported = True
+        except ValueError as exc:
+            reason = str(exc)
+    return {"machines": machines, "version": version, "supported": supported, "reason": reason}
+
+
 def install_kubernetes(build: ClusterBuild, payload: Optional[Dict[str, Any]] = None, *,
                        actor: str = "", user=None) -> Optional[str]:
     """Turn a VMs-only build into a cluster build on the VMs it already has.
@@ -714,6 +778,12 @@ def install_kubernetes(build: ClusterBuild, payload: Optional[Dict[str, Any]] = 
     counts = templates.counts_for_vms(payload.get("counts"), total)
     if payload.get("k8sVersion"):
         build.k8s_version = k8s_versions.validate_version(payload["k8sVersion"])
+    else:
+        # Nobody named a version: the one the VMs already carry wins (nothing
+        # is reinstalled), when the Cluster Builder can build it.
+        found = installed_kubernetes(build)
+        if found["version"] and found["supported"]:
+            build.k8s_version = found["version"]
 
     machines = _assign_roles(build, counts)
     _sync_nodes(build, machines)

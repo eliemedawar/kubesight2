@@ -8,6 +8,7 @@ from typing import Optional
 from ..profiles import DEFAULT_CRI_REPO_RPM
 from .base import (
     OsAdapter,
+    already_installed_check,
     OsFacts,
     ScriptContext,
     containerd_config_script,
@@ -46,9 +47,13 @@ update-ca-trust
         # (or the profile's mirror of it) carries containerd.io.
         cri_repo = ctx.profile.cri_pkg_repo_url or DEFAULT_CRI_REPO_RPM
         return f"""{shell_preamble(ctx)}
-dnf install -y dnf-plugins-core
-dnf config-manager --add-repo "{cri_repo}"
-dnf install -y containerd.io
+if command -v containerd >/dev/null 2>&1; then
+  echo "containerd is already installed ($(containerd --version 2>/dev/null | head -1)); configuring it"
+else
+  dnf install -y dnf-plugins-core
+  dnf config-manager --add-repo "{cri_repo}"
+  dnf install -y containerd.io
+fi
 {containerd_config_script(ctx)}
 """
 
@@ -61,6 +66,7 @@ dnf install -y containerd.io
         version = ctx.k8s_version.lstrip("v")
         return f"""{shell_preamble(ctx)}
 K8S_VER="{version}"
+{already_installed_check()}
 cat > /etc/yum.repos.d/kubesight-kubernetes.repo <<EOF
 [kubesight-kubernetes]
 name=Kubernetes (KubeSight)

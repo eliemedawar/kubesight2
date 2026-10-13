@@ -14,6 +14,7 @@ from ....upgrade_executor import _APT_SHELL_PREAMBLE
 from ..profiles import DEFAULT_K8S_PKG_REPO_DEB
 from .base import (
     OsAdapter,
+    already_installed_check,
     OsFacts,
     ScriptContext,
     containerd_config_script,
@@ -46,10 +47,17 @@ update-ca-certificates
 """
 
     def script_install_containerd(self, ctx: ScriptContext) -> str:
+        # A machine (or its VM template) that already has containerd — often
+        # Docker's containerd.io — keeps it: installing the distro package over
+        # it would fight that one. It is configured either way.
         return f"""{shell_preamble(ctx)}
 {_APT_SHELL_PREAMBLE}
-_apt update -qq
-_apt install -y -qq containerd
+if command -v containerd >/dev/null 2>&1; then
+  echo "containerd is already installed ($(containerd --version 2>/dev/null | head -1)); configuring it"
+else
+  _apt update -qq
+  _apt install -y -qq containerd
+fi
 {containerd_config_script(ctx)}
 """
 
@@ -59,6 +67,7 @@ _apt install -y -qq containerd
         version = ctx.k8s_version.lstrip("v")
         return f"""{shell_preamble(ctx)}
 K8S_VER="{version}"
+{already_installed_check()}
 {_APT_SHELL_PREAMBLE}
 _apt update -qq
 _apt install -y -qq ca-certificates curl gpg

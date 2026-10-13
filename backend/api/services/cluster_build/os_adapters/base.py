@@ -210,6 +210,26 @@ KS_STATE="${{KS_STATE# }}"
 """
 
 
+def already_installed_check() -> str:
+    """Shell that ends the package step early when the machine already has
+    kubeadm, kubelet and kubectl at ``$K8S_VER`` and crictl: nothing is
+    downloaded, which is what lets a VM template's own Kubernetes build a
+    cluster even where the package repository is out of reach."""
+    return """
+ks_ver() { "$@" 2>/dev/null | grep -oE 'v[0-9]+[.][0-9]+[.][0-9]+' | head -1; }
+if [ "$(ks_ver kubeadm version -o short)" = "v$K8S_VER" ] \
+   && [ "$(ks_ver kubelet --version)" = "v$K8S_VER" ] \
+   && [ "$(ks_ver kubectl version --client)" = "v$K8S_VER" ] \
+   && command -v crictl >/dev/null 2>&1; then
+  echo "kubeadm, kubelet and kubectl v$K8S_VER are already installed (with crictl): keeping them"
+  apt-mark hold kubelet kubeadm kubectl >/dev/null 2>&1 || true
+  systemctl enable kubelet
+  kubeadm version -o short
+  exit 0
+fi
+"""
+
+
 def clear_template_state_script(_ctx: ScriptContext) -> str:
     """Remove a previous cluster's state from a VM cloned for this build.
 

@@ -258,6 +258,10 @@ export const retryProvisionConnect = (id, jobId) => jobAction(id, jobId, "retry-
 export const stopProvisionWait = (id, jobId) => jobAction(id, jobId, "stop");
 
 /** A VMs-only build whose VMs are ready: preflight them and build Kubernetes. */
+/** What Kubernetes the build's VMs already carry (asked over SSH). */
+export const getInstalledKubernetes = (id) =>
+  request(`/api/cluster-builds/${id}/provision/installed-kubernetes`);
+
 export const installKubernetesOnVms = (id, payload = {}) =>
   request(`/api/cluster-builds/${id}/provision/install-kubernetes`, { method: "POST", body: payload });
 

@@ -935,8 +935,17 @@ def _node_checks(
             "TLS and etcd both suffer under clock skew; enable NTP/chrony." if status != "pass" else "",
         ))
 
+    wanted = f"v{build.k8s_version.lstrip('v')}"
+    tools_ready = node.role != "loadbalancer" and all(
+        facts.get(f"KS_HAS_{tool}") == wanted for tool in ("kubeadm", "kubelet", "kubectl")
+    ) and facts.get("KS_CRICTL") == "present"
+    package_repo = profile.k8s_pkg_repo("debian", ".".join(build.k8s_version.split(".")[:2]))
     if profile.repo_mode != "offline":
         for url in facts.get("repo_fail", []):
+            if tools_ready and url == package_repo:
+                # The machine already has this exact Kubernetes: base prep
+                # downloads nothing from the package repository.
+                continue
             checks.append(_check(
                 "repo", "Repository reachability", "fail",
                 f"Unreachable from this node: {url}",
@@ -971,7 +980,13 @@ def _node_checks(
             ))
 
         package_state = facts.get("KS_PKG_EXACT")
-        if package_state == "ok":
+        if tools_ready:
+            checks.append(_check(
+                "k8s_packages", "Exact Kubernetes packages available", "pass",
+                f"kubelet/kubeadm/kubectl {build.k8s_version} are already installed "
+                "on this machine; nothing is downloaded.",
+            ))
+        elif package_state == "ok":
             checks.append(_check(
                 "k8s_packages", "Exact Kubernetes packages available", "pass",
                 f"kubelet/kubeadm/kubectl {build.k8s_version} are published by "

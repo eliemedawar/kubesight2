@@ -29,6 +29,7 @@ import {
   createClusterTemplate,
   discardProvisionJob,
   getProvisionJobConfig,
+  getInstalledKubernetes,
   installKubernetesOnVms,
   stopProvisionWait,
   planClusterVms,
@@ -358,6 +359,24 @@ function InstallChooser({ build, catalog, k8sVersions, busy, onInstall, onClose 
   const versions = k8sVersions.includes(build.k8sVersion) || !build.k8sVersion
     ? k8sVersions : [build.k8sVersion, ...k8sVersions];
   const [version, setVersion] = useState(build.k8sVersion || versions[0] || "");
+  // What the VMs already have — a template often carries kubeadm, kubelet and
+  // kubectl. When it is a version KubeSight builds, it is chosen by default
+  // and nothing is reinstalled.
+  const [installed, setInstalled] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    getInstalledKubernetes(build.id)
+      .then((data) => {
+        if (cancelled) return;
+        setInstalled(data);
+        if (data?.version && data.supported) setVersion(data.version);
+      })
+      .catch(() => { if (!cancelled) setInstalled({ error: true }); });
+    return () => { cancelled = true; };
+  }, [build.id]);
+  const shownVersions = installed?.version && installed.supported && !versions.includes(installed.version)
+    ? [installed.version, ...versions] : versions;
+  const anyTools = (installed?.machines || []).some((m) => m.kubeadm || m.kubelet || m.kubectl);
   const chosen = shapes.find((shape) => shape.key === key);
   // Roles go to the VMs in order: balancers first, then control planes, then workers.
   const roles = chosen
@@ -412,12 +431,38 @@ function InstallChooser({ build, catalog, k8sVersions, busy, onInstall, onClose 
       {chosen?.counts.loadbalancer ? (
         <p className="muted">The API address (VIP) is reserved from the network&apos;s range when you install.</p>
       ) : null}
+      {installed === null ? (
+        <p className="muted">Checking whether the VMs already have Kubernetes…</p>
+      ) : installed.error ? null : installed.version && installed.supported ? (
+        <p className="sg-cb-pv-installed">
+          These VMs already have Kubernetes <b>v{installed.version}</b> (kubeadm, kubelet, kubectl).
+          {version === installed.version
+            ? " It is used as it is — nothing is downloaded or reinstalled."
+            : ` Installing v${version} replaces it.`}
+        </p>
+      ) : installed.version ? (
+        <p className="sg-cb-pv-installed">
+          These VMs have Kubernetes v{installed.version}, which the Cluster Builder cannot build
+          ({installed.reason || "unsupported version"}). Installing v{version} replaces it.
+        </p>
+      ) : anyTools ? (
+        <p className="sg-cb-pv-installed">
+          The VMs have some Kubernetes tools, but not one matching set on every VM — installing
+          v{version} puts the same version on all of them.
+        </p>
+      ) : (
+        <p className="muted">No Kubernetes on these VMs yet: v{version} is installed.</p>
+      )}
       <div className="sg-cb-actions">
         {versions.length ? (
           <label className="sg-cb-inlinecheck">
             Kubernetes
             <select className="sg-cb-input" value={version} onChange={(event) => setVersion(event.target.value)}>
-              {versions.map((item) => <option key={item} value={item}>v{item}</option>)}
+              {shownVersions.map((item) => (
+                <option key={item} value={item}>
+                  v{item}{installed?.version === item ? " (already on the VMs)" : ""}
+                </option>
+              ))}
             </select>
           </label>
         ) : null}
