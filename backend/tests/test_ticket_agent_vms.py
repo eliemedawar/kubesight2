@@ -632,3 +632,18 @@ def _task_latest():
         TicketInterpretation.query.filter_by(route=vm_requests.ROUTE)
         .order_by(TicketInterpretation.id.desc()).first()
     )
+
+
+class TestContainerDataPath:
+    def test_builds_from_tickets_keep_data_on_the_profile_path(self, vm_agent, writes):
+        from api.models import ClusterBuild
+
+        updated = vm_requests.update_profile(vm_agent["id"], {"diskCheckPath": "/data"})
+        assert updated["diskCheckPath"] == "/data"
+        _ask(_ticket(subject="Two VMs"))
+        build = db.session.get(ClusterBuild, _vm(_task_latest())["buildId"])
+        assert build.disk_check_path == "/data"
+
+    def test_a_relative_path_is_refused(self, vm_agent):
+        with pytest.raises(vm_requests.VmRequestError):
+            vm_requests.update_profile(vm_agent["id"], {"diskCheckPath": "data"})

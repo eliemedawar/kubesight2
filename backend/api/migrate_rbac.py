@@ -219,6 +219,7 @@ def _migrate_cluster_build_columns() -> None:
     _add_column_if_missing("build_profiles", "satellite_register_url", "VARCHAR(2048)")
     _add_column_if_missing("build_profiles", "satellite_token_cipher", "TEXT")
     _add_column_if_missing("vm_request_profiles", "build_profile_id", "INTEGER")
+    _add_column_if_missing("vm_request_profiles", "disk_check_path", "VARCHAR(255)")
     for col, sql_type in [
         ("provisioning_username", "VARCHAR(255)"),
         ("provisioning_password_cipher", "TEXT"),

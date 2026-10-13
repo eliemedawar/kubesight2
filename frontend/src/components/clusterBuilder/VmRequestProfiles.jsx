@@ -43,6 +43,7 @@ function emptyForm(connections) {
     vm: { ...EMPTY_VM_PLACEMENT, connectionId: connections[0] ? String(connections[0].id) : "", folderMode: "existing" },
     connectionProfileId: "",
     buildProfileId: "",
+    diskCheckPath: "/var",
     defaultSize: { ...DEFAULT_SIZE },
     maxSize: { ...DEFAULT_MAX },
     maxVms: 3,
@@ -59,6 +60,7 @@ function formFromProfile(row) {
     vm: placementFromSpec(row.placement),
     connectionProfileId: row.connectionProfileId ? String(row.connectionProfileId) : "",
     buildProfileId: row.buildProfileId ? String(row.buildProfileId) : "",
+    diskCheckPath: row.diskCheckPath || "/var",
     defaultSize: { ...(row.defaultSize || DEFAULT_SIZE) },
     maxSize: { ...(row.maxSize || DEFAULT_MAX) },
     maxVms: row.maxVms,
@@ -131,6 +133,7 @@ function ProfileEditor({ initial, connections, sshProfiles, buildProfiles = [], 
         placement,
         connectionProfileId: Number(form.connectionProfileId),
         buildProfileId: form.buildProfileId ? Number(form.buildProfileId) : null,
+        diskCheckPath: form.diskCheckPath.trim(),
         maxVms: Number(form.maxVms),
         allowKubernetes: form.allowKubernetes,
         ...(keepTemplate ? {} : { defaultSize: form.defaultSize, maxSize: form.maxSize }),
@@ -220,6 +223,11 @@ function ProfileEditor({ initial, connections, sshProfiles, buildProfiles = [], 
             <option value="">Internet defaults</option>
             {buildProfiles.map((row) => <option key={row.id} value={String(row.id)}>{row.name}</option>)}
           </select>
+        </Field>
+        <Field label="Container data on" htmlFor="vmp-datapath"
+               hint="The mount Kubernetes keeps containerd, kubelet and etcd data on. Anything but /var is bind-mounted there and checked for free space.">
+          <input id="vmp-datapath" className="sg-cb-input sg-cb-mono" value={form.diskCheckPath}
+                 onChange={(e) => set("diskCheckPath", e.target.value)} placeholder="/var" />
         </Field>
         <label className="sg-cb-inlinecheck sg-cb-span">
           <input type="checkbox" checked={form.allowKubernetes}
@@ -315,6 +323,7 @@ export default function VmRequestProfiles({ vsphere, sshProfiles, buildProfiles 
                   : `default ${sizeText(row.defaultSize)}, max ${sizeText(row.maxSize)}`}
                 {row.connectionProfileName ? ` · via ${row.connectionProfileName}` : ""}
                 {row.buildProfileName ? ` · sources ${row.buildProfileName}` : ""}
+                {row.diskCheckPath && row.diskCheckPath !== "/var" ? ` · data on ${row.diskCheckPath}` : ""}
               </span>
             </span>
             <span className="sg-cb-entry-right">

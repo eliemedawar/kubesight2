@@ -194,6 +194,17 @@ def _apply_profile(row: VmRequestProfile, payload: Dict[str, Any]) -> None:
             raise VmRequestError("That source profile does not exist.")
         row.build_profile_id = source_id or None
 
+    if "diskCheckPath" in payload:
+        from ..cluster_build import preflight as build_preflight
+        from ..cluster_build.service import _validate_disk_check_path
+
+        value = str(payload.get("diskCheckPath") or "").strip()
+        try:
+            path = _validate_disk_check_path(value) if value else ""
+        except ValueError as exc:
+            raise VmRequestError(str(exc)) from exc
+        row.disk_check_path = path if path and path != build_preflight.DEFAULT_DISK_PATH else None
+
     if "maxVms" in payload or not row.max_vms:
         from ..cluster_build.provisioning import templates
 
@@ -292,6 +303,7 @@ def serialize_profile(row: VmRequestProfile) -> Dict[str, Any]:
         "connectionProfileName": route.name if route else None,
         "buildProfileId": row.build_profile_id,
         "buildProfileName": source.name if source else None,
+        "diskCheckPath": row.disk_check_path or "/var",
         "defaultSize": row.default_size_json or dict(DEFAULT_SIZE),
         "maxSize": row.max_size_json or dict(DEFAULT_MAX_SIZE),
         "maxVms": row.max_vms,
@@ -640,6 +652,7 @@ def request(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[str, A
         "k8sVersion": (req["kubernetes"] or {}).get("version") or _k8s_version(None),
         "connectionProfileId": profile.connection_profile_id,
         "buildProfileId": profile.build_profile_id,
+        "diskCheckPath": profile.disk_check_path or "",
         "provisioning": {
             **(profile.placement_json or {}),
             "vmCount": req["count"],

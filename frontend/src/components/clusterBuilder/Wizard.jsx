@@ -597,14 +597,14 @@ function ShapeStep({ options, basics, setBasic }) {
       <details className="sg-cb-adv">
         <summary>
           Machine disk
-          <span className="sv sg-cb-mono">free space checked on {basics.diskCheckPath || DEFAULT_DISK_CHECK_PATH}</span>
-          <span className="cv">change it if container data lives on another mount</span>
+          <span className="sv sg-cb-mono">container data on {basics.diskCheckPath || DEFAULT_DISK_CHECK_PATH}</span>
+          <span className="cv">point it at a bigger mount, such as /data</span>
         </summary>
         <div className="sg-cb-adv-body">
           <Field
-            label="Disk check path"
+            label="Container data on"
             htmlFor="cb-diskpath"
-            hint="Preflight measures free space on the filesystem behind this path, on every machine. /var is the default because kubeadm, containerd and pulled images land under /var/lib — point it at the mount that actually backs them if you moved them elsewhere."
+            hint="Where containerd (pulled images), the kubelet and etcd keep their data, on every machine. /var is the default. Any other path, such as /data, gets /var/lib/containerd, /var/lib/kubelet and /var/lib/etcd bind-mounted onto it during node preparation, and preflight checks its free space."
           >
             <input
               id="cb-diskpath"

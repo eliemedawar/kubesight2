@@ -398,6 +398,18 @@ def _phase_base_prep(build: ClusterBuild, resolved) -> None:
                     "Clear Kubernetes left by the VM template",
                     adapter.script_clear_template_state(ctx),
                 ))
+            # The disk the build was told to check is the disk the data goes
+            # on: otherwise preflight passes on /data while /var fills up.
+            from .os_adapters.base import relocate_data_script
+            from .preflight import disk_path_of
+
+            data_path = disk_path_of(build)
+            # "/" or /var already hold /var/lib: nothing to move.
+            if data_path.rstrip("/") not in ("", "/var", "/var/lib"):
+                scripts.append((
+                    f"Container data on {data_path}",
+                    relocate_data_script(data_path),
+                ))
             scripts.append(("Kernel modules + sysctl + swap off", adapter.script_kernel_prep(ctx)))
             scripts.append(("containerd install + config", adapter.script_install_containerd(ctx)))
             scripts.append(("Kubernetes packages (kubeadm, kubelet, kubectl)", adapter.script_install_kube_packages(ctx)))

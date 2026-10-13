@@ -326,3 +326,50 @@ class TestBasePrep:
         db.session.commit()
         with pytest.raises(executor._PhaseFailed, match="Satellite"):
             executor._phase_base_prep(build, resolve(db.session.get(BuildProfile, profile_id)))
+
+
+class TestContainerDataPath:
+    """A build whose disk path is not /var keeps its container data there."""
+
+    def _scripts(self, client, admin_token, ssh_profile, path):
+        payload = make_build_payload(
+            endpoint_mode="managed_haproxy",
+            nodes=SINGLE_CP_MANAGED_LB_NODES,
+            vipAddress="10.0.1.9",
+            vipInterface="ens192",
+            diskCheckPath=path,
+        )
+        payload["connectionProfileId"] = ssh_profile["id"]
+        created = client.post(
+            "/api/cluster-builds", json=payload, headers=auth_headers(admin_token)
+        )
+        assert created.status_code == 201, created.get_json()
+        build = db.session.get(ClusterBuild, created.get_json()["data"]["id"])
+        for node in build.nodes:
+            node.os_family = "rhel"
+        db.session.commit()
+        fake = FakeSshTransport()
+        set_transport_factory(lambda: fake)
+        try:
+            executor._phase_base_prep(build, default_profile())
+        finally:
+            set_transport_factory(None)
+        return fake.calls
+
+    def test_data_is_bind_mounted_onto_the_path(
+        self, client, admin_token, app, ssh_profile  # noqa: F811
+    ):
+        calls = self._scripts(client, admin_token, ssh_profile, "/data")
+        for address in ("10.0.0.11", "10.0.0.21"):
+            scripts = [s for host, s in calls if host == address]
+            move = next(i for i, s in enumerate(scripts) if "kubesight-data" in s)
+            containerd = next(i for i, s in enumerate(scripts) if "containerd config default" in s)
+            assert move < containerd
+            assert "KS_BASE=/data/kubesight-data" in scripts[move]
+            assert "mount --bind" in scripts[move] and "/etc/fstab" in scripts[move]
+        # Load balancers keep no container data.
+        assert not any("kubesight-data" in s for host, s in calls if host == "10.0.0.5")
+
+    def test_var_moves_nothing(self, client, admin_token, app, ssh_profile):  # noqa: F811
+        calls = self._scripts(client, admin_token, ssh_profile, "/var")
+        assert not any("kubesight-data" in s for _, s in calls)

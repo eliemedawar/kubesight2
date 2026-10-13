@@ -224,6 +224,56 @@ dnf repolist --enabled 2>/dev/null || true
 """
 
 
+RELOCATED_DIRS = ("containerd", "kubelet", "etcd")
+
+
+def relocate_data_script(data_path: str) -> str:
+    """Put /var/lib/{containerd,kubelet,etcd} on ``data_path`` with bind mounts.
+
+    Every component keeps its standard path, so nothing else changes; the
+    mounts go in /etc/fstab and survive a reboot. Anything already in a
+    directory (a VM template's containerd) is copied across first. SELinux
+    labels are copied from the original directory so containerd keeps working
+    on an enforcing machine.
+    """
+    base = data_path.rstrip("/") + "/kubesight-data"
+    dirs = " ".join(RELOCATED_DIRS)
+    return f"""set -e
+KS_BASE={shlex.quote(base)}
+if [ ! -d {shlex.quote(data_path)} ]; then
+  echo "{data_path} does not exist on this machine." >&2
+  exit 1
+fi
+systemctl stop kubelet 2>/dev/null || true
+systemctl stop containerd 2>/dev/null || true
+for name in {dirs}; do
+  src="$KS_BASE/$name"
+  dst="/var/lib/$name"
+  mkdir -p "$src" "$dst"
+  if mountpoint -q "$dst"; then
+    echo "$dst is already a mount ($(findmnt -n -o SOURCE "$dst")): keeping it"
+    continue
+  fi
+  if [ -n "$(ls -A "$dst" 2>/dev/null)" ] && [ -z "$(ls -A "$src" 2>/dev/null)" ]; then
+    echo "Copying what $dst already holds to $src"
+    cp -a "$dst/." "$src/"
+  fi
+  if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; then
+    chcon -R --reference="$dst" "$src" 2>/dev/null || true
+  fi
+  grep -qE "^[^#]*[[:space:]]$dst[[:space:]]+none[[:space:]]+bind" /etc/fstab \\
+    || echo "$src $dst none bind 0 0" >> /etc/fstab
+  mount --bind "$src" "$dst"
+  echo "$dst -> $src"
+done
+systemctl daemon-reload
+if systemctl list-unit-files containerd.service >/dev/null 2>&1; then
+  systemctl start containerd 2>/dev/null || true
+fi
+df -h {shlex.quote(data_path)}
+"""
+
+
 def kernel_prep_script(_ctx: ScriptContext) -> str:
     """Swap off + kernel modules + sysctl — identical across supported distros."""
     return """
