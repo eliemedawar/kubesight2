@@ -1428,6 +1428,78 @@ def set_ssh_waiter(waiter) -> None:
     _ssh_waiter = waiter
 
 
+# VMware's Linux guest customization writes the address it sets as
+# /etc/sysconfig/network-scripts/ifcfg-<nic> and switches off the template's
+# own NetworkManager profile. RHEL 9 keeps profiles as keyfiles in
+# /etc/NetworkManager/system-connections, so once a new VM answers SSH its
+# profiles are moved there (``nmcli connection migrate``, Red Hat's supported
+# conversion, which also removes the ifcfg file), the template's profile left
+# inactive on the same card is deleted, and the active one takes its name — so
+# every VM looks like its template. The active connection is never taken down.
+# Only on a machine that has nmcli and ifcfg files; anything else is a no-op.
+NETWORK_KEYFILE_SCRIPT = r"""
+command -v nmcli >/dev/null 2>&1 || { echo "KS_NET=no-networkmanager"; exit 0; }
+ls /etc/sysconfig/network-scripts/ifcfg-* >/dev/null 2>&1 || { echo "KS_NET=keyfile-already"; exit 0; }
+if ! nmcli connection migrate >/dev/null 2>&1; then
+  echo "KS_NET=migrate-unsupported"
+  exit 0
+fi
+for dev in $(nmcli -t -f DEVICE,TYPE device | awk -F: '$2=="ethernet"{print $1}'); do
+  active=$(nmcli -t -f UUID,DEVICE connection show --active | awk -F: -v d="$dev" '$2==d{print $1}' | head -1)
+  [ -n "$active" ] || continue
+  template_name=""
+  for uuid in $(nmcli -t -f UUID,TYPE connection show | awk -F: '$2=="802-3-ethernet"{print $1}'); do
+    [ "$uuid" = "$active" ] && continue
+    if [ "$(nmcli -g connection.interface-name connection show "$uuid")" = "$dev" ]; then
+      template_name=$(nmcli -g connection.id connection show "$uuid")
+      nmcli connection delete "$uuid" >/dev/null && echo "KS_NET_DELETED=$template_name"
+    fi
+  done
+  if [ -n "$template_name" ]; then
+    nmcli connection modify "$active" connection.id "$template_name" && echo "KS_NET_RENAMED=$dev:$template_name"
+  fi
+done
+left=$(ls /etc/sysconfig/network-scripts/ifcfg-* 2>/dev/null | grep -v '/ifcfg-lo$' | tr '\n' ' ')
+echo "KS_NET=migrated"
+[ -z "$left" ] || echo "KS_NET_LEFT=$left"
+exit 0
+"""
+
+
+def _network_keyfiles(job: ClusterProvisionJob, targets: List[Tuple[str, Any]]) -> None:
+    """Move each new VM's network profiles into NetworkManager keyfiles.
+
+    Best effort: a VM this cannot tidy still works, so a failure is written to
+    the job's log and never fails the job."""
+    from ...ssh import get_transport
+
+    if not targets:
+        return
+    transport = get_transport()
+    output = _Output(job, [])
+    for name, target in targets:
+        try:
+            result = transport.run(target, NETWORK_KEYFILE_SCRIPT, timeout_s=120)
+            facts = dict(
+                line.strip().split("=", 1) for line in (result.output or "").splitlines()
+                if line.startswith("KS_NET") and "=" in line
+            )
+        except Exception as exc:  # noqa: BLE001 — the VM is usable either way
+            output.on_line(f"Network · {name}: could not move its profiles to NetworkManager keyfiles: {scrub(str(exc))[:300]}")
+            continue
+        state = facts.get("KS_NET", "")
+        if state == "migrated":
+            renamed = facts.get("KS_NET_RENAMED", "").partition(":")[2]
+            output.on_line(
+                f"Network · {name}: profiles moved to /etc/NetworkManager/system-connections"
+                + (f", named {renamed} like the template" if renamed else "")
+                + (f"; still in network-scripts: {facts['KS_NET_LEFT']}" if facts.get("KS_NET_LEFT") else "")
+            )
+        elif state == "migrate-unsupported":
+            output.on_line(f"Network · {name}: this NetworkManager cannot migrate ifcfg profiles; left as they are")
+    output.flush()
+
+
 def _do_connect(job: ClusterProvisionJob) -> None:
     from .. import executor
 
@@ -1484,6 +1556,9 @@ def _do_connect(job: ClusterProvisionJob) -> None:
         vms[name] = entry
     job.progress_json = {**(job.progress_json or {}), "vms": vms}
     db.session.commit()
+    if waiter is _default_ssh_waiter:  # real VMs only: never the simulator or a test seam
+        _network_keyfiles(job, [(name, target) for name, target in targets
+                                if results.get(name, (False, ""))[0]])
     if failed:
         raise JobFailed(
             f"{', '.join(failed)} did not answer SSH within {_SSH_TIMEOUT_S // 60} minutes. "
