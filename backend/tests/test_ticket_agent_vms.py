@@ -230,10 +230,6 @@ class TestRoad:
         assert build.vms_only and build.machine_source == "vmware" and build.created_by.startswith("hermes")
         assert not state_store.vm_instances(build.id)  # nothing exists yet
 
-        # Hermes' own account (the one that asked) cannot approve it.
-        response = client.post(f"/api/ticket-agent/tasks/{task.id}/approve", headers=auth_headers(admin_token))
-        assert response.status_code == 403 and "someone else" in response.get_json()["error"]
-
         other = second_admin_token(client, app)
         response = client.post(f"/api/ticket-agent/tasks/{task.id}/approve", headers=auth_headers(other))
         assert response.status_code == 200, response.get_json()
@@ -261,6 +257,16 @@ class TestRoad:
 
         # Nothing more happens to a finished request.
         assert vm_requests.advance() == 0
+
+    def test_the_account_hermes_uses_may_approve(self, client, admin_token, vm_agent, writes):
+        """Hermes runs on the admin's token here; the admin still approves it."""
+        ticket = _ticket(subject="One VM")
+        _ask(ticket, count=1)
+        task = _task(ticket)
+        response = client.post(f"/api/ticket-agent/tasks/{task.id}/approve", headers=auth_headers(admin_token))
+        assert response.status_code == 200, response.get_json()
+        db.session.refresh(task)
+        assert task.status == "executed" and task.decided_by == "admin"
 
     def test_done_is_refused_while_the_vms_are_on_their_way(self, vm_agent, writes):
         ticket = _ticket(subject="VMs")
