@@ -174,6 +174,9 @@ class VmRequestProfile(db.Model):
     enabled = db.Column(db.Boolean, nullable=False, default=True)
     placement_json = db.Column(db.JSON, nullable=False, default=dict)
     connection_profile_id = db.Column(db.Integer, nullable=True)
+    # The source profile (packages, images, Satellite registration) a
+    # Kubernetes install on these VMs uses; None = internet defaults.
+    build_profile_id = db.Column(db.Integer, nullable=True)
     # {"cpu", "memoryGb", "diskGb"}: what a VM gets when the ticket names no size.
     default_size_json = db.Column(db.JSON, nullable=True)
     # The most one ticket may ask for: VMs, and per VM.

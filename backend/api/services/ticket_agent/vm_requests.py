@@ -183,6 +183,17 @@ def _apply_profile(row: VmRequestProfile, payload: Dict[str, Any]) -> None:
             raise VmRequestError(str(exc)) from exc
         row.connection_profile_id = route_id
 
+    if "buildProfileId" in payload:
+        from ...models import BuildProfile
+
+        try:
+            source_id = int(payload.get("buildProfileId") or 0)
+        except (TypeError, ValueError):
+            source_id = 0
+        if source_id and db.session.get(BuildProfile, source_id) is None:
+            raise VmRequestError("That source profile does not exist.")
+        row.build_profile_id = source_id or None
+
     if "maxVms" in payload or not row.max_vms:
         from ..cluster_build.provisioning import templates
 
@@ -261,11 +272,12 @@ def _where(placement: Dict[str, Any]) -> str:
 
 
 def serialize_profile(row: VmRequestProfile) -> Dict[str, Any]:
-    from ...models import SshConnectionProfile
+    from ...models import BuildProfile, SshConnectionProfile
 
     placement = dict(row.placement_json or {})
     template = placement.get("template") or {}
     route = db.session.get(SshConnectionProfile, row.connection_profile_id) if row.connection_profile_id else None
+    source = db.session.get(BuildProfile, row.build_profile_id) if row.build_profile_id else None
     return {
         "id": row.id,
         "name": row.name,
@@ -278,6 +290,8 @@ def serialize_profile(row: VmRequestProfile) -> Dict[str, Any]:
         "sizeMode": placement.get("sizeMode") or "custom",
         "connectionProfileId": row.connection_profile_id,
         "connectionProfileName": route.name if route else None,
+        "buildProfileId": row.build_profile_id,
+        "buildProfileName": source.name if source else None,
         "defaultSize": row.default_size_json or dict(DEFAULT_SIZE),
         "maxSize": row.max_size_json or dict(DEFAULT_MAX_SIZE),
         "maxVms": row.max_vms,
@@ -625,6 +639,7 @@ def request(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[str, A
         "templateId": "custom",
         "k8sVersion": (req["kubernetes"] or {}).get("version") or _k8s_version(None),
         "connectionProfileId": profile.connection_profile_id,
+        "buildProfileId": profile.build_profile_id,
         "provisioning": {
             **(profile.placement_json or {}),
             "vmCount": req["count"],

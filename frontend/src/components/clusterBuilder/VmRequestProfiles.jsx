@@ -42,6 +42,7 @@ function emptyForm(connections) {
     enabled: true,
     vm: { ...EMPTY_VM_PLACEMENT, connectionId: connections[0] ? String(connections[0].id) : "", folderMode: "existing" },
     connectionProfileId: "",
+    buildProfileId: "",
     defaultSize: { ...DEFAULT_SIZE },
     maxSize: { ...DEFAULT_MAX },
     maxVms: 3,
@@ -57,6 +58,7 @@ function formFromProfile(row) {
     enabled: row.enabled,
     vm: placementFromSpec(row.placement),
     connectionProfileId: row.connectionProfileId ? String(row.connectionProfileId) : "",
+    buildProfileId: row.buildProfileId ? String(row.buildProfileId) : "",
     defaultSize: { ...(row.defaultSize || DEFAULT_SIZE) },
     maxSize: { ...(row.maxSize || DEFAULT_MAX) },
     maxVms: row.maxVms,
@@ -85,7 +87,7 @@ function SizeRow({ label, value, onChange, idPrefix }) {
   );
 }
 
-function ProfileEditor({ initial, connections, sshProfiles, notify, onSaved, onClose }) {
+function ProfileEditor({ initial, connections, sshProfiles, buildProfiles = [], notify, onSaved, onClose }) {
   const [form, setForm] = useState(initial);
   const [busy, setBusy] = useState(false);
   const placementState = useVmwarePlacement(form.vm.connectionId, notify);
@@ -128,6 +130,7 @@ function ProfileEditor({ initial, connections, sshProfiles, notify, onSaved, onC
         enabled: form.enabled,
         placement,
         connectionProfileId: Number(form.connectionProfileId),
+        buildProfileId: form.buildProfileId ? Number(form.buildProfileId) : null,
         maxVms: Number(form.maxVms),
         allowKubernetes: form.allowKubernetes,
         ...(keepTemplate ? {} : { defaultSize: form.defaultSize, maxSize: form.maxSize }),
@@ -210,6 +213,14 @@ function ProfileEditor({ initial, connections, sshProfiles, notify, onSaved, onC
             {sshProfiles.map((row) => <option key={row.id} value={String(row.id)}>{row.name}</option>)}
           </select>
         </Field>
+        <Field label="Packages & images for Kubernetes" htmlFor="vmp-source"
+               hint="The source profile a Kubernetes install on these VMs uses, Satellite registration included.">
+          <select id="vmp-source" className="sg-cb-input" value={form.buildProfileId}
+                  onChange={(e) => set("buildProfileId", e.target.value)}>
+            <option value="">Internet defaults</option>
+            {buildProfiles.map((row) => <option key={row.id} value={String(row.id)}>{row.name}</option>)}
+          </select>
+        </Field>
         <label className="sg-cb-inlinecheck sg-cb-span">
           <input type="checkbox" checked={form.allowKubernetes}
                  onChange={(e) => set("allowKubernetes", e.target.checked)} />
@@ -232,7 +243,7 @@ function ProfileEditor({ initial, connections, sshProfiles, notify, onSaved, onC
   );
 }
 
-export default function VmRequestProfiles({ vsphere, sshProfiles, notify }) {
+export default function VmRequestProfiles({ vsphere, sshProfiles, buildProfiles = [], notify }) {
   const connections = useMemo(() => vsphere.filter((row) => row.provisioningConfigured), [vsphere]);
   const [items, setItems] = useState([]);
   const [enabled, setEnabled] = useState(false);
@@ -286,7 +297,7 @@ export default function VmRequestProfiles({ vsphere, sshProfiles, notify }) {
 
       {items.map((row) => (
         editing?.id === row.id ? (
-          <ProfileEditor key={row.id} initial={editing} connections={connections} sshProfiles={sshProfiles}
+          <ProfileEditor key={row.id} initial={editing} connections={connections} sshProfiles={sshProfiles} buildProfiles={buildProfiles}
                          notify={notify} onClose={() => setEditing(null)}
                          onSaved={() => { setEditing(null); load(); }} />
         ) : (
@@ -303,6 +314,7 @@ export default function VmRequestProfiles({ vsphere, sshProfiles, notify }) {
                   ? `always ${sizeText(row.defaultSize)}`
                   : `default ${sizeText(row.defaultSize)}, max ${sizeText(row.maxSize)}`}
                 {row.connectionProfileName ? ` · via ${row.connectionProfileName}` : ""}
+                {row.buildProfileName ? ` · sources ${row.buildProfileName}` : ""}
               </span>
             </span>
             <span className="sg-cb-entry-right">
@@ -325,7 +337,7 @@ export default function VmRequestProfiles({ vsphere, sshProfiles, notify }) {
       ) : null}
 
       {editing && !editing.id ? (
-        <ProfileEditor initial={editing} connections={connections} sshProfiles={sshProfiles} notify={notify}
+        <ProfileEditor initial={editing} connections={connections} sshProfiles={sshProfiles} buildProfiles={buildProfiles} notify={notify}
                        onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />
       ) : !editing ? (
         <div className="sg-cb-actions">

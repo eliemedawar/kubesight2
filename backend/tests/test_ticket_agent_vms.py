@@ -595,3 +595,40 @@ def test_hermes_reaches_it_through_mcp(client, admin_token, vm_agent, writes):
     brief = engine.brief(ticket.id)
     assert brief["vmProfiles"][0]["profile"] == "DR test VMs"
     assert brief["agentTasks"][0]["vmRequest"]["phase"] == "awaiting_approval"
+
+
+class TestSourceProfile:
+    """A VM request profile names the packages & images source (Satellite
+    included) that a Kubernetes install on its VMs uses."""
+
+    def test_builds_from_tickets_carry_the_source_profile(self, vm_agent, writes):
+        from api.models import ClusterBuild
+        from api.services.cluster_build import profiles as build_profiles
+
+        source = build_profiles.create_profile({"name": "Satellite DR", "repoMode": "internet"})
+        updated = vm_requests.update_profile(vm_agent["id"], {"buildProfileId": source["id"]})
+        assert updated["buildProfileId"] == source["id"]
+        assert updated["buildProfileName"] == "Satellite DR"
+
+        _ask(_ticket(subject="Two VMs"))
+        build = db.session.get(ClusterBuild, _vm(_task_latest())["buildId"])
+        assert build.build_profile_id == source["id"]
+
+    def test_no_source_profile_means_internet_defaults(self, vm_agent, writes):
+        from api.models import ClusterBuild
+
+        assert vm_agent["buildProfileId"] is None
+        _ask(_ticket(subject="Two VMs"))
+        build = db.session.get(ClusterBuild, _vm(_task_latest())["buildId"])
+        assert build.build_profile_id is None
+
+    def test_an_unknown_source_profile_is_refused(self, vm_agent):
+        with pytest.raises(vm_requests.VmRequestError):
+            vm_requests.update_profile(vm_agent["id"], {"buildProfileId": 99999})
+
+
+def _task_latest():
+    return (
+        TicketInterpretation.query.filter_by(route=vm_requests.ROUTE)
+        .order_by(TicketInterpretation.id.desc()).first()
+    )
