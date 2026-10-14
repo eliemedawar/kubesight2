@@ -662,6 +662,26 @@ class TestVmsOnly:
                             headers=auth_headers(admin_token))
         assert again.status_code == 400
 
+    def test_install_kubernetes_goes_past_preflight_warnings(
+        self, client, admin_token, ready, fake_ssh, monkeypatch
+    ):
+        """A warning (here the version one a newer minor raises) never holds the install up."""
+        from api.services.cluster_build import preflight as preflight_mod
+
+        real = preflight_mod.version_checks
+        monkeypatch.setattr(preflight_mod, "version_checks", lambda build, profile: real(build, profile) + [
+            preflight_mod._check("k8s_version", "Kubernetes version supported", "warn", "carried forward"),
+        ])
+        set_transport_factory(lambda: build_default_fake({**self.VM_HOSTS}))
+        url = f"/api/cluster-builds/{ready['id']}/provision/install-kubernetes"
+        response = client.post(url, json={"counts": {"loadbalancer": 1, "controlPlane": 1, "worker": 2}},
+                               headers=auth_headers(admin_token))
+        assert response.status_code == 200, response.get_json()
+        built = response.get_json()["data"]
+        statuses = {c["status"] for n in built["nodes"] for c in (n.get("preflight") or {}).get("checks", [])}
+        assert "warn" in statuses
+        assert built["status"] == "completed", (built.get("error"), built["provisioning"]["job"])
+
     def test_destroy_takes_a_second_person_too(self, client, app, admin_token, ready, not_admin):
         job = client.post(
             f"/api/cluster-builds/{ready['id']}/provision/destroy",
