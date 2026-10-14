@@ -656,7 +656,7 @@ export default function SourcesTab({
           title="VMs from tickets"
           description="Where VMs a ticket asks for go. Hermes picks one of these profiles by name and fills in only how many and how big, within its limits. Nothing is created until a VM approver approves the OpenTofu plan."
         >
-          <VmRequestProfiles vsphere={vsphere} sshProfiles={profiles} buildProfiles={buildProfiles} notify={notify} />
+          <VmRequestProfiles vsphere={vsphere} sshProfiles={profiles} buildProfiles={buildProfiles} addonCatalog={addonCatalog} notify={notify} />
         </Group>
       ) : null}
 

@@ -402,6 +402,19 @@ def _settle_satellite_version(build: ClusterBuild, resolved) -> Tuple[Optional[s
     listing = """rm -f /etc/yum.repos.d/kubesight-kubernetes.repo
 dnf -q --showduplicates --disableexcludes=all list kubeadm kubelet kubectl 2>/dev/null || true
 """
+    # The other machines wait for this one; say so in their logs rather than
+    # leaving an empty panel that reads as stuck.
+    for other in pending[1:] + [n for n in build.nodes if n.role == "loadbalancer"]:
+        other_step = _get_step(build, "base_prep", other)
+        if other_step.status == "completed":
+            continue
+        waiting = _StreamTail(other_step.id)
+        waiting.write(
+            f"Waiting for {node.hostname or node.address}: it registers with Satellite and checks "
+            "which Kubernetes versions the capsule carries, so every machine installs the same "
+            "one. This machine's preparation starts right after.\n"
+        )
+        waiting.flush()
     step = _get_step(build, "base_prep", node)
     node.status = "preparing"
     _step_start(step)
@@ -443,6 +456,16 @@ dnf -q --showduplicates --disableexcludes=all list kubeadm kubelet kubectl 2>/de
     minor = k8s_versions.minor_of(chosen)
     if descriptor is not None and not descriptor.supports_k8s_minor(build.cni_version or "", minor):
         build.cni_version = descriptor.default_version_for_k8s_minor(minor) or build.cni_version
+    # Add-on versions follow the minor too (Metrics Server 0.9 starts at 1.34).
+    selections = []
+    for item in build.addons_json or []:
+        addon = addon_registry.get(str((item or {}).get("id") or ""))
+        if addon is not None and not item.get("installedAt") and not addon.supports_k8s_minor(
+            str(item.get("version") or ""), minor
+        ):
+            item = {**item, "version": addon.default_version_for_k8s_minor(minor) or item.get("version")}
+        selections.append(item)
+    build.addons_json = selections
     db.session.commit()
     logger.info("build %s: Kubernetes %s is not on the capsule; using %s", build.id, wanted, chosen)
     note = (

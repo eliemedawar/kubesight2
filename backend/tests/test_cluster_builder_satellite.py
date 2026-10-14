@@ -390,7 +390,7 @@ class TestCapsuleVersion:
         output = self._listing("1.33.5", "1.33.2") + "kubeadm.x86_64  1.33.9-1.1  k8s-packages\n"
         assert executor._capsule_versions(output) == ["1.33.5", "1.33.2"]
 
-    def _build_on(self, client, admin_token, ssh_profile, version, listing):  # noqa: F811
+    def _build_on(self, client, admin_token, ssh_profile, version, listing, addons=None):  # noqa: F811
         profile_id = _create(client, admin_token).get_json()["data"]["id"]
         payload = make_build_payload(nodes=[
             {"role": "control_plane", "hostname": "cp-1", "address": "10.0.0.11"},
@@ -402,6 +402,8 @@ class TestCapsuleVersion:
         assert created.status_code == 201, created.get_json()
         build = db.session.get(ClusterBuild, created.get_json()["data"]["id"])
         build.nodes[0].os_family = "rhel"
+        if addons is not None:
+            build.addons_json = addons
         db.session.commit()
         fake = FakeSshTransport()
         fake.add(lambda host, script: "showduplicates" in script, listing)
@@ -468,3 +470,48 @@ class TestPreflightFailuresForTickets:
             ],
         }]})
         assert lines == ["- test-vm-1: Free disk on /var: 5 GiB free Fix: Grow the disk."]
+
+
+class TestCapsuleVersionMovesAddOns(TestCapsuleVersion):
+    def test_add_on_versions_follow_the_minor(self, client, admin_token, app, ssh_profile):  # noqa: F811
+        from api.services.cluster_build import addons as addon_registry
+        from api.services.cluster_build import k8s_versions
+
+        minors = k8s_versions.enabled_minors()
+        newest, older = minors[0], minors[-1]
+        metrics = addon_registry.get("metrics-server")
+        on_newest = metrics.default_version_for_k8s_minor(newest)
+        on_older = metrics.default_version_for_k8s_minor(older)
+        assert on_newest != on_older  # 0.9.0 vs 0.7.2
+        build, _ = self._build_on(
+            client, admin_token, ssh_profile, f"{newest}.1", self._listing(f"{older}.5"),
+            addons=[{"id": "metrics-server", "version": on_newest, "config": {}}],
+        )
+        assert build.k8s_version == f"{older}.5"
+        assert build.addons_json[0]["version"] == on_older
+
+
+class TestWaitingMachinesSaySo:
+    def test_the_other_machines_log_that_they_wait(self, client, admin_token, app, ssh_profile):  # noqa: F811
+        from api.models import ClusterBuildStep
+
+        profile_id = _create(client, admin_token).get_json()["data"]["id"]
+        payload = make_build_payload(nodes=[
+            {"role": "control_plane", "hostname": "cp-1", "address": "10.0.0.11"},
+            {"role": "worker", "hostname": "w-1", "address": "10.0.0.21"},
+        ])
+        payload["connectionProfileId"] = ssh_profile["id"]
+        payload["buildProfileId"] = profile_id
+        created = client.post("/api/cluster-builds", json=payload, headers=auth_headers(admin_token))
+        build = db.session.get(ClusterBuild, created.get_json()["data"]["id"])
+        for node in build.nodes:
+            node.os_family = "rhel"
+        db.session.commit()
+        set_transport_factory(lambda: FakeSshTransport())
+        try:
+            executor._settle_satellite_version(build, resolve(db.session.get(BuildProfile, profile_id)))
+        finally:
+            set_transport_factory(None)
+        worker = next(n for n in build.nodes if n.role == "worker")
+        step = ClusterBuildStep.query.filter_by(build_id=build.id, phase="base_prep", node_id=worker.id).one()
+        assert step.log_tail.startswith("Waiting for cp-1")

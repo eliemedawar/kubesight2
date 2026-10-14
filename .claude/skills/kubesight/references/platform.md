@@ -81,7 +81,8 @@ kubesight_ticket_answer            {ticketRecordId, comment, diagnosis,
                                     proposedFix?: {…same as request_approval…}}
 kubesight_ticket_request_vms       {ticketRecordId, profile, name, count, size?: {cpu,
                                     memoryGb, diskGb}, kubernetes?: {shape | counts,
-                                    version?}, apps?: [appProfile names], confidence,
+                                    version?, addons?: [add-on ids]}, apps?: [appProfile
+                                    names], confidence,
                                     understanding, comment, commentOnApprove}
 kubesight_ticket_install_apps      {ticketRecordId, cluster, apps: [appProfile names],
                                     confidence, understanding, comment, commentOnApprove}
@@ -125,6 +126,11 @@ size, how many one ticket may ask for, and whether Kubernetes is allowed. Give a
 requester for a name; never make one up and never use the ticket number. Then
 `count`, and `size` only for what the ticket states. For a cluster
 add `kubernetes: {shape: lab|small|standard-ha}` (2, 4 or 8 VMs) or `counts`.
+Add-ons (Metrics Server, NGINX Ingress, MetalLB): a profile's `addons.alwaysInstalled`
+come with every cluster — do not pass them; when the ticket asks for one listed in
+`addons.onRequest`, pass its id in `kubernetes.addons`. One the profile does not
+offer is refused: tell the requester, never pick another. You never set add-on
+settings (a MetalLB address pool is the profile's).
 Nothing is created by the call: KubeSight makes the OpenTofu plan and a VM
 approver ALWAYS approves it first — no confidence skips that. If no profile
 fits, the ask is over a profile's limits, or `vmProfiles` is empty, set the

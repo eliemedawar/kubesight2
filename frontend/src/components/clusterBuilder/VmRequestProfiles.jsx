@@ -34,6 +34,48 @@ const SIZE_KEYS = [["cpu", "vCPU"], ["memoryGb", "Memory GB"], ["diskGb", "Disk 
 
 const sizeText = (s) => (s ? `${s.cpu} vCPU · ${s.memoryGb} GB · ${s.diskGb} GB` : "—");
 
+/** Profile add-ons as the editor holds them: a mode per add-on, settings as text. */
+function addonsForm(addons) {
+  const modes = {};
+  for (const id of addons?.allowed || []) modes[id] = (addons.defaults || []).includes(id) ? "always" : "request";
+  const config = {};
+  for (const [id, values] of Object.entries(addons?.config || {})) {
+    config[id] = Object.fromEntries(
+      Object.entries(values || {}).map(([key, value]) => [key, Array.isArray(value) ? value.join("\n") : String(value ?? "")])
+    );
+  }
+  return { modes, config };
+}
+
+function addonsPayload(addons, catalog) {
+  const allowed = Object.keys(addons.modes).filter((id) => addons.modes[id] !== "off");
+  const config = {};
+  for (const id of allowed) {
+    const fields = catalog.find((addon) => addon.id === id)?.configFields || [];
+    const values = {};
+    for (const field of fields) {
+      const raw = (addons.config[id] || {})[field.key] || "";
+      values[field.key] = field.type === "ipRangeList"
+        ? raw.split(/[\n,]+/).map((part) => part.trim()).filter(Boolean)
+        : raw.trim();
+    }
+    if (fields.length) config[id] = values;
+  }
+  return {
+    allowed,
+    defaults: allowed.filter((id) => addons.modes[id] === "always"),
+    config,
+  };
+}
+
+function addonsText(addons, catalog) {
+  const name = (id) => catalog.find((addon) => addon.id === id)?.displayName || id;
+  const allowed = addons?.allowed || [];
+  if (!allowed.length) return "";
+  const always = new Set(addons.defaults || []);
+  return ` · add-ons: ${allowed.map((id) => (always.has(id) ? `${name(id)} (always)` : name(id))).join(", ")}`;
+}
+
 function emptyForm(connections) {
   return {
     id: null,
@@ -44,6 +86,7 @@ function emptyForm(connections) {
     connectionProfileId: "",
     buildProfileId: "",
     diskCheckPath: "/var",
+    addons: { modes: {}, config: {} },
     defaultSize: { ...DEFAULT_SIZE },
     maxSize: { ...DEFAULT_MAX },
     maxVms: 3,
@@ -61,6 +104,7 @@ function formFromProfile(row) {
     connectionProfileId: row.connectionProfileId ? String(row.connectionProfileId) : "",
     buildProfileId: row.buildProfileId ? String(row.buildProfileId) : "",
     diskCheckPath: row.diskCheckPath || "/var",
+    addons: addonsForm(row.addons),
     defaultSize: { ...(row.defaultSize || DEFAULT_SIZE) },
     maxSize: { ...(row.maxSize || DEFAULT_MAX) },
     maxVms: row.maxVms,
@@ -89,7 +133,9 @@ function SizeRow({ label, value, onChange, idPrefix }) {
   );
 }
 
-function ProfileEditor({ initial, connections, sshProfiles, buildProfiles = [], notify, onSaved, onClose }) {
+function ProfileEditor({
+  initial, connections, sshProfiles, buildProfiles = [], addonCatalog = [], notify, onSaved, onClose,
+}) {
   const [form, setForm] = useState(initial);
   const [busy, setBusy] = useState(false);
   const placementState = useVmwarePlacement(form.vm.connectionId, notify);
@@ -109,6 +155,17 @@ function ProfileEditor({ initial, connections, sshProfiles, buildProfiles = [], 
   const keepTemplate = form.vm.sizeMode === "template";
   const kept = keepTemplate ? templateSize(resolved.template) : null;
   const set = (key, value) => setForm((previous) => ({ ...previous, [key]: value }));
+  const setAddonMode = (id, mode) => setForm((previous) => ({
+    ...previous,
+    addons: { ...previous.addons, modes: { ...previous.addons.modes, [id]: mode } },
+  }));
+  const setAddonConfig = (id, key, value) => setForm((previous) => ({
+    ...previous,
+    addons: {
+      ...previous.addons,
+      config: { ...previous.addons.config, [id]: { ...(previous.addons.config[id] || {}), [key]: value } },
+    },
+  }));
   const setVm = (vm) => set("vm", vm);
 
   const problem =
@@ -134,6 +191,7 @@ function ProfileEditor({ initial, connections, sshProfiles, buildProfiles = [], 
         connectionProfileId: Number(form.connectionProfileId),
         buildProfileId: form.buildProfileId ? Number(form.buildProfileId) : null,
         diskCheckPath: form.diskCheckPath.trim(),
+        addons: form.allowKubernetes ? addonsPayload(form.addons, addonCatalog) : null,
         maxVms: Number(form.maxVms),
         allowKubernetes: form.allowKubernetes,
         ...(keepTemplate ? {} : { defaultSize: form.defaultSize, maxSize: form.maxSize }),
@@ -234,6 +292,38 @@ function ProfileEditor({ initial, connections, sshProfiles, buildProfiles = [], 
                  onChange={(e) => set("allowKubernetes", e.target.checked)} />
           Tickets may ask for Kubernetes on the VMs (Lab, Small or Standard HA). Every VM is then at least 2 vCPU · 4 GB · 40 GB.
         </label>
+        {form.allowKubernetes && addonCatalog.length ? (
+          <div className="sg-cb-span">
+            <span className="sg-cb-field-label">Add-ons on ticket clusters</span>
+            <span className="sg-cb-field-hint">
+              Always: every cluster from this profile gets it. On request: only when the ticket asks for it.
+            </span>
+            {addonCatalog.map((addon) => {
+              const mode = form.addons.modes[addon.id] || "off";
+              return (
+                <div key={addon.id} className="sg-cb-qgrid">
+                  <Field label={addon.displayName} htmlFor={`vmp-addon-${addon.id}`}>
+                    <select id={`vmp-addon-${addon.id}`} className="sg-cb-input" value={mode}
+                            onChange={(e) => setAddonMode(addon.id, e.target.value)}>
+                      <option value="off">Off</option>
+                      <option value="request">On request</option>
+                      <option value="always">Always</option>
+                    </select>
+                  </Field>
+                  {mode !== "off" ? (addon.configFields || []).map((field) => (
+                    <Field key={field.key} label={field.label} htmlFor={`vmp-addon-${addon.id}-${field.key}`}
+                           hint={field.help}>
+                      <textarea id={`vmp-addon-${addon.id}-${field.key}`} rows={2}
+                                className="sg-cb-input sg-cb-mono" placeholder={field.placeholder}
+                                value={(form.addons.config[addon.id] || {})[field.key] || ""}
+                                onChange={(e) => setAddonConfig(addon.id, field.key, e.target.value)} />
+                    </Field>
+                  )) : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
         <label className="sg-cb-inlinecheck sg-cb-span">
           <input type="checkbox" checked={form.enabled} onChange={(e) => set("enabled", e.target.checked)} />
           Offered to Hermes
@@ -251,7 +341,7 @@ function ProfileEditor({ initial, connections, sshProfiles, buildProfiles = [], 
   );
 }
 
-export default function VmRequestProfiles({ vsphere, sshProfiles, buildProfiles = [], notify }) {
+export default function VmRequestProfiles({ vsphere, sshProfiles, buildProfiles = [], addonCatalog = [], notify }) {
   const connections = useMemo(() => vsphere.filter((row) => row.provisioningConfigured), [vsphere]);
   const [items, setItems] = useState([]);
   const [enabled, setEnabled] = useState(false);
@@ -305,7 +395,7 @@ export default function VmRequestProfiles({ vsphere, sshProfiles, buildProfiles 
 
       {items.map((row) => (
         editing?.id === row.id ? (
-          <ProfileEditor key={row.id} initial={editing} connections={connections} sshProfiles={sshProfiles} buildProfiles={buildProfiles}
+          <ProfileEditor key={row.id} initial={editing} connections={connections} sshProfiles={sshProfiles} buildProfiles={buildProfiles} addonCatalog={addonCatalog}
                          notify={notify} onClose={() => setEditing(null)}
                          onSaved={() => { setEditing(null); load(); }} />
         ) : (
@@ -324,6 +414,7 @@ export default function VmRequestProfiles({ vsphere, sshProfiles, buildProfiles 
                 {row.connectionProfileName ? ` · via ${row.connectionProfileName}` : ""}
                 {row.buildProfileName ? ` · sources ${row.buildProfileName}` : ""}
                 {row.diskCheckPath && row.diskCheckPath !== "/var" ? ` · data on ${row.diskCheckPath}` : ""}
+                {addonsText(row.addons, addonCatalog)}
               </span>
             </span>
             <span className="sg-cb-entry-right">
@@ -346,7 +437,7 @@ export default function VmRequestProfiles({ vsphere, sshProfiles, buildProfiles 
       ) : null}
 
       {editing && !editing.id ? (
-        <ProfileEditor initial={editing} connections={connections} sshProfiles={sshProfiles} buildProfiles={buildProfiles} notify={notify}
+        <ProfileEditor initial={editing} connections={connections} sshProfiles={sshProfiles} buildProfiles={buildProfiles} addonCatalog={addonCatalog} notify={notify}
                        onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />
       ) : !editing ? (
         <div className="sg-cb-actions">

@@ -179,6 +179,10 @@ class VmRequestProfile(db.Model):
     build_profile_id = db.Column(db.Integer, nullable=True)
     # Where container data lives on these VMs (e.g. /data); None = /var.
     disk_check_path = db.Column(db.String(255), nullable=True)
+    # {"allowed": [ids], "defaults": [ids], "config": {id: {...}}}: the add-ons
+    # a ticket cluster may get. Defaults always install; a ticket may add any
+    # other allowed one. Settings (a MetalLB pool) are the administrator's.
+    addons_json = db.Column(db.JSON, nullable=True)
     # {"cpu", "memoryGb", "diskGb"}: what a VM gets when the ticket names no size.
     default_size_json = db.Column(db.JSON, nullable=True)
     # The most one ticket may ask for: VMs, and per VM.

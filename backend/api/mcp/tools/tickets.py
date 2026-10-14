@@ -327,6 +327,14 @@ _SIZE_PROPS = {
                         },
                     },
                     "version": {"type": "string", "description": "e.g. 1.32 — only if the ticket names one."},
+                    "addons": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Add-on ids from the profile's addons.onRequest that the ticket asks for "
+                            "(e.g. nginx-ingress). The profile's alwaysInstalled add-ons come anyway."
+                        ),
+                    },
                 },
             },
             "apps": {

@@ -729,3 +729,49 @@ class TestWarningsDoNotHoldTheInstall:
         note = jobs.start_kubernetes(ClusterBuild(id=1), ClusterProvisionJob(id=9))
         assert note.startswith("Preflight failed before Kubernetes was installed:")
         assert "test-vm-1: Free disk on /var: 5 GiB free Fix: Grow the disk." in note
+
+
+class TestAddons:
+    """Add-ons on ticket clusters: the profile's defaults always, others on request."""
+
+    ADDONS = {
+        "allowed": ["metrics-server", "nginx-ingress"],
+        "defaults": ["metrics-server"],
+    }
+
+    def _allow(self, vm_agent, addons=None):
+        return vm_requests.update_profile(vm_agent["id"], {
+            "allowKubernetes": True, "addons": addons or self.ADDONS,
+        })
+
+    def test_profile_keeps_allowed_and_defaults(self, vm_agent):
+        data = self._allow(vm_agent)
+        assert data["addons"] == {"allowed": ["metrics-server", "nginx-ingress"],
+                                  "defaults": ["metrics-server"], "config": {}}
+        [entry] = [p for p in vm_requests.catalog() if p["profile"] == "DR test VMs"]
+        assert [a["id"] for a in entry["addons"]["alwaysInstalled"]] == ["metrics-server"]
+        assert [a["id"] for a in entry["addons"]["onRequest"]] == ["nginx-ingress"]
+
+    def test_metallb_needs_its_pool_on_the_profile(self, vm_agent):
+        with pytest.raises(vm_requests.VmRequestError):
+            self._allow(vm_agent, {"allowed": ["metallb"]})
+        data = self._allow(vm_agent, {"allowed": ["metallb"],
+                                      "config": {"metallb": {"addressPools": ["10.20.30.200-10.20.30.210"]}}})
+        assert data["addons"]["config"]["metallb"]
+
+    def test_add_ons_need_kubernetes_allowed(self, vm_agent):
+        with pytest.raises(vm_requests.VmRequestError):
+            vm_requests.update_profile(vm_agent["id"], {"allowKubernetes": False, "addons": self.ADDONS})
+
+    def test_a_ticket_gets_the_defaults_plus_what_it_asks_for(self, vm_agent, writes):
+        self._allow(vm_agent)
+        _ask(_ticket(subject="A cluster with ingress"), count=None,
+             kubernetes={"shape": "lab", "addons": ["nginx-ingress"]})
+        vm = _vm(_task_latest())
+        assert [a["id"] for a in vm["kubernetes"]["addons"]] == ["metrics-server", "nginx-ingress"]
+
+    def test_an_add_on_the_profile_does_not_offer_is_refused(self, vm_agent, writes):
+        self._allow(vm_agent)
+        with pytest.raises(engine.AgentError, match="does not offer add-on"):
+            _ask(_ticket(subject="A cluster with MetalLB"), count=None,
+                 kubernetes={"shape": "lab", "addons": ["metallb"]})

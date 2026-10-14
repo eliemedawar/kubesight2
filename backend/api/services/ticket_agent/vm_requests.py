@@ -205,6 +205,9 @@ def _apply_profile(row: VmRequestProfile, payload: Dict[str, Any]) -> None:
             raise VmRequestError(str(exc)) from exc
         row.disk_check_path = path if path and path != build_preflight.DEFAULT_DISK_PATH else None
 
+    if "addons" in payload:
+        row.addons_json = _profile_addons(payload.get("addons"))
+
     if "maxVms" in payload or not row.max_vms:
         from ..cluster_build.provisioning import templates
 
@@ -230,6 +233,8 @@ def _apply_profile(row: VmRequestProfile, payload: Dict[str, Any]) -> None:
         over = [k for k in SIZE_KEYS if row.default_size_json[k] > row.max_size_json[k]]
         if over:
             raise VmRequestError("The default size cannot be larger than the most a ticket may ask for.")
+    if (row.addons_json or {}).get("allowed") and not row.allow_kubernetes:
+        raise VmRequestError("Add-ons install on a Kubernetes cluster: allow Kubernetes, or clear the add-ons.")
     if row.allow_kubernetes:
         small = [k for k in SIZE_KEYS if row.max_size_json[k] < KUBERNETES_MINIMUM[k]]
         if small:
@@ -308,6 +313,7 @@ def serialize_profile(row: VmRequestProfile) -> Dict[str, Any]:
         "maxSize": row.max_size_json or dict(DEFAULT_MAX_SIZE),
         "maxVms": row.max_vms,
         "allowKubernetes": bool(row.allow_kubernetes),
+        "addons": _addons_of(row),
         "createdBy": row.created_by,
         "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
     }
@@ -315,6 +321,88 @@ def serialize_profile(row: VmRequestProfile) -> Dict[str, Any]:
 
 def list_profiles() -> List[Dict[str, Any]]:
     return [serialize_profile(r) for r in VmRequestProfile.query.order_by(VmRequestProfile.name.asc()).all()]
+
+
+def _addon_name(addon_id: Any) -> str:
+    from ..cluster_build import addons as addon_registry
+
+    descriptor = addon_registry.get(str(addon_id or ""))
+    return descriptor.display_name if descriptor is not None else str(addon_id)
+
+
+def _profile_addons(raw: Any) -> Optional[Dict[str, Any]]:
+    """Validate a profile's add-ons: ids exist, defaults are allowed, and every
+    allowed add-on's settings are complete (MetalLB needs its pool here — a
+    ticket never chooses addresses)."""
+    from ..cluster_build import addons as addon_registry
+
+    if raw in (None, {}, []):
+        return None
+    if not isinstance(raw, dict):
+        raise VmRequestError("addons must be an object: {allowed, defaults, config}.")
+    allowed = [str(a).strip() for a in raw.get("allowed") or [] if str(a).strip()]
+    defaults = [str(a).strip() for a in raw.get("defaults") or [] if str(a).strip()]
+    config = raw.get("config") or {}
+    if not isinstance(config, dict):
+        raise VmRequestError("addons.config must be an object keyed by add-on.")
+    known = {a.id for a in addon_registry.available()}
+    unknown = sorted(set(allowed + defaults) - known)
+    if unknown:
+        raise VmRequestError(f"Unknown add-on(s): {', '.join(unknown)}. Choose from: {', '.join(sorted(known))}.")
+    allowed = list(dict.fromkeys(allowed + defaults))  # a default is allowed by definition
+    clean_config: Dict[str, Any] = {}
+    for addon_id in allowed:
+        try:
+            normalized = addon_registry.get(addon_id).normalize_config(config.get(addon_id) or {})
+        except ValueError as exc:
+            raise VmRequestError(f"{_addon_name(addon_id)}: {exc}") from exc
+        if normalized:
+            clean_config[addon_id] = normalized
+    if not allowed:
+        return None
+    return {"allowed": allowed, "defaults": list(dict.fromkeys(defaults)), "config": clean_config}
+
+
+def _addons_of(row: VmRequestProfile) -> Dict[str, Any]:
+    data = row.addons_json or {}
+    return {
+        "allowed": list(data.get("allowed") or []),
+        "defaults": list(data.get("defaults") or []),
+        "config": dict(data.get("config") or {}),
+    }
+
+
+def _addons_for_hermes(addons: Dict[str, Any]) -> Dict[str, Any]:
+    defaults = addons["defaults"]
+    return {
+        "alwaysInstalled": [{"id": a, "name": _addon_name(a)} for a in defaults],
+        "onRequest": [{"id": a, "name": _addon_name(a)} for a in addons["allowed"] if a not in defaults],
+        "how": "Pass kubernetes.addons with ids from onRequest when the ticket asks for them; "
+               "alwaysInstalled come anyway.",
+    }
+
+
+def _requested_addons(profile: VmRequestProfile, asked: Any) -> List[Dict[str, Any]]:
+    """The profile's defaults plus what the ticket asked for, each with the
+    profile's settings. Anything the profile does not allow is refused."""
+    addons = _addons_of(profile)
+    if asked in (None, "", []):
+        asked = []
+    if not isinstance(asked, list):
+        raise VmRequestError("kubernetes.addons must be a list of add-on ids.")
+    wanted = [str(a.get("id") if isinstance(a, dict) else a).strip().lower() for a in asked]
+    wanted = [a for a in wanted if a]
+    refused = [a for a in wanted if a not in addons["allowed"]]
+    if refused:
+        offered = ", ".join(addons["allowed"]) or "none"
+        raise VmRequestError(
+            f"Profile {profile.name} does not offer add-on(s) {', '.join(refused)}. Offered: {offered}."
+        )
+    chosen = list(dict.fromkeys(addons["defaults"] + wanted))
+    return [
+        {"id": a, **({"config": addons["config"][a]} if addons["config"].get(a) else {})}
+        for a in chosen
+    ]
 
 
 def catalog() -> List[Dict[str, Any]]:
@@ -336,6 +424,8 @@ def catalog() -> List[Dict[str, Any]]:
             ),
             "maxVms": data["maxVms"],
             "kubernetes": data["allowKubernetes"],
+            **({"addons": _addons_for_hermes(data["addons"])}
+               if data["allowKubernetes"] and data["addons"]["allowed"] else {}),
         })
     return out
 
@@ -550,6 +640,7 @@ def parse(arguments: Dict[str, Any], ticket: Optional[ZohoInboundTicket] = None)
             # Not named on the ticket: the VMs' own Kubernetes is used when
             # their template carries a version the Cluster Builder can build.
             "versionAsked": bool(str(asked or "").strip()),
+            "addons": _requested_addons(profile, (arguments.get("kubernetes") or {}).get("addons")),
         }
     app_rows = _app_profiles(arguments.get("apps"))
     if app_rows and kubernetes is None:
@@ -1272,7 +1363,8 @@ def _install(task_id: int) -> None:
         note = provisioning_service.install_kubernetes(
             build,
             {"counts": kubernetes.get("counts"),
-             "k8sVersion": kubernetes.get("version") if kubernetes.get("versionAsked", True) else None},
+             "k8sVersion": kubernetes.get("version") if kubernetes.get("versionAsked", True) else None,
+             **({"addons": kubernetes["addons"]} if kubernetes.get("addons") else {})},
             actor=f"hermes · {task.ticket_number}"[:120],
             user=None,
         )
@@ -1447,6 +1539,8 @@ def describe(task: TicketInterpretation) -> str:
     what = f"create {count} VM{'' if count == 1 else 's'} ({vm.get('name')}-vm-1…) from profile {vm.get('profile')}"
     if vm.get("kubernetes"):
         what += f" and install Kubernetes {vm['kubernetes'].get('version')} on them"
+        if vm["kubernetes"].get("addons"):
+            what += " with " + ", ".join(_addon_name(a.get("id")) for a in vm["kubernetes"]["addons"])
     if apps:
         what += f", then the apps {apps}"
     return what
@@ -1646,8 +1740,12 @@ def _finish(task: TicketInterpretation, outcome: str, *, build: Optional[Cluster
         fallback = {"outcome": "deployed",
                     "comment": f"The VMs are ready:\n{listed}"}
     elif outcome == "cluster_ready":
+        addons_listed = ", ".join(
+            f"{_addon_name(a.get('id'))} {a.get('version')}" for a in (build.addons_json or [])
+        ) if build is not None else ""
         fallback = {"outcome": "deployed",
                     "comment": f"The Kubernetes cluster {vm.get('clusterId') or vm.get('name')} is ready on:\n{listed}"
+                               + (f"\nAdd-ons: {addons_listed}" if addons_listed else "")
                                + (f"\nApps installed:\n{apps_listed}" if apps_listed else "")}
     elif outcome == "needs_attention":
         fallback = {"outcome": "on_hold",
@@ -1672,6 +1770,9 @@ def _finish(task: TicketInterpretation, outcome: str, *, build: Optional[Cluster
         "request": describe(task),
         "vms": machines,
         "clusterId": vm.get("clusterId"),
+        "addons": [
+            {"id": a.get("id"), "version": a.get("version")} for a in (build.addons_json or [])
+        ] if build is not None and vm.get("kubernetes") else None,
         "kubernetesVersion": (
             build.k8s_version if build is not None and vm.get("kubernetes")
             else (vm.get("kubernetes") or {}).get("version")

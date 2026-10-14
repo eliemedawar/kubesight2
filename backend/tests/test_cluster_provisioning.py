@@ -682,6 +682,18 @@ class TestVmsOnly:
         assert "warn" in statuses
         assert built["status"] == "completed", (built.get("error"), built["provisioning"]["job"])
 
+    def test_install_kubernetes_takes_the_tickets_add_ons(self, client, admin_token, ready, fake_ssh):
+        set_transport_factory(lambda: build_default_fake({**self.VM_HOSTS}))
+        url = f"/api/cluster-builds/{ready['id']}/provision/install-kubernetes"
+        response = client.post(url, json={
+            "counts": {"loadbalancer": 1, "controlPlane": 1, "worker": 2},
+            "addons": [{"id": "nginx-ingress"}],
+        }, headers=auth_headers(admin_token))
+        assert response.status_code == 200, response.get_json()
+        built = response.get_json()["data"]
+        [addon] = built["addons"]
+        assert addon["id"] == "nginx-ingress" and addon["version"]
+
     def test_destroy_takes_a_second_person_too(self, client, app, admin_token, ready, not_admin):
         job = client.post(
             f"/api/cluster-builds/{ready['id']}/provision/destroy",

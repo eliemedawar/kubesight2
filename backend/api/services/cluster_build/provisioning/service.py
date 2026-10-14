@@ -796,6 +796,14 @@ def install_kubernetes(build: ClusterBuild, payload: Optional[Dict[str, Any]] = 
         primary = next(m for m in machines if m["role"] == "controlPlane")
         build.vip_address = None
         build.control_plane_endpoint = f"{primary['ip']}:6443"
+    if "addons" in payload:
+        # Add-ons a ticket's profile installs: versions follow this build's
+        # minor, settings (a MetalLB pool) are the profile's.
+        from .. import addons as addon_registry
+
+        build.addons_json = addon_registry.normalize_selection(
+            payload.get("addons"), k8s_versions.minor_of(build.k8s_version)
+        )
     build_service._validate_topology(
         build,
         [{"role": n.role, "hostname": n.hostname, "address": n.address} for n in build.nodes],
