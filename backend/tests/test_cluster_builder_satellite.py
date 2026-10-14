@@ -407,11 +407,13 @@ class TestCapsuleVersion:
         fake.add(lambda host, script: "showduplicates" in script, listing)
         set_transport_factory(lambda: fake)
         try:
-            note = executor._settle_satellite_version(
+            note, logs = executor._settle_satellite_version(
                 build, resolve(db.session.get(BuildProfile, profile_id))
             )
         finally:
             set_transport_factory(None)
+        # What ran is in the node's own log while it runs, not an empty panel.
+        assert "Kubernetes versions on the Satellite capsule" in logs[build.nodes[0].id]
         return build, note
 
     def test_the_newest_capsule_version_replaces_one_it_lacks(

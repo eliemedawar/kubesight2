@@ -372,45 +372,65 @@ def _capsule_versions(output: str) -> List[str]:
     return k8s_versions.sort_versions(found["kubeadm"] & found["kubelet"] & found["kubectl"])
 
 
-def _settle_satellite_version(build: ClusterBuild, resolved) -> Optional[str]:
+def _settle_satellite_version(build: ClusterBuild, resolved) -> Tuple[Optional[str], Dict[int, str]]:
     """Satellite mode: install the Kubernetes the capsule actually carries.
 
     Registers one control plane (the per-node registration later skips it)
     and lists kubeadm/kubelet/kubectl. The build keeps its version when the
     capsule has it; otherwise it moves to the newest version the capsule has
     that the Cluster Builder supports, and the CNI version follows the minor.
-    Returns a line for the node logs, or None when nothing changed. Anything
-    that goes wrong here is left to base prep, which says it clearly per node.
+
+    Streams into that node's node-prep log as it goes — registration and the
+    first listing can take minutes — and returns (a line for the package step
+    label or None, {node id: what was logged}) so node prep carries the log on.
+    Anything that goes wrong here is left to base prep, which says it per node.
     """
     if resolved.repo_mode != "satellite":
-        return None
+        return None, {}
     cps, workers, _ = _nodes_by_role(build)
     pending = [
         node for node in cps + workers
         if _get_step(build, "base_prep", node).status != "completed"
     ]
     if not pending:
-        return None
+        return None, {}
     node = pending[0]
     adapter = os_adapters.by_id(node.os_family or "")
     if adapter is None or not adapter.supports_satellite:
-        return None
+        return None, {}
     ctx = _script_ctx(build, resolved, node)
     listing = """rm -f /etc/yum.repos.d/kubesight-kubernetes.repo
 dnf -q --showduplicates --disableexcludes=all list kubeadm kubelet kubectl 2>/dev/null || true
 """
+    step = _get_step(build, "base_prep", node)
+    node.status = "preparing"
+    _step_start(step)
+    stream = _StreamTail(step.id)
+    output = ""
     try:
         target = _target_for(build, node)
         register = adapter.script_register_satellite(ctx)
         if register:
-            get_transport().run(target, register, timeout_s=900)
-        output = get_transport().run(target, listing, timeout_s=300).output
-    except Exception:  # noqa: BLE001 — base prep reports it per node
-        return None
+            stream.header("Register with Red Hat Satellite")
+            _run_traced(target, register, timeout_s=900, stream=stream,
+                        display_command="Register with Red Hat Satellite (generated script hidden)",
+                        input_summary="configuration content hidden")
+        stream.header("Kubernetes versions on the Satellite capsule")
+        output = _run_traced(target, listing, timeout_s=300, stream=stream).output
+    except Exception as exc:  # noqa: BLE001 — base prep reports it per node
+        stream.write(f"\n!! {scrub(str(exc))}\nNode preparation carries on and reports it.\n")
+        stream.flush()
+        return None, {node.id: stream.text()}
     available = [v for v in _capsule_versions(output) if k8s_versions.is_supported(v)]
     wanted = k8s_versions.normalize_version(build.k8s_version)
     if not available or wanted in available:
-        return None
+        stream.write(
+            f"\nInstalling Kubernetes {wanted}"
+            + (": the capsule carries it.\n" if available else
+               ": no supported version found on the capsule; node preparation will say if it is missing.\n")
+        )
+        stream.flush()
+        return None, {node.id: stream.text()}
     chosen = available[0]
     build.k8s_version = chosen
     descriptor = cni_registry.get(build.cni_plugin)
@@ -419,17 +439,20 @@ dnf -q --showduplicates --disableexcludes=all list kubeadm kubelet kubectl 2>/de
         build.cni_version = descriptor.default_version_for_k8s_minor(minor) or build.cni_version
     db.session.commit()
     logger.info("build %s: Kubernetes %s is not on the capsule; using %s", build.id, wanted, chosen)
-    return (
+    note = (
         f"Kubernetes {chosen}: the newest version the Satellite capsule carries "
         f"({wanted} is not there)"
     )
+    stream.write(f"\n{note}.\n")
+    stream.flush()
+    return note, {node.id: stream.text()}
 
 
 def _phase_base_prep(build: ClusterBuild, resolved) -> None:
     """Parallel node preparation. Scripts per role:
     CP/worker → CA, kernel prep, containerd, kube packages;
     LB → CA + haproxy/keepalived packages only."""
-    version_note = _settle_satellite_version(build, resolved)
+    version_note, settled_logs = _settle_satellite_version(build, resolved)
     jobs = []  # (node, step, [scripts])
     for node in build.nodes:
         step = _get_step(build, "base_prep", node)
@@ -513,6 +536,10 @@ def _phase_base_prep(build: ClusterBuild, resolved) -> None:
         try:
             with app.app_context():
                 stream = _StreamTail(step_id)
+                if settled_logs.get(node_id):
+                    # The Satellite registration + version listing already
+                    # logged here; keep it at the top of this node's log.
+                    stream.write(settled_logs[node_id])
                 try:
                     for label, script in scripts:
                         stream.header(label)
