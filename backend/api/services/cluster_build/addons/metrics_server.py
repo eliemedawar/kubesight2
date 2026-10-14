@@ -32,7 +32,7 @@ METRICS_SERVER = AddonDescriptor(
     # in this catalog were validated on.
     k8s_minors_by_version={
         "0.9.0": ("1.34", "1.35", "1.36"),
-        "0.7.2": ("1.29", "1.30", "1.31", "1.32"),
+        "0.7.2": ("1.29", "1.30", "1.31", "1.32", "1.33"),
     },
     readiness_commands=(
         "-n kube-system rollout status deployment/metrics-server --timeout=600s",

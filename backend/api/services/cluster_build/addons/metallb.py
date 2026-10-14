@@ -172,7 +172,7 @@ METALLB = _MetalLb(
     # best-effort tier above. 0.16.1 is the current release and is contemporary
     # with Kubernetes 1.34-1.36.
     k8s_minors_by_version={
-        "0.16.1": ("1.29", "1.30", "1.31", "1.32", "1.34", "1.35", "1.36"),
+        "0.16.1": ("1.29", "1.30", "1.31", "1.32", "1.33", "1.34", "1.35", "1.36"),
     },
     manifest_files=("metallb-native.yaml",),
     manifest_urls=(

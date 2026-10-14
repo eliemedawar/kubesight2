@@ -56,6 +56,6 @@ NGINX_INGRESS = AddonDescriptor(
     # NGINX publishes an explicit matrix: NIC 5.5.4 supports Kubernetes
     # 1.29-1.36, spanning every minor this builder offers.
     k8s_minors_by_version={
-        "5.5.4": ("1.29", "1.30", "1.31", "1.32", "1.34", "1.35", "1.36"),
+        "5.5.4": ("1.29", "1.30", "1.31", "1.32", "1.33", "1.34", "1.35", "1.36"),
     },
 )

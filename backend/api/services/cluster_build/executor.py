@@ -421,14 +421,20 @@ dnf -q --showduplicates --disableexcludes=all list kubeadm kubelet kubectl 2>/de
         stream.write(f"\n!! {scrub(str(exc))}\nNode preparation carries on and reports it.\n")
         stream.flush()
         return None, {node.id: stream.text()}
-    available = [v for v in _capsule_versions(output) if k8s_versions.is_supported(v)]
+    on_capsule = _capsule_versions(output)
+    available = [v for v in on_capsule if k8s_versions.is_supported(v)]
     wanted = k8s_versions.normalize_version(build.k8s_version)
     if not available or wanted in available:
-        stream.write(
-            f"\nInstalling Kubernetes {wanted}"
-            + (": the capsule carries it.\n" if available else
-               ": no supported version found on the capsule; node preparation will say if it is missing.\n")
-        )
+        if wanted in available:
+            stream.write(f"\nInstalling Kubernetes {wanted}: the capsule carries it.\n")
+        elif on_capsule:
+            stream.write(
+                f"\nThe capsule carries Kubernetes {', '.join(on_capsule[:6])}, none of which "
+                f"the Cluster Builder supports (it builds {', '.join(k8s_versions.enabled_minors())}). "
+                "Sync a supported minor into Satellite.\n"
+            )
+        else:
+            stream.write("\nThe capsule lists no kubeadm/kubelet/kubectl for this activation key.\n")
         stream.flush()
         return None, {node.id: stream.text()}
     chosen = available[0]

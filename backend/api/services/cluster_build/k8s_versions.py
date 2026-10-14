@@ -118,14 +118,8 @@ class MinorSupport:
 # descriptors themselves, per version, and enforced by preflight — this table
 # deliberately does not restate it, so there is one source of truth.
 
-# 1.33 is the one gap in the enabled range: no vendored CNI release covers it.
-# Calico 3.32 starts at 1.34 and 3.28.2 stops at 1.32, so closing this means
-# vendoring a Calico 3.30/3.31 build with its SHA-256 digest.
-_NO_CNI_FOR_MINOR = (
-    "No vendored CNI release covers Kubernetes 1.33: Calico 3.32.1 is "
-    "validated from 1.34 and Calico 3.28.2 only to 1.32. Vendor a Calico "
-    "3.30/3.31 manifest with its digest to close the gap.",
-)
+# 1.33 was the one gap in the enabled range until Calico 3.31.7 was vendored
+# for it (3.32 starts at 1.34, 3.28.2 stops at 1.32).
 
 # Ordered newest first. Records exist for known-but-disabled minors on purpose:
 # the pause tag and kubeadm API for those are already resolved, so enabling one
@@ -159,8 +153,7 @@ SUPPORTED_MINORS: Tuple[MinorSupport, ...] = (
         pause_image_tag="3.10",
         kubeadm_config_api=KUBEADM_API_V1BETA4,
         fallback_patch="1.33.0",
-        enabled=False,
-        blockers=_NO_CNI_FOR_MINOR,
+        enabled=True,
     ),
     # Upstream-EOL, retained so existing builds and drafts stay buildable.
     MinorSupport(

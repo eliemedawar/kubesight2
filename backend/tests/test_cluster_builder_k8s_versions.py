@@ -91,6 +91,25 @@ def _all_minors_respond(discovery, patch: int = 99) -> None:
 # Version grammar and policy
 # ---------------------------------------------------------------------------
 
+
+@pytest.fixture()
+def disabled_minor(monkeypatch):
+    """A known-but-disabled minor. The real table has none since 1.33 got its
+    CNI, so the gate is exercised on one added for the test."""
+    record = k8s_versions.MinorSupport(
+        minor="1.28",
+        pause_image_tag="3.9",
+        kubeadm_config_api=k8s_versions.SUPPORTED_MINORS[-1].kubeadm_config_api,
+        fallback_patch="1.28.15",
+        enabled=False,
+        blockers=("Test blocker: no vendored CNI release covers Kubernetes 1.28.",),
+    )
+    monkeypatch.setattr(k8s_versions, "SUPPORTED_MINORS", k8s_versions.SUPPORTED_MINORS + (record,))
+    monkeypatch.setitem(k8s_versions._BY_MINOR, record.minor, record)
+    k8s_versions.reset_cache()
+    yield record
+    k8s_versions.reset_cache()
+
 class TestVersionPolicy:
     def test_leading_v_is_normalized_away(self):
         assert k8s_versions.normalize_version("v1.32.4") == "1.32.4"
@@ -453,12 +472,9 @@ class TestValidationMatchesOptions:
             assert response.get_json()["data"]["k8sVersion"] == version
 
     def test_backend_rejects_what_the_wizard_would_never_offer(
-        self, client, admin_token, ssh_profile
+        self, client, admin_token, ssh_profile, disabled_minor
     ):
-        disabled = next(
-            record.fallback_patch for record in k8s_versions.SUPPORTED_MINORS
-            if not record.enabled
-        )
+        disabled = disabled_minor.fallback_patch
         for version in ("1.12.0", disabled, "1.32.4-rc.1", "latest", "1.32"):
             response = client.post(
                 "/api/cluster-builds",
@@ -987,11 +1003,8 @@ class TestPreflightVersionGate:
         assert statuses["k8s_kubeadm_config"] == "pass"
         assert statuses["k8s_cni_support"] == "pass"
 
-    def test_an_unsupported_minor_fails_before_any_node_is_touched(self, app):
-        disabled = next(
-            record for record in k8s_versions.SUPPORTED_MINORS
-            if not record.enabled
-        )
+    def test_an_unsupported_minor_fails_before_any_node_is_touched(self, app, disabled_minor):
+        disabled = disabled_minor
         with app.app_context():
             checks = preflight_mod.version_checks(
                 _build_for(disabled.minor), default_profile()
