@@ -340,6 +340,69 @@ def _wait_until(fn, *, timeout_s: int, interval_s: int = 5, describe: str = "") 
 # Phases
 # ---------------------------------------------------------------------------
 
+_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+_HOSTS_MARK = "# kubesight-node"
+
+
+def _hosts_script(build: ClusterBuild) -> str:
+    """Every cluster node's name in /etc/hosts, in a block KubeSight owns.
+
+    kubeadm and the kubelet look the node names up at start-up; where the
+    network's DNS does not know them and answers slowly, a joining kubelet
+    registered minutes late and kubeadm gave up with "nodes ... not found".
+    Lines carrying the marker are rewritten each time; nothing else is touched.
+    """
+    lines = []
+    for node in build.nodes:
+        name = str(node.hostname or "").strip()
+        try:
+            address = str(ipaddress.ip_address(str(node.address or "").strip()))
+        except ValueError:
+            continue
+        if name and _HOSTNAME_RE.fullmatch(name):
+            lines.append(f"{address} {name} {_HOSTS_MARK}")
+    if not lines:
+        return ""
+    block = "\n".join(lines)
+    return f"""KS_HOSTS="$(mktemp /etc/.kubesight-hosts.XXXXXX)"
+grep -v '{_HOSTS_MARK}$' /etc/hosts > "$KS_HOSTS" || true
+cat >> "$KS_HOSTS" <<'KSHOSTS'
+{block}
+KSHOSTS
+cat "$KS_HOSTS" > /etc/hosts
+rm -f "$KS_HOSTS"
+"""
+
+
+_LATE_REGISTRATION_RE = re.compile(r"error writing CRISocket for this node: nodes? \"?[^\"]*\"? ?not found")
+
+
+def _settle_late_registration(primary_target: SshTarget, node_name: str, stream: "_StreamTail") -> bool:
+    """kubeadm gave up waiting for the Node object while the kubelet was
+    still registering it. Wait for it, write the annotation kubeadm could not,
+    and count the join as done; False when the node never shows up."""
+    stream.write(
+        f"\nkubeadm stopped waiting before {node_name} registered; waiting for it (up to 5 minutes).\n"
+    )
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        try:
+            found = _kubectl(primary_target, f"get node {node_name} -o name", timeout_s=30)
+        except (SshCommandError, SshConnectionError):
+            found = ""
+        if f"node/{node_name.strip(chr(39))}" in found:
+            _kubectl(
+                primary_target,
+                f"annotate node {node_name} --overwrite "
+                "kubeadm.alpha.kubernetes.io/cri-socket=unix:///var/run/containerd/containerd.sock",
+                timeout_s=30,
+            )
+            stream.write(f"{node_name} registered; the join is complete.\n")
+            return True
+        time.sleep(10)
+    return False
+
+
 def _nodes_by_role(build: ClusterBuild) -> Tuple[List[ClusterBuildNode], List[ClusterBuildNode], List[ClusterBuildNode]]:
     cps = [n for n in build.nodes if n.role == "control_plane"]
     workers = [n for n in build.nodes if n.role == "worker"]
@@ -493,6 +556,9 @@ def _phase_base_prep(build: ClusterBuild, resolved) -> None:
         ca_script = adapter.script_configure_ca(ctx)
         if ca_script:
             scripts.append(("Trusted CA certificates", ca_script))
+        hosts = _hosts_script(build)
+        if hosts:
+            scripts.append(("Cluster node names in /etc/hosts", "set -e\n" + hosts))
         if resolved.registers_with_satellite or resolved.repo_mode == "satellite":
             if not adapter.supports_satellite:
                 raise _PhaseFailed(
@@ -1122,7 +1188,7 @@ def _phase_join_cp(build: ClusterBuild, primary: ClusterBuildNode) -> None:
             stream = _StreamTail(step.id)
             result = _run_traced(
                 _target_for(build, node),
-                f"set -e\n{join_command}",
+                f"set -e\n{_hosts_script(build)}{join_command}",
                 timeout_s=900,
                 stream=stream,
             )
@@ -1162,6 +1228,8 @@ def _phase_join_workers(build: ClusterBuild) -> None:
         raise _PhaseFailed("Worker join requires a control-plane node.")
     # Minted only when a join is actually outstanding (see _phase_join_cp).
     join_command, _ = _ensure_join_secrets(build, cps[0], need_cert_key=False)
+    hosts = _hosts_script(build)
+    primary_target = _target_for(build, cps[0])
 
     jobs = []
     for node, step in pending:
@@ -1190,7 +1258,7 @@ def _phase_join_workers(build: ClusterBuild) -> None:
                 try:
                     _run_traced(
                         target,
-                        f"set -e\n{join_command} --node-name {node_name}",
+                        f"set -e\n{hosts}{join_command} --node-name {node_name}",
                         timeout_s=900,
                         stream=stream,
                     )
@@ -1198,8 +1266,13 @@ def _phase_join_workers(build: ClusterBuild) -> None:
                 except SshCommandError as exc:
                     if exc.output and exc.output not in stream.text():
                         stream.write(exc.output)
-                    stream.write(f"\n!! {exc}\n")
-                    results[node_id] = (False, stream.text())
+                    if _LATE_REGISTRATION_RE.search(stream.text()) and _settle_late_registration(
+                        primary_target, node_name, stream
+                    ):
+                        results[node_id] = (True, stream.text())
+                    else:
+                        stream.write(f"\n!! {exc}\n")
+                        results[node_id] = (False, stream.text())
                 finally:
                     stream.flush()
         except Exception as exc:  # noqa: BLE001
