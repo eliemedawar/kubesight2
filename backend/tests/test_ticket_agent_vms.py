@@ -647,3 +647,85 @@ class TestContainerDataPath:
     def test_a_relative_path_is_refused(self, vm_agent):
         with pytest.raises(vm_requests.VmRequestError):
             vm_requests.update_profile(vm_agent["id"], {"diskCheckPath": "data"})
+
+
+class TestResumeAfterAttention:
+    """A request parked for DevOps follows the build again once a person starts it."""
+
+    def test_the_ticket_hears_how_a_hand_started_build_ends(
+        self, client, app, admin_token, vm_agent, writes, vcenter
+    ):
+        from api.models import ClusterBuild
+
+        ticket = _ticket(subject="Two VMs")
+        _ask(ticket)
+        task = _task(ticket)
+        other = second_admin_token(client, app)
+        response = client.post(f"/api/ticket-agent/tasks/{task.id}/approve", headers=auth_headers(other))
+        assert response.status_code == 200, response.get_json()
+        db.session.refresh(task)
+        assert task.status == "executed"
+
+        # Parked: preflight stopped the Kubernetes install for DevOps.
+        vm = dict(_vm(task))  # a copy: an in-place edit would not be saved
+        vm.update(phase="needs_attention", finished=True, kubernetes={"version": "1.33.5"})
+        vm_requests._save(task, vm)
+        build = db.session.get(ClusterBuild, vm["buildId"])
+
+        build.status = "preflight_passed"
+        db.session.commit()
+        vm_requests.advance()
+        assert _vm(task)["phase"] == "needs_attention"  # nobody started it yet
+
+        build.status = "building"
+        db.session.commit()
+        vm_requests.advance()
+        assert _vm(task)["phase"] == "installing"
+
+        build.status = "completed"
+        db.session.commit()
+        vm_requests.advance()
+        assert _vm(task)["phase"] == "cluster_ready"
+
+
+class TestWarningsDoNotHoldTheInstall:
+    """The path Hermes takes: VMs ready -> install Kubernetes -> preflight."""
+
+    def test_a_warn_only_preflight_starts_the_build(self, monkeypatch):
+        from api.models import ClusterBuild, ClusterProvisionJob
+        from api.services.cluster_build import service as build_service
+        from api.services.cluster_build.provisioning import jobs
+
+        started = {}
+        monkeypatch.setattr(build_service, "run_preflight", lambda build_id, user=None: {
+            "status": "warn",
+            "nodes": [{"hostname": "test-vm-1", "checks": [
+                {"id": "k8s_packages", "label": "Exact Kubernetes packages available", "status": "warn"},
+                {"id": "k8s_version", "label": "Kubernetes version supported", "status": "warn"},
+                {"id": "cpu", "label": "CPU count", "status": "pass"},
+            ]}],
+        })
+        monkeypatch.setattr(build_service, "start_build",
+                            lambda build_id, ack_warnings=None, actor="", user=None: started.update(ack=ack_warnings))
+        note = jobs.start_kubernetes(ClusterBuild(id=1), ClusterProvisionJob(id=9))
+        assert note is None
+        assert started["ack"] == [
+            "Started automatically after OpenTofu plan #9 past preflight warnings: "
+            "Exact Kubernetes packages available, Kubernetes version supported"
+        ]
+
+    def test_a_failure_still_stops_it_and_says_what_failed(self, monkeypatch):
+        from api.models import ClusterBuild, ClusterProvisionJob
+        from api.services.cluster_build import service as build_service
+        from api.services.cluster_build.provisioning import jobs
+
+        monkeypatch.setattr(build_service, "run_preflight", lambda build_id, user=None: {
+            "status": "fail",
+            "nodes": [{"hostname": "test-vm-1", "checks": [
+                {"id": "disk", "label": "Free disk on /var", "status": "fail",
+                 "detail": "5 GiB free", "hint": "Grow the disk."},
+            ]}],
+        })
+        note = jobs.start_kubernetes(ClusterBuild(id=1), ClusterProvisionJob(id=9))
+        assert note.startswith("Preflight failed before Kubernetes was installed:")
+        assert "test-vm-1: Free disk on /var: 5 GiB free Fix: Grow the disk." in note

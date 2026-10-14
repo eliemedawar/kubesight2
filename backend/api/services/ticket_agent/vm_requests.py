@@ -934,7 +934,8 @@ def advance() -> int:
     )
     for task in rows:
         vm = _vm(task)
-        if vm.get("phase") in FINISHED and not vm.get("cleanup"):
+        if (vm.get("phase") in FINISHED and vm.get("phase") != "needs_attention"
+                and not vm.get("cleanup")):
             continue
         try:
             if _advance_one(task):
@@ -952,6 +953,8 @@ def _advance_one(task: TicketInterpretation) -> bool:
     vm = _vm(task)
     if vm.get("cleanup"):
         return _finish_cleanup(task, vm)
+    if vm.get("phase") == "needs_attention":
+        return _resume_after_attention(task, vm)
     if vm.get("phase") in FINISHED:
         return False
     build = db.session.get(ClusterBuild, vm.get("buildId") or 0)
@@ -1036,6 +1039,30 @@ def _advance_one(task: TicketInterpretation) -> bool:
     if status in ("destroying", "destroyed"):
         return _finish(task, "failed", build=build, error="The VMs were destroyed before the request finished.")
     return False
+
+
+def _resume_after_attention(task: TicketInterpretation, vm: Dict[str, Any]) -> bool:
+    """A person took over (fixed preflight, started the build): follow the
+    build again, so the ticket hears how it ends — the comment it got said
+    the request would continue once that was done."""
+    build = db.session.get(ClusterBuild, vm.get("buildId") or 0)
+    if build is None or build.status not in ("building", "completed", "failed", "cancelled"):
+        return False
+    if build.status in ("failed", "cancelled") and not build.started_at:
+        return False
+    vm["phase"] = "installing"
+    vm["finished"] = False
+    vm["resumedAt"] = datetime.now(timezone.utc).isoformat()
+    vm.pop("finishedAt", None)
+    _save(task, vm)
+    log_audit(
+        "ticket_agent_vm_request_resumed",
+        actor=None,
+        target_type="ticket_interpretation",
+        target_id=str(task.id),
+        details={"ticket": task.ticket_number, "buildId": build.id, "buildStatus": build.status},
+    )
+    return True
 
 
 def _apps_of(build: ClusterBuild, vm: Dict[str, Any]):
