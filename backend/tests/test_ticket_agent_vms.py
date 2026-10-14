@@ -775,3 +775,54 @@ class TestAddons:
         with pytest.raises(engine.AgentError, match="does not offer add-on"):
             _ask(_ticket(subject="A cluster with MetalLB"), count=None,
                  kubernetes={"shape": "lab", "addons": ["metallb"]})
+
+
+class TestResumeAfterRetry:
+    """A failed Kubernetes install that DevOps retries tells the ticket how it ended."""
+
+    def _failed(self, client, app, vm_agent, failed_at):
+        from datetime import datetime, timezone
+
+        from api.models import ClusterBuild
+
+        ticket = _ticket(subject="Two VMs")
+        _ask(ticket)
+        task = _task(ticket)
+        other = second_admin_token(client, app)
+        assert client.post(f"/api/ticket-agent/tasks/{task.id}/approve",
+                           headers=auth_headers(other)).status_code == 200
+        vm = dict(_vm(task))
+        vm.update(phase="failed", finished=True, kubernetes={"version": "1.33.5"},
+                  finishedAt=failed_at.isoformat())
+        vm_requests._save(task, vm)
+        build = db.session.get(ClusterBuild, vm["buildId"])
+        build.status = "failed"
+        db.session.commit()
+        return task, build
+
+    def test_a_retried_build_reports_its_end(self, client, app, admin_token, vm_agent, writes, vcenter):
+        from datetime import datetime, timezone
+
+        task, build = self._failed(client, app, vm_agent, datetime.now(timezone.utc))
+        vm_requests.advance()
+        assert _vm(task)["phase"] == "failed"  # still failed: nobody retried
+
+        build.status = "building"
+        db.session.commit()
+        vm_requests.advance()
+        assert _vm(task)["phase"] == "installing"
+
+        build.status = "completed"
+        build.finished_at = datetime.now(timezone.utc)
+        db.session.commit()
+        vm_requests.advance()
+        assert _vm(task)["phase"] == "cluster_ready"
+
+    def test_an_old_failure_is_left_alone(self, client, app, admin_token, vm_agent, writes, vcenter):
+        from datetime import datetime, timedelta, timezone
+
+        task, build = self._failed(client, app, vm_agent, datetime.now(timezone.utc) - timedelta(days=8))
+        build.status = "building"
+        db.session.commit()
+        vm_requests.advance()
+        assert _vm(task)["phase"] == "failed"

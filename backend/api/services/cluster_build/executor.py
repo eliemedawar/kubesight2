@@ -486,6 +486,14 @@ dnf -q --showduplicates --disableexcludes=all list kubeadm kubelet kubectl 2>/de
     output = ""
     try:
         target = _target_for(build, node)
+        # Same order as node prep: the profile's CAs (a TLS-inspecting proxy's)
+        # are in place before anything talks to the capsule.
+        ca_script = adapter.script_configure_ca(ctx)
+        if ca_script:
+            stream.header("Trusted CA certificates")
+            _run_traced(target, ca_script, timeout_s=300, stream=stream,
+                        display_command="Trusted CA certificates (generated script hidden)",
+                        input_summary="configuration content hidden")
         register = adapter.script_register_satellite(ctx)
         if register:
             stream.header("Register with Red Hat Satellite")
@@ -2152,6 +2160,58 @@ def _verify_claims_bound(
     return unbound
 
 
+_RELEASE_ROLLOUT_TIMEOUT_S = 600
+
+
+def _wait_for_release(target: SshTarget, app, stream: "_StreamTail") -> None:
+    """Helm installs without --wait, so "installed" only meant the manifests
+    were accepted — not that the app runs. Wait for the release's workloads
+    (the standard app.kubernetes.io/instance label) to roll out; when they do
+    not, mark the app failed with what its pods are doing, so the ticket says
+    ImagePullBackOff rather than "installed"."""
+    namespace = shlex.quote(app.namespace)
+    selector = shlex.quote(f"app.kubernetes.io/instance={app.release_name}")
+    names = _kubectl(
+        target, f"-n {namespace} get deployment,statefulset,daemonset -l {selector} -o name",
+        timeout_s=60, stream=stream,
+    ).split()
+    workloads = [name for name in names if "/" in name]
+    if not workloads:
+        stream.write(f"No labelled workloads for {app.release_name}; nothing to wait for.\n")
+        return
+    try:
+        for workload in workloads:
+            _kubectl(
+                target,
+                f"-n {namespace} rollout status {shlex.quote(workload)} "
+                f"--timeout={_RELEASE_ROLLOUT_TIMEOUT_S}s",
+                timeout_s=_RELEASE_ROLLOUT_TIMEOUT_S + 60, stream=stream,
+            )
+    except (SshCommandError, SshConnectionError) as exc:
+        try:
+            pods = _kubectl(target, f"-n {namespace} get pods -l {selector} --no-headers",
+                            timeout_s=60, stream=stream)
+        except (SshCommandError, SshConnectionError):
+            pods = ""
+        states = sorted({
+            line.split()[2] for line in pods.splitlines() if len(line.split()) > 2
+        } - {"Running", "Completed"})
+        reason = (
+            f"{app.release_name} was installed but did not come up in "
+            f"{_RELEASE_ROLLOUT_TIMEOUT_S // 60} minutes"
+            + (f": pods are {', '.join(states)}." if states else ".")
+        )
+        # Not "failed": the chart is in and its values are already dropped,
+        # so a retry must check it again, never install it again.
+        app.status = "not_ready"
+        app.error = reason
+        db.session.commit()
+        raise build_apps.AppsError(reason) from exc
+    if app.status == "not_ready":
+        build_apps.mark_installed(app)
+    stream.write(f"{app.release_name} is running.\n")
+
+
 def _phase_apps(build: ClusterBuild) -> None:
     """Install the build's Inventory Helm charts, in order, onto the cluster.
 
@@ -2164,7 +2224,7 @@ def _phase_apps(build: ClusterBuild) -> None:
     them for approval instead of reopening this phase, and a cluster that
     needs approval by now is refused here too.
     """
-    pending = [app for app in build.apps if app.status in build_apps.TO_INSTALL]
+    pending = [app for app in build.apps if app.status in build_apps.TO_INSTALL + ("not_ready",)]
     if not pending:
         return
     step = _get_step(build, "apps")
@@ -2182,6 +2242,8 @@ def _phase_apps(build: ClusterBuild) -> None:
                 "on the build, which sends the charts for approval."
             )
         context = f"cluster_build:{build.id}"
+        cps, _, _ = _nodes_by_role(build)
+        primary_target = _target_for(build, cps[0]) if cps else None
         for app in pending:
             _check_cancelled(build)
             stream.header(
@@ -2189,9 +2251,12 @@ def _phase_apps(build: ClusterBuild) -> None:
                 f"({app.chart_name or app.chart_slug} {app.chart_version}) "
                 f"in {app.namespace}"
             )
-            output = build_apps.install_one(build, app, context)
-            if output:
-                stream.write(output if output.endswith("\n") else output + "\n")
+            if app.status != "not_ready":
+                output = build_apps.install_one(build, app, context)
+                if output:
+                    stream.write(output if output.endswith("\n") else output + "\n")
+            if primary_target is not None:
+                _wait_for_release(primary_target, app, stream)
         _check_cancelled(build)
         _step_done(step, stream.text())
     except _Cancelled:

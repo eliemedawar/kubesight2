@@ -196,9 +196,20 @@ def _candidate_from_response(payload: object) -> object:
         or hermes_status.get("partial") is True
         or hermes_status.get("completed") is False
     ):
+        # Shared by every Hermes caller (tickets, source analysis, CI assist),
+        # so the message names no one task. Whatever reason Hermes gave is
+        # kept: "no usable response" alone sends people hunting.
+        reason = next(
+            (
+                str(hermes_status.get(key)).strip()
+                for key in ("error", "reason", "message", "detail")
+                if str(hermes_status.get(key) or "").strip()
+            ),
+            "",
+        )
         raise HermesTransientError(
-            "Hermes did not complete the source analysis. Its model provider "
-            "returned no usable response."
+            "Hermes did not finish: its model provider returned no usable response"
+            + (f" ({reason[:300]})." if reason else ". Check the Hermes pod's log and its model provider (API key, quota, model).")
         )
     if "result" in payload:
         return payload["result"]

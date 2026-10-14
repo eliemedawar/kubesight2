@@ -30,6 +30,7 @@ const STATUS_PILLS = {
   // Helm apps
   installing: ["Installing…", "is-live"],
   installed: ["Installed", "is-ok"],
+  not_ready: ["Not running", "is-bad"],
   awaiting_approval: ["Waiting for approval", "is-warn"],
   rejected: ["Not approved", "is-bad"],
 };

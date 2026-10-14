@@ -1025,7 +1025,7 @@ def advance() -> int:
     )
     for task in rows:
         vm = _vm(task)
-        if (vm.get("phase") in FINISHED and vm.get("phase") != "needs_attention"
+        if (vm.get("phase") in FINISHED and not _may_resume(vm)
                 and not vm.get("cleanup")):
             continue
         try:
@@ -1046,6 +1046,8 @@ def _advance_one(task: TicketInterpretation) -> bool:
         return _finish_cleanup(task, vm)
     if vm.get("phase") == "needs_attention":
         return _resume_after_attention(task, vm)
+    if vm.get("phase") == "failed" and _may_resume(vm):
+        return _resume_after_retry(task, vm)
     if vm.get("phase") in FINISHED:
         return False
     build = db.session.get(ClusterBuild, vm.get("buildId") or 0)
@@ -1156,6 +1158,50 @@ def _resume_after_attention(task: TicketInterpretation, vm: Dict[str, Any]) -> b
     return True
 
 
+RESUME_WINDOW = timedelta(days=7)
+
+
+def _may_resume(vm: Dict[str, Any]) -> bool:
+    """A finished request a person can still bring back: parked for DevOps,
+    or a Kubernetes install that failed — recently, so old requests are not
+    re-read on every tick forever."""
+    phase = vm.get("phase")
+    if phase == "needs_attention":
+        return True
+    if phase != "failed" or not vm.get("kubernetes") or vm.get("kind") == APPS_KIND:
+        return False
+    try:
+        finished = datetime.fromisoformat(str(vm.get("finishedAt") or ""))
+    except ValueError:
+        return False
+    if finished.tzinfo is None:
+        finished = finished.replace(tzinfo=timezone.utc)
+    return engine_now() - finished < RESUME_WINDOW
+
+
+def _resume_after_retry(task: TicketInterpretation, vm: Dict[str, Any]) -> bool:
+    """The Kubernetes install failed and the ticket was told; someone pressed
+    Retry on the build. Follow it again so the ticket also hears it worked."""
+    build = db.session.get(ClusterBuild, vm.get("buildId") or 0)
+    if build is None:
+        return False
+    try:
+        failed_at = datetime.fromisoformat(str(vm.get("finishedAt")))
+    except ValueError:
+        return False
+    if failed_at.tzinfo is None:
+        failed_at = failed_at.replace(tzinfo=timezone.utc)
+    finished = build.finished_at
+    if finished is not None and finished.tzinfo is None:
+        finished = finished.replace(tzinfo=timezone.utc)
+    retried = build.status == "building" or (
+        build.status == "completed" and finished is not None and finished > failed_at
+    )
+    if not retried:
+        return False
+    return _resume_after_attention(task, vm)
+
+
 def _apps_of(build: ClusterBuild, vm: Dict[str, Any]):
     ids = set(vm.get("appIds") or [])
     return [app for app in build.apps if app.id in ids]
@@ -1180,7 +1226,7 @@ def _advance_apps(task: TicketInterpretation, vm: Dict[str, Any], build: Cluster
     statuses = {app.status for app in rows}
     if statuses == {"installed"}:
         return _finish(task, "apps_ready", build=build)
-    bad = [app for app in rows if app.status in ("failed", "rejected")]
+    bad = [app for app in rows if app.status in ("failed", "rejected", "not_ready")]
     if bad and build.status != "building":
         return _finish(task, "failed", build=build, error="; ".join(
             f"{app.release_name}: {app.error or app.status}" for app in bad
@@ -1514,6 +1560,8 @@ def approval_text(task: TicketInterpretation, ticket: Optional[ZohoInboundTicket
             f"Then Kubernetes {version}: {counts.get('controlPlane', 0)} control plane(s), "
             f"{counts.get('worker', 0)} worker(s), {counts.get('loadbalancer', 0)} load balancer(s)."
         )
+        if kubernetes.get("addons"):
+            lines.append("With add-ons: " + ", ".join(_addon_name(a.get("id")) for a in kubernetes["addons"]) + ".")
     if vm.get("apps"):
         lines.append("Then these apps, with Helm:")
         lines += _app_lines(vm["apps"])
