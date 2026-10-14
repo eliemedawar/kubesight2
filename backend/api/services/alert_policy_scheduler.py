@@ -156,6 +156,14 @@ def run_background_lane(app: Flask) -> None:
         logger.exception("Deployment request auto-decline tick failed")
     try:
         with app.app_context():
+            from .upgrade_center import start_due_upgrades
+
+            # Approved cluster upgrades whose maintenance window has opened.
+            start_due_upgrades()
+    except Exception:
+        logger.exception("Scheduled upgrade tick failed")
+    try:
+        with app.app_context():
             from .change_bundle_executor import process_due_bundles
 
             process_due_bundles()

@@ -30,13 +30,20 @@ _VERSION_LOOKUP_WAIT_SECONDS = float(os.getenv("K8S_RELEASE_LOOKUP_WAIT_SECONDS"
 _version_lookups: Dict[str, threading.Event] = {}
 
 
-def _cached_release_lookup(key: str, fetch: Callable[[], Optional[str]], fallback: Optional[str]) -> Optional[str]:
+def _cached_release_lookup(
+    key: str,
+    fetch: Callable[[], Optional[str]],
+    fallback: Optional[str],
+    *,
+    wait: Optional[float] = None,
+) -> Optional[str]:
     """``fetch()`` through the version cache, off the caller's thread.
 
     Fresh answers come straight from the cache. Otherwise one background
     lookup runs (never two for the same key); the caller gets the previous
-    answer immediately if there is one, else waits up to
-    _VERSION_LOOKUP_WAIT_SECONDS for the lookup and then gets ``fallback``."""
+    answer immediately if there is one, else waits up to ``wait`` seconds
+    (default _VERSION_LOOKUP_WAIT_SECONDS; 0 = never) for the lookup and then
+    gets ``fallback``."""
     now = time.monotonic()
     with _version_cache_lock:
         entry = _version_cache.get(key)
@@ -74,7 +81,8 @@ def _cached_release_lookup(key: str, fetch: Callable[[], Optional[str]], fallbac
 
     if stale_value_ok:
         return entry["value"]
-    event.wait(_VERSION_LOOKUP_WAIT_SECONDS)
+    if wait != 0:
+        event.wait(_VERSION_LOOKUP_WAIT_SECONDS if wait is None else wait)
     with _version_cache_lock:
         entry = _version_cache.get(key)
     return entry["value"] if entry else fallback
@@ -216,6 +224,27 @@ def recommended_kubeadm_target(current_version: str) -> Optional[str]:
     return _cached_release_lookup(
         key, lambda: _fetch_latest_patch_for_minor(current_tuple[0], current_tuple[1] + 1), None
     )
+
+
+def peek_latest_patch(major: int, minor: int) -> Optional[str]:
+    """The newest patch of ``major.minor`` if the release cache knows it, else
+    None — never waits (a lookup starts in the background for next time)."""
+    return _cached_release_lookup(
+        f"kubeadm_target_{major}_{minor}",
+        lambda: _fetch_latest_patch_for_minor(major, minor),
+        None,
+        wait=0,
+    )
+
+
+def peek_latest_stable() -> str:
+    """Latest stable release if cached, else "unknown" — never waits."""
+    return _cached_release_lookup(
+        "latest_k8s_stable",
+        lambda: _fetch_release_text("https://dl.k8s.io/release/stable.txt"),
+        "unknown",
+        wait=0,
+    ) or "unknown"
 
 
 def kubeadm_minor_jump_blocked(current_version: str, target_version: str) -> Optional[str]:
@@ -563,6 +592,39 @@ def get_provider_support(provider: str) -> Dict[str, Any]:
     }
 
 
+def node_role(node: Dict[str, Any]) -> str:
+    labels = node.get("metadata", {}).get("labels", {}) or {}
+    if "node-role.kubernetes.io/control-plane" in labels or "node-role.kubernetes.io/master" in labels:
+        return "control-plane"
+    return "worker"
+
+
+def node_pool(node: Dict[str, Any]) -> Optional[str]:
+    """The managed node group / pool a cloud node belongs to, when labelled."""
+    labels = node.get("metadata", {}).get("labels", {}) or {}
+    for key in ("eks.amazonaws.com/nodegroup", "kubernetes.azure.com/agentpool", "cloud.google.com/gke-nodepool"):
+        if labels.get(key):
+            return labels[key]
+    return None
+
+
+def describe_nodes(node_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """name / role / kubelet version / Ready / pool for each node, control planes first."""
+    rows = [
+        {
+            "name": node.get("metadata", {}).get("name", "unknown"),
+            "role": node_role(node),
+            "version": _node_version(node),
+            "ready": _node_ready(node),
+            "unschedulable": bool(node.get("spec", {}).get("unschedulable")),
+            "pool": node_pool(node),
+        }
+        for node in node_items
+    ]
+    rows.sort(key=lambda n: (n["role"] != "control-plane", n["name"]))
+    return rows
+
+
 def analyze_version_skew(
     control_plane_version: str,
     node_items: List[Dict[str, Any]],
@@ -707,11 +769,11 @@ def generate_upgrade_plan(provider_support: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _check_status(name: str, status: str, details: str = "") -> Dict[str, Any]:
-    entry: Dict[str, Any] = {"name": name, "status": status}
-    if details:
-        entry["details"] = details
-    return entry
+def _check_status(name: str, status: str, details: str = "", **extra: Any) -> Dict[str, Any]:
+    from .upgrade_checks import check
+
+    key = extra.pop("key", None) or re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    return check(key, name, extra.pop("group", "health"), status, details, **extra)
 
 
 def run_extended_prechecks(
@@ -719,299 +781,22 @@ def run_extended_prechecks(
     target_version: str,
     run_kubectl: RunKubectlFn,
 ) -> Dict[str, Any]:
-    checks: List[Dict[str, Any]] = []
-    current_version = "unknown"
-    node_items: List[Dict[str, Any]] = []
-    version_data: Dict[str, Any] = {}
+    """Every readiness check, from one parallel read of the cluster
+    (see ``upgrade_checks``)."""
+    from .upgrade_checks import run_checks
 
-    try:
-        version_output = run_kubectl(access, ["version", "-o", "json"])
-        version_data = json.loads(version_output)
-        current_version = version_data.get("serverVersion", {}).get("gitVersion") or "unknown"
-        checks.append(_check_status("API reachable", "passed", "Cluster API is reachable."))
-    except Exception as exc:
-        checks.append(_check_status("API reachable", "failed", str(exc)))
-        return _precheck_payload(access, target_version, current_version, checks, node_items, version_data, run_kubectl)
-
-    try:
-        nodes_output = run_kubectl(access, ["get", "nodes", "-o", "json"])
-        node_items = json.loads(nodes_output).get("items", [])
-        not_ready = [n.get("metadata", {}).get("name", "unknown") for n in node_items if not _node_ready(n)]
-        if not_ready:
-            checks.append(_check_status("Nodes ready", "failed", f"Not ready: {', '.join(not_ready)}"))
-        else:
-            checks.append(_check_status("Nodes ready", "passed", f"All {len(node_items)} node(s) are Ready."))
-    except Exception as exc:
-        checks.append(_check_status("Nodes ready", "failed", str(exc)))
-
-    try:
-        pods_output = run_kubectl(access, ["get", "pods", "-n", "kube-system", "-o", "json"])
-        kube_pods = json.loads(pods_output).get("items", [])
-        failed = [p.get("metadata", {}).get("name") for p in kube_pods if p.get("status", {}).get("phase") == "Failed"]
-        not_running = [
-            p.get("metadata", {}).get("name")
-            for p in kube_pods
-            if p.get("status", {}).get("phase") not in ("Running", "Succeeded")
-        ]
-        if failed:
-            checks.append(_check_status("Control plane healthy", "failed", f"Failed pods: {', '.join(failed)}"))
-        elif not_running:
-            checks.append(
-                _check_status(
-                    "Control plane healthy",
-                    "warning",
-                    f"Non-running kube-system pods: {', '.join(not_running[:5])}",
-                )
-            )
-        else:
-            checks.append(_check_status("Control plane healthy", "passed", "kube-system pods are healthy."))
-    except Exception as exc:
-        checks.append(_check_status("Control plane healthy", "warning", str(exc)))
-
-    provider = detect_cluster_provider(access, run_kubectl, version_data=version_data, node_items=node_items)
-
-    valid_target, target_error = validate_target_version(target_version)
-    if not valid_target:
-        checks.append(_check_status("Target version validation", "failed", target_error or "Invalid target version."))
-    else:
-        current_tuple = parse_k8s_version(current_version)
-        target_tuple = parse_k8s_version(target_version)
-        kubeadm_jump_error = (
-            kubeadm_minor_jump_blocked(current_version, target_version)
-            if provider == "kubeadm"
-            else None
-        )
-        if kubeadm_jump_error:
-            checks.append(_check_status("Target version validation", "failed", kubeadm_jump_error))
-        elif current_tuple >= target_tuple:
-            checks.append(
-                _check_status(
-                    "Target version validation",
-                    "warning",
-                    f"Cluster already at or above {normalize_version(target_version)} ({current_version}).",
-                )
-            )
-        else:
-            checks.append(
-                _check_status(
-                    "Target version validation",
-                    "passed",
-                    f"Upgrade path {current_version} -> {normalize_version(target_version)}.",
-                )
-            )
-
-    try:
-        run_kubectl(access, ["top", "nodes", "--no-headers"])
-        checks.append(_check_status("Metrics server available", "passed", "metrics-server is available."))
-    except Exception:
-        checks.append(
-            _check_status(
-                "Metrics server available",
-                "warning",
-                "metrics-server not available; resource metrics may be limited.",
-            )
-        )
-
-    # PVC Health
-    try:
-        pvc_output = run_kubectl(access, ["get", "pvc", "--all-namespaces", "-o", "json"])
-        pvcs = json.loads(pvc_output).get("items", [])
-        pending = [p.get("metadata", {}).get("name") for p in pvcs if p.get("status", {}).get("phase") == "Pending"]
-        lost = [p.get("metadata", {}).get("name") for p in pvcs if p.get("status", {}).get("phase") == "Lost"]
-        if lost:
-            checks.append(_check_status("PVC health", "failed", f"Lost PVCs: {', '.join(lost[:10])}"))
-        elif pending:
-            checks.append(_check_status("PVC health", "warning", f"Pending PVCs: {', '.join(pending[:10])}"))
-        else:
-            checks.append(_check_status("PVC health", "passed", f"{len(pvcs)} PVC(s) checked."))
-    except Exception as exc:
-        checks.append(_check_status("PVC health", "warning", str(exc)))
-
-    # Storage Health
-    try:
-        sc_output = run_kubectl(access, ["get", "storageclass", "-o", "json"])
-        sc_items = json.loads(sc_output).get("items", [])
-        if not sc_items:
-            checks.append(_check_status("Storage health", "warning", "No StorageClasses found."))
-        else:
-            default_count = sum(
-                1 for sc in sc_items if sc.get("metadata", {}).get("annotations", {}).get("storageclass.kubernetes.io/is-default-class") == "true"
-            )
-            detail = f"{len(sc_items)} StorageClass(es)"
-            if default_count == 0:
-                checks.append(_check_status("Storage health", "warning", f"{detail}; no default StorageClass."))
-            else:
-                checks.append(_check_status("Storage health", "passed", detail))
-    except Exception as exc:
-        checks.append(_check_status("Storage health", "warning", str(exc)))
-
-    # Pod restart analysis, CrashLoopBackOff, Pending pods
-    try:
-        pods_output = run_kubectl(access, ["get", "pods", "--all-namespaces", "-o", "json"])
-        all_pods = json.loads(pods_output).get("items", [])
-        high_restart: List[str] = []
-        crash_loop: List[str] = []
-        pending_pods: List[str] = []
-
-        for pod in all_pods:
-            meta = pod.get("metadata", {})
-            ns_name = f"{meta.get('namespace')}/{meta.get('name')}"
-            phase = pod.get("status", {}).get("phase")
-            if phase == "Pending":
-                pending_pods.append(ns_name)
-            for cs in pod.get("status", {}).get("containerStatuses", []) or []:
-                waiting = cs.get("state", {}).get("waiting", {})
-                if waiting.get("reason") == "CrashLoopBackOff":
-                    crash_loop.append(ns_name)
-                if cs.get("restartCount", 0) >= 10:
-                    high_restart.append(ns_name)
-
-        if crash_loop:
-            checks.append(
-                _check_status(
-                    "CrashLoopBackOff detection",
-                    "failed",
-                    f"CrashLoopBackOff: {', '.join(crash_loop[:10])}",
-                )
-            )
-        else:
-            checks.append(_check_status("CrashLoopBackOff detection", "passed", "No CrashLoopBackOff pods."))
-
-        if high_restart:
-            checks.append(
-                _check_status(
-                    "Pod restart analysis",
-                    "warning",
-                    f"High restart count (>=10): {', '.join(high_restart[:10])}",
-                )
-            )
-        else:
-            checks.append(_check_status("Pod restart analysis", "passed", "No excessive pod restarts."))
-
-        if pending_pods:
-            checks.append(
-                _check_status(
-                    "Pending pods",
-                    "warning",
-                    f"Pending pods: {', '.join(pending_pods[:10])}",
-                )
-            )
-        else:
-            checks.append(_check_status("Pending pods", "passed", "No pending pods."))
-    except Exception as exc:
-        checks.append(_check_status("Pod restart analysis", "warning", str(exc)))
-        checks.append(_check_status("CrashLoopBackOff detection", "warning", str(exc)))
-        checks.append(_check_status("Pending pods", "warning", str(exc)))
-
-    # PDB validation
-    try:
-        pdb_output = run_kubectl(access, ["get", "pdb", "--all-namespaces", "-o", "json"])
-        pdbs = json.loads(pdb_output).get("items", [])
-        unhealthy_pdbs = []
-        for pdb in pdbs:
-            status = pdb.get("status", {})
-            desired = status.get("expectedPods", 0)
-            healthy = status.get("currentHealthy", 0)
-            name = pdb.get("metadata", {}).get("name", "unknown")
-            if desired > 0 and healthy < desired:
-                unhealthy_pdbs.append(name)
-        if unhealthy_pdbs:
-            checks.append(
-                _check_status(
-                    "Pod disruption budget validation",
-                    "warning",
-                    f"PDBs below desired healthy: {', '.join(unhealthy_pdbs[:10])}",
-                )
-            )
-        else:
-            checks.append(
-                _check_status(
-                    "Pod disruption budget validation",
-                    "passed",
-                    f"{len(pdbs)} PDB(s) validated.",
-                )
-            )
-    except Exception as exc:
-        checks.append(_check_status("Pod disruption budget validation", "warning", str(exc)))
-
-    # Deprecated API detection (lightweight via apiservices / api resources)
-    try:
-        apis_output = run_kubectl(access, ["get", "apiservices", "-o", "json"])
-        apis = json.loads(apis_output).get("items", [])
-        unavailable = []
-        for a in apis:
-            conditions = a.get("status", {}).get("conditions", [])
-            available = any(
-                c.get("type") == "Available" and c.get("status") == "True" for c in conditions
-            )
-            if not available:
-                unavailable.append(a.get("metadata", {}).get("name"))
-        if unavailable:
-            checks.append(
-                _check_status(
-                    "Deprecated API detection",
-                    "warning",
-                    f"Unavailable API services: {', '.join(unavailable[:5])}. Review deprecated APIs before upgrade.",
-                )
-            )
-        else:
-            checks.append(
-                _check_status(
-                    "Deprecated API detection",
-                    "passed",
-                    "No unavailable API services detected. Run provider-specific deprecation checks before upgrade.",
-                )
-            )
-    except Exception as exc:
-        checks.append(_check_status("Deprecated API detection", "warning", str(exc)))
-
-    # Version skew
-    skew = analyze_version_skew(current_version, node_items)
-    if skew["warnings"]:
-        checks.append(
-            _check_status("Version skew detection", "warning", "; ".join(skew["warnings"][:3]))
-        )
-    else:
-        checks.append(_check_status("Version skew detection", "passed", "Node versions align with control plane."))
-
-    # Node resource pressure
-    try:
-        pressured: List[str] = []
-        for node in node_items:
-            name = node.get("metadata", {}).get("name", "unknown")
-            for condition in node.get("status", {}).get("conditions", []):
-                if condition.get("type") in ("MemoryPressure", "DiskPressure", "PIDPressure"):
-                    if condition.get("status") == "True":
-                        pressured.append(f"{name}({condition.get('type')})")
-        if pressured:
-            checks.append(
-                _check_status("Node resource pressure", "warning", f"Pressure detected: {', '.join(pressured)}")
-            )
-        else:
-            checks.append(_check_status("Node resource pressure", "passed", "No resource pressure on nodes."))
-    except Exception as exc:
-        checks.append(_check_status("Node resource pressure", "warning", str(exc)))
-
-    # Kube-system health (broader than control plane)
-    try:
-        ks_output = run_kubectl(access, ["get", "pods", "-n", "kube-system", "-o", "json"])
-        ks_pods = json.loads(ks_output).get("items", [])
-        bad = []
-        for pod in ks_pods:
-            phase = pod.get("status", {}).get("phase")
-            ready = all(c.get("ready") for c in pod.get("status", {}).get("containerStatuses", []) or [])
-            if phase != "Running" or not ready:
-                bad.append(pod.get("metadata", {}).get("name"))
-        if bad:
-            checks.append(
-                _check_status("Kube-system health", "warning", f"Unhealthy kube-system pods: {', '.join(bad[:10])}")
-            )
-        else:
-            checks.append(_check_status("Kube-system health", "passed", f"{len(ks_pods)} kube-system pod(s) healthy."))
-    except Exception as exc:
-        checks.append(_check_status("Kube-system health", "warning", str(exc)))
-
-    return _precheck_payload(access, target_version, current_version, checks, node_items, version_data, run_kubectl)
+    result = run_checks(access, target_version, run_kubectl)
+    payload = _precheck_payload(
+        access,
+        target_version,
+        result["currentVersion"],
+        result["checks"],
+        result["nodeItems"],
+        result["versionData"],
+        run_kubectl,
+    )
+    payload["baseline"] = result["baseline"]
+    return payload
 
 
 def _precheck_payload(
@@ -1023,6 +808,8 @@ def _precheck_payload(
     version_data: Dict[str, Any],
     run_kubectl: RunKubectlFn,
 ) -> Dict[str, Any]:
+    from .upgrade_checks import GROUPS, summarize
+
     can_upgrade = not any(check.get("status") == "failed" for check in checks)
     provider = detect_cluster_provider(access, run_kubectl, version_data=version_data, node_items=node_items)
     provider_support = get_provider_support(provider)
@@ -1034,6 +821,9 @@ def _precheck_payload(
         "currentVersion": current_version,
         "canUpgrade": can_upgrade,
         "checks": checks,
+        "summary": summarize(checks),
+        "groups": GROUPS,
+        "nodes": describe_nodes(node_items),
         "provider": provider_support,
         "versionSkew": version_skew,
         "versionInfo": build_version_info(current_version, target_version, provider_support),
@@ -1078,7 +868,36 @@ def build_upgrade_info(
         "versionInfo": version_info,
         "versionSkew": version_skew,
         "upgradePlan": generate_upgrade_plan(provider_support),
+        "nodes": describe_nodes(node_items),
+        **release_context(cluster_info["controlPlaneVersion"], version_info.get("latestAvailable")),
         "generatedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def release_context(current_version: str, latest_version: Optional[str], patch=None) -> Dict[str, Any]:
+    """Support clock, release line and hop-by-hop path for one cluster.
+
+    ``patch(major, minor)`` overrides how a minor's newest patch is found
+    (mock mode passes a fixed table)."""
+    from .upgrade_releases import calendar, support_status, upgrade_path
+
+    current = parse_k8s_version(current_version)
+    next_minor = current[1] + 1 if current[1] else None
+
+    def _patch(major: int, minor: int) -> Optional[str]:
+        if patch is not None:
+            return patch(major, minor)
+        # The next hop is the one a person picks now: worth the short wait
+        # recommended_kubeadm_target allows. Later hops never wait.
+        if minor == next_minor:
+            return recommended_kubeadm_target(current_version)
+        return peek_latest_patch(major, minor)
+
+    return {
+        "support": support_status(current_version),
+        "path": upgrade_path(current_version, latest_version, _patch),
+        "patchTarget": (patch or peek_latest_patch)(current[0], current[1]) if current[1] else None,
+        "calendar": calendar(latest_version, around=[current[1]] if current[1] else None),
     }
 
 

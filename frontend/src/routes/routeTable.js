@@ -108,6 +108,8 @@ export const TAB_VALUES = {
   ],
   // pages/ApplicationServicesPage.jsx:1440
   applicationServices: ["overview", "dr"],
+  // pages/UpgradeCenterPage.jsx — fleet, in progress, history
+  upgrade: ["fleet", "progress", "history"],
   // Resource tabs are RBAC-filtered at render time; the full static set is
   // valid in a URL and ResourcesPage falls back if this user cannot see it.
   resources: RESOURCE_TAB_KEYS,
@@ -287,7 +289,16 @@ export const ROUTES = [
     params: { tab: { values: TAB_VALUES.clusterBuilder } },
     defaults: { tab: "floor" },
   },
-  { key: "upgrade", path: "/upgrade", query: ["cluster"] },
+  // One cluster's upgrade workspace; ?job= opens a run or a request.
+  { key: "upgradeCluster", path: "/upgrade/cluster/:clusterId", pageKey: "upgrade", query: ["job"] },
+  // Fleet-wide, so no ?cluster= (the app writes the topbar cluster into any
+  // route that declares it): an old #/upgrade?cluster=x link opens the fleet.
+  {
+    key: "upgrade",
+    path: "/upgrade/:tab?",
+    params: { tab: { values: TAB_VALUES.upgrade } },
+    defaults: { tab: "fleet" },
+  },
 ];
 
 export const DEFAULT_ROUTE_KEY = "dashboard";

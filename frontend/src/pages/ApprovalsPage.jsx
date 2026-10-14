@@ -2,7 +2,7 @@
  *
  *  One inbox for every kind of approval KubeSight asks for: deployment
  *  requests, change bundles, Hermes ticket actions and VM requests, CI approval
- *  stages and Cluster Builder destroys. "Waiting on me" is exactly what each
+ *  stages, Cluster Builder destroys and cluster upgrades. "Waiting on me" is exactly what each
  *  kind's own rule lets this person decide now; the vote goes to that kind's
  *  own route, so no rule is re-implemented here. Rules gathers every setting
  *  that decides who approves what.
@@ -42,6 +42,7 @@ const KIND_FILTERS = [
   { key: "hermes", label: "Hermes tickets" },
   { key: "ci_stage", label: "CI approvals" },
   { key: "cluster_destroy", label: "Cluster destroys" },
+  { key: "cluster_upgrade", label: "Cluster upgrades" },
 ];
 
 // History comes a page at a time ("Load older" asks for the next one).
@@ -59,6 +60,10 @@ const OUTCOME_TONE = {
 const CONFIRM_APPROVE = {
   cluster_destroy: (item) => `Approve: ${item.title}? The VMs are deleted in vCenter.`,
   hermes: (item) => (item.vmRequest ? `Approve and create: ${item.title}?` : null),
+  cluster_upgrade: (item) =>
+    `Approve: ${item.title}? KubeSight drains and upgrades its nodes ${
+      (item.details || []).find((d) => d.startsWith("In the window")) ? "when its window opens" : "as soon as the last approval is in"
+    }.`,
 };
 
 // The API sends some UTC times without a zone; a browser would read them as local.
@@ -259,7 +264,7 @@ function Inbox({ scope, onCounts }) {
           <span className="muted">
             {scope === "mine" && data?.counts?.pending
               ? `${data.counts.pending} pending item${data.counts.pending === 1 ? "" : "s"} wait on someone else — see All pending.`
-              : "Deployment requests, change bundles, Hermes tickets, CI approval stages and Cluster Builder destroys show up here."}
+              : "Deployment requests, change bundles, Hermes tickets, CI approval stages, Cluster Builder destroys and cluster upgrades show up here."}
           </span>
         </div>
       )}
@@ -401,8 +406,8 @@ export default function ApprovalsPage({ clusters = [] }) {
           <div>
             <h2>Approvals</h2>
             <p className="sg-ph-sub">
-              Everything waiting on a person — deploys, change bundles, Hermes tickets, CI approval stages and
-              Cluster Builder destroys — and the rules that decide who approves.
+              Everything waiting on a person — deploys, change bundles, Hermes tickets, CI approval stages,
+              Cluster Builder destroys and cluster upgrades — and the rules that decide who approves.
             </p>
           </div>
         </div>

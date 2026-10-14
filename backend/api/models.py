@@ -3046,7 +3046,7 @@ from .models_ticket_agent import (  # noqa: E402,F401
 )
 
 # Upgrade Center jobs — persisted so a restart cannot lose an upgrade's record.
-from .models_upgrade import UpgradeJob  # noqa: E402,F401
+from .models_upgrade import UpgradeJob, UpgradePrecheck  # noqa: E402,F401
 
 # Promotion rules — the environment ladder, its namespace bindings and the
 # ledger of images that passed each environment.

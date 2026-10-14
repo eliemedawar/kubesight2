@@ -32,13 +32,14 @@ from ..db import db
 
 logger = logging.getLogger(__name__)
 
-KINDS = ("deployment_request", "change_bundle", "hermes", "ci_stage", "cluster_destroy")
+KINDS = ("deployment_request", "change_bundle", "hermes", "ci_stage", "cluster_destroy", "cluster_upgrade")
 KIND_LABELS = {
     "deployment_request": "Deployment request",
     "change_bundle": "Change bundle",
     "hermes": "Hermes ticket",
     "ci_stage": "CI approval stage",
     "cluster_destroy": "Cluster Builder destroy",
+    "cluster_upgrade": "Cluster upgrade",
 }
 _LIMIT = 200
 # Sorts an item with no time last.
@@ -494,12 +495,81 @@ def _cluster_destroys(user) -> List[Dict[str, Any]]:
     return out
 
 
+def _upgrade_when(job: Dict[str, Any]) -> str:
+    sched = job.get("schedule") or {}
+    start = _parse_before(sched.get("start")) if sched.get("mode") == "window" else None
+    if start is None:
+        return "As soon as it is approved"
+    end = _parse_before(sched.get("end"))
+    text = f"In the window starting {start.strftime('%a %d %b, %H:%M')} UTC"
+    return text + (f" until {end.strftime('%H:%M')} UTC" if end else "")
+
+
+def _pending_upgrades(user) -> List[Dict[str, Any]]:
+    """Upgrade requests waiting for approval on clusters this person can see."""
+    from ..upgrade_jobs import list_jobs
+    from .upgrade_center import _can_access
+
+    if not _can(user, "upgrades:precheck"):
+        return []
+    return [
+        job for job in list_jobs(statuses=("awaiting_approval",), limit=_LIMIT)
+        if _can_access(user, str(job.get("clusterId")))
+    ]
+
+
+def _cluster_upgrades(user) -> List[Dict[str, Any]]:
+    from .upgrade_center import why_cannot_decide
+
+    out = []
+    for job in _pending_upgrades(user):
+        why = why_cannot_decide(job, user) or ""
+        approvals = job.get("approvals") or {}
+        votes = approvals.get("votes") or []
+        options = job.get("options") or {}
+        readiness = job.get("readiness") or {}
+        details = [
+            f"{job.get('currentVersion')} → {job.get('targetVersion')}",
+            f"Workers {options.get('waveSize', 1)} at a time; drain timeout {options.get('drainTimeoutMinutes', 10)} min"
+            + ("; etcd snapshot first" if options.get("etcdSnapshot", True) else "; no etcd snapshot"),
+            _upgrade_when(job),
+        ]
+        warnings = readiness.get("warnings") or []
+        if warnings:
+            details.append(f"Readiness warnings: {', '.join(warnings)}")
+        for waiver in job.get("waivers") or []:
+            details.append(f"Blocker waived by {waiver.get('by')}: {waiver.get('name')} — {waiver.get('reason')}")
+        out.append(_item(
+            "cluster_upgrade", 0,
+            key=f"cluster_upgrade:{job['jobId']}",
+            id=job["jobId"],
+            title=f"Upgrade {job.get('clusterName') or job.get('clusterId')} to {job.get('targetVersion')}",
+            summary=job.get("note") or "Kubernetes upgrade run by KubeSight.",
+            where=job.get("clusterName") or job.get("clusterId"),
+            requestedBy=(job.get("requestedBy") or {}).get("name"),
+            requestedAt=job.get("requestedAt"),
+            approvals=sum(1 for v in votes if v.get("decision") == "approve"),
+            required=approvals.get("required"),
+            details=details,
+            href=f"#/upgrade/cluster/{job.get('clusterId')}?job={job['jobId']}",
+            canDecide=not why,
+            why=why,
+            actions=_actions(
+                f"/api/upgrades/requests/{job['jobId']}/approve",
+                f"/api/upgrades/requests/{job['jobId']}/reject",
+                reject_field="note", approve_field="note",
+            ),
+        ))
+    return out
+
+
 _COLLECTORS: Dict[str, Callable] = {
     "deployment_request": _deployment_requests,
     "change_bundle": _change_bundles,
     "hermes": _hermes,
     "ci_stage": _ci_stages,
     "cluster_destroy": _cluster_destroys,
+    "cluster_upgrade": _cluster_upgrades,
 }
 
 
@@ -587,12 +657,21 @@ def _count_destroys(user) -> int:
     return sum(1 for owner, build_id in rows if build_id is not None and (admin or not _is_own(owner, user)))
 
 
+def _count_upgrades(user) -> int:
+    from .upgrade_center import why_cannot_decide
+
+    if not _can(user, "upgrades:start"):
+        return 0
+    return sum(1 for job in _pending_upgrades(user) if why_cannot_decide(job, user) is None)
+
+
 _COUNTERS: Dict[str, Callable] = {
     "deployment_request": _count_deployment_requests,
     "change_bundle": _count_change_bundles,
     "hermes": _count_hermes,
     "ci_stage": _count_ci_stages,
     "cluster_destroy": _count_destroys,
+    "cluster_upgrade": _count_upgrades,
 }
 
 
@@ -643,6 +722,7 @@ _WATCHED_COLUMNS = {
     "TicketInterpretation": ("status", "decision"),
     "CiBuildStage": ("status", "server_state"),
     "ClusterProvisionJob": ("status",),
+    "UpgradeJob": ("status",),
 }
 
 
@@ -952,12 +1032,52 @@ def _history_destroys(user, limit: int, before: Optional[datetime]) -> List[Dict
     return out
 
 
+def _history_upgrades(user, limit: int, before: Optional[datetime]) -> List[Dict[str, Any]]:
+    from ..upgrade_jobs import list_jobs
+    from .upgrade_center import _can_access
+
+    if not _can(user, "upgrades:precheck"):
+        return []
+    out = []
+    for job in list_jobs(statuses=("scheduled", "queued", "running", "paused", "completed", "failed",
+                                   "stopped", "rejected", "expired", "withdrawn"), limit=_LIMIT):
+        approvals = job.get("approvals") or {}
+        votes = approvals.get("votes") or []
+        if not approvals.get("required") or not _can_access(user, str(job.get("clusterId"))):
+            continue
+        if not votes and job.get("status") != "withdrawn":
+            continue
+        decided_at = job.get("approvedAt") or (votes[-1].get("at") if votes else job.get("finishedAt"))
+        when = _parse_before(decided_at)
+        if before is not None and when is not None and when >= before:
+            continue
+        outcome = ("rejected" if job.get("status") == "rejected"
+                   else "withdrawn" if job.get("status") == "withdrawn" else "approved")
+        out.append({
+            "key": f"cluster_upgrade:{job['jobId']}", "kind": "cluster_upgrade",
+            "kindLabel": KIND_LABELS["cluster_upgrade"],
+            "title": f"Upgrade {job.get('clusterName') or job.get('clusterId')} to {job.get('targetVersion')}",
+            "summary": next((v.get("note") for v in reversed(votes) if v.get("note")), "") or job.get("message") or "",
+            "where": job.get("clusterName") or job.get("clusterId"),
+            "requestedBy": (job.get("requestedBy") or {}).get("name"),
+            "requestedAt": job.get("requestedAt"),
+            "outcome": outcome,
+            "decidedBy": ", ".join(v.get("name") or "" for v in votes) or None,
+            "decidedAt": decided_at,
+            "href": f"#/upgrade/cluster/{job.get('clusterId')}?job={job['jobId']}",
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
 _HISTORY: Dict[str, Callable] = {
     "deployment_request": _history_requests,
     "change_bundle": _history_bundles,
     "hermes": _history_hermes,
     "ci_stage": _history_ci,
     "cluster_destroy": _history_destroys,
+    "cluster_upgrade": _history_upgrades,
 }
 
 
@@ -999,6 +1119,7 @@ CLUSTER_GATES = [
     "Ticket deploys (Hermes and deploy automation)",
     "Promotion releases and promotion exceptions",
     "Cluster Builder day-two changes (add-ons, machines, workloads)",
+    "Kubernetes upgrades run from the Upgrade Center (an admin's upgrade needs none)",
 ]
 
 

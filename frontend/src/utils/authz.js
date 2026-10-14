@@ -256,7 +256,6 @@ export const CLUSTER_CONTEXT_PAGE_KEYS = new Set([
   "resources",
   "logs",
   "alerts",
-  "upgrade",
 ]);
 
 /** Pages that use the topbar namespace selector. */
