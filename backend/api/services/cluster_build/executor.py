@@ -39,7 +39,7 @@ from .. import ssh_profile_service
 from . import addons as addon_registry
 from . import apps as build_apps
 from . import cni as cni_registry
-from . import kubeadm, lb, onboard, os_adapters
+from . import k8s_versions, kubeadm, lb, onboard, os_adapters
 from . import storage as workload_storage
 from . import workloads as workload_copy
 from .addons import metallb as metallb_addon
@@ -359,10 +359,77 @@ def _needs_nfs_client(build: ClusterBuild) -> bool:
     return workload_storage.needs_nfs((selection or {}).get("storage"))
 
 
+_CAPSULE_PACKAGE_RE = re.compile(
+    r"^(kubeadm|kubelet|kubectl)\.\S+\s+(?:\d+:)?(\d+\.\d+\.\d+)-", re.MULTILINE
+)
+
+
+def _capsule_versions(output: str) -> List[str]:
+    """Versions for which the capsule carries all of kubeadm, kubelet and kubectl."""
+    found: Dict[str, set] = {"kubeadm": set(), "kubelet": set(), "kubectl": set()}
+    for name, version in _CAPSULE_PACKAGE_RE.findall(output or ""):
+        found[name].add(version)
+    return k8s_versions.sort_versions(found["kubeadm"] & found["kubelet"] & found["kubectl"])
+
+
+def _settle_satellite_version(build: ClusterBuild, resolved) -> Optional[str]:
+    """Satellite mode: install the Kubernetes the capsule actually carries.
+
+    Registers one control plane (the per-node registration later skips it)
+    and lists kubeadm/kubelet/kubectl. The build keeps its version when the
+    capsule has it; otherwise it moves to the newest version the capsule has
+    that the Cluster Builder supports, and the CNI version follows the minor.
+    Returns a line for the node logs, or None when nothing changed. Anything
+    that goes wrong here is left to base prep, which says it clearly per node.
+    """
+    if resolved.repo_mode != "satellite":
+        return None
+    cps, workers, _ = _nodes_by_role(build)
+    pending = [
+        node for node in cps + workers
+        if _get_step(build, "base_prep", node).status != "completed"
+    ]
+    if not pending:
+        return None
+    node = pending[0]
+    adapter = os_adapters.by_id(node.os_family or "")
+    if adapter is None or not adapter.supports_satellite:
+        return None
+    ctx = _script_ctx(build, resolved, node)
+    listing = """rm -f /etc/yum.repos.d/kubesight-kubernetes.repo
+dnf -q --showduplicates --disableexcludes=all list kubeadm kubelet kubectl 2>/dev/null || true
+"""
+    try:
+        target = _target_for(build, node)
+        register = adapter.script_register_satellite(ctx)
+        if register:
+            get_transport().run(target, register, timeout_s=900)
+        output = get_transport().run(target, listing, timeout_s=300).output
+    except Exception:  # noqa: BLE001 — base prep reports it per node
+        return None
+    available = [v for v in _capsule_versions(output) if k8s_versions.is_supported(v)]
+    wanted = k8s_versions.normalize_version(build.k8s_version)
+    if not available or wanted in available:
+        return None
+    chosen = available[0]
+    build.k8s_version = chosen
+    descriptor = cni_registry.get(build.cni_plugin)
+    minor = k8s_versions.minor_of(chosen)
+    if descriptor is not None and not descriptor.supports_k8s_minor(build.cni_version or "", minor):
+        build.cni_version = descriptor.default_version_for_k8s_minor(minor) or build.cni_version
+    db.session.commit()
+    logger.info("build %s: Kubernetes %s is not on the capsule; using %s", build.id, wanted, chosen)
+    return (
+        f"Kubernetes {chosen}: the newest version the Satellite capsule carries "
+        f"({wanted} is not there)"
+    )
+
+
 def _phase_base_prep(build: ClusterBuild, resolved) -> None:
     """Parallel node preparation. Scripts per role:
     CP/worker → CA, kernel prep, containerd, kube packages;
     LB → CA + haproxy/keepalived packages only."""
+    version_note = _settle_satellite_version(build, resolved)
     jobs = []  # (node, step, [scripts])
     for node in build.nodes:
         step = _get_step(build, "base_prep", node)
@@ -412,7 +479,11 @@ def _phase_base_prep(build: ClusterBuild, resolved) -> None:
                 ))
             scripts.append(("Kernel modules + sysctl + swap off", adapter.script_kernel_prep(ctx)))
             scripts.append(("containerd install + config", adapter.script_install_containerd(ctx)))
-            scripts.append(("Kubernetes packages (kubeadm, kubelet, kubectl)", adapter.script_install_kube_packages(ctx)))
+            scripts.append((
+                f"Kubernetes packages (kubeadm, kubelet, kubectl) — {version_note}"
+                if version_note else "Kubernetes packages (kubeadm, kubelet, kubectl)",
+                adapter.script_install_kube_packages(ctx),
+            ))
             # Only when this build will actually mount one: the kubelet needs
             # /sbin/mount.nfs, and without it an NFS volume fails at pod start
             # with an opaque "wrong fs type" long after the build succeeded.

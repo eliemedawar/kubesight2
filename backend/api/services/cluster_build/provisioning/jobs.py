@@ -1650,13 +1650,17 @@ def stop_requested(job_id: int) -> Optional[str]:
 
 
 # Preflight warnings that only restate a placement the approved plan chose —
-# every VM on the one datastore the person picked. Acknowledged in the plan's
-# name so the build is not held up asking again; anything else waits for a person.
+# every VM on the one datastore the person picked.
 _PLAN_PLACEMENT_CHECKS = {"vs_cp_datastore"}
 
 
 def _plan_acknowledges(result: Dict[str, Any], job: ClusterProvisionJob) -> Optional[List[str]]:
-    """``ackWarnings`` for a preflight whose only warnings the plan already decided."""
+    """``ackWarnings`` that let the hand-off start the build past warnings.
+
+    Warnings never hold the build up: it starts on its own and what it started
+    past is recorded against the build in the plan's name. Any failure still
+    stops it for a person.
+    """
     if result.get("status") != "warn":
         return None
     warned = [
@@ -1664,13 +1668,25 @@ def _plan_acknowledges(result: Dict[str, Any], job: ClusterProvisionJob) -> Opti
         for check in node.get("checks") or []
         if check.get("status") not in ("pass", None)
     ]
-    if not warned or any(
-        check.get("status") != "warn" or check.get("id") not in _PLAN_PLACEMENT_CHECKS
-        for check in warned
-    ):
+    if not warned or any(check.get("status") != "warn" for check in warned):
         return None
-    labels = sorted({check.get("label") or check.get("id") for check in warned})
-    return [f"Placement chosen in OpenTofu plan #{job.id}: {', '.join(labels)}"]
+    placement = sorted({
+        check.get("label") or check.get("id")
+        for check in warned if check.get("id") in _PLAN_PLACEMENT_CHECKS
+    })
+    others = sorted({
+        check.get("label") or check.get("id")
+        for check in warned if check.get("id") not in _PLAN_PLACEMENT_CHECKS
+    })
+    ack = []
+    if placement:
+        ack.append(f"Placement chosen in OpenTofu plan #{job.id}: {', '.join(placement)}")
+    if others:
+        ack.append(
+            f"Started automatically after OpenTofu plan #{job.id} past preflight "
+            f"warnings: {', '.join(others)}"
+        )
+    return ack
 
 
 def _handoff(job: ClusterProvisionJob) -> None:
@@ -1739,8 +1755,28 @@ def start_kubernetes(build: ClusterBuild, job: ClusterProvisionJob, *, user=None
         except Exception as exc:  # noqa: BLE001
             return f"The Kubernetes build did not start: {scrub(str(exc))}"
         return None
+    failures = _preflight_failures(result)
+    if failures:
+        return "Preflight failed before Kubernetes was installed:\n" + "\n".join(failures)
     return ("Preflight found something to look at before Kubernetes is installed "
             f"({result.get('status')}). Review it on this page, then start the build.")
+
+
+def _preflight_failures(result: Dict[str, Any], limit: int = 8) -> List[str]:
+    """One line per failed check — what a ticket reader needs to act on."""
+    lines = []
+    for node in result.get("nodes") or []:
+        for check in node.get("checks") or []:
+            if check.get("status") != "fail":
+                continue
+            where = node.get("hostname") or node.get("address") or "a machine"
+            line = f"- {where}: {check.get('label') or check.get('id')}: {check.get('detail') or ''}".rstrip(": ")
+            if check.get("hint"):
+                line += f" Fix: {check['hint']}"
+            lines.append(line)
+    if len(lines) > limit:
+        lines = lines[:limit] + [f"- …and {len(lines) - limit} more on the build page."]
+    return lines
 
 
 def _note(job: ClusterProvisionJob, message: str) -> None:

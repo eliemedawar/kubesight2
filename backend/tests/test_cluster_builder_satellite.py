@@ -373,3 +373,96 @@ class TestContainerDataPath:
     def test_var_moves_nothing(self, client, admin_token, app, ssh_profile):  # noqa: F811
         calls = self._scripts(client, admin_token, ssh_profile, "/var")
         assert not any("kubesight-data" in s for _, s in calls)
+
+
+class TestCapsuleVersion:
+    """Satellite mode installs the Kubernetes the capsule actually carries."""
+
+    @staticmethod
+    def _listing(*versions):
+        lines = ["Available Packages"]
+        for version in versions:
+            for name in ("kubeadm", "kubelet", "kubectl"):
+                lines.append(f"{name}.x86_64   {version}-150500.1.1   k8s-packages")
+        return "\n".join(lines) + "\n"
+
+    def test_only_versions_with_all_three_packages_count(self):
+        output = self._listing("1.33.5", "1.33.2") + "kubeadm.x86_64  1.33.9-1.1  k8s-packages\n"
+        assert executor._capsule_versions(output) == ["1.33.5", "1.33.2"]
+
+    def _build_on(self, client, admin_token, ssh_profile, version, listing):  # noqa: F811
+        profile_id = _create(client, admin_token).get_json()["data"]["id"]
+        payload = make_build_payload(nodes=[
+            {"role": "control_plane", "hostname": "cp-1", "address": "10.0.0.11"},
+        ])
+        payload["k8sVersion"] = version
+        payload["connectionProfileId"] = ssh_profile["id"]
+        payload["buildProfileId"] = profile_id
+        created = client.post("/api/cluster-builds", json=payload, headers=auth_headers(admin_token))
+        assert created.status_code == 201, created.get_json()
+        build = db.session.get(ClusterBuild, created.get_json()["data"]["id"])
+        build.nodes[0].os_family = "rhel"
+        db.session.commit()
+        fake = FakeSshTransport()
+        fake.add(lambda host, script: "showduplicates" in script, listing)
+        set_transport_factory(lambda: fake)
+        try:
+            note = executor._settle_satellite_version(
+                build, resolve(db.session.get(BuildProfile, profile_id))
+            )
+        finally:
+            set_transport_factory(None)
+        return build, note
+
+    def test_the_newest_capsule_version_replaces_one_it_lacks(
+        self, client, admin_token, app, ssh_profile  # noqa: F811
+    ):
+        from api.services.cluster_build import k8s_versions
+
+        minors = k8s_versions.enabled_minors()
+        newest, older = minors[0], minors[-1]
+        build, note = self._build_on(
+            client, admin_token, ssh_profile, f"{newest}.1",
+            self._listing(f"{older}.2", f"{older}.5"),
+        )
+        assert build.k8s_version == f"{older}.5"
+        assert note and f"{older}.5" in note and f"{newest}.1" in note
+        descriptor = executor.cni_registry.get(build.cni_plugin)
+        assert descriptor.supports_k8s_minor(build.cni_version, older)
+
+    def test_a_version_the_capsule_has_is_kept(
+        self, client, admin_token, app, ssh_profile  # noqa: F811
+    ):
+        from api.services.cluster_build import k8s_versions
+
+        minor = k8s_versions.enabled_minors()[-1]
+        build, note = self._build_on(
+            client, admin_token, ssh_profile, f"{minor}.2",
+            self._listing(f"{minor}.2", f"{minor}.5"),
+        )
+        assert build.k8s_version == f"{minor}.2" and note is None
+
+    def test_an_empty_capsule_changes_nothing(
+        self, client, admin_token, app, ssh_profile  # noqa: F811
+    ):
+        from api.services.cluster_build import k8s_versions
+
+        minor = k8s_versions.enabled_minors()[0]
+        build, note = self._build_on(client, admin_token, ssh_profile, f"{minor}.1", "")
+        assert build.k8s_version == f"{minor}.1" and note is None
+
+
+class TestPreflightFailuresForTickets:
+    def test_failed_checks_are_listed_with_their_fix(self):
+        from api.services.cluster_build.provisioning import jobs
+
+        lines = jobs._preflight_failures({"status": "fail", "nodes": [{
+            "hostname": "test-vm-1",
+            "checks": [
+                {"id": "disk", "label": "Free disk on /var", "status": "fail",
+                 "detail": "5 GiB free", "hint": "Grow the disk."},
+                {"id": "cpu", "label": "CPU count", "status": "pass"},
+                {"id": "fsync", "label": "fsync", "status": "warn"},
+            ],
+        }]})
+        assert lines == ["- test-vm-1: Free disk on /var: 5 GiB free Fix: Grow the disk."]

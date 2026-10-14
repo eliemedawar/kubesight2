@@ -1629,6 +1629,13 @@ def _finish(task: TicketInterpretation, outcome: str, *, build: Optional[Cluster
     elif vm.get("kind") == APPS_KIND:
         fallback = {"outcome": "failed",
                     "comment": f"Installing the apps failed: {vm.get('error') or 'see KubeSight'}"[:2000]}
+    elif build is not None and vm.get("kubernetes") and build.status in ("failed", "cancelled"):
+        # The VMs exist; it is Kubernetes on them that failed. Say where.
+        detail = next((node.error for node in build.nodes if node.error), "")
+        fallback = {"outcome": "failed",
+                    "comment": (f"The VMs are created:\n{listed}\nInstalling Kubernetes "
+                                f"{build.k8s_version} failed: {vm.get('error') or 'see KubeSight'}"
+                                + (f"\n{detail[-600:]}" if detail else ""))[:2000]}
     else:
         fallback = {"outcome": "failed",
                     "comment": f"Creating the VMs failed: {vm.get('error') or 'see KubeSight'}"[:2000]}
@@ -1638,7 +1645,10 @@ def _finish(task: TicketInterpretation, outcome: str, *, build: Optional[Cluster
         "request": describe(task),
         "vms": machines,
         "clusterId": vm.get("clusterId"),
-        "kubernetesVersion": (vm.get("kubernetes") or {}).get("version"),
+        "kubernetesVersion": (
+            build.k8s_version if build is not None and vm.get("kubernetes")
+            else (vm.get("kubernetes") or {}).get("version")
+        ),
         "apps": vm.get("appResults") or None,
         "error": vm.get("error"),
         "note": vm.get("note"),

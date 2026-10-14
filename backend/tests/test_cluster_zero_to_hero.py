@@ -520,12 +520,25 @@ class TestPlanAcknowledgedWarnings:
         ), ClusterProvisionJob(id=7))
         assert ack == ["Placement chosen in OpenTofu plan #7: Control-plane datastore diversity"]
 
-    def test_any_other_warning_waits_for_a_person(self):
+    def test_other_warnings_are_acknowledged_and_recorded(self):
+        from api.services.cluster_build.provisioning import jobs
+        from api.models import ClusterProvisionJob
+
+        ack = jobs._plan_acknowledges(self._result(
+            {"id": "vs_cp_datastore", "label": "Control-plane datastore diversity", "status": "warn"},
+            {"id": "fsync", "label": "etcd disk fsync latency", "status": "warn"},
+        ), ClusterProvisionJob(id=7))
+        assert ack == [
+            "Placement chosen in OpenTofu plan #7: Control-plane datastore diversity",
+            "Started automatically after OpenTofu plan #7 past preflight warnings: etcd disk fsync latency",
+        ]
+
+    def test_failures_still_wait_for_a_person(self):
         from api.services.cluster_build.provisioning import jobs
         from api.models import ClusterProvisionJob
 
         assert jobs._plan_acknowledges(self._result(
-            {"id": "vs_cp_datastore", "label": "Control-plane datastore diversity", "status": "warn"},
+            {"id": "disk", "label": "Free disk", "status": "fail"},
             {"id": "fsync", "label": "etcd disk fsync latency", "status": "warn"},
         ), ClusterProvisionJob(id=7)) is None
         assert jobs._plan_acknowledges({"status": "fail", "nodes": []}, ClusterProvisionJob(id=7)) is None
