@@ -40,6 +40,7 @@ from . import addons as addon_registry
 from . import apps as build_apps
 from . import cni as cni_registry
 from . import k8s_versions, kubeadm, lb, onboard, os_adapters
+from .os_adapters.base import reset_node_script
 from . import storage as workload_storage
 from . import workloads as workload_copy
 from .addons import metallb as metallb_addon
@@ -1256,23 +1257,38 @@ def _phase_join_workers(build: ClusterBuild) -> None:
             with app.app_context():
                 stream = _StreamTail(step_id)
                 try:
-                    _run_traced(
-                        target,
-                        f"set -e\n{hosts}{join_command} --node-name {node_name}",
-                        timeout_s=900,
-                        stream=stream,
-                    )
-                    results[node_id] = (True, stream.text())
-                except SshCommandError as exc:
-                    if exc.output and exc.output not in stream.text():
-                        stream.write(exc.output)
-                    if _LATE_REGISTRATION_RE.search(stream.text()) and _settle_late_registration(
-                        primary_target, node_name, stream
-                    ):
-                        results[node_id] = (True, stream.text())
-                    else:
-                        stream.write(f"\n!! {exc}\n")
-                        results[node_id] = (False, stream.text())
+                    # A failed join is reset and tried once more on its own —
+                    # what a person pressing Retry would do — before the
+                    # build fails. Only this worker is touched.
+                    for attempt in (1, 2):
+                        try:
+                            _run_traced(
+                                target,
+                                f"set -e\n{hosts}{join_command} --node-name {node_name}",
+                                timeout_s=900,
+                                stream=stream,
+                            )
+                            results[node_id] = (True, stream.text())
+                            break
+                        except SshCommandError as exc:
+                            if exc.output and exc.output not in stream.text():
+                                stream.write(exc.output)
+                            if _LATE_REGISTRATION_RE.search(exc.output or "") and _settle_late_registration(
+                                primary_target, node_name, stream
+                            ):
+                                results[node_id] = (True, stream.text())
+                                break
+                            stream.write(f"\n!! {exc}\n")
+                            results[node_id] = (False, stream.text())
+                            if attempt == 2:
+                                break
+                            stream.header(f"Resetting {node_name} and joining again")
+                            try:
+                                _run_traced(target, reset_node_script(None), timeout_s=300, stream=stream,
+                                            display_command="kubeadm reset + CNI cleanup")
+                            except (SshCommandError, SshConnectionError) as reset_exc:
+                                stream.write(f"\n!! reset failed: {reset_exc}\n")
+                                break
                 finally:
                     stream.flush()
         except Exception as exc:  # noqa: BLE001

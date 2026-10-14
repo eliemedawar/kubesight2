@@ -1008,12 +1008,13 @@ class TestHaBuild:
     ):
         hosts = {"10.0.0.11": ("cp-1", "control_plane"), "10.0.0.21": ("w-1", "worker")}
         fake = build_default_fake(hosts)
-        # Sabotage the worker join once.
-        state = {"failed_once": False}
+        # Sabotage the worker join twice: the first attempt and the automatic
+        # reset-and-rejoin both fail, so the build fails and waits for Retry.
+        state = {"failures": 0}
 
         def _join_fail(host, script):
-            if "kubeadm join" in script and host == "10.0.0.21" and not state["failed_once"]:
-                state["failed_once"] = True
+            if "kubeadm join" in script and host == "10.0.0.21" and state["failures"] < 2:
+                state["failures"] += 1
                 return True
             return False
 
@@ -1169,11 +1170,12 @@ class TestRetryResilience:
         cancelled build must be resumable, not a delete-only dead end."""
         hosts = {"10.0.0.11": ("cp-1", "control_plane"), "10.0.0.21": ("w-1", "worker")}
         fake = build_default_fake(hosts)
-        state = {"failed_once": False}
+        # Fails twice: the first join and the automatic reset-and-rejoin.
+        state = {"failures": 0}
 
         def _join_fail(host, script):
-            if "kubeadm join" in script and host == "10.0.0.21" and not state["failed_once"]:
-                state["failed_once"] = True
+            if "kubeadm join" in script and host == "10.0.0.21" and state["failures"] < 2:
+                state["failures"] += 1
                 return True
             return False
 

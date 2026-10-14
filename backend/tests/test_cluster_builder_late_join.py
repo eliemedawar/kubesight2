@@ -78,3 +78,22 @@ def test_node_names_go_into_etc_hosts(app):
     assert "10.4.112.3 test-vm-2 # kubesight-node" in script
     assert "bad;name" not in script
     assert "grep -v '# kubesight-node$' /etc/hosts" in script
+
+
+def test_a_failed_join_is_reset_and_tried_again_on_its_own(client, admin_token, ssh_profile, fake_ssh):  # noqa: F811
+    fake = build_default_fake({"10.0.0.11": ("cp-1", "control_plane"), "10.0.0.21": ("w-1", "worker")})
+    state = {"failures": 0}
+
+    def _fail_once(host, script):
+        if "kubeadm join" in script and host == "10.0.0.21" and state["failures"] < 1:
+            state["failures"] += 1
+            return True
+        return False
+
+    fake.responders.insert(0, (_fail_once, SshCommandError("boom", exit_code=1, output="kubelet exploded")))
+    data = _start(client, admin_token, ssh_profile, fake)
+    assert data["status"] == "completed", data.get("error")
+    worker_scripts = [s for host, s in fake.calls if host == "10.0.0.21"]
+    reset_at = next(i for i, s in enumerate(worker_scripts) if "kubeadm reset -f" in s)
+    joins = [i for i, s in enumerate(worker_scripts) if "kubeadm join" in s]
+    assert len(joins) == 2 and joins[0] < reset_at < joins[1]
