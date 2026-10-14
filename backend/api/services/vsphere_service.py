@@ -6,7 +6,8 @@ status/error/last-tested on the row, secrets never serialized back out.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from ..db import db
@@ -262,6 +263,59 @@ def test_provisioning(connection_id: int) -> Dict[str, Any]:
         "privileges": privileges,
         "datacenter": dc["name"],
     }
+
+
+def _auto_test_hours() -> float:
+    """VSPHERE_AUTO_TEST_HOURS: how often each vCenter is re-tested on its own
+    (connection and provisioning account). 0 turns it off. Default: daily."""
+    try:
+        return max(0.0, float(os.environ.get("VSPHERE_AUTO_TEST_HOURS", "24")))
+    except ValueError:
+        return 24.0
+
+
+def _due(at: Optional[datetime], now: datetime, every: timedelta) -> bool:
+    if at is None:
+        return True
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return now - at >= every
+
+
+def run_due_tests(now: Optional[datetime] = None) -> int:
+    """Scheduler step: re-run "Test now" and "Check privileges" on vCenters
+    whose last test is a day old. At most one vCenter per tick, so a slow or
+    unreachable one never holds up the jobs after it. Returns how many ran."""
+    hours = _auto_test_hours()
+    if not hours:
+        return 0
+    now = now or datetime.now(timezone.utc)
+    every = timedelta(hours=hours)
+    for row in VSphereConnection.query.filter_by(is_active=True).order_by(VSphereConnection.id).all():
+        ran = 0
+        # Every outcome is recorded with a timestamp, or a vCenter that throws
+        # would be retried on every tick instead of once a day.
+        if _due(row.last_tested_at, now, every):
+            try:
+                test_connection(row.id)
+            except Exception as exc:  # noqa: BLE001
+                db.session.rollback()
+                _record_test(db.session.get(VSphereConnection, row.id), "failed", str(exc)[:1000])
+            ran += 1
+        if row.provisioning_username and _due(row.provisioning_last_test_at, now, every):
+            try:
+                test_provisioning(row.id)
+            except Exception as exc:  # noqa: BLE001
+                db.session.rollback()
+                fresh = db.session.get(VSphereConnection, row.id)
+                fresh.provisioning_last_test_at = datetime.now(timezone.utc)
+                fresh.provisioning_last_test_status = "failed"
+                fresh.provisioning_last_test_message = str(exc)[:1000]
+                db.session.commit()
+            ran += 1
+        if ran:
+            return ran
+    return 0
 
 
 def _record_test(row: VSphereConnection, status: str, message: str) -> None:

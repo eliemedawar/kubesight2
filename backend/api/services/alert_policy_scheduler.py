@@ -281,6 +281,15 @@ def run_background_lane(app: Flask) -> None:
         logger.exception("Cluster provisioning tick failed")
     try:
         with app.app_context():
+            from .vsphere_service import run_due_tests as run_due_vsphere_tests
+
+            # vCenter "Test now" + provisioning "Check privileges", once a day
+            # per vCenter (VSPHERE_AUTO_TEST_HOURS); one vCenter per tick.
+            run_due_vsphere_tests()
+    except Exception:
+        logger.exception("vCenter auto-test tick failed")
+    try:
+        with app.app_context():
             from .retention import run_due_retention
 
             # Opt-in history retention (audit, CI logs, alert deliveries):
