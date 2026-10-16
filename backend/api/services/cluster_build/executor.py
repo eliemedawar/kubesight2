@@ -857,10 +857,16 @@ def _phase_pull_images(build: ClusterBuild, resolved) -> None:
                 proxy_env = resolved.proxy_env()
             else:
                 proxy_env = ""
-            if node.id in cp_ids:
+            if node.id in cp_ids and repo_flag:
+                # Not `kubeadm config images pull`: with a custom repository
+                # it looks for CoreDNS at a path most mirrors do not have.
+                pull_commands.append(kubeadm.pull_control_plane_images_script(
+                    build.k8s_version, resolved.k8s_image_registry
+                ))
+            elif node.id in cp_ids:
                 pull_commands.append(
                     "kubeadm config images pull "
-                    f"--kubernetes-version v{build.k8s_version.lstrip('v')}{repo_flag}"
+                    f"--kubernetes-version v{build.k8s_version.lstrip('v')}"
                 )
             if images:
                 # Base prep installs cri-tools, but a build resumed from a
@@ -900,6 +906,31 @@ def _phase_pull_images(build: ClusterBuild, resolved) -> None:
             ) from exc
 
 
+def _coredns_repository(build: ClusterBuild, resolved, primary: ClusterBuildNode) -> str:
+    """Where kubeadm init must look for CoreDNS, when not at its own guess.
+
+    The pull phase found CoreDNS at kubeadm's flat path or at upstream's
+    coredns/coredns; asking the node which image it holds keeps a retry or a
+    restarted backend right without storing anything.
+    """
+    from .profiles import DEFAULT_K8S_IMAGE_REGISTRY
+
+    repository = resolved.k8s_image_registry
+    if not repository or repository == DEFAULT_K8S_IMAGE_REGISTRY:
+        return ""
+    try:
+        result = get_transport().run(
+            _target_for(build, primary),
+            kubeadm.coredns_probe_script(build.k8s_version, repository),
+            timeout_s=60,
+        )
+    except (SshCommandError, SshConnectionError):
+        return ""
+    if kubeadm.coredns_layout(result.output or "") == "nested":
+        return kubeadm.coredns_nested_repository(repository)
+    return ""
+
+
 def _phase_init(build: ClusterBuild, resolved) -> ClusterBuildNode:
     cps, _, _ = _nodes_by_role(build)
     if not cps:
@@ -921,6 +952,7 @@ def _phase_init(build: ClusterBuild, resolved) -> ClusterBuildNode:
             item.get("id") == "metrics-server"
             for item in (build.addons_json or [])
         ),
+        dns_image_repository=_coredns_repository(build, resolved, primary),
     )
     upload_flag = " --upload-certs" if is_ha else ""
     try:

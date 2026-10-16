@@ -1383,3 +1383,67 @@ class TestSshProfileTestBookkeeping:
         assert row["lastTestStatus"] == "failed"
         assert row["lastTestMessage"].startswith("10.0.0.99: ")
         assert "BEGIN KEY" not in row["lastTestMessage"]
+
+
+class TestCoreDnsPath:
+    """kubeadm flattens CoreDNS to <repo>/coredns:<tag> for a custom repository;
+    registry.k8s.io and the mirrors that copy it keep coredns/coredns:<tag>."""
+
+    def test_init_config_points_coredns_at_the_nested_path(self):
+        rendered = kubeadm.render_init_config(
+            k8s_version="1.33.9",
+            control_plane_endpoint="10.0.0.11:6443",
+            pod_cidr="10.244.0.0/16",
+            service_cidr="10.96.0.0/12",
+            profile=replace(default_profile(), k8s_image_registry="mirror.local/k8s"),
+            node_name="cp-1",
+            dns_image_repository="mirror.local/k8s/coredns",
+        )
+        cluster = next(d for d in yaml.safe_load_all(rendered) if d["kind"] == "ClusterConfiguration")
+        assert cluster["imageRepository"] == "mirror.local/k8s"
+        assert cluster["dns"] == {"imageRepository": "mirror.local/k8s/coredns"}
+
+    def test_pull_script_tries_kubeadms_path_then_upstreams(self):
+        script = kubeadm.pull_control_plane_images_script("1.33.9", "mirror.local/k8s/")
+        assert "kubeadm config images list --kubernetes-version v1.33.9" in script
+        assert "KS_REPO=mirror.local/k8s\n" in script
+        assert script.index('crictl pull "$KS_IMG"') < script.index('"$KS_REPO/coredns/coredns:$KS_TAG"')
+        assert kubeadm.coredns_layout("Pulled x\nKS_COREDNS=nested\n") == "nested"
+        assert kubeadm.coredns_layout("nothing") == "unknown"
+
+    def test_a_build_finds_coredns_nested_and_tells_kubeadm_init(
+        self, client, admin_token, ssh_profile, app, monkeypatch
+    ):
+        profile = TestAddonExecution._profile(None, client, admin_token)
+        hosts = {"10.0.0.11": ("cp-1", "control_plane"), "10.0.0.21": ("w-1", "worker")}
+        fake = build_default_fake(hosts)
+        fake.responders.insert(0, (lambda h, s: "crictl inspecti" in s, "KS_COREDNS=nested\n"))
+        set_transport_factory(lambda: fake)
+        rendered = []
+        real = kubeadm.render_init_config
+
+        def spy(**kwargs):
+            rendered.append(kwargs.get("dns_image_repository", ""))
+            return real(**kwargs)
+
+        monkeypatch.setattr(kubeadm, "render_init_config", spy)
+        data = run_full_build(
+            client, admin_token, ssh_profile, fake,
+            make_build_payload(nodes=SINGLE_CP_NODES, buildProfileId=profile["id"]),
+        )
+        assert data["status"] == "completed", data.get("error")
+        # Preflight renders first without a node to ask; kubeadm init gets the path.
+        assert rendered[-1] == "proxy.local:5000/k8s/coredns", rendered
+        cp_scripts = [s for h, s in fake.calls if h == "10.0.0.11"]
+        assert any("kubeadm config images list" in s and "coredns/coredns" in s for s in cp_scripts)
+        assert not any("kubeadm config images pull" in s for _, s in fake.calls)
+
+    def test_default_registry_keeps_kubeadm_images_pull(self, client, admin_token, ssh_profile, app):
+        hosts = {"10.0.0.11": ("cp-1", "control_plane"), "10.0.0.21": ("w-1", "worker")}
+        fake = build_default_fake(hosts)
+        set_transport_factory(lambda: fake)
+        data = run_full_build(client, admin_token, ssh_profile, fake,
+                              make_build_payload(nodes=SINGLE_CP_NODES))
+        assert data["status"] == "completed", data.get("error")
+        assert any("kubeadm config images pull" in s for _, s in fake.calls)
+        assert not any("crictl inspecti" in s for _, s in fake.calls)

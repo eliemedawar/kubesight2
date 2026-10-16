@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from dataclasses import dataclass
 from typing import Optional
 
@@ -65,8 +66,12 @@ def render_init_config(
     profile: ResolvedProfile,
     node_name: str,
     server_tls_bootstrap: bool = False,
+    dns_image_repository: str = "",
 ) -> str:
     """InitConfiguration + ClusterConfiguration + KubeletConfiguration YAML.
+
+    ``dns_image_repository`` points CoreDNS somewhere other than kubeadm's
+    ``<imageRepository>/coredns`` (see ``pull_control_plane_images_script``).
 
     The kubeadm API version comes from the minor's support record. Every field
     emitted below carries the same name and nesting in v1beta3 and v1beta4 —
@@ -87,6 +92,8 @@ def render_init_config(
     image_repo_block = ""
     if profile.k8s_image_registry and profile.k8s_image_registry != DEFAULT_K8S_IMAGE_REGISTRY:
         image_repo_block = f"imageRepository: {profile.k8s_image_registry}\n"
+    if dns_image_repository:
+        image_repo_block += f"dns:\n  imageRepository: {dns_image_repository}\n"
     endpoint_host = control_plane_endpoint.rsplit(":", 1)[0]
     server_tls_line = "serverTLSBootstrap: true\n" if server_tls_bootstrap else ""
     return f"""apiVersion: {api_version}
@@ -110,6 +117,70 @@ apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 cgroupDriver: systemd
 {server_tls_line}"""
+
+
+# kubeadm writes CoreDNS as <imageRepository>/coredns:<tag> whenever the
+# repository is not registry.k8s.io, but registry.k8s.io (and every mirror or
+# proxy that copies its paths) keeps it one level deeper, at
+# coredns/coredns:<tag>. The node tries kubeadm's path first, then upstream's,
+# and kubeadm init is told which one it found.
+COREDNS_MARK = "KS_COREDNS="
+
+
+def coredns_nested_repository(repository: str) -> str:
+    return f"{repository.rstrip('/')}/coredns"
+
+
+def pull_control_plane_images_script(k8s_version: str, repository: str) -> str:
+    """Pull kubeadm's images from ``repository``, finding CoreDNS at either path."""
+    version = "v" + k8s_version.lstrip("v")
+    repo = repository.rstrip("/")
+    return f"""KS_REPO={shlex.quote(repo)}
+KS_IMAGES=$(kubeadm config images list --kubernetes-version {shlex.quote(version)} --image-repository "$KS_REPO")
+command -v crictl >/dev/null 2>&1 || {{ echo "crictl is not installed on this node; install the cri-tools package and retry."; exit 1; }}
+for KS_IMG in $KS_IMAGES; do
+  case "$KS_IMG" in
+    "$KS_REPO"/coredns:*)
+      KS_TAG="${{KS_IMG##*:}}"
+      if crictl pull "$KS_IMG" >/dev/null 2>&1; then
+        echo "[config/images] Pulled $KS_IMG"
+        echo "{COREDNS_MARK}flat"
+      elif crictl pull "$KS_REPO/coredns/coredns:$KS_TAG" >/dev/null; then
+        echo "[config/images] Pulled $KS_REPO/coredns/coredns:$KS_TAG (not at $KS_IMG; the registry keeps CoreDNS where registry.k8s.io does)"
+        echo "{COREDNS_MARK}nested"
+      else
+        echo "CoreDNS $KS_TAG is in neither $KS_IMG nor $KS_REPO/coredns/coredns:$KS_TAG. Mirror registry.k8s.io/coredns/coredns:$KS_TAG into the registry and retry."
+        exit 1
+      fi
+      ;;
+    *)
+      crictl pull "$KS_IMG" >/dev/null
+      echo "[config/images] Pulled $KS_IMG"
+      ;;
+  esac
+done"""
+
+
+def coredns_probe_script(k8s_version: str, repository: str) -> str:
+    """Which CoreDNS path the node already holds (after the pull phase)."""
+    version = "v" + k8s_version.lstrip("v")
+    repo = repository.rstrip("/")
+    return f"""KS_REPO={shlex.quote(repo)}
+KS_IMG=$(kubeadm config images list --kubernetes-version {shlex.quote(version)} --image-repository "$KS_REPO" | grep "/coredns:" | head -n 1)
+KS_TAG="${{KS_IMG##*:}}"
+if [ -n "$KS_IMG" ] && crictl inspecti "$KS_IMG" >/dev/null 2>&1; then
+  echo "{COREDNS_MARK}flat"
+elif [ -n "$KS_TAG" ] && crictl inspecti "$KS_REPO/coredns/coredns:$KS_TAG" >/dev/null 2>&1; then
+  echo "{COREDNS_MARK}nested"
+else
+  echo "{COREDNS_MARK}unknown"
+fi"""
+
+
+def coredns_layout(output: str) -> str:
+    """``flat``, ``nested`` or ``unknown`` from either script's output."""
+    found = re.findall(re.escape(COREDNS_MARK) + r"(flat|nested|unknown)", output or "")
+    return found[-1] if found else "unknown"
 
 
 @dataclass
