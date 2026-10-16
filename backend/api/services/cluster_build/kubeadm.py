@@ -126,6 +126,29 @@ cgroupDriver: systemd
 # and kubeadm init is told which one it found.
 COREDNS_MARK = "KS_COREDNS="
 
+# `ks_pull IMAGE`: crictl pull, tried again when it fails for any reason but
+# "not found". A proxy registry (Nexus in front of quay.io, say) can hold a
+# layer request until it has fetched the layer upstream; containerd gives up
+# waiting ("timeout awaiting response headers") while the proxy carries on, so
+# the next attempt usually finds the layer cached.
+PULL_ATTEMPTS = 3
+PULL_WITH_RETRY_FN = f"""ks_pull() {{
+  ks_try=1
+  while :; do
+    if ks_out=$(crictl pull "$1" 2>&1); then
+      printf '%s\\n' "$ks_out" | grep -v 'level=warning' || true
+      return 0
+    fi
+    printf '%s\\n' "$ks_out" | grep -v 'level=warning' >&2 || true
+    if [ "$ks_try" -ge {PULL_ATTEMPTS} ] || printf '%s' "$ks_out" | grep -qi 'not found'; then
+      return 1
+    fi
+    echo "Pulling $1 failed (attempt $ks_try of {PULL_ATTEMPTS}); trying again in $((ks_try * 20))s." >&2
+    sleep $((ks_try * 20))
+    ks_try=$((ks_try + 1))
+  done
+}}"""
+
 
 def coredns_nested_repository(repository: str) -> str:
     return f"{repository.rstrip('/')}/coredns"
@@ -135,7 +158,8 @@ def pull_control_plane_images_script(k8s_version: str, repository: str) -> str:
     """Pull kubeadm's images from ``repository``, finding CoreDNS at either path."""
     version = "v" + k8s_version.lstrip("v")
     repo = repository.rstrip("/")
-    return f"""KS_REPO={shlex.quote(repo)}
+    return f"""{PULL_WITH_RETRY_FN}
+KS_REPO={shlex.quote(repo)}
 KS_IMAGES=$(kubeadm config images list --kubernetes-version {shlex.quote(version)} --image-repository "$KS_REPO")
 command -v crictl >/dev/null 2>&1 || {{ echo "crictl is not installed on this node; install the cri-tools package and retry."; exit 1; }}
 for KS_IMG in $KS_IMAGES; do
@@ -145,7 +169,7 @@ for KS_IMG in $KS_IMAGES; do
       if crictl pull "$KS_IMG" >/dev/null 2>&1; then
         echo "[config/images] Pulled $KS_IMG"
         echo "{COREDNS_MARK}flat"
-      elif crictl pull "$KS_REPO/coredns/coredns:$KS_TAG" >/dev/null; then
+      elif ks_pull "$KS_REPO/coredns/coredns:$KS_TAG" >/dev/null; then
         echo "[config/images] Pulled $KS_REPO/coredns/coredns:$KS_TAG (not at $KS_IMG; the registry keeps CoreDNS where registry.k8s.io does)"
         echo "{COREDNS_MARK}nested"
       else
@@ -154,7 +178,7 @@ for KS_IMG in $KS_IMAGES; do
       fi
       ;;
     *)
-      crictl pull "$KS_IMG" >/dev/null
+      ks_pull "$KS_IMG" >/dev/null
       echo "[config/images] Pulled $KS_IMG"
       ;;
   esac

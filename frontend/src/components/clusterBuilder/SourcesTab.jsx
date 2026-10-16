@@ -105,7 +105,21 @@ const EMPTY_SOURCE = {
   extraCaCertsPem: "",
   satelliteRegisterUrl: "",
   satelliteToken: "",
+  imagePullTimeoutMinutes: "",
 };
+
+const PULL_MINUTES = { min: 5, max: 240, fallback: 30 };
+
+/** "" is the default; anything else must be whole minutes in range. */
+function pullTimeoutError(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  const minutes = Number(raw);
+  if (!Number.isInteger(minutes) || minutes < PULL_MINUTES.min || minutes > PULL_MINUTES.max) {
+    return `Whole minutes from ${PULL_MINUTES.min} to ${PULL_MINUTES.max}, or blank for the default.`;
+  }
+  return "";
+}
 
 function imagePrefixError(value, required = false) {
   const prefix = String(value || "").trim();
@@ -178,6 +192,7 @@ function SourceProfileForm({ onSave, onClose, busy }) {
     ? "Paste a PEM-encoded CA certificate."
     : "";
   const satelliteError = useSatellite ? satelliteUrlError(form.satelliteRegisterUrl, true) : "";
+  const pullError = pullTimeoutError(form.imagePullTimeoutMinutes);
 
   const valid = Boolean(
     form.name.trim()
@@ -186,6 +201,7 @@ function SourceProfileForm({ onSave, onClose, busy }) {
     && !k8sImageError && !cniImageError && !addonImageError
     && !registryAuthError && !extraCaError && !httpProxyError && !httpsProxyError
     && !satelliteError && (!useSatellite || form.satelliteToken.trim())
+    && !pullError
   );
 
   const save = () => {
@@ -210,6 +226,9 @@ function SourceProfileForm({ onSave, onClose, busy }) {
       noProxy: form.noProxy.trim(),
       satelliteRegisterUrl: useSatellite ? form.satelliteRegisterUrl.trim() : "",
       satelliteToken: useSatellite ? form.satelliteToken.trim() : "",
+      imagePullTimeoutMinutes: String(form.imagePullTimeoutMinutes).trim()
+        ? Number(form.imagePullTimeoutMinutes)
+        : null,
     });
   };
 
@@ -455,6 +474,24 @@ function SourceProfileForm({ onSave, onClose, busy }) {
             />
           </Field>
           <Field
+            label="Image pull limit, minutes (optional)"
+            htmlFor="src-pull"
+            hint={`How long one node may take to pull every image a build needs. Blank is ${PULL_MINUTES.fallback}; give a slow registry more.`}
+            error={pullError}
+          >
+            <input
+              id="src-pull"
+              type="number"
+              min={PULL_MINUTES.min}
+              max={PULL_MINUTES.max}
+              className="sg-cb-input sg-cb-mono"
+              value={form.imagePullTimeoutMinutes}
+              onChange={(event) => set("imagePullTimeoutMinutes", event.target.value)}
+              placeholder={String(PULL_MINUTES.fallback)}
+              aria-invalid={Boolean(pullError)}
+            />
+          </Field>
+          <Field
             label="Trusted CA certificates (optional)"
             htmlFor="src-ca"
             error={extraCaError}
@@ -505,6 +542,8 @@ export default function SourcesTab({
   // The source profile whose Satellite token is being replaced.
   const [tokenFor, setTokenFor] = useState(null);
   const [newToken, setNewToken] = useState("");
+  const [pullFor, setPullFor] = useState(null);
+  const [newPull, setNewPull] = useState("");
 
   const run = async (fn, after) => {
     setBusy(true);
@@ -984,7 +1023,61 @@ export default function SourcesTab({
                   <dt>In the way</dt>
                   <dd>{summary.obstacles.join(" · ")}</dd>
                 </div>
+                <div>
+                  <dt>Image pull limit</dt>
+                  <dd>
+                    {row.imagePullTimeoutMinutes
+                      ? `${row.imagePullTimeoutMinutes} min per node`
+                      : `${row.defaultImagePullTimeoutMinutes || PULL_MINUTES.fallback} min per node (default)`}
+                    {" "}
+                    <button className="btn-ghost btn-sm" type="button" disabled={busy}
+                            aria-expanded={pullFor === row.id}
+                            onClick={() => {
+                              setPullFor(pullFor === row.id ? null : row.id);
+                              setNewPull(row.imagePullTimeoutMinutes ? String(row.imagePullTimeoutMinutes) : "");
+                            }}>
+                      Change
+                    </button>
+                  </dd>
+                </div>
               </dl>
+              {pullFor === row.id ? (
+                <div className="sg-cb-qform">
+                  <Field
+                    label="Image pull limit, minutes"
+                    htmlFor={`src-pull-${row.id}`}
+                    hint={`Blank is the default (${row.defaultImagePullTimeoutMinutes || PULL_MINUTES.fallback}). A build already running picks it up on its next retry.`}
+                    error={pullTimeoutError(newPull)}
+                  >
+                    <input
+                      id={`src-pull-${row.id}`}
+                      type="number"
+                      min={PULL_MINUTES.min}
+                      max={PULL_MINUTES.max}
+                      className="sg-cb-input sg-cb-mono"
+                      value={newPull}
+                      onChange={(event) => setNewPull(event.target.value)}
+                      placeholder={String(row.defaultImagePullTimeoutMinutes || PULL_MINUTES.fallback)}
+                    />
+                  </Field>
+                  <div className="sg-cb-actions">
+                    <button className="btn-ghost" type="button" onClick={() => setPullFor(null)}>Cancel</button>
+                    <button
+                      className="primary"
+                      type="button"
+                      disabled={busy || Boolean(pullTimeoutError(newPull))}
+                      onClick={() => run(
+                        () => updateBuildProfile(row.id, {
+                          imagePullTimeoutMinutes: newPull.trim() ? Number(newPull) : null,
+                        }),
+                        () => { setPullFor(null); notify(`Image pull limit saved on ${row.name}.`); }
+                      )}
+                    >
+                      Save limit
+                    </button>
+                  </div>
+                </div>
+              ) : null}
               {tokenFor === row.id ? (
                 <div className="sg-cb-qform">
                   <Field

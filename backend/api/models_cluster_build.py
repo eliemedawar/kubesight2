@@ -344,6 +344,9 @@ class BuildProfile(db.Model):
     extra_ca_certs_pem = db.Column(db.Text, nullable=True)
     offline_bundle_path = db.Column(db.String(512), nullable=True)
     offline_bundle_checksum = db.Column(db.String(128), nullable=True)
+    # How long one node may spend pulling every image a build needs. NULL is
+    # the default (profiles.DEFAULT_IMAGE_PULL_TIMEOUT_S); a slow mirror wants more.
+    image_pull_timeout_s = db.Column(db.Integer, nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at = db.Column(
         db.DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow

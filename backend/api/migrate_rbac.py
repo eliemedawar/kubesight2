@@ -218,6 +218,7 @@ def _migrate_cluster_build_columns() -> None:
     _add_column_if_missing("cluster_infra_states", "vm_count", "INTEGER")
     _add_column_if_missing("build_profiles", "satellite_register_url", "VARCHAR(2048)")
     _add_column_if_missing("build_profiles", "satellite_token_cipher", "TEXT")
+    _add_column_if_missing("build_profiles", "image_pull_timeout_s", "INTEGER")
     _add_column_if_missing("vm_request_profiles", "build_profile_id", "INTEGER")
     _add_column_if_missing("vm_request_profiles", "disk_check_path", "VARCHAR(255)")
     _add_column_if_missing("vm_request_profiles", "addons_json", "JSON")

@@ -40,7 +40,7 @@ from api.services.cluster_build.os_adapters.base import (
 )
 from api.services.cluster_build.profiles import default_profile, resolve
 from api.services.cluster_build.scrub import scrub
-from api.services.ssh import SshConnectionError, set_transport_factory
+from api.services.ssh import SshCommandError, SshConnectionError, set_transport_factory
 
 from tests.test_cluster_builds import (
     SINGLE_CP_NODES,
@@ -1092,27 +1092,27 @@ class TestAddonExecution:
 
         scripts = [script for _, script in fake.calls]
         assert any(
-            "crictl pull proxy.local:5000/addons/metrics-server/"
+            "ks_pull proxy.local:5000/addons/metrics-server/"
             "metrics-server:v0.7.2" in script
             for script in scripts
         )
         assert any(
-            "crictl pull proxy.local:5000/addons/nginx/"
+            "ks_pull proxy.local:5000/addons/nginx/"
             "nginx-ingress:5.5.4" in script
             for script in scripts
         )
         assert any(
-            "crictl pull proxy.local:5000/addons/metallb/"
+            "ks_pull proxy.local:5000/addons/metallb/"
             "controller:v0.16.1" in script
             for script in scripts
         )
         assert any(
-            "crictl pull proxy.local:5000/addons/metallb/"
+            "ks_pull proxy.local:5000/addons/metallb/"
             "speaker:v0.16.1" in script
             for script in scripts
         )
         assert any(
-            "crictl pull proxy.local:5000/addons/postfinance/"
+            "ks_pull proxy.local:5000/addons/postfinance/"
             "kubelet-csr-approver:v1.2.14" in script
             for script in scripts
         )
@@ -1439,3 +1439,81 @@ class TestCoreDnsPath:
         assert data["status"] == "completed", data.get("error")
         assert any("kubeadm config images pull" in s for _, s in fake.calls)
         assert not any("crictl inspecti" in s for _, s in fake.calls)
+
+
+class TestImagePullLimitAndRetry:
+    """The image pull step's time limit comes from the build profile, and each
+    pull is tried again when a proxy registry is slow to hand over a layer."""
+
+    def _profile(self, client, token, **extra):
+        response = client.post(
+            "/api/build-profiles",
+            json={"name": "slow mirror", "repoMode": "internet",
+                  "k8sImageRegistry": "mirror.local/k8s", **extra},
+            headers=auth_headers(token),
+        )
+        assert response.status_code == 201, response.get_json()
+        return response.get_json()["data"]
+
+    def test_limit_is_saved_in_minutes_and_checked(self, client, admin_token):
+        profile = self._profile(client, admin_token)
+        assert profile["imagePullTimeoutMinutes"] is None
+        assert profile["defaultImagePullTimeoutMinutes"] == 30
+        url = f"/api/build-profiles/{profile['id']}"
+        response = client.put(url, json={"imagePullTimeoutMinutes": 90}, headers=auth_headers(admin_token))
+        assert response.status_code == 200, response.get_json()
+        assert response.get_json()["data"]["imagePullTimeoutMinutes"] == 90
+        row = db.session.get(BuildProfile, profile["id"])
+        assert resolve(row).image_pull_timeout_s == 5400
+        for bad in (2, 241, "soon", True):
+            response = client.put(url, json={"imagePullTimeoutMinutes": bad}, headers=auth_headers(admin_token))
+            assert response.status_code == 400, bad
+            assert "imagePullTimeoutMinutes" in response.get_json()["error"]
+        response = client.put(url, json={"imagePullTimeoutMinutes": None}, headers=auth_headers(admin_token))
+        assert response.get_json()["data"]["imagePullTimeoutMinutes"] is None
+        db.session.expire_all()
+        assert resolve(db.session.get(BuildProfile, profile["id"])).image_pull_timeout_s == 1800
+
+    def test_the_build_uses_the_profiles_limit_and_retrying_pulls(
+        self, client, admin_token, ssh_profile, app
+    ):
+        profile = self._profile(client, admin_token, imagePullTimeoutMinutes=90)
+        hosts = {"10.0.0.11": ("cp-1", "control_plane"), "10.0.0.21": ("w-1", "worker")}
+        fake = build_default_fake(hosts)
+        timeouts = []
+        real_run = fake.run
+
+        def run(target, script, timeout_s=None, **kwargs):
+            if "ks_pull()" in script:
+                timeouts.append(timeout_s)
+            return real_run(target, script, timeout_s=timeout_s, **kwargs)
+
+        fake.run = run
+        set_transport_factory(lambda: fake)
+        data = run_full_build(
+            client, admin_token, ssh_profile, fake,
+            make_build_payload(nodes=SINGLE_CP_NODES, buildProfileId=profile["id"]),
+        )
+        assert data["status"] == "completed", data.get("error")
+        assert timeouts and set(timeouts) == {5400}
+        pulls = [s for _, s in fake.calls if "ks_pull()" in s]
+        assert any("[images] Pulled" in s for s in pulls)  # CNI images name themselves
+        assert not any(re.search(r"^crictl pull ", s, re.MULTILINE) for s in pulls)
+
+    def test_running_out_of_time_says_where_to_give_more(
+        self, client, admin_token, ssh_profile, app
+    ):
+        profile = self._profile(client, admin_token, imagePullTimeoutMinutes=10)
+        hosts = {"10.0.0.11": ("cp-1", "control_plane"), "10.0.0.21": ("w-1", "worker")}
+        fake = build_default_fake(hosts)
+        fake.responders.insert(0, (
+            lambda h, s: "ks_pull()" in s,
+            SshCommandError("cp-1: command timed out after 600s.", -1, "pulling…"),
+        ))
+        set_transport_factory(lambda: fake)
+        data = run_full_build(
+            client, admin_token, ssh_profile, fake,
+            make_build_payload(nodes=SINGLE_CP_NODES, buildProfileId=profile["id"]),
+        )
+        assert data["status"] == "failed"
+        assert "within 10 minutes" in data["error"] and "image pull timeout" in data["error"]

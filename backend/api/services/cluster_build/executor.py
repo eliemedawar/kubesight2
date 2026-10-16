@@ -893,7 +893,7 @@ def _phase_pull_images(build: ClusterBuild, resolved) -> None:
     for _, step, _, _ in jobs:
         _step_start(step)
 
-    results: Dict[int, Tuple[bool, str]] = {}
+    results: Dict[int, Tuple[bool, str, bool]] = {}  # ok, log, ran past the limit
     app = current_app._get_current_object()
 
     def _pull(node_id: int, step_id: int, target: SshTarget, pull_commands: List[str]) -> None:
@@ -908,21 +908,21 @@ def _phase_pull_images(build: ClusterBuild, resolved) -> None:
                     _run_traced(
                         target,
                         "\n".join(commands),
-                        timeout_s=1800,
+                        timeout_s=resolved.image_pull_timeout_s,
                         stream=stream,
                         display_command="\n".join(
                             ["set -e", *pull_commands, "# proxy environment hidden"]
                         ),
                     )
-                    results[node_id] = (True, stream.text())
+                    results[node_id] = (True, stream.text(), False)
                 except (SshCommandError, SshConnectionError) as exc:
                     if getattr(exc, "output", "") and exc.output not in stream.text():
                         stream.write(exc.output)
-                    results[node_id] = (False, stream.text())
+                    results[node_id] = (False, stream.text(), "timed out after" in str(exc))
                 finally:
                     stream.flush()
         except Exception as exc:  # noqa: BLE001
-            results[node_id] = (False, str(exc))
+            results[node_id] = (False, str(exc), False)
 
     # Every node pulls at once: the registry, not the node count, sets the pace.
     with ThreadPoolExecutor(max_workers=_NODE_PARALLELISM) as pool:
@@ -930,13 +930,25 @@ def _phase_pull_images(build: ClusterBuild, resolved) -> None:
             pool.submit(_pull, node.id, step.id, target, pull_commands)
 
     failures = []
+    timed_out = []
+    minutes = resolved.image_pull_timeout_s // 60
     for node, step, _, _ in jobs:
-        ok, log = results.get(node.id, (False, "no result"))
+        ok, log, past_limit = results.get(node.id, (False, "no result", False))
+        where = node.hostname or node.address
         if ok:
             _step_done(step, log)
+        elif past_limit:
+            _step_fail(step, f"Image pull on {where} ran past its {minutes}-minute limit.", log)
+            timed_out.append(where)
         else:
-            _step_fail(step, f"Image pull failed on {node.hostname or node.address}.", log)
-            failures.append(node.hostname or node.address)
+            _step_fail(step, f"Image pull failed on {where}.", log)
+            failures.append(where)
+    if timed_out and not failures:
+        raise _PhaseFailed(
+            f"pull_images on {', '.join(timed_out)} did not finish within {minutes} minutes. "
+            "A slow registry can be given longer in the build profile's image pull timeout."
+        )
+    failures.extend(timed_out)
     if failures:
         raise _PhaseFailed(
             f"pull_images failed on {', '.join(failures)} — "
@@ -945,11 +957,13 @@ def _phase_pull_images(build: ClusterBuild, resolved) -> None:
 
 
 def _parallel_pull_script(images: List[str]) -> str:
-    """``crictl pull`` each image, ``_IMAGE_PULL_PARALLELISM`` at a time (POSIX
-    sh: the transport runs ``sh -s``). Each pull's output is held until its batch
-    ends so the log reads one image at a time; any failure fails the script
-    after every pull has finished, naming the images that did not come."""
+    """``ks_pull`` (crictl pull, retried — see ``kubeadm.PULL_WITH_RETRY_FN``)
+    each image, ``_IMAGE_PULL_PARALLELISM`` at a time (POSIX sh: the transport
+    runs ``sh -s``). Each pull's output is held until its batch ends so the log
+    reads one image at a time; any failure fails the script after every pull
+    has finished, naming the images that did not come."""
     lines = [
+        kubeadm.PULL_WITH_RETRY_FN,
         "KS_PULL_LOG=$(mktemp -d)",
     ]
     for start in range(0, len(images), _IMAGE_PULL_PARALLELISM):
@@ -957,7 +971,8 @@ def _parallel_pull_script(images: List[str]) -> str:
         for index, image in batch:
             quoted = shlex.quote(image)
             lines.append(
-                f'{{ crictl pull {quoted} >"$KS_PULL_LOG/{index}" 2>&1 '
+                f'{{ ks_pull {quoted} >"$KS_PULL_LOG/{index}" 2>&1 '
+                f'&& echo "[images] Pulled "{quoted} >>"$KS_PULL_LOG/{index}" '
                 f'|| echo {quoted} >>"$KS_PULL_LOG/failed"; }} &'
             )
         lines.append("wait")

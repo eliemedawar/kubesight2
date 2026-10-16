@@ -47,6 +47,30 @@ _CERTIFICATE_BLOCK_RE = re.compile(
 )
 
 
+# One node's image pull step: the Kubernetes, CNI and add-on images together.
+DEFAULT_IMAGE_PULL_TIMEOUT_S = 1800
+MIN_IMAGE_PULL_TIMEOUT_MINUTES = 5
+MAX_IMAGE_PULL_TIMEOUT_MINUTES = 240
+
+
+def _image_pull_timeout_minutes(value: Any) -> Optional[int]:
+    """Minutes from the API, checked; None (or blank) means the default."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        minutes = int(str(value).strip())
+    except ValueError:
+        minutes = 0
+    if isinstance(value, bool) or not (
+        MIN_IMAGE_PULL_TIMEOUT_MINUTES <= minutes <= MAX_IMAGE_PULL_TIMEOUT_MINUTES
+    ):
+        raise ValueError(
+            "imagePullTimeoutMinutes must be a whole number of minutes from "
+            f"{MIN_IMAGE_PULL_TIMEOUT_MINUTES} to {MAX_IMAGE_PULL_TIMEOUT_MINUTES}."
+        )
+    return minutes
+
+
 @dataclass(frozen=True)
 class ResolvedProfile:
     repo_mode: str
@@ -67,6 +91,7 @@ class ResolvedProfile:
     offline_bundle_checksum: str
     satellite_register_url: str = ""
     satellite_token: str = ""
+    image_pull_timeout_s: int = DEFAULT_IMAGE_PULL_TIMEOUT_S
 
     @property
     def registers_with_satellite(self) -> bool:
@@ -467,6 +492,7 @@ def resolve(row: Optional[BuildProfile]) -> ResolvedProfile:
         offline_bundle_checksum=row.offline_bundle_checksum or "",
         satellite_register_url=satellite_url,
         satellite_token=satellite_token,
+        image_pull_timeout_s=row.image_pull_timeout_s or DEFAULT_IMAGE_PULL_TIMEOUT_S,
     )
 
 
@@ -522,6 +548,11 @@ def serialize(row: BuildProfile) -> Dict[str, Any]:
             urlsplit(satellite_register_url).hostname if satellite_register_url else None
         ),
         "satelliteTokenConfigured": bool(row.satellite_token_cipher),
+        # None = the default, shown as defaultImagePullTimeoutMinutes.
+        "imagePullTimeoutMinutes": (
+            row.image_pull_timeout_s // 60 if row.image_pull_timeout_s else None
+        ),
+        "defaultImagePullTimeoutMinutes": DEFAULT_IMAGE_PULL_TIMEOUT_S // 60,
         "createdAt": _iso(row.created_at),
         "updatedAt": _iso(row.updated_at),
     }
@@ -582,6 +613,10 @@ def _apply_payload(row: BuildProfile, payload: Dict[str, Any]) -> None:
 
     if "noProxy" in payload:
         row.no_proxy = _normalize_no_proxy(payload.get("noProxy"))
+
+    if "imagePullTimeoutMinutes" in payload:
+        minutes = _image_pull_timeout_minutes(payload.get("imagePullTimeoutMinutes"))
+        row.image_pull_timeout_s = minutes * 60 if minutes else None
 
     if "extraCaCertsPem" in payload:
         row.extra_ca_certs_pem = _normalize_ca_bundle(
