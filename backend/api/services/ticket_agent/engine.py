@@ -534,6 +534,48 @@ def _post(ticket: ZohoInboundTicket, text: str) -> None:
     )
 
 
+def _write_back(ticket: ZohoInboundTicket, outcome: str, text: str) -> List[str]:
+    """Move the ticket and post Hermes' comment, and say what did not land.
+
+    Waits for the provider (Hermes is waiting on the tool call anyway) so a
+    status or owner the provider refused comes back as a problem instead of a
+    log line nobody reads — the comment can land while the status does not.
+    """
+    from .. import ticketing
+
+    result = ticketing.report_outcome(
+        ticket.provider or "zoho", ticket.ticket_id, outcome,
+        comment=text, public=agent_settings.comments_public(), wait=True,
+    )
+    if not isinstance(result, dict):
+        return []
+    vendor = "Jira" if (ticket.provider or "zoho") == "jira" else "Zoho"
+    labels = {"status": "change the status", "owner": "take ownership", "comment": "post the comment"}
+    problems = [f"{vendor} write-back did not run: {result['skipped']}"] if result.get("skipped") else []
+    for part, label in labels.items():
+        value = result.get(part)
+        if value and value not in ("ok", "skipped"):
+            problems.append(f"{vendor} did not {label}: {value}")
+    return problems
+
+
+def _with_problems(task: TicketInterpretation, problems: List[str], out: Dict[str, Any]) -> Dict[str, Any]:
+    """Record write-back problems on the task and pass them on to Hermes."""
+    decision = dict(task.decision or {})
+    if problems:
+        decision["ticketUpdateProblems"] = problems
+        out["ticketUpdateProblems"] = problems
+        out["note"] = (
+            "Your comment and the task are recorded, but the ticket itself did not fully update "
+            "(see ticketUpdateProblems). Do not retry; the DevOps team sees it in KubeSight."
+        )
+    else:
+        decision.pop("ticketUpdateProblems", None)
+    task.decision = decision
+    db.session.commit()
+    return out
+
+
 def _open_run(ticket: ZohoInboundTicket) -> Optional[DeployAutomationRun]:
     from ..deploy_automation_service import OPEN_STATUSES as RUN_OPEN
 
@@ -833,8 +875,6 @@ def request_approval(record_id: Any, arguments: Dict[str, Any], user=None) -> Di
 
 def set_status(record_id: Any, status: str, comment_text: Any, user=None) -> Dict[str, Any]:
     """kubesight_ticket_set_status: move the ticket, with Hermes' comment."""
-    from .. import ticketing
-
     ticket = _ticket(record_id)
     status = str(status or "").strip().lower().replace(" ", "_").replace("-", "_")
     outcome = schema.TICKET_STATUSES.get(status)
@@ -872,10 +912,7 @@ def set_status(record_id: Any, status: str, comment_text: Any, user=None) -> Dic
 
     _remember(ticket, text)
     db.session.commit()
-    ticketing.report_outcome(
-        ticket.provider or "zoho", ticket.ticket_id, outcome,
-        comment=text, public=agent_settings.comments_public(),
-    )
+    problems = _write_back(ticket, outcome, text)
     task.comment = text
     if status in schema.PARKED_STATUSES:
         # Parked on the requester: their next comment wakes Hermes again.
@@ -892,9 +929,9 @@ def set_status(record_id: Any, status: str, comment_text: Any, user=None) -> Dic
         actor=user,
         target_type="ticket_interpretation",
         target_id=str(task.id),
-        details={"ticket": task.ticket_number, "status": status},
+        details={"ticket": task.ticket_number, "status": status, "problems": problems},
     )
-    return {"ticketStatus": status, "commentPosted": True}
+    return _with_problems(task, problems, {"ticketStatus": status, "commentPosted": True})
 
 
 def answer(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[str, Any]:
@@ -961,14 +998,9 @@ def answer(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[str, An
     ).all():
         _close_approval(waiting, "superseded", "Superseded — Hermes answered the ticket instead.")
 
-    from .. import ticketing
-
     _remember(ticket, text)
     db.session.commit()
-    ticketing.report_outcome(
-        ticket.provider or "zoho", ticket.ticket_id, schema.TICKET_STATUSES[found["status"]],
-        comment=text, public=agent_settings.comments_public(),
-    )
+    problems = _write_back(ticket, schema.TICKET_STATUSES[found["status"]], text)
     task.decision = {"troubleshooting": record}
     task.confidence = found["confidence"]
     task.understanding = found["diagnosis"][: schema.MAX_UNDERSTANDING]
@@ -981,7 +1013,10 @@ def answer(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[str, An
     task.error = None
     db.session.commit()
     _audit_answer(task, found, user, fix=False)
-    return {"answered": True, "ticketStatus": found["status"], "fixProposed": False, "commentPosted": True}
+    return _with_problems(
+        task, problems,
+        {"answered": True, "ticketStatus": found["status"], "fixProposed": False, "commentPosted": True},
+    )
 
 
 def _audit_answer(task: TicketInterpretation, found: Dict[str, Any], user, *, fix: bool) -> None:
@@ -1788,6 +1823,8 @@ def serialize(task: TicketInterpretation, brief: bool = False) -> Dict[str, Any]
         "finalMessage": task.final_message,
         # A troubleshooting ticket: diagnosis, evidence, recommendation.
         "troubleshooting": decision.get("troubleshooting"),
+        # What the ticketing system refused when Hermes moved the ticket.
+        "ticketUpdateProblems": decision.get("ticketUpdateProblems") or [],
         # New VMs asked for on the ticket: profile, plan, phase, names and addresses.
         "vmRequest": decision.get("vmRequest"),
         "createdAt": _iso(task.created_at),

@@ -209,11 +209,14 @@ def report_outcome(
     comment: Optional[str] = None,
     resolution: Optional[str] = None,
     public: bool = False,
-) -> None:
+    wait: bool = False,
+) -> Optional[Dict[str, Any]]:
     """Route a finished run's write-back to whichever provider owns the ticket.
 
     ``public`` makes the comment visible to the requester where the provider
     distinguishes (Desk comments are private by default; Jira's are not).
+    ``wait`` does the write-back inline and returns what the provider did with
+    the status, owner and comment — the ticket agent reports it to Hermes.
 
     Deploy automation is provider-agnostic — it only knows the intake row — so
     this is where the ticket's ``provider`` column turns back into a vendor call.
@@ -221,13 +224,13 @@ def report_outcome(
     """
     provider = get(provider_key)
     if provider is None:
-        return
+        return {"skipped": f"No ticketing provider {provider_key!r}."} if wait else None
     try:
-        provider.sync.report_ticket_outcome(
-            ticket_id, outcome, comment=comment, resolution=resolution, public=public
+        return provider.sync.report_ticket_outcome(
+            ticket_id, outcome, comment=comment, resolution=resolution, public=public, wait=wait
         )
-    except Exception:  # noqa: BLE001 — best-effort by contract
-        pass
+    except Exception as exc:  # noqa: BLE001 — best-effort by contract
+        return {"skipped": str(exc) or exc.__class__.__name__} if wait else None
 
 
 def post_comment(

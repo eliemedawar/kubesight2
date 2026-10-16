@@ -54,7 +54,7 @@ def writes(monkeypatch):
     )
     monkeypatch.setattr(
         "api.services.ticketing.report_outcome",
-        lambda provider, ticket_id, outcome, comment=None, resolution=None, public=False: log.append(
+        lambda provider, ticket_id, outcome, comment=None, resolution=None, public=False, wait=False: log.append(
             {"kind": "status", "ticket": ticket_id, "outcome": outcome, "comment": comment, "public": public}
         ),
     )

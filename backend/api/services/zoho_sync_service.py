@@ -2062,58 +2062,78 @@ def report_ticket_outcome(
     comment: Optional[str] = None,
     resolution: Optional[str] = None,
     public: bool = False,
-) -> None:
+    wait: bool = False,
+) -> Optional[Dict[str, Any]]:
     """Write a finished automation run's result back to its Desk ticket.
 
     Sets the mapped status, reassigns the ticket to the configured owner
     (zagent), posts a comment, and (for terminal outcomes) a resolution. No-op
     when write-back is disabled or OAuth isn't configured. Never raises.
+
+    ``wait`` runs it inline and returns what Desk did with each part
+    (``{"status": "ok" | "skipped" | <error>, "owner": …, "comment": …}``) so
+    the ticket agent can tell Hermes when a status did not change. Without it
+    the work runs off-thread and the result is only logged.
     """
     if not ticket_id:
-        return
+        return None
     row = get_or_create_config()
     if not row.ticket_writeback_enabled:
-        return
+        return {"skipped": "Ticket write-back is switched off in the Zoho settings."} if wait else None
     if not (row.refresh_token_encrypted and row.client_id and row.org_id):
-        return
+        return {"skipped": "Zoho OAuth is not configured."} if wait else None
 
     status_label = getattr(row, _OUTCOME_STATUS_ATTR.get(outcome, ""), "") or None
     owner_email = (row.ticket_owner_email or "").strip()
     cfg = _to_client_config(row)
     ticket_id = str(ticket_id)
+    result: Dict[str, Any] = {}
+
+    def _patch(part: str, fields: Dict[str, Any]) -> None:
+        try:
+            zoho_client.update_ticket(cfg, ticket_id, fields)
+            result[part] = "ok"
+        except Exception as exc:
+            logger.warning("Zoho ticket %s update failed (%s)", part, ticket_id, exc_info=True)
+            result[part] = str(exc) or exc.__class__.__name__
 
     def _work() -> None:
-        # Status + owner in one PATCH (both are core, well-known ticket fields).
-        core: Dict[str, Any] = {}
+        # Status, owner and resolution each go in their OWN PATCH: Desk rejects
+        # the whole request when one field is refused (an owner outside the
+        # ticket's department, a status the layout lacks, a read-only
+        # resolution), and one refusal must not take the others down with it.
         if status_label:
-            core["status"] = status_label
+            _patch("status", {"status": status_label})
+        else:
+            result["status"] = "skipped"
         if owner_email:
             try:
                 agent_id = zoho_client.resolve_agent_id(cfg, owner_email)
-                if agent_id:
-                    core["assigneeId"] = agent_id
-            except Exception:
+            except Exception as exc:
                 logger.warning("Zoho ticket owner resolve failed", exc_info=True)
-        if core:
-            try:
-                zoho_client.update_ticket(cfg, ticket_id, core)
-            except Exception:
-                logger.warning("Zoho ticket status/owner update failed (%s)", ticket_id, exc_info=True)
-        # Resolution goes in its OWN PATCH — if 'resolution' isn't writable in
-        # this Desk it must not take the status/owner change down with it.
+                agent_id, result["owner"] = None, str(exc) or exc.__class__.__name__
+            if agent_id:
+                _patch("owner", {"assigneeId": agent_id})
+            elif "owner" not in result:
+                result["owner"] = f"No Zoho Desk agent has the email {owner_email}."
+        else:
+            result["owner"] = "skipped"
         if resolution:
-            try:
-                zoho_client.update_ticket(cfg, ticket_id, {"resolution": resolution})
-            except Exception:
-                logger.warning("Zoho ticket resolution update failed (%s)", ticket_id, exc_info=True)
+            _patch("resolution", {"resolution": resolution})
         if comment:
             try:
                 zoho_client.add_ticket_comment(cfg, ticket_id, comment, is_public=public)
-            except Exception:
+                result["comment"] = "ok"
+            except Exception as exc:
                 logger.warning("Zoho ticket comment failed (%s)", ticket_id, exc_info=True)
+                result["comment"] = str(exc) or exc.__class__.__name__
         invalidate_ticket_details(ticket_id)
 
+    if wait:
+        _work()
+        return result
     _dispatch_ticket_work(_work)
+    return None
 
 
 def post_ticket_comment(ticket_id: Optional[str], comment: str, public: bool = False) -> None:

@@ -201,3 +201,51 @@ def test_hermes_answers_through_mcp(client, agent, writes, admin_token):
     db.session.expire_all()
     task = TicketInterpretation.query.filter_by(ticket_record_id=ticket.id).one()
     assert task.route == "answered"
+
+
+def test_a_refused_owner_does_not_stop_the_status_and_hermes_is_told(client, agent, monkeypatch):
+    """Desk rejects a whole PATCH when one field is refused. Status and owner go
+    separately, so an owner outside the ticket's department still lets the
+    status move — and what was refused reaches Hermes and the task card."""
+    from api.models import ZohoIntegration
+    from api.secret_encryption import encrypt_secret
+    from api.services.zoho_client import ZohoError
+
+    zi = ZohoIntegration.query.get(1) or ZohoIntegration(id=1)
+    zi.enabled = True
+    zi.org_id = "854214247"
+    zi.client_id = "1000.abc"
+    zi.refresh_token_encrypted = encrypt_secret("rt")
+    zi.client_secret_encrypted = encrypt_secret("cs")
+    zi.ticket_writeback_enabled = True
+    zi.ticket_owner_email = "zagent@areeba.com"
+    zi.ticket_status_on_hold = "On Hold"
+    db.session.add(zi)
+    db.session.commit()
+
+    patches, comments = [], []
+
+    def update_ticket(cfg, tid, fields):
+        if "assigneeId" in fields:
+            raise ZohoError("Updating the Zoho ticket failed (422): assignee not in department", 422)
+        patches.append(fields)
+        return {}
+
+    monkeypatch.setattr("api.services.zoho_client.resolve_agent_id", lambda cfg, email: "999149000003619001")
+    monkeypatch.setattr("api.services.zoho_client.update_ticket", update_ticket)
+    monkeypatch.setattr(
+        "api.services.zoho_client.add_ticket_comment",
+        lambda cfg, tid, content, **kw: comments.append(content) or {},
+    )
+    ticket = _problem_ticket()
+
+    out = engine.answer(ticket.id, _answer())
+
+    assert patches == [{"status": "On Hold"}]
+    assert len(comments) == 1
+    assert out["answered"] is True
+    assert out["ticketUpdateProblems"] == [
+        "Zoho did not take ownership: Updating the Zoho ticket failed (422): assignee not in department"
+    ]
+    task = TicketInterpretation.query.filter_by(ticket_record_id=ticket.id).one()
+    assert engine.serialize(task)["ticketUpdateProblems"] == out["ticketUpdateProblems"]

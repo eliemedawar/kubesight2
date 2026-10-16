@@ -284,6 +284,11 @@ export default function AgentTaskCard({ task, canManage, deciding, onApprove, on
       ) : null}
       {task.finalMessage ? <p className="sg-zh-fhint">Hermes: {task.finalMessage}</p> : null}
       {task.error ? <p className="sg-zh-inline-error">{task.error}</p> : null}
+      {(task.ticketUpdateProblems || []).map((problem) => (
+        <p key={problem} className="sg-zh-inline-error">
+          {problem}
+        </p>
+      ))}
 
       {task.status === "awaiting_approval" && canManage ? (
         <div className="sg-zh-agent-actions">

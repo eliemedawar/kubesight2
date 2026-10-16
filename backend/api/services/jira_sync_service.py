@@ -921,57 +921,75 @@ def report_ticket_outcome(
     comment: Optional[str] = None,
     resolution: Optional[str] = None,
     public: bool = False,  # noqa: ARG001 — Jira comments already reach the reporter
-) -> None:
+    wait: bool = False,
+) -> Optional[Dict[str, Any]]:
     """Write a finished automation run's result back to its Jira issue.
 
     Runs the mapped transition, reassigns to the configured owner and posts a
     comment. No-op when write-back is disabled or the credential is missing;
-    never raises.
+    never raises. ``wait`` runs it inline and returns what Jira did with each
+    part, like the Desk one.
 
     Jira has no separate "resolution" text field to PATCH the way Desk does, so
     the resolution sentence is appended to the comment instead of dropped — the
     operator still gets the full account on the issue.
     """
     if not ticket_id:
-        return
+        return None
     row = get_or_create_config()
     if not row.ticket_writeback_enabled:
-        return
+        return {"skipped": "Ticket write-back is switched off in the Jira settings."} if wait else None
     if not (row.api_token_encrypted and row.base_url):
-        return
+        return {"skipped": "The Jira credential is not configured."} if wait else None
 
     transition_name = getattr(row, _OUTCOME_TRANSITION_ATTR.get(outcome, ""), "") or None
     owner_email = (row.ticket_owner_email or "").strip()
     cfg = _to_client_config(row)
     issue_key = str(ticket_id)
     body = "\n\n".join(part for part in (comment, resolution) if part)
+    result: Dict[str, Any] = {}
 
     def _work() -> None:
+        result["status"] = "skipped"
         if transition_name:
             try:
                 moved = jira_client.transition_issue(cfg, issue_key, transition_name)
+                result["status"] = "ok"
                 if not moved:
                     logger.info(
                         "Jira transition %r is not available on %s right now; skipped.",
                         transition_name,
                         issue_key,
                     )
-            except Exception:
+                    result["status"] = f"The transition {transition_name!r} is not available on {issue_key} right now."
+            except Exception as exc:
                 logger.warning("Jira issue transition failed (%s)", issue_key, exc_info=True)
+                result["status"] = str(exc) or exc.__class__.__name__
+        result["owner"] = "skipped"
         if owner_email:
             try:
                 account_id = jira_client.resolve_account_id(cfg, owner_email)
                 if account_id:
                     jira_client.assign_issue(cfg, issue_key, account_id)
-            except Exception:
+                    result["owner"] = "ok"
+                else:
+                    result["owner"] = f"No Jira account has the email {owner_email}."
+            except Exception as exc:
                 logger.warning("Jira issue assignee update failed (%s)", issue_key, exc_info=True)
+                result["owner"] = str(exc) or exc.__class__.__name__
         if body:
             try:
                 jira_client.add_comment(cfg, issue_key, body)
-            except Exception:
+                result["comment"] = "ok"
+            except Exception as exc:
                 logger.warning("Jira issue comment failed (%s)", issue_key, exc_info=True)
+                result["comment"] = str(exc) or exc.__class__.__name__
 
+    if wait:
+        _work()
+        return result
     shared._dispatch_ticket_work(_work)
+    return None
 
 
 # --- Provider port: the parts that are genuinely shared -------------------
