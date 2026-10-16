@@ -1765,6 +1765,14 @@ def _finish(task: TicketInterpretation, outcome: str, *, build: Optional[Cluster
             for app in build.apps
             if (app.id in wanted if by_id else app.profile_id in wanted)
         ]
+        installed = [(a["release"], a["namespace"]) for a in vm["appResults"] if a["status"] == "installed"]
+        if installed and vm.get("clusterId"):
+            # What the requester opens: each Ingress host (the DNS name) and the IP behind it.
+            from ..cluster_build import app_ingress
+
+            vm["ingresses"], problem = app_ingress.release_ingresses(vm["clusterId"], installed)
+            if problem:
+                vm["ingressNote"] = problem
     _save(task, vm)
     log_audit(
         "ticket_agent_vm_request_finished",
@@ -1781,6 +1789,10 @@ def _finish(task: TicketInterpretation, outcome: str, *, build: Optional[Cluster
     apps_listed = "\n".join(
         f"{a['release']} in {a['namespace']}: {a['status']}" for a in vm.get("appResults") or []
     )
+    if vm.get("ingresses"):
+        from ..cluster_build import app_ingress
+
+        apps_listed += "\nIngress:\n" + "\n".join(app_ingress.lines(vm["ingresses"]))
     if outcome == "apps_ready":
         fallback = {"outcome": "deployed",
                     "comment": f"Installed on cluster {vm.get('clusterId')}:\n{apps_listed}"}
@@ -1826,6 +1838,8 @@ def _finish(task: TicketInterpretation, outcome: str, *, build: Optional[Cluster
             else (vm.get("kubernetes") or {}).get("version")
         ),
         "apps": vm.get("appResults") or None,
+        "ingresses": vm.get("ingresses") or None,
+        "ingressNote": vm.get("ingressNote"),
         "error": vm.get("error"),
         "note": vm.get("note"),
         "fallback": fallback,

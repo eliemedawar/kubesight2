@@ -182,7 +182,11 @@ A VM request gets ONE follow-up "vm_request_finished" with `result` and every VM
 in `vms`: "ready" or "cluster_ready" -> list the VMs (name and address; the cluster id for a
 cluster) and set "done"; "needs_attention" -> the VMs exist but Kubernetes waits for the DevOps
 team: say so and set "on_hold"; "failed" -> say it failed (the error in plain words) and set
-"failed". "vm_request_failed" (the plan could not be made) and a rejected or expired VM approval
+"failed". When it carries `ingresses` (apps that installed an Ingress), the comment MUST give,
+for each one, its DNS name(s) from `hosts`, the IP(s) from `addresses` they must point at, and the
+`urls` to open — with `via: "nodePort"` say the port in the URL is needed. `ingressNote` means the
+Ingresses could not be read: say so in one line, the apps are still installed.
+"vm_request_failed" (the plan could not be made) and a rejected or expired VM approval
 -> "impediment", saying the DevOps team will look or asking what to change.
 
 Rules you must not break:

@@ -151,7 +151,12 @@ release's status. On a cluster the Cluster Builder already built, call
 `kubesight_ticket_install_apps` with its name as `cluster`: an approver ALWAYS
 approves first, and a cluster that needs approval for changes then asks its own
 approvers (the phase reads `waiting_cluster_approval`). One follow-up:
-`vm_request_finished` with `result: apps_ready` (→ `done`) or `failed`. An app
+`vm_request_finished` with `result: apps_ready` (→ `done`) or `failed`. When an
+installed chart made Ingresses, the follow-up carries `ingresses` (release,
+namespace, `hosts`, `addresses`, `urls`, `via`): write each host as the DNS name
+to create, the address(es) it must point at, and the URL to open — with `via:
+nodePort` the port in the URL is part of it. `ingressNote` says they could not
+be read; mention it, the apps are still installed. An app
 that is not in `appProfiles`, or a cluster the Cluster Builder did not build,
 is an `impediment`. Never install a chart for a ticket with a Helm tool.
 

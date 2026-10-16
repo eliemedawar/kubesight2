@@ -47,6 +47,22 @@ def _cluster_needs_no_approval(no_cluster_approvals):
     yield
 
 
+@pytest.fixture(autouse=True)
+def ingresses(monkeypatch):
+    """The finished follow-up reads the releases' Ingresses; no kubectl here."""
+    from api.services.cluster_build import app_ingress
+
+    found = []
+    asked = []
+
+    def fake(cluster_id, releases):
+        asked.append((cluster_id, list(releases)))
+        return list(found), None
+
+    monkeypatch.setattr(app_ingress, "release_ingresses", fake)
+    return {"found": found, "asked": asked}
+
+
 @pytest.fixture()
 def shop(app, chart):
     """One app profile: the shop front end with UAT values and its password."""
@@ -221,6 +237,34 @@ class TestOnAnExistingCluster:
         event = followups[-1]["event"]
         assert event["result"] == "apps_ready"
         assert event["apps"][0]["status"] == "installed"
+
+    def test_the_followup_carries_ingress_dns_and_ip(
+        self, client, app, built, shop, writes, monkeypatch, helm, ingresses,
+    ):
+        ingresses["found"].append({
+            "release": "web", "namespace": "shop", "name": "web", "className": "nginx",
+            "hosts": ["shop.example.local"], "addresses": ["10.0.0.21", "10.0.0.22"],
+            "via": "nodePort", "httpPort": 30080, "httpsPort": 30443,
+            "urls": ["http://shop.example.local:30080/"],
+        })
+        ticket = _ticket(subject="Shop front on shop-cluster")
+        _ask_apps(ticket)
+        task = _task(ticket)
+        other = second_admin_token(client, app)
+        assert client.post(f"/api/ticket-agent/tasks/{task.id}/approve",
+                           headers=auth_headers(other)).status_code == 200
+
+        followups = []
+        _fake_hermes(monkeypatch, lambda message: followups.append(message) and None)
+        engine.tick()
+        assert ingresses["asked"] == [(built["resultClusterId"], [("web", "shop")])]
+        event = followups[-1]["event"]
+        assert event["ingresses"][0]["hosts"] == ["shop.example.local"]
+        assert event["ingresses"][0]["addresses"] == ["10.0.0.21", "10.0.0.22"]
+        # Hermes said nothing here, so KubeSight's own comment went on the ticket.
+        comment = "\n".join(w.get("comment") or "" for w in writes)
+        assert "point DNS shop.example.local at 10.0.0.21, 10.0.0.22" in comment
+        assert "http://shop.example.local:30080/" in comment
 
     def test_a_cluster_that_needs_approval_asks_its_own_approvers_next(
         self, client, app, built, shop, writes, monkeypatch,
