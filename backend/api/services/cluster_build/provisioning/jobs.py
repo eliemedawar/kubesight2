@@ -43,6 +43,7 @@ from sqlalchemy.orm import undefer
 from ....audit import log_audit
 from ....db import db
 from ....models import (
+    BuildProfile,
     ClusterBuild,
     ClusterBuildNode,
     ClusterProvisionJob,
@@ -52,6 +53,7 @@ from ....models import (
 )
 from ....secret_encryption import decrypt_secret, encrypt_secret
 from ...vsphere_client import VSphereError
+from ..os_adapters.base import SATELLITE_MARKER
 from ..scrub import scrub
 from . import inventory, ip_pool, state_store, templates, tofu_config, tofu_runner, vm_watch
 
@@ -1240,6 +1242,10 @@ def _do_apply(job: ClusterProvisionJob, engine) -> bool:
 
     workdir = _workdir(job)
     output = _Output(job, [cfg.password], track_vms=True)
+    if job.operation == "destroy":
+        _unregister_from_satellite(
+            build, [name for name, action in planned.items() if action == "delete"], output,
+        )
     try:
         token = _issue_token(job)
         output.hide.append(token)
@@ -1792,6 +1798,119 @@ def _note(job: ClusterProvisionJob, message: str) -> None:
 # Destroy
 # ---------------------------------------------------------------------------
 
+# Only machines KubeSight registered carry the marker; anything registered by
+# hand (or by the VM template) is left alone. subscription-manager speaks for
+# the machine with its own consumer certificate, so neither the source profile
+# nor its (expiring) registration token is needed — the profile may be gone.
+_SATELLITE_UNREGISTER = f"""
+KS_MARK={SATELLITE_MARKER}
+if [ ! -f "$KS_MARK" ]; then
+  echo "KS_SAT=none"
+  exit 0
+fi
+if ! command -v subscription-manager >/dev/null 2>&1 \\
+   || ! subscription-manager identity >/dev/null 2>&1; then
+  rm -f "$KS_MARK"
+  echo "KS_SAT=not-registered"
+  exit 0
+fi
+if subscription-manager unregister; then
+  subscription-manager clean || true
+  rm -f "$KS_MARK"
+  echo "KS_SAT=unregistered"
+else
+  echo "KS_SAT=failed"
+  exit 1
+fi
+"""
+
+
+def _unregister_from_satellite(build: ClusterBuild, vm_names: List[str], output: "_Output") -> None:
+    """Before OpenTofu deletes the VMs, unregister the ones KubeSight
+    registered with Red Hat Satellite, so the capsule does not keep content
+    hosts (and their subscriptions) for machines that no longer exist.
+
+    Best effort: a VM that is off, unreachable or refuses is named in the log
+    and the destroy carries on — the VMs are going either way, and the host can
+    still be removed in Satellite by hand.
+    """
+    from ...ssh import get_transport
+    from .. import executor
+
+    if inventory.simulation_enabled():
+        return
+    profile = db.session.get(BuildProfile, build.build_profile_id) if build.build_profile_id else None
+    if profile is None or not profile.satellite_register_url:
+        return  # this build never registered anything
+    wanted = set(vm_names)
+    nodes = [n for n in build.nodes if (n.vsphere_vm_name or n.hostname) in wanted and n.address]
+    if not nodes:
+        return
+    targets: List[Tuple[str, Any]] = []
+    for node in nodes:
+        name = node.vsphere_vm_name or node.hostname
+        try:
+            targets.append((name, executor._target_for(build, node)))
+        except Exception as exc:  # noqa: BLE001 — no SSH route: say so, destroy anyway
+            output.on_line(f"Satellite · {name}: not unregistered ({scrub(str(exc))[:200]})")
+    if not targets:
+        output.flush()
+        return
+    output.on_line("Unregistering the VMs from Red Hat Satellite before they are destroyed")
+    output.flush()
+    transport = get_transport()
+    app = current_app._get_current_object()
+
+    def _one(item: Tuple[str, Any]) -> Tuple[str, str, str]:
+        name, target = item
+        try:
+            # The host-key check reads KubeSight's database: app context per thread.
+            with app.app_context():
+                try:
+                    result = transport.run(target, _SATELLITE_UNREGISTER, timeout_s=120)
+                finally:
+                    db.session.remove()
+        except Exception as exc:  # noqa: BLE001 — reported, never fatal
+            said = getattr(exc, "output", "") or ""
+            state = "failed" if "KS_SAT=failed" in said else "unreachable"
+            lines = [l.strip() for l in said.splitlines() if l.strip() and not l.startswith("KS_SAT=")]
+            return name, state, (lines or [str(exc)])[-1]
+        found = re.search(r"KS_SAT=([a-z-]+)", result.output or "")
+        return name, (found.group(1) if found else "none"), ""
+
+    with ThreadPoolExecutor(max_workers=min(len(targets), 8)) as pool:
+        results = list(pool.map(_one, targets))
+    # OpenTofu's destroy output soon pushes these lines out of the stored log
+    # tail; the job keeps the outcome, and a warning names what is left to do.
+    outcome = {name: state for name, state, _ in results if state != "none"}
+    left = [name for name, state in outcome.items() if state in ("failed", "unreachable")]
+    progress = dict(output.job.progress_json or {})
+    if outcome:
+        progress["satellite"] = outcome
+    if left:
+        progress["handoffNote"] = (
+            f"Not unregistered from Red Hat Satellite: {', '.join(left)}. "
+            "Remove those hosts in Satellite by hand (the log says why)."
+        )[:1000]
+    output.job.progress_json = progress
+    for name, state, detail in results:
+        if state == "unregistered":
+            output.on_line(f"Satellite · {name}: unregistered")
+        elif state == "not-registered":
+            output.on_line(f"Satellite · {name}: was no longer registered")
+        elif state == "failed":
+            output.on_line(
+                f"Satellite · {name}: subscription-manager unregister failed ({detail[:200]}); "
+                "remove the host in Satellite by hand"
+            )
+        elif state == "unreachable":
+            output.on_line(
+                f"Satellite · {name}: could not be asked over SSH ({detail[:200]}); "
+                "if KubeSight registered it, remove the host in Satellite by hand"
+            )
+    output.flush()
+
+
 def _retire_cluster(public_id: str, job: ClusterProvisionJob) -> None:
     from ....cluster_store import delete_kubeconfig_file, get_active_cluster_by_public_id
     from ....k8s_provider import invalidate_cluster_list_cache
@@ -1839,6 +1958,7 @@ def _finish_destroy(job: ClusterProvisionJob) -> None:
             "name": build.name, "clusterId": build.result_cluster_id,
             "requestedBy": job.requested_by, "approvedBy": job.approved_by,
             "jobId": job.id,
+            "satellite": (job.progress_json or {}).get("satellite"),
         },
     )
 

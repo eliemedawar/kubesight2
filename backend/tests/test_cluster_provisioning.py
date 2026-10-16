@@ -1123,6 +1123,61 @@ class TestGrowAndDestroy:
         assert state_store.vm_instances(built["id"]) == {}
         assert VSphereIpReservation.query.filter_by(build_id=built["id"]).count() == 0
 
+    def test_destroy_unregisters_the_vms_from_satellite_first(self, client, admin_token, built):
+        from api.services.ssh import get_transport
+        from api.services.ssh.transport import SshCommandError, SshConnectionError
+        from tests.test_cluster_builder_satellite import _create as create_satellite_profile
+
+        profile = create_satellite_profile(client, admin_token).get_json()["data"]
+        db.session.get(ClusterBuild, built["id"]).build_profile_id = profile["id"]
+        db.session.commit()
+        fake = get_transport()
+        answers = {
+            "10.20.30.52": "Unregistering from: capsule:443/rhsm\nKS_SAT=unregistered\n",
+            "10.20.30.53": SshCommandError("exit 1", 1, "Network error\nKS_SAT=failed\n"),
+            "10.20.30.54": SshConnectionError("timed out"),
+        }
+        fake.responders[:0] = [
+            (lambda h, s, host=host: h == host and "subscription-manager unregister" in s, reply)
+            for host, reply in answers.items()
+        ] + [(lambda h, s: "subscription-manager unregister" in s, "KS_SAT=none\n")]
+        response = client.post(
+            f"/api/cluster-builds/{built['id']}/provision/destroy",
+            json={"confirmName": "uat-02"}, headers=auth_headers(admin_token),
+        )
+        assert response.status_code == 202, response.get_json()
+        gone = response.get_json()["data"]
+        # Satellite refusing or a VM not answering never stops the destroy.
+        assert gone["status"] == "destroyed", gone["provisioning"]["job"].get("error")
+        asked = {host for host, script in fake.calls if "subscription-manager unregister" in script}
+        assert asked == set(SMALL_HOSTS)
+        log = ClusterProvisionJob.query.get(gone["provisioning"]["job"]["id"]).log_tail
+        assert "uat-02-cp-1: unregistered" in log
+        assert "uat-02-wk-1: subscription-manager unregister failed (Network error)" in log
+        assert "uat-02-wk-2: could not be asked over SSH (timed out)" in log
+        assert "Satellite · uat-02-lb-1" not in log  # never registered by KubeSight: nothing to say
+        # Unregistering happens before OpenTofu deletes anything.
+        assert log.index("Unregistering the VMs") < log.index(": Destroying...")
+        # The log tail rolls over; the outcome and what is left to do stay.
+        progress = gone["provisioning"]["job"]["progress"]
+        assert progress["satellite"] == {
+            "uat-02-cp-1": "unregistered", "uat-02-wk-1": "failed", "uat-02-wk-2": "unreachable",
+        }
+        assert progress["handoffNote"].startswith(
+            "Not unregistered from Red Hat Satellite: uat-02-wk-1, uat-02-wk-2."
+        )
+
+    def test_destroy_skips_satellite_when_the_build_never_registered(self, client, admin_token, built):
+        from api.services.ssh import get_transport
+
+        fake = get_transport()
+        response = client.post(
+            f"/api/cluster-builds/{built['id']}/provision/destroy",
+            json={"confirmName": "uat-02"}, headers=auth_headers(admin_token),
+        )
+        assert response.get_json()["data"]["status"] == "destroyed"
+        assert not any("subscription-manager unregister" in script for _, script in fake.calls)
+
     def test_an_admin_approves_their_own_waiting_request(self, client, admin_token, built, not_admin):
         job = client.post(
             f"/api/cluster-builds/{built['id']}/provision/destroy",
