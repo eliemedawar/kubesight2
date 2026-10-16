@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f8fa">
+  <title>KubeSight · Upgrade Center concept</title>
+  <link rel="stylesheet" href="upgrade-center.css">
+  <script src="upgrade-center.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to Upgrade Center</a>
+  <aside class="sidebar" aria-label="Workspace navigation">
+    <a class="brand" href="upgrade-center.html"><img src="../frontend/src/assets/kubesight-mark.png" alt="">KubeSight<span>.</span></a>
+    <div class="workspace"><span class="workspace-symbol">K</span><div><strong>Infrastructure</strong><small>Company workspace</small></div><span class="workspace-chevron">⌄</span></div>
+    <p class="nav-label">WORKSPACE</p>
+    <nav aria-label="Main"><a class="nav-item" href="dashboard-focus.html"><i data-icon="grid"></i>Overview</a><span class="nav-item"><i data-icon="cluster"></i>Clusters<span class="nav-count">2</span></span><span class="nav-item"><i data-icon="box"></i>Workloads</span><span class="nav-item"><i data-icon="layers"></i>Storage</span><span class="nav-item"><i data-icon="pulse"></i>Observability</span><div class="nav-divider"></div><p class="nav-label">OPERATIONS</p><a class="nav-item active" href="upgrade-center.html" aria-current="page"><i data-icon="upgrade"></i>Upgrade Center<span class="active-dot"></span></a><span class="nav-item"><i data-icon="clock"></i>Activity</span><span class="nav-item"><i data-icon="settings"></i>Settings</span></nav>
+    <div class="sidebar-bottom"><div class="preview-note"><span class="small-dot"></span> Interactive concept <span>02</span></div><div class="profile"><span class="avatar">EM</span><div><strong>Elie Medawar</strong><small>Workspace admin</small></div></div></div>
+  </aside>
+  <div class="app">
+    <header class="topbar"><div class="breadcrumbs">Operations <span>/</span> <strong>Upgrade Center</strong></div><span class="sample-label"><span class="small-dot"></span> Concept · sample data</span></header>
+    <main id="main">
+      <div class="page-heading"><div><div class="eyebrow">CLUSTER LIFECYCLE</div><h1>Upgrade Center<span>.</span></h1><p>Every check. Every step. A clear path forward.</p></div><button class="button" data-action="guide"><i data-icon="book"></i>Upgrade guide</button></div>
+      <section class="scope-panel" aria-label="Upgrade scope">
+        <div class="cluster-picker"><span class="cluster-icon"><i data-icon="cluster"></i></span><div><label class="eyebrow" for="cluster">CLUSTER</label><select id="cluster"><option value="production">production-beirut-01</option><option value="staging">staging-eu-01</option></select><div id="cluster-meta" class="cluster-meta"></div></div></div>
+        <div class="version-path"><div><span class="eyebrow">CURRENT</span><strong class="version">v1.33.10</strong></div><span class="path-arrow" aria-hidden="true">→</span><div><label class="eyebrow" for="target">TARGET VERSION</label><select id="target"><option value="v1.34.6">v1.34.6</option><option value="v1.33.11">v1.33.11</option></select></div></div>
+        <div class="scope-mode" id="scope-mode"></div>
+      </section>
+      <div class="section-nav"><nav aria-label="Upgrade views" id="view-nav"><button data-view="readiness" class="selected" aria-current="page">Readiness <span class="tab-count" id="readiness-count">2</span></button><button data-view="plan">Upgrade plan</button><button data-view="execution">Execution</button><button data-view="history">History <span class="quiet-count">3</span></button></nav><span class="snapshot" id="snapshot"></span></div>
+      <div id="view"></div>
+      <footer class="page-footer"><span><strong>K</strong> A little certainty before the next step.</span><span>Illustrative versions and results · no live connection</span></footer>
+    </main>
+    <div class="action-bar" id="action-bar"></div>
+    <div class="prototype-bar"><span><i data-icon="sliders"></i> Explore the concept</span><label for="scenario">Scenario</label><select id="scenario"><option value="attention">Needs attention</option><option value="ready">Ready to review</option><option value="unchecked">Not checked</option><option value="stale">Outdated checks</option><option value="running">Upgrade running</option><option value="failed">Upgrade interrupted</option><option value="completed">Execution finished</option><option value="error">Connection error</option><option value="readonly">Read-only access</option></select><button data-action="reset">Reset preview ↺</button></div>
+  </div>
+  <dialog id="drawer" class="drawer" aria-labelledby="drawer-title"><div class="drawer-header"><span class="eyebrow" id="drawer-label">CHECK DETAILS</span><button class="icon-button" data-action="close-drawer" aria-label="Close details"><i data-icon="close"></i></button></div><div id="drawer-body"></div><div class="drawer-footer">Design preview · illustrative evidence</div></dialog>
+  <dialog id="confirm" class="confirmation" aria-labelledby="confirm-title"><div class="drawer-header"><span class="eyebrow">FINAL REVIEW</span><button class="icon-button" data-action="close-confirm" aria-label="Close confirmation"><i data-icon="close"></i></button></div><div id="confirm-body"></div></dialog>
+  <div id="announcer" class="sr-only" role="status" aria-live="polite"></div>
+  <div class="toast" id="toast" role="status"></div>
+</body>
+</html>
