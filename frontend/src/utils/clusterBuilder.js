@@ -697,8 +697,10 @@ export function sshPosture(profile, credentials = []) {
  *  password field and never sits visible in the URL field. Text that is not
  *  that command comes back unchanged as the URL. */
 export function splitSatelliteCommand(text) {
-  const raw = String(text || "");
-  const token = (raw.match(/Bearer\s+([^\s'"]+)/i) || [])[1] || "";
+  // Line breaks never belong to a URL or a token; an email that wrapped the
+  // command put them inside both (…LEB-DOPS-9-⏎DR_AK…).
+  const raw = String(text || "").replace(/[\r\n]+/g, "");
+  const token = (raw.match(/Bearer\s*([A-Za-z0-9._~+/=-]+)/i) || [])[1] || "";
   const url = /\s/.test(raw.trim()) || token
     ? (raw.match(/https:\/\/[^\s'"]+/) || [raw.trim()])[0]
     : raw.trim();

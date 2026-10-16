@@ -1179,3 +1179,13 @@ describe("Satellite registration", () => {
     expect(sourceProfileSummary({ repoMode: "satellite" }).incomplete).not.toBe("");
   });
 });
+
+describe("Satellite paste wrapped by an email", () => {
+  it("joins a URL and a token split across lines", () => {
+    const pasted = "set -o pipefail && curl --silent --show-error   'https://capsule.example:9090/register?activation_keys=LEB-DOPS-9-\nDR_AK&organization_id=1' --header 'Authorization: Bearer\neyJabc.de\nf.ghi' | bash";
+    expect(splitSatelliteCommand(pasted)).toEqual({
+      url: "https://capsule.example:9090/register?activation_keys=LEB-DOPS-9-DR_AK&organization_id=1",
+      token: "eyJabc.def.ghi",
+    });
+  });
+});

@@ -515,3 +515,17 @@ class TestWaitingMachinesSaySo:
         worker = next(n for n in build.nodes if n.role == "worker")
         step = ClusterBuildStep.query.filter_by(build_id=build.id, phase="base_prep", node_id=worker.id).one()
         assert step.log_tail.startswith("Waiting for cp-1")
+
+
+class TestEmailWrappedPaste:
+    """An email wraps the long command; the copy carries its line breaks."""
+
+    def test_a_url_broken_across_lines_keeps_its_activation_key(self):
+        wrapped = URL.replace("LEB-DOPS-9-", "LEB-DOPS-9-\n", 1)
+        assert _normalize_satellite_register_url(wrapped) == URL
+        assert _normalize_satellite_register_url(PASTED.replace("LEB-DOPS-9-", "LEB-DOPS-9-\r\n", 1)) == URL
+
+    def test_a_token_broken_across_lines_is_joined(self, client, admin_token, app):
+        data = _create(client, admin_token,
+                       satelliteToken="Bearer\n" + TOKEN[:20] + "\n" + TOKEN[20:]).get_json()["data"]
+        assert resolve(db.session.get(BuildProfile, data["id"])).satellite_token == TOKEN

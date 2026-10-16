@@ -283,7 +283,10 @@ def _normalize_satellite_register_url(value: Any) -> Optional[str]:
     The URL reaches a root shell, shell-quoted; quoting characters are refused
     rather than escaped into surprising semantics.
     """
-    raw = str(value or "").strip()
+    # Line breaks go first: a URL never contains one, and one copied out of an
+    # email that wrapped it (…activation_keys=LEB-DOPS-9-⏎DR_AK…) used to cut
+    # the activation key short without a word.
+    raw = re.sub(r"[\r\n]+", "", str(value or "")).strip()
     if not raw:
         return None
     if not raw.startswith("https://") or any(char.isspace() for char in raw):
@@ -639,8 +642,10 @@ def _apply_payload(row: BuildProfile, payload: Dict[str, Any]) -> None:
 
 def _apply_satellite_token(row: BuildProfile, payload: Dict[str, Any]) -> None:
     token = str(payload.get("satelliteToken") or "").strip()
-    if token.lower().startswith("bearer "):
-        token = token[len("bearer "):].strip()
+    if token.lower().startswith("bearer"):
+        token = token[len("bearer"):].strip()
+    # A token never contains whitespace; an email that wrapped it did add some.
+    token = "".join(token.split())
     if token:
         if any(char.isspace() or ord(char) < 32 for char in token):
             raise ValueError("satelliteToken must be a single token, without spaces.")
