@@ -5,11 +5,16 @@
  *  goes all come from here, never from the ticket — Hermes does not even see
  *  the values. A profile pins the chart version it was saved with. Nothing is
  *  installed before an approver approves.
+ *
+ *  A profile may let a ticket name another of the chart's values files ("with
+ *  the UAT values"). Then only what was changed in values.yaml here (the
+ *  passwords, usually) goes on top of the file the ticket names.
  */
 
 import { useEffect, useState } from "react";
 import AppsPicker from "./AppsPicker.jsx";
 import { Field } from "./common.jsx";
+import { getHelmChartTemplate } from "../../api/helmApi.js";
 import {
   createAppProfile,
   deleteAppProfile,
@@ -25,6 +30,7 @@ function formFromProfile(row) {
     name: row?.name || "",
     description: row?.description || "",
     enabled: row ? row.enabled : true,
+    allowedValuesFiles: row?.allowedValuesFiles || [],
     app: row
       ? {
         key: `profile-${row.id}`,
@@ -38,6 +44,40 @@ function formFromProfile(row) {
       }
       : newAppItem(null),
   };
+}
+
+/** The chart's other values files a ticket may name instead of the profile's own. */
+function TicketValuesFiles({ app, allowed, onChange }) {
+  const [files, setFiles] = useState([]);
+  useEffect(() => {
+    if (!app.chartSlug) { setFiles([]); return undefined; }
+    let cancelled = false;
+    getHelmChartTemplate(app.chartSlug, app.chartVersion)
+      .then((detail) => { if (!cancelled) setFiles(detail.chart?.valuesFiles || []); })
+      .catch(() => { if (!cancelled) setFiles([]); });
+    return () => { cancelled = true; };
+  }, [app.chartSlug, app.chartVersion]);
+
+  const others = files.filter((file) => file.path !== app.valuesFile);
+  if (!others.length) return null;
+  const toggle = (path, on) => onChange(on ? [...allowed, path] : allowed.filter((p) => p !== path));
+  return (
+    <div className="sg-cb-field">
+      <span className="sg-cb-field-label">A ticket may pick instead</span>
+      <span className="sg-cb-field-hint">
+        Hermes installs with {app.valuesFile || "the chart defaults"} unless the ticket names one of
+        these. Only what you changed in values.yaml above goes on top of the file it names.
+      </span>
+      {others.map((file) => (
+        <label className="sg-cb-inlinecheck" key={file.path}>
+          <input type="checkbox" checked={allowed.includes(file.path)}
+                 onChange={(e) => toggle(file.path, e.target.checked)} />
+          <span className="sg-cb-mono">{file.path}</span>
+          {file.environment ? <span className="muted"> — {file.environment}</span> : null}
+        </label>
+      ))}
+    </div>
+  );
 }
 
 function ProfileEditor({ initial, notify, onClose, onSaved }) {
@@ -59,6 +99,8 @@ function ProfileEditor({ initial, notify, onClose, onSaved }) {
         namespace: app.namespace,
         releaseName: app.releaseName,
         valuesYaml: app.valuesYaml,
+        // A file that is now the profile's own, or gone from the chart, drops out.
+        allowedValuesFiles: form.allowedValuesFiles.filter((path) => path !== app.valuesFile),
       };
       if (form.id) await updateAppProfile(form.id, payload);
       else await createAppProfile(payload);
@@ -90,6 +132,11 @@ function ProfileEditor({ initial, notify, onClose, onSaved }) {
         value={[form.app]}
         onChange={(next) => setForm((previous) => ({ ...previous, app: next[0] || previous.app }))}
         notify={notify}
+      />
+      <TicketValuesFiles
+        app={form.app}
+        allowed={form.allowedValuesFiles}
+        onChange={(allowedValuesFiles) => setForm((previous) => ({ ...previous, allowedValuesFiles }))}
       />
       <div className="sg-cb-actions">
         {problem ? <span className="sg-cb-field-error">{problem}</span> : null}
@@ -155,6 +202,9 @@ export default function AppProfiles({ notify, vmRequestsEnabled = true }) {
                 {row.chartName} {row.chartVersion}{row.valuesFile ? ` · ${row.valuesFile}` : ""}
                 {" → "}{row.releaseName} in {row.namespace}
               </span>
+              {row.allowedValuesFiles?.length ? (
+                <span className="ea">A ticket may pick: {row.allowedValuesFiles.join(", ")}</span>
+              ) : null}
               {row.description ? <span className="ea">{row.description}</span> : null}
             </span>
             <span className="sg-cb-entry-right">

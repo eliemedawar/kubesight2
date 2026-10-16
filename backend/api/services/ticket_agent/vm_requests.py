@@ -440,10 +440,28 @@ def app_catalog() -> List[Dict[str, Any]]:
     return app_profiles.catalog()
 
 
-def _app_profiles(names: Any):
+def _app_profiles(arguments: Dict[str, Any]):
+    """The profiles a request names, each with the values file it installs from:
+    the profile's own, or one of its ticketMayPick files named in valuesFiles."""
     from ..cluster_build import app_profiles
 
+    names, files = arguments.get("apps"), arguments.get("valuesFiles") or {}
     try:
+        if not isinstance(files, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in files.items()
+        ):
+            raise ValueError("valuesFiles must map an app profile name to a values file name.")
+        by_name = {k.strip().lower(): v for k, v in files.items()}
+        listed = {n.strip().lower() for n in names if isinstance(n, str)} if isinstance(names, list) else set()
+        stray = [k for k in files if k.strip().lower() not in listed]
+        if stray:
+            raise ValueError(f"valuesFiles names {', '.join(stray)}, which is not in apps.")
+        if isinstance(names, list):
+            names = [
+                {"profile": n, "valuesFile": by_name[n.strip().lower()]}
+                if isinstance(n, str) and n.strip().lower() in by_name else n
+                for n in names
+            ]
         return app_profiles.named(names)
     except ValueError as exc:
         raise VmRequestError(str(exc), 422) from exc
@@ -642,7 +660,7 @@ def parse(arguments: Dict[str, Any], ticket: Optional[ZohoInboundTicket] = None)
             "versionAsked": bool(str(asked or "").strip()),
             "addons": _requested_addons(profile, (arguments.get("kubernetes") or {}).get("addons")),
         }
-    app_rows = _app_profiles(arguments.get("apps"))
+    app_rows = _app_profiles(arguments)
     if app_rows and kubernetes is None:
         raise VmRequestError("apps need a Kubernetes cluster: add kubernetes, or leave apps out.")
     try:
@@ -768,7 +786,7 @@ def request(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[str, A
 
         try:
             build_apps.append_apps(build, app_profiles.items_for(req["apps"]), actor=actor,
-                                   profile_ids=[row.id for row in req["apps"]])
+                                   profile_ids=[pick.row.id for pick in req["apps"]])
             db.session.commit()
         except build_apps.AppsError as exc:
             db.session.rollback()
@@ -901,11 +919,11 @@ def request_apps(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[s
         raise engine.AgentError(str(exc), 400)
     try:
         build = _target_build(arguments.get("cluster"))
-        rows = _app_profiles(arguments.get("apps"))
-        if not rows:
+        picks = _app_profiles(arguments)
+        if not picks:
             raise VmRequestError("apps is required: one or more names copied from appProfiles.")
         taken = {(a.namespace, a.release_name) for a in build.apps}
-        clash = [r.release_name for r in rows if (r.namespace, r.release_name) in taken]
+        clash = [p.row.release_name for p in picks if (p.row.namespace, p.row.release_name) in taken]
         if clash:
             raise VmRequestError(
                 f"Cluster {build.name} already has {', '.join(clash)} from its build.", 409,
@@ -935,7 +953,7 @@ def request_apps(record_id: Any, arguments: Dict[str, Any], user=None) -> Dict[s
         "name": build.name,
         "buildId": build.id,
         "clusterId": build.result_cluster_id,
-        "apps": app_profiles.describe(rows),
+        "apps": app_profiles.describe(picks),
         "requestedByUserId": getattr(user, "id", None),
     }
     task.decision = {
@@ -1241,7 +1259,7 @@ def _advance_apps(task: TicketInterpretation, vm: Dict[str, Any], build: Cluster
 
 def _approve_apps(task: TicketInterpretation, by: str) -> None:
     """Install the profiles' charts as the day-two install of that build."""
-    from ...models import AppProfile, User
+    from ...models import User
     from ..cluster_build import app_profiles
     from ..cluster_build import service as build_service
 
@@ -1249,12 +1267,10 @@ def _approve_apps(task: TicketInterpretation, by: str) -> None:
     build = db.session.get(ClusterBuild, vm.get("buildId") or 0)
     if build is None:
         raise VmRequestError("The cluster's build is gone (deleted in Cluster Builder).", 409)
-    rows = []
-    for entry in vm.get("apps") or []:
-        row = db.session.get(AppProfile, entry.get("profileId") or 0)
-        if row is None or not row.enabled:
-            raise VmRequestError(f"App profile {entry.get('profile')} was deleted or switched off.", 409)
-        rows.append(row)
+    try:
+        picks = app_profiles.picks_from(vm.get("apps") or [])
+    except LookupError as exc:
+        raise VmRequestError(str(exc), 409) from exc
     # The account Hermes asked with owns it: if the cluster needs approval for
     # changes, its own approvers are asked next, in that account's name.
     requester = db.session.get(User, vm.get("requestedByUserId") or 0)
@@ -1263,9 +1279,9 @@ def _approve_apps(task: TicketInterpretation, by: str) -> None:
     _save(task, vm)
     try:
         data = build_service.add_apps(
-            build.id, {"apps": app_profiles.items_for(rows)}, user=requester,
+            build.id, {"apps": app_profiles.items_for(picks)}, user=requester,
             actor=f"{by} (approved {task.ticket_number or 'ticket'})"[:120],
-            profile_ids=[row.id for row in rows],
+            profile_ids=[pick.row.id for pick in picks],
         )
     except (ValueError, LookupError) as exc:
         db.session.rollback()
@@ -1502,6 +1518,7 @@ def _app_lines(apps: List[Dict[str, Any]]) -> List[str]:
         lines.append(
             f"• {app.get('release')} → {app.get('namespace')}: {app.get('chart')} {app.get('version')}"
             + (f", from {app['valuesFile']}" if app.get("valuesFile") else "")
+            + (" (picked by the ticket)" if app.get("valuesFilePicked") else "")
             + f" (profile {app.get('profile')}; values set: {keys})"
         )
     return lines

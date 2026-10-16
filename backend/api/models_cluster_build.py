@@ -217,6 +217,10 @@ class AppProfile(db.Model):
     chart_name = db.Column(db.String(255), nullable=True)
     chart_version = db.Column(db.String(64), nullable=False, default="")
     values_file = db.Column(db.String(500), nullable=False, default="")
+    # Other values-*.yaml of the chart a ticket may name instead of values_file
+    # ("install it with the UAT values"). The administrator's own edits in
+    # values_cipher still go on top of the file the ticket picks.
+    values_files_json = db.Column(db.JSON, nullable=True)
     values_cipher = db.Column(db.Text, nullable=True)
     namespace = db.Column(db.String(63), nullable=False)
     release_name = db.Column(db.String(53), nullable=False)

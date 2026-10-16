@@ -10,6 +10,7 @@ approvers after that. Hermes gets one follow-up with what was installed.
 from __future__ import annotations
 
 import pytest
+import yaml
 
 from api.db import db
 from api.models import AppProfile, ChangeBundle, ClusterBuild, DeploymentRequestSetting
@@ -87,6 +88,16 @@ class TestProfiles:
         [entry] = vm_requests.app_catalog()
         assert entry["profile"] == "Shop front" and "release web in namespace shop" == entry["installsAs"]
         assert "valuesYaml" not in entry and PASSWORD not in str(entry)
+
+    def test_allowed_values_files_are_checked_against_the_chart(self, client, admin_token, shop, chart):
+        url = f"/api/app-profiles/{shop['id']}"
+        response = client.put(url, json={"allowedValuesFiles": ["values-prod.yaml"]},
+                              headers=auth_headers(admin_token))
+        assert response.status_code == 400 and "values-prod.yaml" in response.get_json()["error"]
+        # The profile's own file is not "another" file: it drops out.
+        response = client.put(url, json={"allowedValuesFiles": [chart["uat"]]},
+                              headers=auth_headers(admin_token))
+        assert response.status_code == 200 and response.get_json()["data"]["allowedValuesFiles"] == []
 
     def test_not_offered_while_vm_requests_are_off(self, shop, agent):
         agent_settings.update({"vmRequestsEnabled": False})
@@ -265,6 +276,49 @@ class TestOnAnExistingCluster:
         comment = "\n".join(w.get("comment") or "" for w in writes)
         assert "point DNS shop.example.local at 10.0.0.21, 10.0.0.22" in comment
         assert "http://shop.example.local:30080/" in comment
+
+    def test_a_ticket_picks_an_allowed_values_file_and_only_the_admins_edits_ride_on_top(
+        self, client, app, built, chart, writes, helm,
+    ):
+        # The UI saves the whole values.yaml it started from (the chart defaults)
+        # with the password typed in: only the password is the admin's edit.
+        app_profiles.create({
+            "name": "Demo",
+            "chartSlug": chart["slug"],
+            "namespace": "demo",
+            "releaseName": "demo",
+            "valuesYaml": ("replicaCount: 1\nimage:\n  repository: nginx\n  tag: '1.27'\n"
+                           f"database:\n  host: pg\n  password: {PASSWORD}\n"),
+            "allowedValuesFiles": [chart["uat"]],
+        }, created_by="admin")
+        offered = {p["profile"]: p for p in vm_requests.app_catalog()}
+        assert offered["Demo"]["valuesFile"] == "chart defaults"
+        assert offered["Demo"]["ticketMayPick"] == [chart["uat"]]
+
+        ticket = _ticket(subject="Demo with the UAT values on shop-cluster")
+        _ask_apps(ticket, apps=["Demo"], valuesFiles={"Demo": "values-uat"})
+        task = _task(ticket)
+        [described] = _vm(task)["apps"]
+        assert described["valuesFile"] == chart["uat"] and described["valuesFilePicked"]
+        assert described["valueKeys"] == ["database"]
+        assert "picked by the ticket" in vm_requests.approval_text(task, ticket)
+
+        other = second_admin_token(client, app)
+        response = client.post(f"/api/ticket-agent/tasks/{task.id}/approve", headers=auth_headers(other))
+        assert response.status_code == 200, response.get_json()
+        payload, _ = helm["install"][-1]
+        assert payload["valuesFile"] == chart["uat"]
+        # The UAT file's replicaCount and host win; the admin's password goes on top.
+        assert yaml.safe_load(payload["valuesYaml"]) == {"database": {"password": PASSWORD}}
+
+    @pytest.mark.parametrize("overrides, message", [
+        ({"valuesFiles": {"Shop front": "values-prod"}}, "always installs with"),
+        ({"valuesFiles": {"CRM": "values-uat"}}, "not in apps"),
+        ({"valuesFiles": ["values-uat"]}, "must map an app profile name"),
+    ])
+    def test_values_file_refusals(self, built, shop, writes, overrides, message):
+        with pytest.raises(engine.AgentError, match=message):
+            _ask_apps(_ticket(subject="Shop front"), **overrides)
 
     def test_a_cluster_that_needs_approval_asks_its_own_approvers_next(
         self, client, app, built, shop, writes, monkeypatch,

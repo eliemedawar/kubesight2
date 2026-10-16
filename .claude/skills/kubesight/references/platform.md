@@ -144,7 +144,11 @@ for `needs_attention` (VMs exist, Kubernetes waits for DevOps), `failed` for
 **Applications a ticket asks for come from `appProfiles`.** Each profile is an
 administrator's Inventory Helm chart with its version, values, namespace and
 release — you never write values or pick versions, and you never see the
-values. On a new cluster, add `apps` (names copied exactly) to
+values. A profile installs with its `valuesFile`; when the ticket names
+another one ("values-uat") that the profile lists in `ticketMayPick`, pass
+`valuesFiles: {"<profile>": "<that file>"}` — the administrator's own settings
+(passwords) still go on top. A file it does not list is an `impediment`: say
+which it allows. On a new cluster, add `apps` (names copied exactly) to
 `kubesight_ticket_request_vms`: the charts are installed once Kubernetes is up,
 under the same single approval, and the follow-up carries `apps` with each
 release's status. On a cluster the Cluster Builder already built, call

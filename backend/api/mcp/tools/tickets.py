@@ -342,6 +342,13 @@ _SIZE_PROPS = {
                 "items": {"type": "string"},
                 "description": "Only with kubernetes: app profile names copied exactly from appProfiles.",
             },
+            "valuesFiles": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+                "description": "Only when the ticket names a values file for an app: {profile name: file}, "
+                               "the file copied from that profile's ticketMayPick (e.g. values-uat.yaml). "
+                               "Leave it out to install with the profile's own values.",
+            },
             "confidence": {"type": "string", "enum": ["High", "Medium", "Low"]},
             "understanding": {"type": "string", "description": "One or two sentences, for the approver, on what the ticket asks."},
             "concerns": {"type": "array", "items": {"type": "string"}, "description": "Anything the approver should know."},
@@ -384,6 +391,13 @@ def _ticket_request_vms(arguments: Dict[str, Any], *, user=None) -> Dict[str, An
             "cluster": {"type": "string", "description": "A cluster the Cluster Builder built: its name or id."},
             "apps": {"type": "array", "items": {"type": "string"},
                      "description": "App profile names copied exactly from appProfiles."},
+            "valuesFiles": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+                "description": "Only when the ticket names a values file for an app: {profile name: file}, "
+                               "the file copied from that profile's ticketMayPick (e.g. values-uat.yaml). "
+                               "Leave it out to install with the profile's own values.",
+            },
             "confidence": {"type": "string", "enum": ["High", "Medium", "Low"]},
             "understanding": {"type": "string", "description": "One or two sentences, for the approver, on what the ticket asks."},
             "concerns": {"type": "array", "items": {"type": "string"}},

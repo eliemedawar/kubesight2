@@ -221,6 +221,7 @@ def _migrate_cluster_build_columns() -> None:
     _add_column_if_missing("vm_request_profiles", "build_profile_id", "INTEGER")
     _add_column_if_missing("vm_request_profiles", "disk_check_path", "VARCHAR(255)")
     _add_column_if_missing("vm_request_profiles", "addons_json", "JSON")
+    _add_column_if_missing("app_profiles", "values_files_json", "JSON")
     for col, sql_type in [
         ("provisioning_username", "VARCHAR(255)"),
         ("provisioning_password_cipher", "TEXT"),
