@@ -377,6 +377,7 @@ def _migrate_clusters_table() -> None:
         ("authentication_type", "VARCHAR(32)"),
         ("skip_tls_verify", "INTEGER"),
         ("connection_timeout_seconds", "INTEGER"),
+        ("kubeconfig_cipher", "TEXT"),
     ]:
         _add_column_if_missing("clusters", col, sql_type)
 
@@ -1583,6 +1584,26 @@ def _encrypt_plaintext_kubeconfigs() -> None:
         logger.info("Encrypted %d stored kubeconfig file(s) at rest.", converted)
 
 
+def _restore_kubeconfig_files() -> None:
+    """Rewrite kubeconfig files a restart wiped, from their database copy.
+
+    Also copies any file that has no database copy yet into the database, so a
+    cluster that still works today survives the next restart. Never fatal.
+    """
+    from .cluster_store import restore_kubeconfig_files
+
+    try:
+        restored, saved = restore_kubeconfig_files()
+    except Exception:  # noqa: BLE001 — startup must not die on one bad file
+        db.session.rollback()
+        logger.exception("Restoring stored kubeconfigs failed; will retry next start.")
+        return
+    if restored:
+        logger.info("Restored %d kubeconfig file(s) from the database.", restored)
+    if saved:
+        logger.info("Saved %d kubeconfig file(s) to the database.", saved)
+
+
 def _interrupt_orphaned_upgrade_jobs() -> None:
     """Upgrade jobs left queued/running by a previous process are dead."""
     from .upgrade_jobs import interrupt_orphaned_jobs
@@ -1902,6 +1923,7 @@ def run_migrations() -> None:
         # Cluster access (Area C): not schema, but one-time data fix-ups that must
         # run on every start.
         _encrypt_plaintext_kubeconfigs()
+        _restore_kubeconfig_files()
         _interrupt_orphaned_upgrade_jobs()
         # Last, once every ALTER above has added the columns an index may cover.
         _create_missing_indexes()

@@ -2,9 +2,13 @@
 
 from ...access_engine import can_access_cluster, user_has_permission
 from ...audit import log_audit
-from ...cluster_store import build_cluster_kubeconfig, custom_cluster_public_id, write_kubeconfig_file
+from ...cluster_store import (
+    build_cluster_kubeconfig,
+    custom_cluster_public_id,
+    ensure_kubeconfig_file,
+    write_kubeconfig_file,
+)
 from ...db import db
-from ...kubeconfig_vault import kubeconfig_exists
 from ...models import ClusterBuild
 from .. import ssh_profile_service
 from ..ssh import SshCommandError, SshConnectionError, get_transport
@@ -18,7 +22,7 @@ def restore_missing_kubeconfig(cluster, user) -> bool:
     both builder execution and cluster update access, and never returns or logs
     the SSH output (including error output, which could contain credentials).
     """
-    if not cluster.is_active or kubeconfig_exists(cluster.kubeconfig_path):
+    if not cluster.is_active or ensure_kubeconfig_file(cluster):
         return False
     cluster_id = custom_cluster_public_id(cluster.id)
     build = ClusterBuild.query.filter(

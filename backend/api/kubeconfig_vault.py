@@ -263,9 +263,17 @@ def encrypt_plaintext_kubeconfigs(storage_dir: Path) -> List[Tuple[int, str, str
     return moved
 
 
-def write_encrypted_file(target: Path, plain: str) -> None:
-    """Atomically write ``plain`` encrypted to ``target`` with mode 0600."""
+def write_encrypted_file(target: Path, plain: str) -> str:
+    """Atomically write ``plain`` encrypted to ``target`` with mode 0600.
+
+    Returns the ciphertext that was written."""
     cipher = encrypt_kubeconfig_text(plain)
+    write_cipher_file(target, cipher)
+    return cipher
+
+
+def write_cipher_file(target: Path, cipher: str) -> None:
+    """Atomically write already-encrypted ``cipher`` to ``target`` (0600)."""
     fd, temp = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:

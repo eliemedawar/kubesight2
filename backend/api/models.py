@@ -301,6 +301,10 @@ class Cluster(db.Model):
     skip_tls_verify = db.Column(db.Boolean, nullable=False, default=False)
     connection_timeout_seconds = db.Column(db.Integer, nullable=True)
     kubeconfig_path = db.Column(db.String(512), nullable=True)
+    # The same Fernet ciphertext as the file at kubeconfig_path. The file lives
+    # on the backend container's disk and is gone after a restart; this copy is
+    # what puts it back (cluster_store.ensure_kubeconfig_file).
+    kubeconfig_cipher = db.Column(db.Text, nullable=True)
     context_name = db.Column(db.String(255), nullable=True)
     is_active = db.Column(db.Boolean, nullable=False, default=True)
     last_connection_status = db.Column(db.String(32), nullable=True)

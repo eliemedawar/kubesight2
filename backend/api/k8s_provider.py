@@ -597,10 +597,11 @@ def _custom_clusters_as_items() -> List[Dict[str, Any]]:
 def _custom_cluster_snapshots() -> List[Dict[str, Any]]:
     """The ORM fields a cluster-list row needs, read on the calling thread
     (it needs the app context); probing them is kubectl-only."""
-    from .cluster_store import list_active_custom_clusters
+    from .cluster_store import ensure_kubeconfig_file, list_active_custom_clusters
 
     snapshots: List[Dict[str, Any]] = []
     for cluster in list_active_custom_clusters():
+        ensure_kubeconfig_file(cluster)
         if cluster.last_connection_status == "error":
             status = "warning"
         elif cluster.last_connection_status == "connected":
@@ -793,10 +794,13 @@ def list_clusters_from_k8s() -> Dict[str, Any]:
 
 def resolve_cluster_access(cluster_id: str) -> Optional[ClusterAccess]:
     if is_custom_cluster_id(cluster_id):
-        from .cluster_store import get_active_cluster_by_public_id
+        from .cluster_store import ensure_kubeconfig_file, get_active_cluster_by_public_id
 
         cluster = get_active_cluster_by_public_id(cluster_id)
-        if not cluster or not cluster.kubeconfig_path:
+        if not cluster:
+            return None
+        ensure_kubeconfig_file(cluster)
+        if not cluster.kubeconfig_path:
             return None
         return ClusterAccess(
             cluster_id=custom_cluster_public_id(cluster.id),

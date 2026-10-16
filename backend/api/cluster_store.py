@@ -20,6 +20,7 @@ from .kubeconfig_vault import (
     is_encrypted_kubeconfig,
     kubeconfig_exists,
     read_kubeconfig_path,
+    write_cipher_file,
     write_encrypted_file,
 )
 from .models import Cluster
@@ -171,12 +172,69 @@ def write_kubeconfig_file(cluster_db_id: int, content: str) -> str:
     hand it to kubectl directly — see ``kubeconfig_vault.materialized_kubeconfig``.
     """
     path = _kubeconfig_file_path(cluster_db_id)
-    write_encrypted_file(path, content)
+    cipher = write_encrypted_file(path, content)
     # A legacy plaintext copy must not outlive a rewrite.
     legacy = _kubeconfig_file_path(cluster_db_id, encrypted=False)
     if legacy.exists():
         legacy.unlink()
+    # The file is on the container's disk; the row keeps the copy that brings
+    # it back after a restart. Every caller commits the row afterwards.
+    cluster = db.session.get(Cluster, int(cluster_db_id))
+    if cluster is not None:
+        cluster.kubeconfig_cipher = cipher
     return str(path)
+
+
+def ensure_kubeconfig_file(cluster: Cluster) -> bool:
+    """Make sure an active cluster's kubeconfig file is on disk.
+
+    A backend restart (or another replica) starts without the files; the row's
+    ciphertext is written back as-is, so nothing is decrypted here. Returns
+    whether the file exists afterwards. Commits only if the stored path moved
+    (KUBESIGHT_KUBECONFIG_DIR changed).
+    """
+    if kubeconfig_exists(cluster.kubeconfig_path):
+        return True
+    if not cluster.is_active or not cluster.kubeconfig_cipher:
+        return False
+    path = _kubeconfig_file_path(cluster.id)
+    try:
+        write_cipher_file(path, cluster.kubeconfig_cipher)
+    except OSError:
+        return False
+    if cluster.kubeconfig_path != str(path):
+        cluster.kubeconfig_path = str(path)
+        db.session.commit()
+    return True
+
+
+def restore_kubeconfig_files() -> Tuple[int, int]:
+    """Boot step: rewrite missing files from the database, and save files the
+    database has no copy of yet. Returns (files restored, copies saved)."""
+    restored = saved = 0
+    for cluster in list_active_custom_clusters():
+        if kubeconfig_exists(cluster.kubeconfig_path):
+            if cluster.kubeconfig_cipher:
+                continue
+            path = cluster.kubeconfig_path
+            if is_encrypted_kubeconfig(path):
+                cipher = Path(path).read_text(encoding="utf-8").strip()
+            else:
+                # Legacy plaintext the migration could not convert: encrypt
+                # it in place first so file and copy match.
+                cipher = write_encrypted_file(_kubeconfig_file_path(cluster.id), read_kubeconfig_path(path))
+                cluster.kubeconfig_path = str(_kubeconfig_file_path(cluster.id))
+            if cipher:
+                cluster.kubeconfig_cipher = cipher
+                saved += 1
+        elif cluster.kubeconfig_cipher:
+            path = _kubeconfig_file_path(cluster.id)
+            write_cipher_file(path, cluster.kubeconfig_cipher)
+            cluster.kubeconfig_path = str(path)
+            restored += 1
+    if restored or saved:
+        db.session.commit()
+    return restored, saved
 
 
 def read_kubeconfig_file(cluster_db_id: int) -> str:
@@ -193,11 +251,15 @@ def read_kubeconfig_file(cluster_db_id: int) -> str:
 
 
 def delete_kubeconfig_file(cluster_db_id: int) -> None:
-    """Remove the stored kubeconfig (encrypted and any legacy plaintext copy)."""
+    """Remove the stored kubeconfig (encrypted and any legacy plaintext copy,
+    and the database copy — the caller commits)."""
     for encrypted in (True, False):
         path = _kubeconfig_file_path(cluster_db_id, encrypted=encrypted)
         if path.exists():
             path.unlink()
+    cluster = db.session.get(Cluster, int(cluster_db_id))
+    if cluster is not None:
+        cluster.kubeconfig_cipher = None
 
 
 def migrate_plaintext_kubeconfigs() -> int:
@@ -279,6 +341,7 @@ def _node_summary(nodes_json: Dict[str, Any]) -> List[Dict[str, str]]:
 def test_cluster_connection(cluster: Cluster) -> Dict[str, Any]:
     from .k8s_provider import K8sCommandError, _run_kubectl
 
+    ensure_kubeconfig_file(cluster)
     kubeconfig_path = cluster.kubeconfig_path
     if not kubeconfig_exists(kubeconfig_path):
         return {
