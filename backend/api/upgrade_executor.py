@@ -46,6 +46,11 @@ POD_POLL_INTERVAL_SECONDS = 3
 NODE_EXECUTOR_IMAGE = "debian:bookworm-slim"
 NODE_READY_TIMEOUT_SECONDS = int(os.getenv("UPGRADE_NODE_READY_TIMEOUT_SECONDS", "600"))
 PAUSE_POLL_SECONDS = 5
+# How long one kubectl call keeps retrying a dropped connection to the API
+# server (kubeadm restarts it; a node VM's network can blip) before the run
+# gives up on it.
+TRANSIENT_RETRY_SECONDS = int(os.getenv("UPGRADE_TRANSIENT_RETRY_SECONDS", "180"))
+TRANSIENT_RETRY_INTERVAL_SECONDS = 5
 
 DEFAULT_OPTIONS: Dict[str, Any] = {
     "waveSize": 1,
@@ -75,6 +80,19 @@ _TRANSIENT_API_ERROR_MARKERS = (
 def _is_transient_api_error(exc: Exception) -> bool:
     lower = str(exc).lower()
     return any(marker in lower for marker in _TRANSIENT_API_ERROR_MARKERS)
+
+
+def _retry_transient(call: Callable[[], str]) -> str:
+    """``call()``, retried while the API server is unreachable — up to
+    ``TRANSIENT_RETRY_SECONDS``, then the last error is raised."""
+    deadline = time.time() + TRANSIENT_RETRY_SECONDS
+    while True:
+        try:
+            return call()
+        except Exception as exc:
+            if not _is_transient_api_error(exc) or time.time() >= deadline:
+                raise
+        time.sleep(TRANSIENT_RETRY_INTERVAL_SECONDS)
 
 
 def _package_version(target_version: str) -> str:
@@ -325,12 +343,16 @@ def _run_upgrade_kubectl(
     """Run kubectl without inheriting a kubeconfig default namespace (e.g. kubesight).
 
     ``timeout`` (seconds) is the process kill timeout; long verbs like
-    ``drain`` must pass one, or the runner's 30 s default kills them first."""
+    ``drain`` must pass one, or the runner's 30 s default kills them first.
+
+    A dropped connection is retried rather than ending the run: every verb
+    the executor sends (get, cordon, drain, uncordon, logs, exec) is safe to
+    repeat."""
     if "-n" not in args and "--namespace" not in args:
         args = ["--namespace", "default", *args]
     if timeout and _accepts_timeout(run_kubectl):
-        return run_kubectl(access, args, timeout=timeout)
-    return run_kubectl(access, args)
+        return _retry_transient(lambda: run_kubectl(access, args, timeout=timeout))
+    return _retry_transient(lambda: run_kubectl(access, args))
 
 
 def _kubectl_command(
@@ -450,7 +472,7 @@ def _delete_upgrade_job(access: ClusterAccess, run_kubectl: RunKubectlFn, job_na
             run_kubectl,
             ["delete", "job", job_name, "-n", DEFAULT_DEBUG_NAMESPACE, "--ignore-not-found", "--wait=false"],
         )
-    except K8sCommandError:
+    except Exception:  # noqa: BLE001 — cleanup must not hide the job's own result; its TTL removes it
         pass
 
 
@@ -498,7 +520,7 @@ def _run_on_node(access: ClusterAccess, run_kubectl: RunKubectlFn, node_name: st
         },
     }
     try:
-        _kubectl_apply_manifest(access, manifest)
+        _retry_transient(lambda: _kubectl_apply_manifest(access, manifest))
         output = _wait_for_job_completion(access, run_kubectl, job_name)
     finally:
         _delete_upgrade_job(access, run_kubectl, job_name)
@@ -906,6 +928,9 @@ def _execute_kubeadm_upgrade(
 
     schedulable_elsewhere = len(node_items) > 1
     cordoned: List[str] = []
+    # The API server is on the target: from here a failure leaves a cluster to
+    # finish (re-run the same target), not one to roll back.
+    control_plane_upgraded = cp_done
 
     def upgrade_node(name: str, script: str, *, drain: bool) -> None:
         """cordon → drain → on-node upgrade → uncordon → Ready. A drain timeout
@@ -981,6 +1006,7 @@ def _execute_kubeadm_upgrade(
             if index == 0 and not cp_done:
                 upgrade_node(cp, _shell_script_control_plane_upgrade(normalized), drain=schedulable_elsewhere)
                 server_version = _verify_server_version(access, run_kubectl, normalized, previous_version=previous_version)
+                control_plane_upgraded = True
                 tracker.log(cp, f"API server reports {server_version}")
             else:
                 upgrade_node(cp, _shell_script_upgrade_worker_node(normalized), drain=schedulable_elsewhere)
@@ -1039,6 +1065,20 @@ def _execute_kubeadm_upgrade(
             message = (
                 f"{message} The cluster kubeconfig may set a default namespace (e.g. kubesight) "
                 "that does not exist on this cluster."
+            )
+        if not control_plane_upgraded:
+            # The failure may have come after kubeadm apply but before the
+            # check: one direct look, no retries, so the failure is not delayed.
+            try:
+                version_output = run_kubectl(access, ["--namespace", "default", "version", "-o", "json"])
+                server_now = json.loads(version_output).get("serverVersion", {}).get("gitVersion") or ""
+                control_plane_upgraded = parse_k8s_version(server_now) >= target_tuple
+            except Exception:  # noqa: BLE001
+                pass
+        if control_plane_upgraded:
+            message = (
+                f"{message} The control plane is already on {normalized}: start the upgrade to "
+                f"{normalized} again to finish the remaining workers (nodes already on it are skipped)."
             )
         update_job(job_id, cordonedNodes=list(cordoned))
         raise RuntimeError(message) from exc

@@ -625,6 +625,19 @@ def describe_nodes(node_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return rows
 
 
+def nodes_behind(control_plane_version: str, nodes: List[Dict[str, Any]]) -> List[str]:
+    """Names of nodes (``describe_nodes`` rows) whose kubelet is older than the
+    API server — what a run left behind when it upgraded the control plane but
+    stopped or failed before every worker."""
+    cp_tuple = parse_k8s_version(control_plane_version)
+    if cp_tuple == (0, 0, 0):
+        return []
+    return [
+        n["name"] for n in nodes
+        if n.get("version") not in (None, "", "unknown") and parse_k8s_version(n["version"]) < cp_tuple
+    ]
+
+
 def analyze_version_skew(
     control_plane_version: str,
     node_items: List[Dict[str, Any]],

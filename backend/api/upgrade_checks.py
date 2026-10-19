@@ -349,7 +349,9 @@ def _version_checks(
 ) -> List[Dict[str, Any]]:
     from .upgrade_provider import (
         analyze_version_skew,
+        describe_nodes,
         kubeadm_minor_jump_blocked,
+        nodes_behind,
         normalize_version,
         parse_k8s_version,
         validate_target_version,
@@ -367,8 +369,16 @@ def _version_checks(
             out.append(check("target", "Target version", "versions", "failed", jump,
                              fix="Upgrade to the next minor first; each hop is its own run."))
         elif parse_k8s_version(current_version) >= parse_k8s_version(target_version):
-            out.append(check("target", "Target version", "versions", "warning",
-                             f"The cluster is already at or above {target} ({current_version})."))
+            # Same version as the API server: a run finishing the nodes it left behind.
+            behind = (nodes_behind(target, describe_nodes(node_items))
+                      if parse_k8s_version(current_version) == parse_k8s_version(target_version) else [])
+            if behind:
+                out.append(check("target", "Target version", "versions", "passed",
+                                 f"Finishing {target}: the control plane is on it; "
+                                 f"{', '.join(behind[:5])}{'…' if len(behind) > 5 else ''} still to upgrade."))
+            else:
+                out.append(check("target", "Target version", "versions", "warning",
+                                 f"The cluster is already at or above {target} ({current_version})."))
         else:
             out.append(check("target", "Target version", "versions", "passed", f"{current_version} → {target}."))
 

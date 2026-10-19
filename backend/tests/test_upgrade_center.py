@@ -195,6 +195,7 @@ def fast_executor(monkeypatch):
 
     monkeypatch.setattr(ex, "POD_POLL_INTERVAL_SECONDS", 0)
     monkeypatch.setattr(ex, "PAUSE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(ex, "TRANSIENT_RETRY_INTERVAL_SECONDS", 0)
     return ex
 
 
@@ -281,6 +282,61 @@ def test_resume_skips_nodes_already_on_the_target(app, fast_executor, monkeypatc
     assert not [e for e in cluster.events if e[0] == "snapshot"]
 
 
+def test_a_dropped_connection_after_the_control_plane_is_retried(app, fast_executor, monkeypatch):
+    from api.upgrade_jobs import get_job
+
+    ex = fast_executor
+    cluster = FakeCluster(cps=1, workers=2)
+    monkeypatch.setattr(ex, "_run_on_node", cluster.run_on_node)
+    # The API server drops the first uncordon and the first drain after
+    # kubeadm restarts it.
+    flaky = {("uncordon", "cp-1"): 2, ("drain", "w-1"): 1}
+
+    def kubectl(access, args, timeout=None):
+        bare = [a for a in args if a not in ("--namespace", "default")]
+        key = (bare[0], bare[1]) if len(bare) > 1 else None
+        if flaky.get(key):
+            flaky[key] -= 1
+            raise RuntimeError("Unable to connect to the server: dial tcp 10.0.0.10:6443: connect: connection refused")
+        return cluster.kubectl(access, args, timeout=timeout)
+
+    job_id = _start(ex, cluster)
+    ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.35.7",
+                                kubectl, job_id, options={"etcdSnapshot": False})
+    assert {e[1] for e in cluster.events if e[0] == "upgrade"} == {"cp-1", "w-1", "w-2"}
+    assert get_job(job_id)["status"] == "completed"
+
+
+def test_a_worker_failure_after_the_control_plane_says_how_to_finish(app, fast_executor, monkeypatch):
+    ex = fast_executor
+    cluster = FakeCluster(cps=1, workers=2)
+
+    def run_on_node(access, run_kubectl, node, script):
+        if node == "w-1":
+            raise RuntimeError("E: Could not get lock /var/lib/dpkg/lock-frontend")
+        return cluster.run_on_node(access, run_kubectl, node, script)
+
+    monkeypatch.setattr(ex, "_run_on_node", run_on_node)
+    job_id = _start(ex, cluster)
+    with pytest.raises(RuntimeError, match="start the upgrade to v1.35.7 again to finish"):
+        ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.35.7",
+                                    cluster.kubectl, job_id, options={"etcdSnapshot": False})
+
+
+def test_a_control_plane_left_ahead_of_its_workers_can_be_finished():
+    from api.upgrade_provider import run_extended_prechecks
+
+    run = _kubectl_from(_reads(**{
+        "version -o json": {"serverVersion": {"gitVersion": "v1.34.0"}},
+        "get nodes -o json": {"items": [_node("cp-1", "v1.34.0", cp=True), _node("w-1", "v1.33.9"),
+                                        _node("w-2", "v1.33.9")]},
+    }))
+    result = run_extended_prechecks(ClusterAccess(cluster_id="c", context_name="c"), "v1.34.0", run)
+    target = {c["key"]: c for c in result["checks"]}["target"]
+    assert target["status"] == "passed"
+    assert "w-1, w-2" in target["details"]
+
+
 # --- Requests over the API (mock mode: staging-eu-west is simulated kubeadm) ---
 
 CLUSTER = "staging-eu-west"
@@ -325,6 +381,19 @@ def test_fleet_lists_clusters_with_support_and_mode(client, admin_token, simulat
     assert rows[CLUSTER]["support"]["state"] in ("ending", "ended", "supported")
     assert rows["prod-us-east"]["mode"] == "manual"
     assert data["calendar"]
+
+
+def test_workspace_offers_to_finish_nodes_a_run_left_behind(client, admin_token, simulated):
+    response = client.get(f"/api/upgrades/clusters/{CLUSTER}", headers=auth_headers(admin_token))
+    assert response.get_json()["data"]["finish"] is None
+
+    sim = simulated._mock_kubeadm_cluster(CLUSTER)
+    for node in sim["nodes"]:
+        if node["name"] in ("w-3", "w-4"):
+            node["version"] = "v1.33.9"
+    data = client.get(f"/api/upgrades/clusters/{CLUSTER}", headers=auth_headers(admin_token)).get_json()["data"]
+    assert data["finish"] == {"version": "v1.34.4", "nodes": ["w-3", "w-4"]}
+    assert data["confirmationText"].endswith("TO v1.34.4")
 
 
 def test_viewer_cannot_see_the_fleet(client, viewer_token):

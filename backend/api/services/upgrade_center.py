@@ -61,6 +61,7 @@ from ..upgrade_provider import (
     describe_nodes,
     detect_cluster_provider,
     get_provider_support,
+    nodes_behind,
     normalize_version,
     parse_k8s_version,
     peek_latest_patch,
@@ -620,6 +621,11 @@ def workspace(cluster_id: str, *, user=None) -> Result:
     ctx = release_context(snap["version"], latest, None if snap["real"] else mock_patch)
     jobs = list_jobs(cluster_ids=[cluster_id], statuses=OPEN_STATUSES, limit=1)
     names = _cluster_names()
+    # A run that upgraded the control plane but not every node: finishing it
+    # (same target, already-done nodes skipped) comes before the next minor.
+    behind = nodes_behind(snap["version"], snap["nodes"])
+    finish = {"version": snap["version"], "nodes": behind} if behind and snap["mode"] == "automatic" else None
+    confirm_for = finish["version"] if finish else (ctx["path"][0].get("version") if ctx["path"] else None)
     return {
         "clusterId": cluster_id,
         "name": names.get(cluster_id, cluster_id),
@@ -635,12 +641,12 @@ def workspace(cluster_id: str, *, user=None) -> Result:
         "pools": snap["pools"],
         "latest": latest,
         **ctx,
+        "finish": finish,
         "readiness": _latest_precheck(cluster_id),
         "openJob": jobs[0] if jobs else None,
         "requiredApprovals": approvals_for(user, cluster_id),
         "clusterApprovals": _required_approvals(cluster_id),
-        "confirmationText": confirmation_text(names.get(cluster_id, cluster_id), ctx["path"][0]["version"])
-        if ctx["path"] and ctx["path"][0].get("version") else None,
+        "confirmationText": confirmation_text(names.get(cluster_id, cluster_id), confirm_for) if confirm_for else None,
         "canStart": _has(user, "upgrades:start"),
         "isAdmin": _is_admin(user),
         "generatedAt": _iso(),

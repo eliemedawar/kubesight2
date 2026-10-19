@@ -42,10 +42,26 @@ function Flow({ steps }) {
 
 function TargetPanel({ ws, target, onTarget, locked }) {
   const hops = ws.path || [];
-  const patch = ws.patchTarget && ws.patchTarget !== ws.version ? ws.patchTarget : null;
+  const finish = ws.finish;
+  // Nodes left behind by an earlier run go first: kubeadm moves the whole
+  // cluster one minor at a time.
+  const patch = !finish && ws.patchTarget && ws.patchTarget !== ws.version ? ws.patchTarget : null;
   return (
     <section className="uc-card" aria-labelledby="uc-target-h">
       <h3 id="uc-target-h" className="uc-h3">Where to</h3>
+      {finish ? (
+        <label className={`uc-option${target === finish.version ? " is-selected" : ""}`}>
+          <input type="radio" name="uc-target" checked={target === finish.version} disabled={locked}
+            onChange={() => onTarget(finish.version)} />
+          <span className="uc-stack">
+            <span className="uc-mono uc-strong">Finish {finish.version}</span>
+            <span className="uc-sub">
+              The control plane is on {finish.version}; {finish.nodes.join(", ")} {finish.nodes.length === 1 ? "is" : "are"} not.
+              Nodes already on it are skipped.
+            </span>
+          </span>
+        </label>
+      ) : null}
       <ol className="uc-path">
         <li className="uc-path__now">
           <span className="uc-path__dot" aria-hidden="true" />
@@ -53,7 +69,7 @@ function TargetPanel({ ws, target, onTarget, locked }) {
           <span className="uc-sub">Running now</span>
         </li>
         {hops.map((hop, index) => {
-          const selectable = index === 0 && hop.version && !locked;
+          const selectable = index === 0 && hop.version && !locked && !finish;
           const selected = target === hop.version;
           return (
             <li key={hop.minor} className={`uc-path__hop${selected ? " is-selected" : ""}`}>
@@ -67,7 +83,9 @@ function TargetPanel({ ws, target, onTarget, locked }) {
                       <span className="uc-mono uc-strong">{hop.label}</span>
                       <SupportChip support={{ state: "supported", endOfLife: hop.endOfLife, estimated: hop.estimated }} />
                     </span>
-                    <span className="uc-sub">Next minor, newest patch{hop.version ? "" : " (not known yet)"}</span>
+                    <span className="uc-sub">
+                      {finish ? `After finishing ${finish.version}` : `Next minor, newest patch${hop.version ? "" : " (not known yet)"}`}
+                    </span>
                   </span>
                 </label>
               ) : (
@@ -155,6 +173,7 @@ export default function ClusterWorkspace({ clusterId, focusJobId, canStart, isAd
       setTarget((current) => {
         if (current) return current;
         if (data.openJob?.targetVersion) return data.openJob.targetVersion;
+        if (data.finish?.version) return data.finish.version;
         const hop = (data.path || [])[0];
         if (hop?.version) return hop.version;
         if (data.patchTarget && data.patchTarget !== data.version) return data.patchTarget;
