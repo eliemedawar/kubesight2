@@ -1133,18 +1133,17 @@ class TestPreflightVersionGate:
 
 class TestPreflightNodeProbe:
     @pytest.mark.parametrize("minor", ENABLED_MINORS)
-    def test_the_probe_targets_the_exact_patch_and_pause_tag(self, app, minor):
+    def test_the_probe_targets_the_exact_patch(self, app, minor):
         version = f"{minor}.4"
         with app.app_context():
             script = preflight_mod._probe_script(
                 _build_for(minor), ClusterBuildNode(role="worker"),
                 default_profile(),
             )
-        tag = k8s_versions._BY_MINOR[minor].pause_image_tag
         assert f"core:/stable:/v{minor}/deb/Packages" in script
         assert f"grep -q '^Version: {version}-'" in script
-        assert f"https://registry.k8s.io/v2/pause/manifests/{tag}" in script
-        assert "KS_PKG_EXACT" in script and "KS_IMG_OK" in script
+        assert "KS_PKG_EXACT" in script
+        assert "/manifests/" not in script
 
     def test_a_mirror_is_probed_under_its_repository_path(self, app):
         with app.app_context():
@@ -1160,12 +1159,8 @@ class TestPreflightNodeProbe:
                 ClusterBuildNode(role="worker"), resolve(row),
             )
         minor = ENABLED_MINORS[0]
-        tag = k8s_versions._BY_MINOR[minor].pause_image_tag
         assert f"https://mirror.corp/k8s/v{minor}/deb/Packages" in script
-        assert (
-            f"https://nexus.corp:5000/v2/kubernetes/pause/manifests/{tag}"
-            in script
-        )
+        assert "https://nexus.corp:5000/v2/" in script
 
     def test_offline_mode_probes_neither_repository_nor_registry(self, app):
         with app.app_context():
@@ -1203,24 +1198,10 @@ class TestPreflightNodeProbe:
                 ClusterBuildNode(role="worker"),
                 {"KS_OS_ID": "ubuntu", "KS_OS_LIKE": "debian",
                  "KS_OS_VERSION": "24.04", "KS_ARCH": "x86_64",
-                 "KS_PKG_EXACT": state, "repo_ok": [], "repo_fail": [],
-                 "image_ok": [], "image_fail": []},
+                 "KS_PKG_EXACT": state, "repo_ok": [], "repo_fail": []},
                 default_profile(),
             )
         assert _statuses(checks)["k8s_packages"] == expected
-
-    def test_a_missing_pause_tag_in_the_registry_fails(self, app):
-        with app.app_context():
-            checks = preflight_mod._node_checks(
-                _build_for(ENABLED_MINORS[0]),
-                ClusterBuildNode(role="worker"),
-                {"KS_OS_ID": "ubuntu", "KS_OS_LIKE": "debian",
-                 "KS_OS_VERSION": "24.04", "KS_ARCH": "x86_64",
-                 "repo_ok": [], "repo_fail": [], "image_ok": [],
-                 "image_fail": ["https://nexus.corp:5000/v2/pause/manifests/3.10"]},
-                default_profile(),
-            )
-        assert _statuses(checks)["k8s_images"] == "fail"
 
 
 # ---------------------------------------------------------------------------

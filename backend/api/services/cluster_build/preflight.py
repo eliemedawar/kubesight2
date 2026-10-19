@@ -27,7 +27,7 @@ from . import cni as cni_registry
 from . import k8s_versions, kubeadm, os_adapters
 from .os_adapters import OsFacts
 from .os_adapters.base import k8s_state_probe
-from .profiles import ResolvedProfile, registry_authority
+from .profiles import ResolvedProfile
 from .scrub import scrub
 
 _ROLE_MINIMUMS = {
@@ -453,20 +453,6 @@ def version_checks(
 # Node-side probe (one escalated POSIX script; output parsed as KS_KEY=value)
 # ---------------------------------------------------------------------------
 
-def image_manifest_url(image_prefix: str, repository: str, tag: str) -> str:
-    """Registry v2 manifest URL for ``<prefix>/<repository>:<tag>``.
-
-    ``registry.k8s.io`` → ``https://registry.k8s.io/v2/pause/manifests/3.10``;
-    ``nexus:5000/kubernetes`` →
-    ``https://nexus:5000/v2/kubernetes/pause/manifests/3.10``.
-    """
-    prefix = str(image_prefix or "").strip().strip("/")
-    authority = registry_authority(prefix)
-    path = prefix[len(authority):].strip("/")
-    repo_path = f"{path}/{repository}" if path else repository
-    return f"https://{authority}/v2/{repo_path}/manifests/{tag}"
-
-
 def _probe_script(build: ClusterBuild, node: ClusterBuildNode, profile: ResolvedProfile) -> str:
     ports = " ".join(str(p) for p in _required_ports(build, node))
     version = build.k8s_version.lstrip("v")
@@ -474,7 +460,6 @@ def _probe_script(build: ClusterBuild, node: ClusterBuildNode, profile: Resolved
     deb_repo = profile.k8s_pkg_repo("debian", minor_placeholder)
     rpm_repo = profile.k8s_pkg_repo("rhel", minor_placeholder)
     repo_urls = []
-    image_urls = []
     if profile.repo_mode != "offline":
         # Satellite repositories only exist once the node has registered.
         if profile.repo_mode != "satellite":
@@ -482,17 +467,7 @@ def _probe_script(build: ClusterBuild, node: ClusterBuildNode, profile: Resolved
         if node.role != "loadbalancer":
             for host in profile.registry_hosts():
                 repo_urls.append(f"https://{host}/v2/")
-            # The pause tag is the one image kubeadm pins per minor rather than
-            # per patch, so a mirror stocked for an older minor fails here
-            # instead of at pod-sandbox creation time on every node. An
-            # unrecorded minor is reported by ``version_checks`` instead.
-            record = k8s_versions.record_for(version)
-            if record is not None:
-                image_urls.append(image_manifest_url(
-                    profile.k8s_image_registry, "pause", record.pause_image_tag
-                ))
     probe_urls = " ".join(shlex.quote(u) for u in repo_urls)
-    image_probe_urls = " ".join(shlex.quote(u) for u in image_urls)
     # Load balancers never install kubelet/kubeadm/kubectl, and an offline
     # build must not carry an outbound URL into the script at all.
     probe_packages = (
@@ -610,20 +585,6 @@ if command -v curl >/dev/null 2>&1; then
       echo "KS_REPO_FAIL=$url"
     fi
   done
-  # Registry v2 manifest probe. The Accept header matters: without it a
-  # registry serving an OCI index answers 404 for an image that is present.
-  for url in {image_probe_urls}; do
-    KS_IMG_CODE=$(ks_curl -m 8 -s -o /dev/null -w '%{{http_code}}' \
-      -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json' \
-      "$url" 2>/dev/null)
-    # 401/403: the mirror wants credentials, which the image pre-pull phase
-    # proves. Only 404/000 means the tag is genuinely unavailable here.
-    if echo "$KS_IMG_CODE" | grep -qE '^(2|3|401|403)'; then
-      echo "KS_IMG_OK=$url"
-    else
-      echo "KS_IMG_FAIL=$url"
-    fi
-  done
   if [ "{pkg_probe}" = "1" ]; then
     # The exact kubeadm/kubelet/kubectl build must be obtainable, not merely
     # the repository. Debian repos publish a flat Packages index readable
@@ -697,14 +658,10 @@ exit 0
 
 
 def _parse_probe(output: str) -> Dict[str, Any]:
-    facts: Dict[str, Any] = {
-        "repo_ok": [], "repo_fail": [], "image_ok": [], "image_fail": [],
-    }
+    facts: Dict[str, Any] = {"repo_ok": [], "repo_fail": []}
     collected = {
         "KS_REPO_OK": "repo_ok",
         "KS_REPO_FAIL": "repo_fail",
-        "KS_IMG_OK": "image_ok",
-        "KS_IMG_FAIL": "image_fail",
     }
     for raw_line in output.splitlines():
         line = raw_line.strip()
@@ -1032,21 +989,6 @@ def _node_checks(
             checks.append(_check(
                 "repo", "Repository reachability", "warn",
                 "curl is not installed; reachability could not be probed.",
-            ))
-
-        for url in facts.get("image_fail", []):
-            checks.append(_check(
-                "k8s_images", "Kubernetes images available", "fail",
-                f"The configured registry does not serve {url}.",
-                "kubeadm pins this pause tag for the selected Kubernetes "
-                "minor; mirror it before building, or the pod sandbox cannot "
-                "start on any node.",
-            ))
-        if facts.get("image_ok") and not facts.get("image_fail"):
-            checks.append(_check(
-                "k8s_images", "Kubernetes images available", "pass",
-                f"pause:{kubeadm.pause_image_tag(build.k8s_version)} is served "
-                "by the configured registry.",
             ))
 
         package_state = facts.get("KS_PKG_EXACT")

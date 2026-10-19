@@ -223,8 +223,7 @@ def _build():
 def _checks(app, profile, drop=(), **facts):
     base = {"KS_OS_ID": "rhel", "KS_OS_LIKE": "fedora", "KS_OS_VERSION": "9.4",
             "KS_ARCH": "x86_64", "KS_SUBMAN": "present", "KS_SAT_CA": "200",
-            "KS_SAT_REG": "404", "repo_ok": [], "repo_fail": [], "image_ok": [],
-            "image_fail": []}
+            "KS_SAT_REG": "404", "repo_ok": [], "repo_fail": []}
     base.update(facts)
     for key in drop:
         base.pop(key, None)

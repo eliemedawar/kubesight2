@@ -31,8 +31,7 @@ def _build() -> ClusterBuild:
 
 def _checks(app, node, **facts):
     base = {"KS_OS_ID": "ubuntu", "KS_OS_LIKE": "debian", "KS_OS_VERSION": "24.04",
-            "KS_ARCH": "x86_64", "repo_ok": [], "repo_fail": [], "image_ok": [],
-            "image_fail": []}
+            "KS_ARCH": "x86_64", "repo_ok": [], "repo_fail": []}
     base.update(facts)
     with app.app_context():
         checks = preflight_mod._node_checks(_build(), node, base, default_profile())
