@@ -55,6 +55,12 @@ _LOG_TAIL_CHARS = 8000
 # straddles the tail's edge is still matched whole before the cut.
 _SCRUB_WINDOW_CHARS = 4 * _LOG_TAIL_CHARS
 _STALE_BUILD_MINUTES = 5
+# Nodes prepared, pre-pulled or joined at once. Each holds one SSH session and,
+# while it streams, a database connection (the pool allows 16 + 20).
+_NODE_PARALLELISM = 10
+# Images one node pulls at once: a registry serves a few layers in parallel far
+# faster than one image after another, without saturating the node's link.
+_IMAGE_PULL_PARALLELISM = 4
 _CERT_KEY_TTL_HOURS = 2
 _CNI_APPLY_TIMEOUT_S = 600
 _CNI_ROLLOUT_TIMEOUT_S = 1200
@@ -673,7 +679,7 @@ def _phase_base_prep(build: ClusterBuild, resolved) -> None:
         except Exception as exc:  # noqa: BLE001
             results[node_id] = (False, f"{exc}")
 
-    with ThreadPoolExecutor(max_workers=5) as pool:
+    with ThreadPoolExecutor(max_workers=_NODE_PARALLELISM) as pool:
         for _, _, scripts, target, node_id, step_id in jobs:
             pool.submit(_prep, node_id, step_id, target, scripts)
 
@@ -849,66 +855,119 @@ def _phase_pull_images(build: ClusterBuild, resolved) -> None:
             break
         raise _PhaseFailed(f"Required image resolution failed: {exc}") from exc
     cp_ids = {node.id for node in cps}
+    proxy_env = resolved.proxy_env() or ""
+    jobs = []  # (node, step, target, pull_commands)
     for node in nodes:
         step = _get_step(build, "pull_images", node)
         if step.status == "completed":
             continue
+        pull_commands = []
+        if node.id in cp_ids and repo_flag:
+            # Not `kubeadm config images pull`: with a custom repository
+            # it looks for CoreDNS at a path most mirrors do not have.
+            pull_commands.append(kubeadm.pull_control_plane_images_script(
+                build.k8s_version, resolved.k8s_image_registry
+            ))
+        elif node.id in cp_ids:
+            pull_commands.append(
+                "kubeadm config images pull "
+                f"--kubernetes-version v{build.k8s_version.lstrip('v')}"
+            )
+        if images:
+            # Base prep installs cri-tools, but a build resumed from a
+            # node prepared by an older KubeSight can reach this phase
+            # without it. Say so, rather than leave the log holding a bare
+            # "crictl: command not found".
+            pull_commands.append(
+                'command -v crictl >/dev/null 2>&1 || { '
+                'echo "crictl is not installed on this node; the CNI and '
+                'add-on images are pulled with it. Install the cri-tools '
+                'package (base prep installs it on a fresh build) and '
+                'retry."; exit 1; }'
+            )
+            pull_commands.append(_parallel_pull_script(images))
+        jobs.append((node, step, _target_for(build, node), pull_commands))
+    if not jobs:
+        return
+    for _, step, _, _ in jobs:
         _step_start(step)
+
+    results: Dict[int, Tuple[bool, str]] = {}
+    app = current_app._get_current_object()
+
+    def _pull(node_id: int, step_id: int, target: SshTarget, pull_commands: List[str]) -> None:
         try:
-            stream = _StreamTail(step.id)
-            target = _target_for(build, node)
-            pull_commands = []
-            if resolved.proxy_env():
-                proxy_env = resolved.proxy_env()
-            else:
-                proxy_env = ""
-            if node.id in cp_ids and repo_flag:
-                # Not `kubeadm config images pull`: with a custom repository
-                # it looks for CoreDNS at a path most mirrors do not have.
-                pull_commands.append(kubeadm.pull_control_plane_images_script(
-                    build.k8s_version, resolved.k8s_image_registry
-                ))
-            elif node.id in cp_ids:
-                pull_commands.append(
-                    "kubeadm config images pull "
-                    f"--kubernetes-version v{build.k8s_version.lstrip('v')}"
-                )
-            if images:
-                # Base prep installs cri-tools, but a build resumed from a
-                # node prepared by an older KubeSight can reach this phase
-                # without it. Say so, rather than leave the log holding a bare
-                # "crictl: command not found".
-                pull_commands.append(
-                    'command -v crictl >/dev/null 2>&1 || { '
-                    'echo "crictl is not installed on this node; the CNI and '
-                    'add-on images are pulled with it. Install the cri-tools '
-                    'package (base prep installs it on a fresh build) and '
-                    'retry."; exit 1; }'
-                )
-            pull_commands.extend(
-                f"crictl pull {shlex.quote(image)}" for image in images
+            with app.app_context():
+                stream = _StreamTail(step_id)
+                commands = ["set -e"]
+                if proxy_env:
+                    commands.append(proxy_env)
+                commands.extend(pull_commands)
+                try:
+                    _run_traced(
+                        target,
+                        "\n".join(commands),
+                        timeout_s=1800,
+                        stream=stream,
+                        display_command="\n".join(
+                            ["set -e", *pull_commands, "# proxy environment hidden"]
+                        ),
+                    )
+                    results[node_id] = (True, stream.text())
+                except (SshCommandError, SshConnectionError) as exc:
+                    if getattr(exc, "output", "") and exc.output not in stream.text():
+                        stream.write(exc.output)
+                    results[node_id] = (False, stream.text())
+                finally:
+                    stream.flush()
+        except Exception as exc:  # noqa: BLE001
+            results[node_id] = (False, str(exc))
+
+    # Every node pulls at once: the registry, not the node count, sets the pace.
+    with ThreadPoolExecutor(max_workers=_NODE_PARALLELISM) as pool:
+        for node, step, target, pull_commands in jobs:
+            pool.submit(_pull, node.id, step.id, target, pull_commands)
+
+    failures = []
+    for node, step, _, _ in jobs:
+        ok, log = results.get(node.id, (False, "no result"))
+        if ok:
+            _step_done(step, log)
+        else:
+            _step_fail(step, f"Image pull failed on {node.hostname or node.address}.", log)
+            failures.append(node.hostname or node.address)
+    if failures:
+        raise _PhaseFailed(
+            f"pull_images failed on {', '.join(failures)} — "
+            "registry unreachable or images missing. Fails early by design."
+        )
+
+
+def _parallel_pull_script(images: List[str]) -> str:
+    """``crictl pull`` each image, ``_IMAGE_PULL_PARALLELISM`` at a time (POSIX
+    sh: the transport runs ``sh -s``). Each pull's output is held until its batch
+    ends so the log reads one image at a time; any failure fails the script
+    after every pull has finished, naming the images that did not come."""
+    lines = [
+        "KS_PULL_LOG=$(mktemp -d)",
+    ]
+    for start in range(0, len(images), _IMAGE_PULL_PARALLELISM):
+        batch = list(enumerate(images[start:start + _IMAGE_PULL_PARALLELISM], start=start))
+        for index, image in batch:
+            quoted = shlex.quote(image)
+            lines.append(
+                f'{{ crictl pull {quoted} >"$KS_PULL_LOG/{index}" 2>&1 '
+                f'|| echo {quoted} >>"$KS_PULL_LOG/failed"; }} &'
             )
-            commands = ["set -e"]
-            if proxy_env:
-                commands.append(proxy_env)
-            commands.extend(pull_commands)
-            _run_traced(
-                target,
-                "\n".join(commands),
-                timeout_s=1800,
-                stream=stream,
-                display_command="\n".join(
-                    ["set -e", *pull_commands, "# proxy environment hidden"]
-                ),
-            )
-            _step_done(step, stream.text())
-        except (SshCommandError, SshConnectionError) as exc:
-            _step_fail(step, f"Image pull failed on {node.hostname or node.address}.",
-                       getattr(exc, "output", ""))
-            raise _PhaseFailed(
-                f"pull_images failed on {node.hostname or node.address} — "
-                "registry unreachable or images missing. Fails early by design."
-            ) from exc
+        lines.append("wait")
+        for index, image in batch:
+            lines.append(f'echo ">> crictl pull "{shlex.quote(image)}; cat "$KS_PULL_LOG/{index}"')
+    lines.append(
+        'if [ -s "$KS_PULL_LOG/failed" ]; then '
+        'echo "Could not pull:"; cat "$KS_PULL_LOG/failed"; rm -rf "$KS_PULL_LOG"; exit 1; fi'
+    )
+    lines.append('rm -rf "$KS_PULL_LOG"')
+    return "\n".join(lines)
 
 
 def _coredns_repository(build: ClusterBuild, resolved, primary: ClusterBuildNode) -> str:
@@ -1339,7 +1398,7 @@ def _phase_join_workers(build: ClusterBuild) -> None:
         except Exception as exc:  # noqa: BLE001
             results[node_id] = (False, str(exc))
 
-    with ThreadPoolExecutor(max_workers=5) as pool:
+    with ThreadPoolExecutor(max_workers=_NODE_PARALLELISM) as pool:
         for node, step, target, node_name in jobs:
             pool.submit(_join, node.id, step.id, target, node_name)
 

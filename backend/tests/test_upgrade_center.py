@@ -161,6 +161,9 @@ class FakeCluster:
                 return json.dumps({"serverVersion": {"gitVersion": self.server}})
             if key == "get pods --all-namespaces -o json":
                 return json.dumps({"items": []})
+            if key.startswith("get pods -n kube-system -l component=kube-apiserver"):
+                image = "registry.local:5000/k8s/kube-apiserver:v1.34.4"
+                return json.dumps({"items": [{"spec": {"containers": [{"image": image}]}}]})
             if key.startswith("get pods -n kube-system -l component=etcd"):
                 return json.dumps({"items": [{"metadata": {"name": "etcd-cp-1"}, "spec": {"nodeName": "cp-1"}}]})
             if args[0] == "exec":
@@ -179,9 +182,12 @@ class FakeCluster:
                 return json.dumps(self.nodes[args[2]])
         raise RuntimeError(f"unexpected kubectl {args}")
 
-    def run_on_node(self, access, run_kubectl, node, script):
+    def run_on_node(self, access, run_kubectl, node, script, **kwargs):
         target = script.split('K8S_VER="', 1)[1].split('"', 1)[0]
         with self.lock:
+            if "--download-only" in script:
+                self.events.append(("stage", node, script))
+                return "ok"
             self.events.append(("upgrade", node, "apply" if "kubeadm upgrade apply" in script else "node"))
             self.nodes[node]["status"]["nodeInfo"]["kubeletVersion"] = f"v{target}"
             if "kubeadm upgrade apply" in script:
@@ -282,6 +288,50 @@ def test_resume_skips_nodes_already_on_the_target(app, fast_executor, monkeypatc
     assert not [e for e in cluster.events if e[0] == "snapshot"]
 
 
+def test_every_node_is_prestaged_before_the_first_is_cordoned(app, fast_executor, monkeypatch):
+    ex = fast_executor
+    cluster = FakeCluster(cps=2, workers=2)
+    monkeypatch.setattr(ex, "_run_on_node", cluster.run_on_node)
+    job_id = _start(ex, cluster)
+    ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.35.7",
+                                cluster.kubectl, job_id, options={"etcdSnapshot": False})
+    staged = {e[1]: e[2] for e in cluster.events if e[0] == "stage"}
+    assert set(staged) == {"cp-1", "cp-2", "w-1", "w-2"}
+    last_stage = max(i for i, e in enumerate(cluster.events) if e[0] == "stage")
+    first_cordon = next(i for i, e in enumerate(cluster.events) if e[0] == "cordon")
+    assert last_stage < first_cordon
+    # From the registry the API server runs from, at the target tag; control
+    # planes also get their static-pod images, workers only kube-proxy.
+    assert "crictl pull registry.local:5000/k8s/kube-apiserver:v1.35.7" in staged["cp-2"]
+    assert "crictl pull registry.local:5000/k8s/kube-proxy:v1.35.7" in staged["w-1"]
+    assert "kube-apiserver" not in staged["w-1"]
+    assert 'K8S_VER="1.35.7"' in staged["w-1"]
+
+
+def test_prestaging_skips_nodes_on_the_target_and_never_fails_the_run(app, fast_executor, monkeypatch):
+    from api.upgrade_jobs import get_job
+
+    ex = fast_executor
+    cluster = FakeCluster(cps=1, workers=2)
+    cluster.server = "v1.35.7"
+    cluster.nodes["cp-1"]["status"]["nodeInfo"]["kubeletVersion"] = "v1.35.7"
+
+    def run_on_node(access, run_kubectl, node, script, **kwargs):
+        if "--download-only" in script and node == "w-1":
+            raise RuntimeError("Timed out waiting for upgrade job kubesight-upg-1.")
+        return cluster.run_on_node(access, run_kubectl, node, script, **kwargs)
+
+    monkeypatch.setattr(ex, "_run_on_node", run_on_node)
+    job_id = _start(ex, cluster)
+    ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.35.7",
+                                cluster.kubectl, job_id, options={"etcdSnapshot": False})
+    assert [e[1] for e in cluster.events if e[0] == "stage"] == ["w-2"]
+    assert [e[1] for e in cluster.events if e[0] == "upgrade"] == ["w-1", "w-2"]
+    job = get_job(job_id)
+    assert job["status"] == "completed"
+    assert any(line["node"] == "w-1" and "Pre-staging did not finish" in line["message"] for line in job["log"])
+
+
 def _built(cluster_id, version, status="completed"):
     from api.models import ClusterBuild
 
@@ -350,8 +400,8 @@ def test_a_worker_failure_after_the_control_plane_says_how_to_finish(app, fast_e
     ex = fast_executor
     cluster = FakeCluster(cps=1, workers=2)
 
-    def run_on_node(access, run_kubectl, node, script):
-        if node == "w-1":
+    def run_on_node(access, run_kubectl, node, script, **kwargs):
+        if node == "w-1" and "--download-only" not in script:
             raise RuntimeError("E: Could not get lock /var/lib/dpkg/lock-frontend")
         return cluster.run_on_node(access, run_kubectl, node, script)
 

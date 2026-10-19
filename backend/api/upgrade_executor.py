@@ -27,12 +27,15 @@ import inspect
 import json
 import logging
 import os
+import re
+import shlex
 import subprocess
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .cluster_access import ClusterAccess
 from .k8s_provider import K8sCommandError
@@ -54,6 +57,11 @@ PAUSE_POLL_SECONDS = 5
 # gives up on it.
 TRANSIENT_RETRY_SECONDS = int(os.getenv("UPGRADE_TRANSIENT_RETRY_SECONDS", "180"))
 TRANSIENT_RETRY_INTERVAL_SECONDS = 5
+# Pre-staging downloads every node's packages and images at once before the
+# first node is cordoned. It is best effort: a node that does not finish in time
+# downloads what it needs during its own upgrade, as it would without it.
+PRESTAGE_TIMEOUT_SECONDS = int(os.getenv("UPGRADE_PRESTAGE_TIMEOUT_SECONDS", "600"))
+PRESTAGE_PARALLELISM = 10
 
 DEFAULT_OPTIONS: Dict[str, Any] = {
     "waveSize": 1,
@@ -323,6 +331,38 @@ systemctl restart kubelet
 """
 
 
+def _shell_script_prestage(target_version: str, images: List[str]) -> str:
+    """Download the target's packages and pull its images without installing or
+    restarting anything, so a node's cordoned window holds only the install."""
+    version = _package_version(target_version)
+    pulls = "\n".join(
+        f"  crictl pull {shlex.quote(image)} >/dev/null 2>&1 && echo \"Pulled \"{shlex.quote(image)} || "
+        f"echo \"Could not pre-pull \"{shlex.quote(image)}\"; the upgrade pulls it itself.\""
+        for image in images
+    )
+    return f"""set -e
+K8S_VER="{version}"
+{_APT_SHELL_PREAMBLE}
+{satellite_kube_repo_script(version)}
+if command -v apt-get >/dev/null 2>&1; then
+  _apt update -qq
+  _apt install -y -qq --download-only --allow-change-held-packages \\
+    kubeadm="${{K8S_VER}}-*" kubelet="${{K8S_VER}}-*" kubectl="${{K8S_VER}}-*"
+elif command -v dnf >/dev/null 2>&1; then
+  dnf install -y --downloadonly "kubeadm-${{K8S_VER}}" "kubelet-${{K8S_VER}}" "kubectl-${{K8S_VER}}" || \\
+    dnf install -y --downloadonly "kubeadm-${{K8S_VER}}-*" "kubelet-${{K8S_VER}}-*" "kubectl-${{K8S_VER}}-*"
+elif command -v yum >/dev/null 2>&1; then
+  yum install -y --downloadonly "kubeadm-${{K8S_VER}}" "kubelet-${{K8S_VER}}" "kubectl-${{K8S_VER}}" || \\
+    yum install -y --downloadonly "kubeadm-${{K8S_VER}}-*" "kubelet-${{K8S_VER}}-*" "kubectl-${{K8S_VER}}-*"
+fi
+echo "Packages for ${{K8S_VER}} downloaded."
+if command -v crictl >/dev/null 2>&1; then
+  :
+{pulls}
+fi
+"""
+
+
 def _is_control_plane_node(labels: Dict[str, Any]) -> bool:
     # Role labels are often present with an empty string value — use key membership.
     return (
@@ -522,7 +562,14 @@ def _delete_upgrade_job(access: ClusterAccess, run_kubectl: RunKubectlFn, job_na
         pass
 
 
-def _run_on_node(access: ClusterAccess, run_kubectl: RunKubectlFn, node_name: str, shell_command: str) -> str:
+def _run_on_node(
+    access: ClusterAccess,
+    run_kubectl: RunKubectlFn,
+    node_name: str,
+    shell_command: str,
+    *,
+    timeout_seconds: int = POD_WAIT_TIMEOUT_SECONDS,
+) -> str:
     job_name = f"kubesight-upg-{uuid.uuid4().hex[:8]}"
     manifest = {
         "apiVersion": "batch/v1",
@@ -567,7 +614,7 @@ def _run_on_node(access: ClusterAccess, run_kubectl: RunKubectlFn, node_name: st
     }
     try:
         _retry_transient(lambda: _kubectl_apply_manifest(access, manifest))
-        output = _wait_for_job_completion(access, run_kubectl, job_name)
+        output = _wait_for_job_completion(access, run_kubectl, job_name, timeout_seconds=timeout_seconds)
     finally:
         _delete_upgrade_job(access, run_kubectl, job_name)
 
@@ -881,6 +928,58 @@ def _etcd_snapshot(access: ClusterAccess, run_kubectl: RunKubectlFn, node: str) 
     }
 
 
+_RELEASE_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+
+
+def _prestage_images(access: ClusterAccess, run_kubectl: RunKubectlFn, target: str) -> Tuple[List[str], List[str]]:
+    """(control-plane images, every node's images) at ``target``, from the
+    registry the API server runs from now. kubeadm keeps etcd's and CoreDNS's
+    tags in its own tables, so those are left for ``upgrade apply`` to pull."""
+    if not _RELEASE_TAG_RE.match(target):
+        return [], []
+    pods = _get_json(access, run_kubectl, ["get", "pods", "-n", "kube-system", "-l", "component=kube-apiserver", "-o", "json"])
+    containers = next(iter(pods.get("items") or []), {}).get("spec", {}).get("containers") or []
+    image = (containers[0].get("image") if containers else "") or ""
+    name = image.split("@", 1)[0]
+    if ":" in name.rsplit("/", 1)[-1]:
+        name = name.rsplit(":", 1)[0]
+    if "/" not in name:
+        return [], []
+    registry = name.rsplit("/", 1)[0]
+    proxy = [f"{registry}/kube-proxy:{target}"]
+    control_plane = [
+        f"{registry}/{component}:{target}"
+        for component in ("kube-apiserver", "kube-controller-manager", "kube-scheduler")
+    ]
+    return control_plane + proxy, proxy
+
+
+def _prestage(access: ClusterAccess, run_kubectl: RunKubectlFn, tracker: "RunTracker",
+              nodes: List[Tuple[str, bool]], target: str) -> None:
+    """Every node at once: download the target's packages and pull its images.
+    ``nodes`` holds (name, is_control_plane). Never fails the run."""
+    if not nodes:
+        return
+    try:
+        cp_images, node_images = _prestage_images(access, run_kubectl, target)
+    except Exception as exc:  # noqa: BLE001 — packages are still worth fetching
+        cp_images, node_images = [], []
+        tracker.log(None, f"Images not pre-pulled: could not read the API server's image ({str(exc)[:200]}).")
+    tracker.log(None, f"Pre-staging {target} packages and images on {len(nodes)} node(s) before the first is cordoned.")
+
+    def _one(name: str, is_cp: bool) -> None:
+        script = _shell_script_prestage(target, cp_images if is_cp else node_images)
+        try:
+            _run_on_node(access, run_kubectl, name, script, timeout_seconds=PRESTAGE_TIMEOUT_SECONDS)
+            tracker.log(name, "Packages downloaded and images pre-pulled.")
+        except Exception as exc:  # noqa: BLE001 — its own upgrade downloads them
+            tracker.log(name, f"Pre-staging did not finish; the upgrade downloads what it needs itself. "
+                              f"({str(exc)[:200]})")
+
+    with ThreadPoolExecutor(max_workers=PRESTAGE_PARALLELISM) as pool:
+        list(pool.map(lambda node: _one(*node), nodes))
+
+
 def _wait_node_ready(access: ClusterAccess, run_kubectl: RunKubectlFn, node: str, target: str) -> str:
     deadline = time.time() + NODE_READY_TIMEOUT_SECONDS
     last = "unknown"
@@ -1042,7 +1141,17 @@ def _execute_kubeadm_upgrade(
             tracker.node(name, phase=phase, status="skipped")
 
     try:
-        # -- 1 + 2. control planes ---------------------------------------------
+        # -- 1. pre-stage: downloads off every node's cordoned window ------------
+        tracker.checkpoint("pre-staging")
+        _prestage(
+            access, run_kubectl, tracker,
+            [(cp, True) for index, cp in enumerate(control_planes)
+             if not (at_target(cp) and (index > 0 or cp_done))]
+            + [(w, False) for w in workers if not at_target(w)],
+            normalized,
+        )
+
+        # -- 2 + 3. control planes ---------------------------------------------
         tracker.stage("control-plane", "active")
         for index, cp in enumerate(control_planes):
             if at_target(cp) and (index > 0 or cp_done):
@@ -1061,7 +1170,7 @@ def _execute_kubeadm_upgrade(
         _mark_step(steps, 3, "completed", f"Control plane on {normalized}.")
         tracker.save(steps=steps, activeStep=3)
 
-        # -- 3. workers in waves ----------------------------------------------------
+        # -- 4. workers in waves ----------------------------------------------------
         if workers:
             tracker.stage("workers", "active")
             pending = [w for w in workers if not at_target(w)]

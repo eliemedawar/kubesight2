@@ -1047,6 +1047,73 @@ class TestHaBuild:
         assert len(init_calls) == 1
 
 
+def _is_pull(script):
+    return "KS_PULL_LOG" in script or "kubeadm config images pull" in script
+
+
+class TestImagePrePull:
+    def test_every_node_pulls_at_once(self, client, admin_token, ssh_profile, fake_ssh, app):
+        import threading
+        import time
+
+        hosts = {"10.0.0.11": ("cp-1", "control_plane"), "10.0.0.21": ("w-1", "worker")}
+        fake = build_default_fake(hosts)
+        lock = threading.Lock()
+        state = {"running": 0, "peak": 0}
+        real_run = fake.run
+
+        def run(target, script, **kwargs):
+            if not _is_pull(script):
+                return real_run(target, script, **kwargs)
+            with lock:
+                state["running"] += 1
+                state["peak"] = max(state["peak"], state["running"])
+            time.sleep(0.3)
+            with lock:
+                state["running"] -= 1
+            return real_run(target, script, **kwargs)
+
+        fake.run = run
+        set_transport_factory(lambda: fake)
+        data = run_full_build(client, admin_token, ssh_profile, fake,
+                              make_build_payload(nodes=SINGLE_CP_NODES))
+        assert data["status"] == "completed", data.get("error")
+        assert state["peak"] == 2
+        # Images within a node go up to four at a time, each still a crictl pull.
+        worker_pull = next(s for h, s in fake.calls if h == "10.0.0.21" and _is_pull(s))
+        assert "crictl pull " in worker_pull and "wait" in worker_pull.splitlines()
+
+    def test_a_failed_pull_names_its_node_and_retry_pulls_only_it(
+        self, client, admin_token, ssh_profile, fake_ssh, app
+    ):
+        hosts = {"10.0.0.11": ("cp-1", "control_plane"), "10.0.0.21": ("w-1", "worker")}
+        fake = build_default_fake(hosts)
+        state = {"failures": 0}
+
+        def _pull_fail(host, script):
+            if host == "10.0.0.21" and _is_pull(script) and not state["failures"]:
+                state["failures"] += 1
+                return True
+            return False
+
+        fake.responders.insert(
+            0, (_pull_fail, SshCommandError("boom", exit_code=1, output="Could not pull:\ncalico/node"))
+        )
+        set_transport_factory(lambda: fake)
+        data = run_full_build(client, admin_token, ssh_profile, fake,
+                              make_build_payload(nodes=SINGLE_CP_NODES))
+        assert data["status"] == "failed"
+        assert "pull_images failed on w-1" in (data["error"] or "")
+        pulls = [s["status"] for s in data["steps"] if s["phase"] == "pull_images"]
+        assert sorted(pulls) == ["completed", "failed"]
+
+        response = client.post(f"/api/cluster-builds/{data['id']}/retry",
+                               headers=auth_headers(admin_token))
+        assert response.get_json()["data"]["status"] == "completed"
+        cp_pulls = [s for h, s in fake.calls if h == "10.0.0.11" and _is_pull(s)]
+        assert len(cp_pulls) == 1
+
+
 class TestRetryResilience:
     """The retry path is where 'worked the second time' bugs live (plan §11.6)."""
 
