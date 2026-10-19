@@ -282,6 +282,45 @@ def test_resume_skips_nodes_already_on_the_target(app, fast_executor, monkeypatc
     assert not [e for e in cluster.events if e[0] == "snapshot"]
 
 
+def _built(cluster_id, version, status="completed"):
+    from api.models import ClusterBuild
+
+    build = ClusterBuild(name=f"b-{status}-{version}", k8s_version=version, status=status,
+                         result_cluster_id=cluster_id)
+    db.session.add(build)
+    db.session.commit()
+    return build
+
+
+def test_a_finished_run_moves_the_cluster_builder_build_to_the_new_version(app, fast_executor, monkeypatch):
+    ex = fast_executor
+    cluster = FakeCluster(cps=1, workers=1)
+    monkeypatch.setattr(ex, "_run_on_node", cluster.run_on_node)
+    build = _built("kubeadm-1", "1.34.4")
+    job_id = _start(ex, cluster)
+    ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.35.7",
+                                cluster.kubectl, job_id, options={"etcdSnapshot": False})
+    db.session.refresh(build)
+    assert build.k8s_version == "1.35.7"
+
+
+def test_a_build_follows_its_cluster_up_never_down(app):
+    from api.services.cluster_build.onboard import record_cluster_version
+
+    behind = _built("custom-7", "1.33.9")
+    ahead = _built("custom-8", "1.35.1")
+    running = _built("custom-7", "1.33.9", status="running")
+    other = _built("custom-9", "1.33.9")
+    assert record_cluster_version("custom-7", "v1.34.0") == 1
+    assert record_cluster_version("custom-8", "v1.34.0") == 0
+    assert record_cluster_version("custom-7", "not-a-version") == 0
+    for build in (behind, ahead, running, other):
+        db.session.refresh(build)
+    assert behind.k8s_version == "1.34.0"
+    assert ahead.k8s_version == "1.35.1"
+    assert running.k8s_version == "1.33.9" and other.k8s_version == "1.33.9"
+
+
 def test_a_dropped_connection_after_the_control_plane_is_retried(app, fast_executor, monkeypatch):
     from api.upgrade_jobs import get_job
 

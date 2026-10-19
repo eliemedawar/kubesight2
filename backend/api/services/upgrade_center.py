@@ -607,6 +607,18 @@ def fleet(user) -> Result:
     }, None, 200
 
 
+def _record_built_version(cluster_id: str, server_version: str) -> None:
+    """A cluster upgraded outside a finished run (one that failed after the
+    control plane, or by hand) still brings its Cluster Builder build along."""
+    from .cluster_build.onboard import record_cluster_version
+
+    try:
+        record_cluster_version(cluster_id, server_version)
+    except Exception:  # noqa: BLE001 — the page still shows the cluster
+        db.session.rollback()
+        logger.warning("Could not record %s on the build of %s", server_version, cluster_id, exc_info=True)
+
+
 def workspace(cluster_id: str, *, user=None) -> Result:
     """Everything the cluster page needs: versions, path, nodes, last readiness, open job."""
     from ..upgrade_provider import _fetch_latest_k8s_version
@@ -617,6 +629,8 @@ def workspace(cluster_id: str, *, user=None) -> Result:
         return None, "Cluster not found", 404
     except Exception as exc:  # noqa: BLE001
         return None, f"Could not read the cluster: {exc}", 503
+    if snap["real"]:
+        _record_built_version(cluster_id, snap["version"])
     latest = _fetch_latest_k8s_version() if snap["real"] else MOCK_LATEST
     ctx = release_context(snap["version"], latest, None if snap["real"] else mock_patch)
     jobs = list_jobs(cluster_ids=[cluster_id], statuses=OPEN_STATUSES, limit=1)

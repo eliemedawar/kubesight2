@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import os
 import subprocess
 import threading
@@ -39,6 +40,8 @@ from .upgrade_jobs import LOG_LIMIT, create_job, get_control, mutate_job, run_jo
 from .upgrade_provider import UPGRADE_PLAN_STEPS, normalize_version, parse_k8s_version
 
 RunKubectlFn = Callable[..., str]
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_DEBUG_NAMESPACE = "default"
 POD_WAIT_TIMEOUT_SECONDS = 1800
@@ -1162,6 +1165,24 @@ def _execute_kubeadm_upgrade(
         verdict=verdict,
         finishedAt=_now(),
     )
+    _record_built_version(job_id, access.cluster_id, final_version)
+
+
+def _record_built_version(job_id: str, cluster_id: str, server_version: str) -> None:
+    """A cluster the Cluster Builder made: its build now reads the new version."""
+    from .services.cluster_build.onboard import record_cluster_version
+    from .upgrade_jobs import _with_app
+
+    def _record() -> None:
+        from .db import db
+
+        try:
+            record_cluster_version(cluster_id, server_version)
+        except Exception:  # noqa: BLE001 — the upgrade itself is done
+            db.session.rollback()
+            logger.warning("Could not record %s on the build of %s", server_version, cluster_id, exc_info=True)
+
+    _with_app(job_id, _record)
 
 
 def _execute_minikube_upgrade(target_version: str, job_id: str) -> None:

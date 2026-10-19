@@ -72,3 +72,32 @@ def register_cluster(build: ClusterBuild, admin_conf: str) -> str:
     record_connection_test(cluster, test_cluster_connection(cluster))
     invalidate_cluster_list_cache()
     return public_id
+
+
+def record_cluster_version(cluster_id: str, server_version: str) -> int:
+    """Move the builds that created ``cluster_id`` up to the version its API
+    server now runs, after an upgrade.
+
+    A build's ``k8s_version`` is what nodes added to the cluster later
+    install, and what the Cluster Builder shows, so it follows the cluster
+    rather than staying on the version it was built with. Never moves a
+    build down, and leaves a build that is running alone. Returns how many
+    builds changed."""
+    from . import k8s_versions
+
+    live = k8s_versions.parse_version(server_version)
+    if not cluster_id or live is None:
+        return 0
+    builds = ClusterBuild.query.filter(
+        ClusterBuild.result_cluster_id == str(cluster_id),
+        ClusterBuild.status.in_(("completed", "failed", "cancelled")),
+    ).all()
+    changed = 0
+    for build in builds:
+        current = k8s_versions.parse_version(build.k8s_version)
+        if current is None or current < live:
+            build.k8s_version = k8s_versions.normalize_version(server_version)
+            changed += 1
+    if changed:
+        db.session.commit()
+    return changed
