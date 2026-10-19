@@ -147,6 +147,9 @@ class FakeCluster:
         self.events = []
         self.drain_timeouts = []
         self.fail_drain = set()
+        # What `dnf --showduplicates list` prints on the first control plane;
+        # by default the node is not registered with Satellite.
+        self.capsule = "KS_NOT_SATELLITE\n"
         self.lock = threading.Lock()
 
     def kubectl(self, access, args, timeout=None):
@@ -183,6 +186,10 @@ class FakeCluster:
         raise RuntimeError(f"unexpected kubectl {args}")
 
     def run_on_node(self, access, run_kubectl, node, script, **kwargs):
+        if "--showduplicates" in script:
+            with self.lock:
+                self.events.append(("list", node))
+            return self.capsule
         target = script.split('K8S_VER="', 1)[1].split('"', 1)[0]
         with self.lock:
             if "--download-only" in script:
@@ -227,8 +234,8 @@ def test_kubeadm_run_upgrades_every_control_plane_then_workers_in_waves(app, fas
     # Every control plane — not only the first — and the first one with `apply`.
     assert upgrades[:3] == [("upgrade", "cp-1", "apply"), ("upgrade", "cp-2", "node"), ("upgrade", "cp-3", "node")]
     assert {e[1] for e in upgrades[3:]} == {"w-1", "w-2", "w-3"}
-    # The etcd snapshot came before anything was touched.
-    assert cluster.events[0][0] == "snapshot"
+    # The etcd snapshot came before anything was touched (the capsule listing only reads).
+    assert [e for e in cluster.events if e[0] != "list"][0][0] == "snapshot"
     # Drain carries the plan's timeout, and the process timeout is longer than it.
     assert all(flag == "--timeout=7m" and timeout and timeout > 420 for flag, timeout in cluster.drain_timeouts)
     # No worker was drained before the control planes were done.
@@ -330,6 +337,45 @@ def test_prestaging_skips_nodes_on_the_target_and_never_fails_the_run(app, fast_
     job = get_job(job_id)
     assert job["status"] == "completed"
     assert any(line["node"] == "w-1" and "Pre-staging did not finish" in line["message"] for line in job["log"])
+
+
+def _capsule(*versions):
+    return "".join(f"{name}.x86_64   {version}-150500.1.1   k8s-packages-v1_35\n"
+                   for version in versions for name in ("kubeadm", "kubelet", "kubectl"))
+
+
+def test_a_satellite_cluster_gets_the_newest_patch_of_the_minor_its_capsule_carries(
+    app, fast_executor, monkeypatch
+):
+    from api.upgrade_jobs import get_job
+
+    ex = fast_executor
+    cluster = FakeCluster(cps=1, workers=1)
+    cluster.capsule = _capsule("1.35.2", "1.35.4", "1.36.1")
+    monkeypatch.setattr(ex, "_run_on_node", cluster.run_on_node)
+    job_id = _start(ex, cluster)
+    ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.35.7",
+                                cluster.kubectl, job_id, options={"etcdSnapshot": False})
+    # The capsule was asked before any node was touched, on the first control plane.
+    assert cluster.events[0] == ("list", "cp-1")
+    assert cluster.server == "v1.35.4"
+    assert {n["status"]["nodeInfo"]["kubeletVersion"] for n in cluster.nodes.values()} == {"v1.35.4"}
+    job = get_job(job_id)
+    assert job["status"] == "completed"
+    assert job["targetVersion"] == "v1.35.4" and job["requestedVersion"] == "v1.35.7"
+    assert any("newest 1.35 patch the Satellite capsule carries" in line["message"] for line in job["log"])
+
+
+def test_the_target_is_kept_off_satellite_or_when_the_capsule_has_it(app, fast_executor, monkeypatch):
+    ex = fast_executor
+    for capsule in ("KS_NOT_SATELLITE\n", _capsule("1.35.4", "1.35.7"), _capsule("1.34.9")):
+        cluster = FakeCluster(cps=1, workers=1)
+        cluster.capsule = capsule
+        monkeypatch.setattr(ex, "_run_on_node", cluster.run_on_node)
+        job_id = _start(ex, cluster)
+        ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.35.7",
+                                    cluster.kubectl, job_id, options={"etcdSnapshot": False})
+        assert cluster.server == "v1.35.7", capsule
 
 
 def _built(cluster_id, version, status="completed"):

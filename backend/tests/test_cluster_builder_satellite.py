@@ -536,6 +536,20 @@ class TestCapsuleVersion:
         descriptor = executor.cni_registry.get(build.cni_plugin)
         assert descriptor.supports_k8s_minor(build.cni_version, older)
 
+    def test_the_minor_asked_for_wins_over_a_newer_one(
+        self, client, admin_token, app, ssh_profile  # noqa: F811
+    ):
+        from api.services.cluster_build import k8s_versions
+
+        minors = k8s_versions.enabled_minors()
+        newest, older = minors[0], minors[-1]
+        build, note = self._build_on(
+            client, admin_token, ssh_profile, f"{older}.1",
+            self._listing(f"{newest}.3", f"{older}.2", f"{older}.5"),
+        )
+        assert build.k8s_version == f"{older}.5"
+        assert note and f"newest {older} patch" in note
+
     def test_a_version_the_capsule_has_is_kept(
         self, client, admin_token, app, ssh_profile  # noqa: F811
     ):

@@ -281,6 +281,30 @@ def validate_version(value: str) -> str:
     return normalized
 
 
+_CAPSULE_PACKAGE_RE = re.compile(
+    r"^(kubeadm|kubelet|kubectl)\.\S+\s+(?:\d+:)?(\d+\.\d+\.\d+)-", re.MULTILINE
+)
+
+
+def capsule_versions(output: str) -> List[str]:
+    """From ``dnf --showduplicates list kubeadm kubelet kubectl``: the versions
+    for which the repositories carry all three packages, newest first."""
+    found: Dict[str, set] = {"kubeadm": set(), "kubelet": set(), "kubectl": set()}
+    for name, version in _CAPSULE_PACKAGE_RE.findall(output or ""):
+        found[name].add(version)
+    return sort_versions(found["kubeadm"] & found["kubelet"] & found["kubectl"])
+
+
+def newest_patch_of(versions, wanted: str) -> Optional[str]:
+    """``wanted`` when it is in ``versions``, else the newest of ``versions`` in
+    its minor, else None."""
+    target = normalize_version(wanted)
+    ordered = sort_versions(versions)
+    if target in ordered:
+        return target
+    return next((v for v in ordered if minor_of(v) == minor_of(target)), None)
+
+
 def sort_versions(versions) -> List[str]:
     """Newest first, by semantic ordering — "1.9.0" must not beat "1.32.4"."""
     parsed = [(parse_version(v), normalize_version(v)) for v in versions]

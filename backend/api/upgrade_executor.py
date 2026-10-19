@@ -928,6 +928,50 @@ def _etcd_snapshot(access: ClusterAccess, run_kubectl: RunKubectlFn, node: str) 
     }
 
 
+_NOT_SATELLITE_MARK = "KS_NOT_SATELLITE"
+
+
+def _capsule_target(access: ClusterAccess, run_kubectl: RunKubectlFn, tracker: "RunTracker",
+                    node: str, target: str) -> str:
+    """The version to install: ``target``, unless ``node`` is registered with
+    Satellite and its capsule lacks it — then the newest patch of the same minor
+    the capsule carries (v1.35.7 asked, v1.35.4 on the capsule: v1.35.4).
+    Anything else keeps ``target``, and the install says what is missing."""
+    version = _package_version(target)
+    minor = ".".join(version.split(".")[:2])
+    script = f"""if ! command -v subscription-manager >/dev/null 2>&1 || ! subscription-manager identity >/dev/null 2>&1; then
+  echo {_NOT_SATELLITE_MARK}
+  exit 0
+fi
+{satellite_kube_repo_script(version)}
+dnf -q --showduplicates --disableexcludes=all list kubeadm kubelet kubectl 2>/dev/null || true
+"""
+    try:
+        output = _run_on_node(access, run_kubectl, node, script, timeout_seconds=PRESTAGE_TIMEOUT_SECONDS)
+    except Exception as exc:  # noqa: BLE001 — the install itself reports a missing version
+        tracker.log(node, f"Could not list the Kubernetes versions on the Satellite capsule; installing {target}. "
+                          f"({str(exc)[:200]})")
+        return target
+    if _NOT_SATELLITE_MARK in output:
+        return target
+    from .services.cluster_build import k8s_versions
+
+    on_capsule = k8s_versions.capsule_versions(output)
+    chosen = k8s_versions.newest_patch_of(on_capsule, version)
+    if chosen is None:
+        carried = ", ".join(on_capsule[:6]) or "no kubeadm/kubelet/kubectl"
+        tracker.log(node, f"The Satellite capsule carries no Kubernetes {minor} ({carried}); sync it into "
+                          "Satellite, or the install stops on the missing packages.")
+        return target
+    chosen = normalize_version(chosen)
+    if chosen == target:
+        tracker.log(node, f"The Satellite capsule carries {target}.")
+    else:
+        tracker.log(node, f"Installing {chosen}: the newest {minor} patch the Satellite capsule carries "
+                          f"({target} is not there).")
+    return chosen
+
+
 _RELEASE_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 
 
@@ -1040,6 +1084,11 @@ def _execute_kubeadm_upgrade(
         baseline=baseline, versionBefore=previous_version, startedAt=_now(),
     )
     tracker.log(None, f"Upgrading {access.cluster_id} from {previous_version} to {normalized}.")
+    capsule_version = _capsule_target(access, run_kubectl, tracker, control_planes[0], normalized)
+    if capsule_version != normalized:
+        tracker.save(targetVersion=capsule_version, requestedVersion=normalized)
+        normalized = capsule_version
+        target_tuple = parse_k8s_version(normalized)
 
     def at_target(name: str) -> bool:
         return parse_k8s_version(_worker_kubelet_version(name, node_items)) >= target_tuple

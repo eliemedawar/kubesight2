@@ -429,17 +429,7 @@ def _needs_nfs_client(build: ClusterBuild) -> bool:
     return workload_storage.needs_nfs((selection or {}).get("storage"))
 
 
-_CAPSULE_PACKAGE_RE = re.compile(
-    r"^(kubeadm|kubelet|kubectl)\.\S+\s+(?:\d+:)?(\d+\.\d+\.\d+)-", re.MULTILINE
-)
-
-
-def _capsule_versions(output: str) -> List[str]:
-    """Versions for which the capsule carries all of kubeadm, kubelet and kubectl."""
-    found: Dict[str, set] = {"kubeadm": set(), "kubelet": set(), "kubectl": set()}
-    for name, version in _CAPSULE_PACKAGE_RE.findall(output or ""):
-        found[name].add(version)
-    return k8s_versions.sort_versions(found["kubeadm"] & found["kubelet"] & found["kubectl"])
+_capsule_versions = k8s_versions.capsule_versions
 
 
 def _settle_satellite_version(build: ClusterBuild, resolved) -> Tuple[Optional[str], Dict[int, str]]:
@@ -447,8 +437,10 @@ def _settle_satellite_version(build: ClusterBuild, resolved) -> Tuple[Optional[s
 
     Registers one control plane (the per-node registration later skips it)
     and lists kubeadm/kubelet/kubectl. The build keeps its version when the
-    capsule has it; otherwise it moves to the newest version the capsule has
-    that the Cluster Builder supports, and the CNI version follows the minor.
+    capsule has it; otherwise it takes the newest patch of the same minor the
+    capsule has (1.33 asked, 1.33.x installed), and only when the capsule has
+    none of that minor the newest version it has that the Cluster Builder
+    supports. The CNI and add-on versions follow the minor.
 
     Streams into that node's node-prep log as it goes — registration and the
     first listing can take minutes — and returns (a line for the package step
@@ -533,7 +525,10 @@ dnf -q --showduplicates --disableexcludes=all list kubeadm kubelet kubectl 2>/de
             stream.write("\nThe capsule lists no kubeadm/kubelet/kubectl for this activation key.\n")
         stream.flush()
         return None, {node.id: stream.text()}
-    chosen = available[0]
+    # The minor asked for decides: its newest patch on the capsule. Only a
+    # capsule without that minor at all moves the build to another one.
+    same_minor = k8s_versions.newest_patch_of(available, wanted)
+    chosen = same_minor or available[0]
     build.k8s_version = chosen
     descriptor = cni_registry.get(build.cni_plugin)
     minor = k8s_versions.minor_of(chosen)
@@ -551,10 +546,16 @@ dnf -q --showduplicates --disableexcludes=all list kubeadm kubelet kubectl 2>/de
     build.addons_json = selections
     db.session.commit()
     logger.info("build %s: Kubernetes %s is not on the capsule; using %s", build.id, wanted, chosen)
-    note = (
-        f"Kubernetes {chosen}: the newest version the Satellite capsule carries "
-        f"({wanted} is not there)"
-    )
+    if same_minor:
+        note = (
+            f"Kubernetes {chosen}: the newest {minor} patch the Satellite capsule carries "
+            f"({wanted} is not there)"
+        )
+    else:
+        note = (
+            f"Kubernetes {chosen}: the newest version the Satellite capsule carries "
+            f"({wanted} is not there, nor any other {k8s_versions.minor_of(wanted)} patch)"
+        )
     stream.write(f"\n{note}.\n")
     stream.flush()
     return note, {node.id: stream.text()}
