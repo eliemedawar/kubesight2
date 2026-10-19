@@ -463,7 +463,12 @@ def _settle_satellite_version(build: ClusterBuild, resolved) -> Tuple[Optional[s
     if adapter is None or not adapter.supports_satellite:
         return None, {}
     ctx = _script_ctx(build, resolved, node)
-    listing = """rm -f /etc/yum.repos.d/kubesight-kubernetes.repo
+    from ...upgrade_executor import satellite_kube_repo_script
+
+    # The requested minor's repository first: it is often in the content view
+    # but not enabled by the activation key.
+    listing = f"""rm -f /etc/yum.repos.d/kubesight-kubernetes.repo
+{satellite_kube_repo_script(build.k8s_version)}
 dnf -q --showduplicates --disableexcludes=all list kubeadm kubelet kubectl 2>/dev/null || true
 """
     # The other machines wait for this one; say so in their logs rather than

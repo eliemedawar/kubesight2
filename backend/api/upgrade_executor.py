@@ -161,11 +161,51 @@ _apt() {
 """
 
 
+_SATELLITE_KUBE_REPO_SCRIPT = r"""# Satellite publishes one repository per Kubernetes minor (k8s-packages-v1_34,
+# ...) and the activation key enables whichever it was set up with. Turn on
+# this minor's and the other minors' off, so dnf sees exactly this version.
+if command -v subscription-manager >/dev/null 2>&1 && subscription-manager identity >/dev/null 2>&1; then
+  KS_KUBE_REPOS=$(subscription-manager repos --list 2>/dev/null | awk '
+    /^Repo ID:/ { id = $3 }
+    /^Repo Name:/ { sub(/^Repo Name:[ \t]*/, ""); print id "\t" $0 }' \
+    | grep -iE 'k8s|kube' | grep -E '[vV-][0-9]+[._][0-9]+([^0-9]|$)' || true)
+  KS_KUBE_WANT=$(printf '%s\n' "$KS_KUBE_REPOS" | grep -E '@WANT@' | cut -f1 | head -n 1)
+  if [ -n "$KS_KUBE_WANT" ]; then
+    KS_KUBE_ARGS="--enable=$KS_KUBE_WANT"
+    for KS_KUBE_OTHER in $(printf '%s\n' "$KS_KUBE_REPOS" | grep -vE '@WANT@' | cut -f1); do
+      KS_KUBE_ARGS="$KS_KUBE_ARGS --disable=$KS_KUBE_OTHER"
+    done
+    if ! subscription-manager repos $KS_KUBE_ARGS; then
+      echo "Could not switch this host to Satellite repository $KS_KUBE_WANT for Kubernetes @MINOR@." >&2
+      exit 1
+    fi
+    echo "Kubernetes @MINOR@ packages come from Satellite repository $KS_KUBE_WANT."
+  elif [ -n "$KS_KUBE_REPOS" ]; then
+    echo "Satellite offers this host no Kubernetes @MINOR@ repository; it has:" $(printf '%s\n' "$KS_KUBE_REPOS" | cut -f1)
+  fi
+fi
+"""
+
+
+def satellite_kube_repo_script(k8s_version: str) -> str:
+    """Shell that enables the Satellite repository for ``k8s_version``'s minor
+    and disables the other minors' — a no-op on a host not registered with
+    Satellite, or when Satellite has no repository named for that minor."""
+    parts = k8s_version.lstrip("v").split(".")
+    major, minor = parts[0], parts[1] if len(parts) > 1 else "0"
+    return (
+        _SATELLITE_KUBE_REPO_SCRIPT
+        .replace("@WANT@", f"[vV-]{major}[._]{minor}([^0-9]|$)")
+        .replace("@MINOR@", f"{major}.{minor}")
+    )
+
+
 def _shell_script_install_kubeadm_only(target_version: str) -> str:
     version = _package_version(target_version)
     return f"""set -e
 K8S_VER="{version}"
 {_APT_SHELL_PREAMBLE}
+{satellite_kube_repo_script(version)}
 if command -v apt-get >/dev/null 2>&1; then
   apt-mark unhold kubeadm 2>/dev/null || true
   _apt update -qq
@@ -188,6 +228,7 @@ def _shell_script_install_kubelet_kubectl(target_version: str) -> str:
     return f"""set -e
 K8S_VER="{version}"
 {_APT_SHELL_PREAMBLE}
+{satellite_kube_repo_script(version)}
 if command -v apt-get >/dev/null 2>&1; then
   apt-mark unhold kubelet kubectl 2>/dev/null || true
   _apt install -y -qq kubelet="${{K8S_VER}}-*" kubectl="${{K8S_VER}}-*"
@@ -215,6 +256,7 @@ def _shell_script_control_plane_upgrade(target_version: str) -> str:
 K8S_VER="{version}"
 TARGET="{normalized}"
 {_APT_SHELL_PREAMBLE}
+{satellite_kube_repo_script(version)}
 if command -v apt-get >/dev/null 2>&1; then
   apt-mark unhold kubeadm kubelet kubectl 2>/dev/null || true
   _apt update -qq
@@ -255,6 +297,7 @@ def _shell_script_upgrade_worker_node(target_version: str) -> str:
     return f"""set -e
 K8S_VER="{version}"
 {_APT_SHELL_PREAMBLE}
+{satellite_kube_repo_script(version)}
 if command -v apt-get >/dev/null 2>&1; then
   apt-mark unhold kubeadm kubelet kubectl 2>/dev/null || true
   _apt update -qq

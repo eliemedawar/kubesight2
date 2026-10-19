@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from typing import Optional
 
+from ....upgrade_executor import satellite_kube_repo_script
 from ..profiles import DEFAULT_CRI_REPO_RPM
 from .base import (
     OsAdapter,
@@ -115,11 +116,12 @@ kubeadm version -o short
 K8S_VER="{version}"
 {already_installed_check()}
 rm -f /etc/yum.repos.d/kubesight-kubernetes.repo
+{satellite_kube_repo_script(version)}
 setenforce 0 2>/dev/null || true
 sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config 2>/dev/null || true
 dnf versionlock delete kubelet kubeadm kubectl >/dev/null 2>&1 || true
 if ! dnf install -y "kubelet-${{K8S_VER}}" "kubeadm-${{K8S_VER}}" "kubectl-${{K8S_VER}}"; then
-  echo "kubelet/kubeadm/kubectl ${{K8S_VER}} are not in the repositories this activation key enables." >&2
+  echo "kubelet/kubeadm/kubectl ${{K8S_VER}} are not in the Satellite repositories this host can use." >&2
   exit 1
 fi
 if ! dnf install -y cri-tools; then

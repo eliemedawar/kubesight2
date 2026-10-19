@@ -199,6 +199,12 @@ class TestScripts:
         assert "download.docker.com" not in containerd
         assert "dnf install -y containerd.io" in containerd
 
+    def test_satellite_mode_switches_to_the_minor_repository_first(self):
+        ctx = ScriptContext(profile=_satellite_profile(), k8s_version="1.37.1")
+        packages = self._rhel().script_install_kube_packages(ctx)
+        assert "[vV-]1[._]37([^0-9]|$)" in packages
+        assert packages.index("subscription-manager repos $KS_KUBE_ARGS") < packages.index("dnf install")
+
     def test_other_modes_keep_their_repositories(self):
         ctx = ScriptContext(profile=_satellite_profile("internet"), k8s_version=VERSION)
         assert "pkgs.k8s.io" in self._rhel().script_install_kube_packages(ctx)
@@ -210,6 +216,103 @@ class TestScripts:
 
     def test_a_bare_token_is_scrubbed_from_logs(self):
         assert TOKEN not in scrub(f"token was {TOKEN}")
+
+
+REPOS_LISTING = """+----------------------------------------------------------+
+    Available Repositories in /etc/yum.repos.d/redhat.repo
++----------------------------------------------------------+
+Repo ID:   Areeba_Kubernetes_k8s-packages-v1_33
+Repo Name: k8s-packages-v1.33
+Repo URL:  https://capsule/pulp/content/k8s-packages-v1_33
+Enabled:   0
+
+Repo ID:   Areeba_Kubernetes_helm-stable-rhel9
+Repo Name: helm-stable-rhel9
+Repo URL:  https://capsule/pulp/content/helm-stable-rhel9
+Enabled:   1
+
+Repo ID:   rhel-9-for-x86_64-baseos-rpms
+Repo Name: Red Hat Enterprise Linux 9 for x86_64 - BaseOS (RPMs)
+Repo URL:  https://capsule/pulp/content/baseos
+Enabled:   1
+
+Repo ID:   Areeba_Kubernetes_k8s-packages-v1_37
+Repo Name: k8s-packages-v1.37
+Repo URL:  https://capsule/pulp/content/k8s-packages-v1_37
+Enabled:   0
+
+Repo ID:   Areeba_Kubernetes_k8s-packages-v1_34
+Repo Name: k8s-packages-v1.34
+Repo URL:  https://capsule/pulp/content/k8s-packages-v1_34
+Enabled:   1
+
+Repo ID:   Areeba_Kubernetes_docker-ce-stable-rhel9
+Repo Name: docker-ce-stable-rhel9
+Repo URL:  https://capsule/pulp/content/docker-ce-stable-rhel9
+Enabled:   1
+"""
+
+
+def _run_repo_switch(tmp_path, version, listing=REPOS_LISTING, registered=True):
+    """Run the repository switch against a fake subscription-manager; return
+    (exit code, output, the arguments ``repos`` was changed with)."""
+    import shutil
+    import subprocess
+
+    from api.upgrade_executor import satellite_kube_repo_script
+
+    if shutil.which("sh") is None:
+        pytest.skip("needs a POSIX shell")
+    (tmp_path / "listing.txt").write_text(listing)
+    fake = tmp_path / "subscription-manager"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'case "$1" in\n'
+        f'  identity) exit {0 if registered else 1} ;;\n'
+        f'  repos) if [ "$2" = "--list" ]; then cat "{(tmp_path / "listing.txt").as_posix()}"; '
+        f'else echo "$@" >> "{(tmp_path / "changed.txt").as_posix()}"; fi ;;\n'
+        "esac\n"
+    )
+    fake.chmod(0o755)
+    import os
+
+    env = {**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}"}
+    script = "set -e\n" + satellite_kube_repo_script(version)
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=env)
+    changed = tmp_path / "changed.txt"
+    return result.returncode, result.stdout + result.stderr, changed.read_text().split() if changed.exists() else []
+
+
+class TestSatelliteMinorRepository:
+    """The activation key enables one Kubernetes minor; the build or upgrade
+    switches the host to the minor it installs."""
+
+    def test_the_requested_minor_is_enabled_and_the_others_disabled(self, tmp_path):
+        code, output, changed = _run_repo_switch(tmp_path, "1.37.1")
+        assert code == 0, output
+        assert "--enable=Areeba_Kubernetes_k8s-packages-v1_37" in changed
+        assert {"--disable=Areeba_Kubernetes_k8s-packages-v1_33",
+                "--disable=Areeba_Kubernetes_k8s-packages-v1_34"} <= set(changed)
+        # Kubernetes-branded repositories without a version are left alone.
+        assert not [arg for arg in changed if "helm" in arg or "docker" in arg or "rhel-9" in arg]
+
+    def test_a_minor_satellite_lacks_changes_nothing(self, tmp_path):
+        code, output, changed = _run_repo_switch(tmp_path, "1.36.2")
+        assert code == 0, output
+        assert changed == []
+        assert "no Kubernetes 1.36 repository" in output
+
+    def test_an_unregistered_host_is_left_alone(self, tmp_path):
+        code, output, changed = _run_repo_switch(tmp_path, "1.37.1", registered=False)
+        assert code == 0 and changed == []
+
+    def test_upgrades_switch_before_installing(self):
+        from api import upgrade_executor as ex
+
+        for script in (ex._shell_script_control_plane_upgrade("v1.35.2"),
+                       ex._shell_script_upgrade_worker_node("v1.35.2")):
+            assert "[vV-]1[._]35([^0-9]|$)" in script
+            assert script.index("subscription-manager repos $KS_KUBE_ARGS") < script.index("dnf install")
 
 
 def _build():
