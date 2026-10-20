@@ -432,99 +432,59 @@ def _needs_nfs_client(build: ClusterBuild) -> bool:
 _capsule_versions = k8s_versions.capsule_versions
 
 
-def _settle_satellite_version(build: ClusterBuild, resolved) -> Tuple[Optional[str], Dict[int, str]]:
-    """Satellite mode: install the Kubernetes the capsule actually carries.
-
-    Registers one control plane (the per-node registration later skips it)
-    and lists kubeadm/kubelet/kubectl. The build keeps its version when the
-    capsule has it; otherwise it takes the newest patch of the same minor the
-    capsule has (1.33 asked, 1.33.x installed), and only when the capsule has
-    none of that minor the newest version it has that the Cluster Builder
-    supports. The CNI and add-on versions follow the minor.
-
-    Streams into that node's node-prep log as it goes — registration and the
-    first listing can take minutes — and returns (a line for the package step
-    label or None, {node id: what was logged}) so node prep carries the log on.
-    Anything that goes wrong here is left to base prep, which says it per node.
-    """
+def _satellite_settle_node(build: ClusterBuild, resolved) -> Optional[ClusterBuildNode]:
+    """Satellite mode: the machine that finds out which Kubernetes the capsule
+    carries — the first control plane (or worker) still to prepare."""
     if resolved.repo_mode != "satellite":
-        return None, {}
+        return None
     cps, workers, _ = _nodes_by_role(build)
     pending = [
         node for node in cps + workers
         if _get_step(build, "base_prep", node).status != "completed"
     ]
     if not pending:
-        return None, {}
-    node = pending[0]
-    adapter = os_adapters.by_id(node.os_family or "")
+        return None
+    adapter = os_adapters.by_id(pending[0].os_family or "")
     if adapter is None or not adapter.supports_satellite:
-        return None, {}
-    ctx = _script_ctx(build, resolved, node)
+        return None
+    return pending[0]
+
+
+def _capsule_listing_script(build: ClusterBuild) -> str:
     from ...upgrade_executor import satellite_kube_repo_script
 
     # The requested minor's repository first: it is often in the content view
     # but not enabled by the activation key.
-    listing = f"""rm -f /etc/yum.repos.d/kubesight-kubernetes.repo
+    return f"""rm -f /etc/yum.repos.d/kubesight-kubernetes.repo
 {satellite_kube_repo_script(build.k8s_version)}
 dnf -q --showduplicates --disableexcludes=all list kubeadm kubelet kubectl 2>/dev/null || true
 """
-    # The other machines wait for this one; say so in their logs rather than
-    # leaving an empty panel that reads as stuck.
-    for other in pending[1:] + [n for n in build.nodes if n.role == "loadbalancer"]:
-        other_step = _get_step(build, "base_prep", other)
-        if other_step.status == "completed":
-            continue
-        waiting = _StreamTail(other_step.id)
-        waiting.write(
-            f"Waiting for {node.hostname or node.address}: it registers with Satellite and checks "
-            "which Kubernetes versions the capsule carries, so every machine installs the same "
-            "one. This machine's preparation starts right after.\n"
-        )
-        waiting.flush()
-    step = _get_step(build, "base_prep", node)
-    node.status = "preparing"
-    _step_start(step)
-    stream = _StreamTail(step.id)
-    output = ""
-    try:
-        target = _target_for(build, node)
-        # Same order as node prep: the profile's CAs (a TLS-inspecting proxy's)
-        # are in place before anything talks to the capsule.
-        ca_script = adapter.script_configure_ca(ctx)
-        if ca_script:
-            stream.header("Trusted CA certificates")
-            _run_traced(target, ca_script, timeout_s=300, stream=stream,
-                        display_command="Trusted CA certificates (generated script hidden)",
-                        input_summary="configuration content hidden")
-        register = adapter.script_register_satellite(ctx)
-        if register:
-            stream.header("Register with Red Hat Satellite")
-            _run_traced(target, register, timeout_s=900, stream=stream,
-                        display_command="Register with Red Hat Satellite (generated script hidden)",
-                        input_summary="configuration content hidden")
-        stream.header("Kubernetes versions on the Satellite capsule")
-        output = _run_traced(target, listing, timeout_s=300, stream=stream).output
-    except Exception as exc:  # noqa: BLE001 — base prep reports it per node
-        stream.write(f"\n!! {scrub(str(exc))}\nNode preparation carries on and reports it.\n")
-        stream.flush()
-        return None, {node.id: stream.text()}
+
+
+def _apply_capsule_version(build: ClusterBuild, output: str) -> Tuple[Optional[str], str]:
+    """Satellite mode: install the Kubernetes the capsule actually carries.
+
+    ``output`` is the capsule's kubeadm/kubelet/kubectl listing. The build
+    keeps its version when the capsule has it; otherwise it takes the newest
+    patch of the same minor the capsule has (1.33 asked, 1.33.x installed), and
+    only when the capsule has none of that minor the newest version it has that
+    the Cluster Builder supports. The CNI and add-on versions follow the minor.
+
+    Returns (a line for the package step label or None, what to tell the log).
+    """
     on_capsule = _capsule_versions(output)
     available = [v for v in on_capsule if k8s_versions.is_supported(v)]
     wanted = k8s_versions.normalize_version(build.k8s_version)
     if not available or wanted in available:
         if wanted in available:
-            stream.write(f"\nInstalling Kubernetes {wanted}: the capsule carries it.\n")
-        elif on_capsule:
-            stream.write(
+            return None, f"\nInstalling Kubernetes {wanted}: the capsule carries it.\n"
+        if on_capsule:
+            return None, (
                 f"\nThe capsule carries Kubernetes {', '.join(on_capsule[:6])}, none of which "
                 f"the Cluster Builder supports (it builds {', '.join(k8s_versions.enabled_minors())}). "
                 "Sync a supported minor into Satellite.\n"
             )
-        else:
-            stream.write("\nThe capsule lists no kubeadm/kubelet/kubectl for this activation key.\n")
-        stream.flush()
-        return None, {node.id: stream.text()}
+        return None, "\nThe capsule lists no kubeadm/kubelet/kubectl for this activation key.\n"
     # The minor asked for decides: its newest patch on the capsule. Only a
     # capsule without that minor at all moves the build to another one.
     same_minor = k8s_versions.newest_patch_of(available, wanted)
@@ -556,17 +516,21 @@ dnf -q --showduplicates --disableexcludes=all list kubeadm kubelet kubectl 2>/de
             f"Kubernetes {chosen}: the newest version the Satellite capsule carries "
             f"({wanted} is not there, nor any other {k8s_versions.minor_of(wanted)} patch)"
         )
-    stream.write(f"\n{note}.\n")
-    stream.flush()
-    return note, {node.id: stream.text()}
+    return note, f"\n{note}.\n"
 
 
 def _phase_base_prep(build: ClusterBuild, resolved) -> None:
     """Parallel node preparation. Scripts per role:
     CP/worker → CA, kernel prep, containerd, kube packages;
-    LB → CA + haproxy/keepalived packages only."""
-    version_note, settled_logs = _settle_satellite_version(build, resolved)
-    jobs = []  # (node, step, [scripts])
+    LB → CA + haproxy/keepalived packages only.
+
+    Every machine starts at once. In Satellite mode the first control plane
+    also lists the Kubernetes versions the capsule carries right after it
+    registers; the others wait for that answer only where it matters — before
+    containerd (its pause image follows the version) and the Kubernetes
+    packages — so every machine installs the same version."""
+    settle_node = _satellite_settle_node(build, resolved)
+    jobs = []  # (node, step, before scripts, target, node id, step id, needs the version)
     for node in build.nodes:
         step = _get_step(build, "base_prep", node)
         if step.status == "completed":
@@ -617,12 +581,36 @@ def _phase_base_prep(build: ClusterBuild, resolved) -> None:
                     relocate_data_script(data_path),
                 ))
             scripts.append(("Kernel modules + sysctl + swap off", adapter.script_kernel_prep(ctx)))
-            scripts.append(("containerd install + config", adapter.script_install_containerd(ctx)))
-            scripts.append((
-                f"Kubernetes packages (kubeadm, kubelet, kubectl) — {version_note}"
-                if version_note else "Kubernetes packages (kubeadm, kubelet, kubectl)",
-                adapter.script_install_kube_packages(ctx),
-            ))
+        jobs.append((
+            node, step, scripts, _target_for(build, node),
+            node.id, step.id, node.role != "loadbalancer",
+        ))
+
+    if not jobs:
+        return
+    for node, step, *_ in jobs:
+        node.status = "preparing"
+        _step_start(step)  # commits, persisting the node status too
+
+    # What follows the version: containerd (its pause image) and the packages.
+    # Written once the version is settled; None for a machine means it was not.
+    after: Dict[int, List[Tuple[str, str]]] = {}
+    nodes_by_id = {node.id: node for node, *_ in jobs}
+
+    def _fill_after(version_note: Optional[str]) -> None:
+        for node, _, _, _, node_id, _, needs_version in jobs:
+            if not needs_version:
+                continue
+            adapter = _adapter_for(node)
+            ctx = _script_ctx(build, resolved, node)
+            scripts = [
+                ("containerd install + config", adapter.script_install_containerd(ctx)),
+                (
+                    f"Kubernetes packages (kubeadm, kubelet, kubectl) — {version_note}"
+                    if version_note else "Kubernetes packages (kubeadm, kubelet, kubectl)",
+                    adapter.script_install_kube_packages(ctx),
+                ),
+            ]
             # Only when this build will actually mount one: the kubelet needs
             # /sbin/mount.nfs, and without it an NFS volume fails at pod start
             # with an opaque "wrong fs type" long after the build succeeded.
@@ -631,42 +619,71 @@ def _phase_base_prep(build: ClusterBuild, resolved) -> None:
                     "NFS client (for copied volume claims)",
                     adapter.script_install_nfs_client(ctx),
                 ))
-        jobs.append((
-            node, step, scripts, _target_for(build, node),
-            node.id, step.id,
-        ))
+            after[node_id] = scripts
 
-    if not jobs:
-        return
-    for node, step, _, _, _, _ in jobs:
-        node.status = "preparing"
-        _step_start(step)  # commits, persisting the node status too
+    settle_id = settle_node.id if settle_node is not None and settle_node.id in nodes_by_id else None
+    settle_name = (settle_node.hostname or settle_node.address) if settle_id is not None else ""
+    listing_script = _capsule_listing_script(build) if settle_id is not None else ""
+    version_before = build.k8s_version
+    decided = threading.Event()
+    listing_done = threading.Event()
+    listing: Dict[str, str] = {"output": "", "message": ""}
+    if settle_id is None:
+        _fill_after(None)
+        decided.set()
 
     results: Dict[int, Tuple[bool, str]] = {}
     app = current_app._get_current_object()
 
-    def _prep(node_id: int, step_id: int, target: SshTarget, scripts) -> None:
+    def _run_all(target: SshTarget, stream: "_StreamTail", scripts) -> None:
+        for label, script in scripts:
+            stream.header(label)
+            _run_traced(
+                target,
+                script,
+                timeout_s=900,
+                stream=stream,
+                display_command=f"{label} (generated script hidden)",
+                input_summary="configuration content hidden",
+            )
+
+    def _prep(node_id: int, step_id: int, target: SshTarget, scripts, needs_version: bool) -> None:
         # App context per thread: the real transport's host-key verification
         # reads/writes the ssh_host_keys table, and the stream tail persists
         # partial output so the UI shows live progress.
         try:
             with app.app_context():
                 stream = _StreamTail(step_id)
-                if settled_logs.get(node_id):
-                    # The Satellite registration + version listing already
-                    # logged here; keep it at the top of this node's log.
-                    stream.write(settled_logs[node_id])
                 try:
-                    for label, script in scripts:
-                        stream.header(label)
-                        _run_traced(
-                            target,
-                            script,
-                            timeout_s=900,
-                            stream=stream,
-                            display_command=f"{label} (generated script hidden)",
-                            input_summary="configuration content hidden",
-                        )
+                    _run_all(target, stream, scripts)
+                    if node_id == settle_id:
+                        stream.header("Kubernetes versions on the Satellite capsule")
+                        try:
+                            listing["output"] = _run_traced(
+                                target, listing_script, timeout_s=300, stream=stream
+                            ).output
+                        except (SshCommandError, SshConnectionError) as exc:
+                            stream.write(
+                                f"\n!! {scrub(str(exc))}\nKeeping Kubernetes {version_before}.\n"
+                            )
+                        finally:
+                            listing_done.set()
+                    if needs_version:
+                        if not decided.is_set():
+                            stream.write(
+                                f"\nWaiting for {settle_name}: it checks which Kubernetes versions "
+                                "the Satellite capsule carries, so every machine installs the same one.\n"
+                            )
+                            stream.flush()
+                        decided.wait()
+                        if node_id == settle_id and listing["message"]:
+                            stream.write(listing["message"])
+                        if after.get(node_id) is None:
+                            raise SshCommandError(
+                                "The Kubernetes version could not be settled, so the packages "
+                                "were not installed.", -1, ""
+                            )
+                        _run_all(target, stream, after[node_id])
                     results[node_id] = (True, stream.text())
                 except SshCommandError as exc:
                     # Chunks already streamed; make sure the buffer holds the
@@ -679,13 +696,28 @@ def _phase_base_prep(build: ClusterBuild, resolved) -> None:
                     stream.flush()
         except Exception as exc:  # noqa: BLE001
             results[node_id] = (False, f"{exc}")
+        finally:
+            if node_id == settle_id:
+                listing_done.set()  # a machine that failed early must not hold the others
 
+    # The machine that settles the version goes first: with more machines than
+    # threads, the waiting ones could otherwise fill every thread before it.
+    ordered = sorted(jobs, key=lambda job: job[4] != settle_id)
     with ThreadPoolExecutor(max_workers=_NODE_PARALLELISM) as pool:
-        for _, _, scripts, target, node_id, step_id in jobs:
-            pool.submit(_prep, node_id, step_id, target, scripts)
+        for _, _, scripts, target, node_id, step_id, needs_version in ordered:
+            pool.submit(_prep, node_id, step_id, target, scripts, needs_version)
+        if settle_id is not None:
+            try:
+                listing_done.wait()
+                note, listing["message"] = _apply_capsule_version(build, listing["output"])
+                _fill_after(note)
+            except Exception:  # noqa: BLE001 — the machines report it
+                logger.exception("build %s: settling the Kubernetes version failed", build.id)
+            finally:
+                decided.set()
 
     failures = []
-    for node, step, _, _, node_id, _ in jobs:
+    for node, step, _, _, node_id, _, _ in jobs:
         ok, log = results.get(node_id, (False, "no result"))
         if ok:
             node.status = "ready"

@@ -511,13 +511,24 @@ class TestCapsuleVersion:
         fake.add(lambda host, script: "showduplicates" in script, listing)
         set_transport_factory(lambda: fake)
         try:
-            note, logs = executor._settle_satellite_version(
-                build, resolve(db.session.get(BuildProfile, profile_id))
-            )
+            executor._phase_base_prep(build, resolve(db.session.get(BuildProfile, profile_id)))
         finally:
             set_transport_factory(None)
+        from api.models import ClusterBuildStep
+
+        step = ClusterBuildStep.query.filter_by(
+            build_id=build.id, phase="base_prep", node_id=build.nodes[0].id
+        ).one()
         # What ran is in the node's own log while it runs, not an empty panel.
-        assert "Kubernetes versions on the Satellite capsule" in logs[build.nodes[0].id]
+        assert "Kubernetes versions on the Satellite capsule" in step.log_tail
+        label = next(
+            line for line in step.log_tail.splitlines()
+            if line.startswith(">>> Kubernetes packages (kubeadm, kubelet, kubectl)")
+        )
+        note = label.split(" — ", 1)[1] if " — " in label else None
+        # The packages install the version the capsule settled on.
+        packages = [script for _, script in fake.calls if 'K8S_VER="' in script and "dnf install" in script]
+        assert packages and all(f'K8S_VER="{build.k8s_version}"' in script for script in packages)
         return build, note
 
     def test_the_newest_capsule_version_replaces_one_it_lacks(
@@ -607,8 +618,15 @@ class TestCapsuleVersionMovesAddOns(TestCapsuleVersion):
         assert build.addons_json[0]["version"] == on_older
 
 
-class TestWaitingMachinesSaySo:
-    def test_the_other_machines_log_that_they_wait(self, client, admin_token, app, ssh_profile):  # noqa: F811
+class TestMachinesPrepareTogether:
+    def test_the_second_machine_starts_while_the_first_checks_the_capsule(
+        self, client, admin_token, app, ssh_profile  # noqa: F811
+    ):
+        """Both machines start at once; the worker waits for the capsule's
+        answer only before containerd and the Kubernetes packages."""
+        import threading
+        import time as _time
+
         from api.models import ClusterBuildStep
 
         profile_id = _create(client, admin_token).get_json()["data"]["id"]
@@ -623,14 +641,36 @@ class TestWaitingMachinesSaySo:
         for node in build.nodes:
             node.os_family = "rhel"
         db.session.commit()
-        set_transport_factory(lambda: FakeSshTransport())
+        worker_started = threading.Event()
+        fake = FakeSshTransport()
+        real_run = fake.run
+
+        def run(target, script, timeout_s=None, on_output=None, escalate=True):
+            if target.host == "10.0.0.21" and "swapoff" in script:
+                worker_started.set()
+            if "showduplicates" in script:
+                # Before: the worker had not begun while cp-1 checked the capsule.
+                assert worker_started.wait(10), "the worker waited for cp-1 to finish"
+                _time.sleep(0.5)  # the worker reaches the version-dependent steps
+            return real_run(target, script, timeout_s=timeout_s, on_output=on_output, escalate=escalate)
+
+        fake.run = run
+        set_transport_factory(lambda: fake)
         try:
-            executor._settle_satellite_version(build, resolve(db.session.get(BuildProfile, profile_id)))
+            executor._phase_base_prep(build, resolve(db.session.get(BuildProfile, profile_id)))
         finally:
             set_transport_factory(None)
         worker = next(n for n in build.nodes if n.role == "worker")
         step = ClusterBuildStep.query.filter_by(build_id=build.id, phase="base_prep", node_id=worker.id).one()
-        assert step.log_tail.startswith("Waiting for cp-1")
+        assert step.status == "completed"
+        assert "Waiting for cp-1" in step.log_tail
+        # containerd and the packages came only after cp-1's answer.
+        listing = next(i for i, (_, sc) in enumerate(fake.calls) if "showduplicates" in sc)
+        worker_containerd = next(
+            i for i, (host, sc) in enumerate(fake.calls) if host == "10.0.0.21" and "containerd" in sc
+            and "config default" in sc
+        )
+        assert worker_containerd > listing
 
 
 class TestEmailWrappedPaste:
