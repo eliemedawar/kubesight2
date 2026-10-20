@@ -72,6 +72,13 @@ AUTO_RESUME_ATTEMPTS = int(os.getenv("UPGRADE_AUTO_RESUME_ATTEMPTS", "5"))
 # downloads what it needs during its own upgrade, as it would without it.
 PRESTAGE_TIMEOUT_SECONDS = int(os.getenv("UPGRADE_PRESTAGE_TIMEOUT_SECONDS", "600"))
 PRESTAGE_PARALLELISM = 10
+# The on-node upgrade Job ends with `systemctl restart kubelet` on the node it
+# runs on, and the new kubelet can end that Job's own pod: the node is upgraded
+# but the Job reads as failed, which used to stop the run after every node. So
+# the script leaves a marker once every step before the restart has passed, and
+# a failed Job whose node holds the marker counts as done.
+UPGRADE_MARK_DIR = "/var/lib/kubesight/upgrade"
+_MARK_FOUND = "KS_UPGRADE_MARK_FOUND"
 
 DEFAULT_OPTIONS: Dict[str, Any] = {
     "waveSize": 1,
@@ -325,7 +332,19 @@ systemctl restart kubelet
 """
 
 
-def _shell_script_control_plane_upgrade(target_version: str) -> str:
+def _done_marker(job_id: str, node: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "-", f"{job_id}-{node}")
+
+
+def _mark_done_script(done_marker: Optional[str]) -> str:
+    """Shell that leaves ``done_marker`` on the node (before the kubelet restart)."""
+    if not done_marker:
+        return ""
+    path = shlex.quote(f"{UPGRADE_MARK_DIR}/{done_marker}")
+    return f"mkdir -p {shlex.quote(UPGRADE_MARK_DIR)}\necho \"$K8S_VER\" > {path}\n"
+
+
+def _shell_script_control_plane_upgrade(target_version: str, done_marker: Optional[str] = None) -> str:
     """Single on-node script: packages, kubeadm apply, kubelet — one apt session."""
     normalized = normalize_version(target_version)
     version = _package_version(target_version)
@@ -361,12 +380,12 @@ elif command -v yum >/dev/null 2>&1; then
   yum install -y "kubelet-${{K8S_VER}}" "kubectl-${{K8S_VER}}" || \\
     yum install -y "kubelet-${{K8S_VER}}-*" "kubectl-${{K8S_VER}}-*"
 fi
-systemctl daemon-reload
+{_mark_done_script(done_marker)}systemctl daemon-reload
 systemctl restart kubelet
 """
 
 
-def _shell_script_upgrade_worker_node(target_version: str) -> str:
+def _shell_script_upgrade_worker_node(target_version: str, done_marker: Optional[str] = None) -> str:
     """Packages + ``kubeadm upgrade node`` + kubelet: every node but the first
     control plane (``kubeadm upgrade node`` also upgrades a secondary control
     plane's static pods)."""
@@ -392,7 +411,7 @@ else
   exit 1
 fi
 kubeadm upgrade node
-systemctl daemon-reload
+{_mark_done_script(done_marker)}systemctl daemon-reload
 systemctl restart kubelet
 """
 
@@ -1094,6 +1113,19 @@ def _prestage(access: ClusterAccess, run_kubectl: RunKubectlFn, tracker: "RunTra
         list(pool.map(lambda node: _one(*node), nodes))
 
 
+def _upgraded_despite_job(access: ClusterAccess, run_kubectl: RunKubectlFn, node: str, done_marker: str) -> bool:
+    """Whether ``node`` holds the marker its upgrade script leaves once every
+    step passed — read (and removed) by a fresh Job once the kubelet is back."""
+    path = shlex.quote(f"{UPGRADE_MARK_DIR}/{done_marker}")
+    script = f"if [ -f {path} ]; then rm -f {path}; echo {_MARK_FOUND}; fi"
+    try:
+        output = _run_on_node(access, run_kubectl, node, script, timeout_seconds=NODE_READY_TIMEOUT_SECONDS)
+    except Exception:  # noqa: BLE001 — no answer: the Job's own failure stands
+        logger.debug("Could not read the upgrade marker on %s", node, exc_info=True)
+        return False
+    return _MARK_FOUND in output
+
+
 def _wait_node_ready(access: ClusterAccess, run_kubectl: RunKubectlFn, node: str, target: str) -> str:
     deadline = time.time() + NODE_READY_TIMEOUT_SECONDS
     last = "unknown"
@@ -1360,10 +1392,15 @@ def _kubeadm_attempt(
         try:
             _run_on_node(access, run_kubectl, name, script)
         except Exception as exc:
-            tracker.node(name, phase="upgrade", status="failed", state="failed",
-                         message="Upgrade failed on the node; left cordoned for inspection.")
-            tracker.log(name, f"upgrade failed: {str(exc)[:300]}")
-            raise
+            # An API outage is the auto-resume's to handle; anything else may
+            # only be the kubelet restart ending the Job's own pod.
+            if _resumable(exc) or not _upgraded_despite_job(access, run_kubectl, name, _done_marker(job_id, name)):
+                tracker.node(name, phase="upgrade", status="failed", state="failed",
+                             message="Upgrade failed on the node; left cordoned for inspection.")
+                tracker.log(name, f"upgrade failed: {str(exc)[:300]}")
+                raise
+            tracker.log(name, f"The upgrade job reported a failure ({str(exc)[:200]}), but the node finished "
+                              "every step before the kubelet restart: carrying on.")
         tracker.node(name, phase="upgrade", status="done")
         tracker.log(name, "kubeadm and kubelet upgraded")
         tracker.node(name, phase="uncordon", status="active", message="Uncordoning")
@@ -1413,12 +1450,14 @@ def _kubeadm_attempt(
                 continue
             tracker.checkpoint(cp)
             if index == 0 and not cp_done:
-                upgrade_node(cp, _shell_script_control_plane_upgrade(normalized), drain=schedulable_elsewhere)
+                upgrade_node(cp, _shell_script_control_plane_upgrade(normalized, _done_marker(job_id, cp)),
+                             drain=schedulable_elsewhere)
                 server_version = _verify_server_version(access, run_kubectl, normalized, previous_version=previous_version)
                 control_plane_upgraded = True
                 tracker.log(cp, f"API server reports {server_version}")
             else:
-                upgrade_node(cp, _shell_script_upgrade_worker_node(normalized), drain=schedulable_elsewhere)
+                upgrade_node(cp, _shell_script_upgrade_worker_node(normalized, _done_marker(job_id, cp)),
+                             drain=schedulable_elsewhere)
         tracker.stage("control-plane", "done", f"{len(control_planes)} control plane(s) on {normalized}.")
         _mark_step(steps, 2, "completed", "Control planes upgraded one at a time.")
         _mark_step(steps, 3, "completed", f"Control plane on {normalized}.")
@@ -1438,13 +1477,14 @@ def _kubeadm_attempt(
                                    force_pause=options["pauseBetweenWaves"] and number > 1)
                 tracker.log(None, f"Wave {number} of {len(waves)}: {', '.join(wave)}")
                 if len(wave) == 1:
-                    upgrade_node(wave[0], _shell_script_upgrade_worker_node(normalized), drain=True)
+                    upgrade_node(wave[0], _shell_script_upgrade_worker_node(normalized, _done_marker(job_id, wave[0])),
+                                 drain=True)
                     continue
                 errors: List[BaseException] = []
 
                 def _one(name: str) -> None:
                     try:
-                        upgrade_node(name, _shell_script_upgrade_worker_node(normalized), drain=True)
+                        upgrade_node(name, _shell_script_upgrade_worker_node(normalized, _done_marker(job_id, name)), drain=True)
                     except BaseException as exc:  # noqa: BLE001 — collected and re-raised below
                         errors.append(exc)
 

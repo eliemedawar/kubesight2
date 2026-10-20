@@ -153,6 +153,10 @@ class FakeCluster:
         # Calls that fail as if the API server were down, set when `apply` runs.
         self.outage = 0
         self.outage_after_apply = 0
+        # Nodes whose upgrade Job's pod the restarted kubelet ends: the node is
+        # upgraded, the Job reads as failed.
+        self.kubelet_kills_job = set()
+        self.marks = set()
         self.lock = threading.Lock()
 
     def kubectl(self, access, args, timeout=None):
@@ -196,6 +200,14 @@ class FakeCluster:
         raise RuntimeError(f"unexpected kubectl {args}")
 
     def run_on_node(self, access, run_kubectl, node, script, **kwargs):
+        from api.upgrade_executor import UPGRADE_MARK_DIR
+
+        if script.startswith("if [ -f ") and UPGRADE_MARK_DIR in script:
+            with self.lock:
+                self.events.append(("read-mark", node))
+                found = node in self.marks
+                self.marks.discard(node)
+            return "KS_UPGRADE_MARK_FOUND" if found else ""
         if "--showduplicates" in script:
             with self.lock:
                 self.events.append(("list", node))
@@ -210,6 +222,12 @@ class FakeCluster:
             if "kubeadm upgrade apply" in script:
                 self.server = f"v{target}"
                 self.outage = self.outage_after_apply
+            if UPGRADE_MARK_DIR in script:
+                self.marks.add(node)
+            if node in self.kubelet_kills_job:
+                from api.upgrade_executor import NodeCommandFailed
+
+                raise NodeCommandFailed(f"Upgrade job kubesight-upg-{node} failed.")
         return "ok"
 
 
@@ -506,7 +524,7 @@ def test_a_node_whose_upgrade_failed_is_not_retried(app, fast_executor, monkeypa
     upgrades = []
 
     def run_on_node(access, run_kubectl, node, script, **kwargs):
-        if "--showduplicates" in script or "--download-only" in script:
+        if "--showduplicates" in script or "--download-only" in script or script.startswith("if [ -f "):
             return cluster.run_on_node(access, run_kubectl, node, script)
         upgrades.append(node)
         raise ex.NodeCommandFailed("E: dial tcp pkgs.k8s.io: connection refused")
@@ -517,6 +535,40 @@ def test_a_node_whose_upgrade_failed_is_not_retried(app, fast_executor, monkeypa
         ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.35.7",
                                     cluster.kubectl, job_id, options={"etcdSnapshot": False})
     assert upgrades == ["cp-1"]
+    # It failed before its marker was written, so the marker check found nothing.
+    assert ("read-mark", "cp-1") in cluster.events
+
+
+def test_a_job_the_kubelet_restart_ended_does_not_stop_the_run(app, fast_executor, monkeypatch):
+    """Each node's upgrade Job restarts the kubelet on its own node, and the new
+    kubelet can end that pod: the node is upgraded but the Job reads as failed.
+    The run used to stop there after every node ("Finish" per VM)."""
+    from api.upgrade_jobs import get_job
+
+    ex = fast_executor
+    cluster = FakeCluster(cps=2, workers=2, version="v1.33.9")
+    cluster.kubelet_kills_job = {"cp-1", "cp-2", "w-1", "w-2"}
+    monkeypatch.setattr(ex, "_run_on_node", cluster.run_on_node)
+    job_id = _start(ex, cluster)
+    ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.34.1",
+                                cluster.kubectl, job_id, options={"etcdSnapshot": False})
+    assert [e[1] for e in cluster.events if e[0] == "upgrade"] == ["cp-1", "cp-2", "w-1", "w-2"]
+    assert [e[1] for e in cluster.events if e[0] == "read-mark"] == ["cp-1", "cp-2", "w-1", "w-2"]
+    assert not cluster.marks  # each marker is removed once read
+    job = get_job(job_id)
+    assert job["status"] == "completed" and job["verdict"] == "clean"
+    assert all(n["status"] == "done" and n["versionAfter"] == "v1.34.1" for n in job["nodes"])
+    assert any("finished every step before the kubelet restart" in line["message"] for line in job["log"])
+
+
+def test_every_node_script_leaves_its_marker_before_the_kubelet_restart():
+    from api import upgrade_executor as ex
+
+    for script in (ex._shell_script_control_plane_upgrade("v1.34.1", "job-1-cp-1"),
+                   ex._shell_script_upgrade_worker_node("v1.34.1", "job-1-w-1")):
+        mark = script.index(ex.UPGRADE_MARK_DIR + "/job-1-")
+        assert script.index("kubeadm upgrade") < mark < script.index("systemctl restart kubelet")
+    assert ex.UPGRADE_MARK_DIR not in ex._shell_script_upgrade_worker_node("v1.34.1")
 
 
 def test_finishing_uncordons_the_control_plane_an_earlier_run_left_cordoned(app, fast_executor, monkeypatch):
