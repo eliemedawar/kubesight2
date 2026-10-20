@@ -60,6 +60,8 @@ def serialize(row: VSphereConnection) -> Dict[str, Any]:
         "provisioningLastTestStatus": row.provisioning_last_test_status,
         "provisioningLastTestMessage": row.provisioning_last_test_message,
         "provisioningPrivileges": row.provisioning_privileges_json or [],
+        # {vSphere cluster id: [ESXi host name or id]}; empty: vCenter picks.
+        "allowedHosts": row.allowed_hosts_json or {},
         "createdAt": _iso(row.created_at),
         "updatedAt": _iso(row.updated_at),
     }
@@ -99,6 +101,10 @@ def _apply_payload(row: VSphereConnection, payload: Dict[str, Any]) -> None:
         row.folder_filter = str(payload.get("folderFilter") or "").strip() or None
     if "isActive" in payload:
         row.is_active = bool(payload.get("isActive"))
+    if "allowedHosts" in payload:
+        from .cluster_build.provisioning.host_placement import normalize_allowed
+
+        row.allowed_hosts_json = normalize_allowed(payload.get("allowedHosts"))
     password = payload.get("password")
     if password:
         row.password_cipher = encrypt_secret(str(password))

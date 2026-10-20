@@ -13,7 +13,7 @@
 import { useState } from "react";
 import { Field, StatusPill } from "./common.jsx";
 import HostKeysPanel from "./HostKeysPanel.jsx";
-import { NetworkRanges, OpenTofuStatus, ProvisioningAccount } from "./ProvisioningSources.jsx";
+import { AllowedHosts, NetworkRanges, OpenTofuStatus, ProvisioningAccount } from "./ProvisioningSources.jsx";
 import VmRequestProfiles from "./VmRequestProfiles.jsx";
 import AppProfiles from "./AppProfiles.jsx";
 import {
@@ -676,6 +676,7 @@ export default function SourcesTab({
             )}
           />
           <ProvisioningAccount row={row} notify={notify} reloadInfra={reloadInfra} />
+          <AllowedHosts row={row} notify={notify} reloadInfra={reloadInfra} />
           </div>
         )) : <p className="muted">Nothing configured yet — machines can still be entered by hand.</p>}
       </Group>

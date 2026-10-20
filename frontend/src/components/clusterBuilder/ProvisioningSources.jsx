@@ -26,6 +26,140 @@ const NEED_TEXT = {
   other: "optional: vCenter decides when the plan is applied",
 };
 
+const OFFLOADED = "vStorageSupported";
+
+/** Datastores this host clones to by full copy (no VAAI offload). */
+function slowDatastores(host, datastores) {
+  return (datastores || [])
+    .filter((ds) => (ds.hostMounts || []).some((m) => m.hostId === host.id && m.vStorageSupport && m.vStorageSupport !== OFFLOADED))
+    .map((ds) => ds.name);
+}
+
+/** Per vSphere cluster, the ESXi hosts new VMs may be cloned onto. None: vCenter picks. */
+export function AllowedHosts({ row, notify, reloadInfra }) {
+  const allowed = row.allowedHosts || {};
+  const [editing, setEditing] = useState(false);
+  const [placement, setPlacement] = useState(null);
+  const [draft, setDraft] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const total = Object.values(allowed).reduce((count, hosts) => count + hosts.length, 0);
+
+  const load = async (refresh = false) => {
+    setLoadError("");
+    try {
+      setPlacement(await getVSpherePlacement(row.id, refresh));
+    } catch (error) {
+      setLoadError(error.message || String(error));
+    }
+  };
+
+  const open = async () => {
+    if (editing) {
+      setEditing(false);
+      return;
+    }
+    setDraft(Object.fromEntries(Object.entries(allowed).map(([id, hosts]) => [id, [...hosts]])));
+    setEditing(true);
+    if (!placement) await load();
+  };
+
+  const toggle = (clusterId, host) => {
+    setDraft((current) => {
+      const hosts = current[clusterId] || [];
+      const on = hosts.includes(host.name) || hosts.includes(host.id);
+      const next = on ? hosts.filter((h) => h !== host.name && h !== host.id) : [...hosts, host.name];
+      return { ...current, [clusterId]: next };
+    });
+  };
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const cleaned = Object.fromEntries(Object.entries(draft).filter(([, hosts]) => hosts.length));
+      await updateVSphereConnection(row.id, {
+        name: row.name, baseUrl: row.baseUrl, username: row.username, allowedHosts: cleaned,
+      });
+      setEditing(false);
+      await reloadInfra();
+      notify(Object.keys(cleaned).length
+        ? "Allowed ESXi hosts saved. New VMs are spread over them from the next plan."
+        : "Allowed ESXi hosts cleared. vCenter picks the host again.");
+    } catch (error) {
+      notify(error.message || String(error), true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clusters = (placement?.datacenters || []).flatMap((dc) =>
+    (dc.clusters || []).map((cluster) => ({ ...cluster, datacenter: dc.name, datastores: dc.datastores })));
+  const clusterName = (id) => clusters.find((c) => c.id === id)?.name || id;
+
+  return (
+    <div className="sg-cb-pv-acct">
+      <div className="sg-cb-pv-acct-line">
+        <span className="sg-cb-pv-acct-label">Allowed ESXi hosts</span>
+        {total ? (
+          <span className="sg-cb-mono">
+            {Object.entries(allowed).map(([id, hosts]) => `${clusterName(id)}: ${hosts.join(", ")}`).join(" · ")}
+          </span>
+        ) : (
+          <span className="muted">Any host — vCenter picks where each new VM goes.</span>
+        )}
+        <span className="sg-cb-pv-acct-acts">
+          {row.provisioningConfigured ? (
+            <button className="btn-ghost btn-sm" type="button" onClick={open}>
+              {editing ? "Close" : "Change"}
+            </button>
+          ) : null}
+        </span>
+      </div>
+      {editing ? (
+        <div className="sg-cb-pv-hosts">
+          <p className="muted sg-cb-pv-acct-msg">
+            New VMs are spread over the ticked hosts, so control planes land on different ones. Hosts that make
+            full-copy clones of the build&apos;s datastore are skipped. VMs already created stay where they are.
+          </p>
+          {loadError ? <p className="sg-cb-pv-acct-msg is-bad">{loadError}</p> : null}
+          {!placement && !loadError ? <p className="muted sg-cb-pv-acct-msg">Reading the hosts from vCenter…</p> : null}
+          {clusters.map((cluster) => (
+            <fieldset key={cluster.id} className="sg-cb-pv-hosts-cluster">
+              <legend>
+                {cluster.name} <span className="muted">· {cluster.datacenter}</span>
+                {(draft[cluster.id] || []).length ? null : <span className="muted"> · any host</span>}
+              </legend>
+              {(cluster.hosts || []).length ? (cluster.hosts || []).map((host) => {
+                const slow = slowDatastores(host, cluster.datastores);
+                const checked = (draft[cluster.id] || []).some((h) => h === host.name || h === host.id);
+                return (
+                  <label key={host.id} className="sg-cb-pv-host">
+                    <input type="checkbox" checked={checked} onChange={() => toggle(cluster.id, host)} />
+                    <span className="sg-cb-mono">{host.name}</span>
+                    {!host.connected ? <span className="sg-cb-pill is-bad">disconnected</span> : null}
+                    {host.maintenance ? <span className="sg-cb-pill is-warn">maintenance</span> : null}
+                    {slow.length ? (
+                      <span className="sg-cb-pill is-warn" title="No storage offload (VAAI): clones are full copies, minutes instead of seconds.">
+                        full-copy clones on {slow.join(", ")}
+                      </span>
+                    ) : null}
+                  </label>
+                );
+              }) : <p className="muted sg-cb-pv-acct-msg">vCenter shows this account no hosts here.</p>}
+            </fieldset>
+          ))}
+          <div className="sg-cb-actions">
+            <button className="btn-ghost btn-sm" type="button" disabled={busy} onClick={() => load(true)}>Re-read vCenter</button>
+            <button className="primary" type="button" disabled={busy || !placement} onClick={save}>
+              {busy ? "Saving…" : "Save hosts"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /** The second, VM-creating account on one vCenter, and what it may do. */
 export function ProvisioningAccount({ row, notify, reloadInfra }) {
   const [editing, setEditing] = useState(false);

@@ -55,7 +55,7 @@ from ....secret_encryption import decrypt_secret, encrypt_secret
 from ...vsphere_client import VSphereError
 from ..os_adapters.base import SATELLITE_MARKER
 from ..scrub import scrub
-from . import inventory, ip_pool, state_store, templates, tofu_config, tofu_runner, vm_watch
+from . import host_placement, inventory, ip_pool, state_store, templates, tofu_config, tofu_runner, vm_watch
 
 logger = logging.getLogger(__name__)
 
@@ -644,7 +644,7 @@ def _render_config(build: ClusterBuild, job: ClusterProvisionJob, cfg) -> Dict[s
         {
             "name": m["name"], "role": m["role"], "ip": m["ip"],
             "cpu": m["cpu"], "memoryGb": m["memoryGb"], "diskGb": m["diskGb"],
-            "memoryMb": m.get("memoryMb"),
+            "memoryMb": m.get("memoryMb"), "hostId": m.get("hostId"),
         }
         for m in machines
     ]
@@ -756,6 +756,8 @@ def _vcenter_checks(build: ClusterBuild, job: ClusterProvisionJob, connection, c
     else:
         checks.append(_check("ok", "Datastore room", f"{datastore['name']} has {datastore['freeGb']} GB free"))
 
+    checks += _place_on_hosts(build, job, connection, cluster, datacenter, template)
+
     counts = (spec.get("counts") or {})
     if (counts.get("controlPlane", 0) > 1 or counts.get("loadbalancer", 0) > 1):
         if cluster["hostCount"] < 2:
@@ -796,6 +798,107 @@ def _vcenter_checks(build: ClusterBuild, job: ClusterProvisionJob, connection, c
             f"{size.get('diskGb')} GB disk",
         ))
     return checks
+
+
+def _place_on_hosts(build: ClusterBuild, job: ClusterProvisionJob, connection, cluster: Dict[str, Any],
+                    datacenter: Dict[str, Any], template: Dict[str, Any]) -> List[Dict[str, str]]:
+    """The fast-clone (VAAI) check, and — when the vCenter connection names
+    allowed ESXi hosts for this cluster — the host each new VM is cloned onto.
+
+    A host whose mount of the target or template datastore reports no storage
+    offload is skipped when hosts are assigned; the plan fails only when none
+    is left. Without an allowed list vCenter still picks the host, and the check
+    only warns which hosts would make full copies."""
+    spec = dict(build.provisioning_json or {})
+    created = set(state_store.vm_instances(build.id))
+    machines = _machines_in_scope(build, job)
+    new = [m for m in machines if m["name"] not in created]
+    allowed = host_placement.allowed_for(getattr(connection, "allowed_hosts_json", None), cluster["id"])
+    candidates, unknown, down = host_placement.candidates(cluster, allowed)
+    datastores = {d["id"]: d for d in datacenter.get("datastores") or []}
+    target_ids = sorted({m.get("datastoreId") or spec.get("datastoreId") for m in new} - {None}) \
+        or [spec.get("datastoreId")]
+    datastore_ids = list(dict.fromkeys([*target_ids, *(template.get("datastoreIds") or [])]))
+
+    checks: List[Dict[str, str]] = []
+    slow = {h["id"]: host_placement.offload(h["id"], datastore_ids, datastores) for h in candidates}
+    slow = {host_id: problems for host_id, problems in slow.items() if problems}
+    names = {h["id"]: h["name"] for h in cluster.get("hosts") or []}
+    reported = any(d.get("hostMounts") is not None for d in datastores.values())
+    if not cluster.get("hosts") or not reported:
+        checks.append(_check("warn", host_placement.CHECK_LABEL,
+                             "vCenter did not report the cluster's hosts or their datastore mounts; "
+                             "whether clones are offloaded could not be checked."))
+    elif slow:
+        lines = [
+            f"Host {names.get(host_id, host_id)} does not support storage offload for datastore "
+            f"{host_placement.describe(problems)}; clones there are full copies (minutes instead of seconds)"
+            for host_id, problems in slow.items()
+        ]
+        hint = "" if allowed else " Name the fast hosts under Allowed ESXi hosts on this vCenter in Sources."
+        checks.append(_check("warn", host_placement.CHECK_LABEL, "; ".join(lines) + "." + hint))
+    else:
+        checks.append(_check("ok", host_placement.CHECK_LABEL,
+                             f"{len(candidates)} host(s) offload clones to "
+                             f"{', '.join(datastores[d]['name'] for d in datastore_ids if d in datastores)}"))
+
+    if not allowed:
+        # Today's behaviour: vCenter picks. A host left from an earlier plan goes.
+        _set_hosts(build, job, {m["name"]: None for m in new})
+        return checks
+
+    if unknown:
+        checks.append(_check("warn", host_placement.PLACEMENT_LABEL,
+                             f"{', '.join(unknown)} from Allowed ESXi hosts are not in {cluster['name']}."))
+    if down:
+        checks.append(_check("warn", host_placement.PLACEMENT_LABEL,
+                             f"{', '.join(down)} are disconnected or in maintenance mode; no VM goes there."))
+    usable = [h for h in candidates if not host_placement.blocks_placement(slow.get(h["id"]) or [])]
+    if new and not cluster.get("hosts"):
+        raise JobFailed(
+            f"vCenter shows the provisioning account no ESXi hosts in {cluster['name']}, so the allowed "
+            "hosts cannot be used. Give its role read access on the cluster's hosts, or clear Allowed "
+            "ESXi hosts on this vCenter in Sources."
+        )
+    if new and not usable:
+        raise JobFailed(
+            f"None of the allowed ESXi hosts in {cluster['name']} can take a new VM: "
+            + ("every one makes full-copy clones of these datastores. " if candidates else
+               "none is connected and out of maintenance. ")
+            + "Fix the hosts, or change Allowed ESXi hosts on this vCenter in Sources."
+        )
+    load: Dict[str, int] = {}
+    for machine in spec.get("machines") or []:
+        if machine["name"] in created and machine.get("hostId"):
+            load[machine["hostId"]] = load.get(machine["hostId"], 0) + 1
+    placed = host_placement.assign([m["name"] for m in new], usable, load)
+    _set_hosts(build, job, {name: host for name, host in placed.items()})
+    if placed:
+        checks.append(_check("ok", host_placement.PLACEMENT_LABEL, "; ".join(
+            f"{name} → {host['name']}" for name, host in placed.items()
+        )))
+    return checks
+
+
+def _set_hosts(build: ClusterBuild, job: ClusterProvisionJob, hosts: Dict[str, Optional[Dict[str, Any]]]) -> None:
+    """Write each new machine's ESXi host (or none) where the plan reads it."""
+    def place(machine: Dict[str, Any]) -> Dict[str, Any]:
+        if machine["name"] not in hosts:
+            return machine
+        host = hosts[machine["name"]]
+        out = {k: v for k, v in machine.items() if k not in ("hostId", "hostName")}
+        if host is not None:
+            out.update(hostId=host["id"], hostName=host["name"])
+        return out
+
+    if job.operation == "grow":
+        config = dict(job.config_json or {})
+        config["newMachines"] = [place(m) for m in config.get("newMachines") or []]
+        job.config_json = config
+    else:
+        spec = dict(build.provisioning_json or {})
+        spec["machines"] = [place(m) for m in spec.get("machines") or []]
+        build.provisioning_json = spec
 
 
 def _missing_privileges_message(missing: List[Dict[str, Any]], spec: Dict[str, Any],

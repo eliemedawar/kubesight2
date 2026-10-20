@@ -548,8 +548,17 @@ def _fetch_placement(cfg: VSphereConfig) -> Dict[str, Any]:
         datastores = _collect(
             content, vim.Datastore,
             ["name", "parent", "summary.capacity", "summary.freeSpace",
-             "summary.accessible", "summary.type"],
+             "summary.accessible", "summary.type", "host"],
         )
+        # Which ESXi hosts a VM may be placed on, and (through each datastore's
+        # host mounts) which of them offload clones to it (VAAI).
+        hosts = {
+            _moid(obj): props
+            for obj, props in _collect(
+                content, vim.HostSystem,
+                ["name", "runtime.connectionState", "runtime.inMaintenanceMode"],
+            )
+        }
         networks = _collect(content, vim.Network, ["name", "parent"])
         vms = _collect(content, vim.VirtualMachine, ["name", "parent", "config.template"])
 
@@ -590,7 +599,7 @@ def _fetch_placement(cfg: VSphereConfig) -> Dict[str, Any]:
                     type=vim.VirtualMachine,
                     # The whole config: the provider compares nearly all of it
                     # with its own config right after a clone (see _template_settings).
-                    pathSet=["config", "guest.guestFullName"],
+                    pathSet=["config", "guest.guestFullName", "datastore"],
                     all=False,
                 )],
             )
@@ -623,11 +632,23 @@ def _fetch_placement(cfg: VSphereConfig) -> Dict[str, Any]:
                         "name": pool_props.get("name", ""),
                         "path": path_below(pool_id, root_pool),
                     })
+                cluster_hosts = []
+                for host_obj in props.get("host") or []:
+                    host_id = _moid(host_obj)
+                    host_props = hosts.get(host_id) or {}
+                    cluster_hosts.append({
+                        "id": host_id,
+                        "name": host_props.get("name", host_id),
+                        "connected": str(host_props.get("runtime.connectionState") or "connected") == "connected",
+                        "maintenance": bool(host_props.get("runtime.inMaintenanceMode")),
+                    })
+                cluster_hosts.sort(key=lambda h: str(h["name"]).lower())
                 entry["clusters"].append({
                     "id": cluster_id,
                     "name": props.get("name", ""),
                     "path": path_below(cluster_id, host_folder),
                     "hostCount": len(props.get("host") or []),
+                    "hosts": cluster_hosts,
                     "drsEnabled": bool(drs),
                     "rootResourcePoolId": root_pool,
                     "resourcePools": sorted(pool_entries, key=lambda p: p["path"]),
@@ -658,6 +679,14 @@ def _fetch_placement(cfg: VSphereConfig) -> Dict[str, Any]:
                     "freeGb": round((props.get("summary.freeSpace") or 0) / 1024 ** 3),
                     "accessible": bool(props.get("summary.accessible", True)),
                     "type": props.get("summary.type"),
+                    "hostMounts": [
+                        {
+                            "hostId": _moid(getattr(mount, "key", None)),
+                            "vStorageSupport": getattr(getattr(mount, "mountInfo", None), "vStorageSupport", None),
+                            "mounted": getattr(getattr(mount, "mountInfo", None), "mounted", None),
+                        }
+                        for mount in props.get("host") or []
+                    ],
                 })
             for obj, props in networks:
                 if datacenter_of(_moid(obj)) != dc_id:
@@ -695,6 +724,7 @@ def _fetch_placement(cfg: VSphereConfig) -> Dict[str, Any]:
                     "cpu": getattr(vm_hardware, "numCPU", None),
                     "memoryMb": getattr(vm_hardware, "memoryMB", None),
                     "settings": _template_settings(config),
+                    "datastoreIds": [_moid(ds) for ds in info.get("datastore") or []],
                     **hardware,
                 }
                 template["compatibility"] = assess_template(template)
@@ -899,10 +929,19 @@ def demo_placement(_cfg: Optional[VSphereConfig] = None) -> Dict[str, Any]:
             "firmware": firmware, "toolsVersion": tools, "cpu": 2, "memoryMb": 4096,
             "disks": disks, "nics": nics, "scsiType": "pvscsi",
         }
+        item["datastoreIds"] = ["datastore-11"]
         item["compatibility"] = assess_template(item)
         return item
 
     one_disk = [{"unit": 0, "sizeGb": 40, "thin": True, "eagerlyScrub": False}]
+
+    def mounts(*host_ids, slow=("host-104",)):
+        # esx-04 lacks the array's VAAI plugin: clones there are full copies.
+        return [{"hostId": h, "mounted": True,
+                 "vStorageSupport": "vStorageUnsupported" if h in slow else "vStorageSupported"}
+                for h in host_ids]
+
+    prod_hosts = ("host-101", "host-102", "host-103", "host-104")
     vmx = [{"type": "vmxnet3"}]
     return {
         "fetchedAt": time.time(),
@@ -913,9 +952,13 @@ def demo_placement(_cfg: Optional[VSphereConfig] = None) -> Dict[str, Any]:
             "clusters": [
                 {"id": "domain-c8", "name": "Cluster-Prod-A", "path": "Cluster-Prod-A",
                  "hostCount": 4, "drsEnabled": True, "rootResourcePoolId": "resgroup-9",
+                 "hosts": [{"id": f"host-{n}", "name": f"esx-0{n - 100}.demo.local",
+                            "connected": True, "maintenance": False} for n in (101, 102, 103, 104)],
                  "resourcePools": [{"id": "resgroup-20", "name": "k8s-builds", "path": "k8s-builds"}]},
                 {"id": "domain-c31", "name": "Cluster-Lab", "path": "Cluster-Lab",
                  "hostCount": 2, "drsEnabled": False, "rootResourcePoolId": "resgroup-32",
+                 "hosts": [{"id": f"host-{n}", "name": f"esx-lab-0{n - 200}.demo.local",
+                            "connected": True, "maintenance": False} for n in (201, 202)],
                  "resourcePools": []},
             ],
             "folders": [
@@ -924,11 +967,11 @@ def demo_placement(_cfg: Optional[VSphereConfig] = None) -> Dict[str, Any]:
             ],
             "datastores": [
                 {"id": "datastore-11", "name": "ds-ssd-01", "capacityGb": 2048, "freeGb": 380,
-                 "accessible": True, "type": "VMFS"},
+                 "accessible": True, "type": "VMFS", "hostMounts": mounts(*prod_hosts, "host-201", "host-202")},
                 {"id": "datastore-12", "name": "ds-ssd-02", "capacityGb": 4096, "freeGb": 2150,
-                 "accessible": True, "type": "VMFS"},
+                 "accessible": True, "type": "VMFS", "hostMounts": mounts(*prod_hosts, "host-201", "host-202")},
                 {"id": "datastore-13", "name": "ds-nvme-01", "capacityGb": 1536, "freeGb": 910,
-                 "accessible": True, "type": "VMFS"},
+                 "accessible": True, "type": "VMFS", "hostMounts": mounts(*prod_hosts, "host-201", "host-202")},
             ],
             "networks": [
                 {"id": "dvportgroup-41", "name": "VM-Net-K8S-30", "kind": "distributed"},

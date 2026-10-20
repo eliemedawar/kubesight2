@@ -58,6 +58,9 @@ class VSphereConnection(db.Model):
     provisioning_last_test_message = db.Column(db.Text, nullable=True)
     # [{"privilege": "Folder.Create", "entity": "DC-Beirut", "granted": true}]
     provisioning_privileges_json = db.Column(db.JSON, nullable=True)
+    # {vSphere cluster id: [ESXi host name or id, ...]}: the hosts new VMs may
+    # be cloned onto (see provisioning.host_placement). NULL: vCenter picks.
+    allowed_hosts_json = db.Column(db.JSON, nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at = db.Column(
         db.DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow

@@ -1405,3 +1405,119 @@ class TestVCenterAccounts:
         assert verdicts["ubuntu-22.04-k8s-base"] == "ok"
         assert verdicts["win-2022-std"] == "bad"
         assert data["networks"][0]["networkName"] == "VM-Net-K8S-30"
+
+
+# ---------------------------------------------------------------------------
+# ESXi host placement and the fast-clone (VAAI) check
+# ---------------------------------------------------------------------------
+
+class TestHostPlacement:
+    """The demo cluster has esx-01..04; esx-04 (host-104) makes full-copy clones."""
+
+    @staticmethod
+    def allow(vcenter, *hosts):
+        vcenter["connection"].allowed_hosts_json = {"domain-c8": list(hosts)} if hosts else None
+        db.session.commit()
+
+    @staticmethod
+    def planned(client, admin_token, build):
+        job = plan(client, admin_token, build["id"])["provisioning"]["job"]
+        row = ClusterProvisionJob.query.get(job["id"])
+        return job, row
+
+    @staticmethod
+    def vm_of(row):
+        return row.config_json["tofu"]["resource"]["vsphere_virtual_machine"]["node"]
+
+    @staticmethod
+    def check(job, label):
+        return next(c for c in job["summary"]["checks"] if c["label"] == label)
+
+    def test_new_vms_are_spread_over_the_allowed_hosts(self, client, admin_token, ssh_profile, vcenter, engine):
+        self.allow(vcenter, "esx-01.demo.local", "esx-02.demo.local", "host-103")
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-31",
+                                  counts={"loadbalancer": 2, "controlPlane": 3, "worker": 2})
+        job, row = self.planned(client, admin_token, build)
+        assert job["status"] == "planned", job.get("error")
+        vm = self.vm_of(row)
+        assert vm["host_system_id"] == "${each.value.host_system_id}"
+        assert vm["resource_pool_id"] == "resgroup-20"
+        hosts = {name: entry["host_system_id"] for name, entry in vm["for_each"].items()}
+        assert set(hosts.values()) <= {"host-101", "host-102", "host-103"}
+        # Round-robin: the three control planes on three different hosts.
+        assert len({hosts[f"uat-31-cp-{i}"] for i in (1, 2, 3)}) == 3
+        # 7 VMs over 3 hosts: 3 / 2 / 2.
+        assert sorted(list(hosts.values()).count(h) for h in set(hosts.values())) == [2, 2, 3]
+        assert "host_system_id" in vm["lifecycle"][0]["ignore_changes"]
+        # The anti-affinity rule is still made.
+        assert "control_planes" in row.config_json["tofu"]["resource"][
+            "vsphere_compute_cluster_vm_anti_affinity_rule"]
+        assert self.check(job, "Fast clone (VAAI) on target hosts")["status"] == "ok"
+        assert "uat-31-cp-1 → esx-0" in self.check(job, "ESXi hosts")["detail"]
+
+    def test_a_host_without_offload_is_skipped(self, client, admin_token, ssh_profile, vcenter, engine):
+        self.allow(vcenter, "host-104", "esx-01.demo.local")
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-32")
+        job, row = self.planned(client, admin_token, build)
+        assert job["status"] == "planned", job.get("error")
+        assert {e["host_system_id"] for e in self.vm_of(row)["for_each"].values()} == {"host-101"}
+        vaai = self.check(job, "Fast clone (VAAI) on target hosts")
+        assert vaai["status"] == "warn"
+        assert "Host esx-04.demo.local does not support storage offload for datastore" in vaai["detail"]
+        assert "full copies (minutes instead of seconds)" in vaai["detail"]
+
+    def test_only_slow_hosts_left_fails_the_plan(self, client, admin_token, ssh_profile, vcenter, engine):
+        self.allow(vcenter, "esx-04.demo.local")
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-33")
+        job, _ = self.planned(client, admin_token, build)
+        assert job["status"] == "plan_failed"
+        assert "None of the allowed ESXi hosts" in job["error"]
+
+    def test_no_list_keeps_todays_behaviour(self, client, admin_token, ssh_profile, vcenter, engine):
+        self.allow(vcenter)
+        build = make_vmware_build(client, admin_token, ssh_profile, vcenter, name="uat-34")
+        job, row = self.planned(client, admin_token, build)
+        assert job["status"] == "planned", job.get("error")
+        vm = self.vm_of(row)
+        assert "host_system_id" not in vm
+        assert not any("host_system_id" in entry for entry in vm["for_each"].values())
+        # Still ignored once created, and still warned about.
+        assert "host_system_id" in vm["lifecycle"][0]["ignore_changes"]
+        vaai = self.check(job, "Fast clone (VAAI) on target hosts")
+        assert vaai["status"] == "warn" and "esx-04.demo.local" in vaai["detail"]
+        assert "Allowed ESXi hosts" in vaai["detail"]
+
+    def test_render_ignores_the_host_after_creation(self):
+        spec = placement_payload(1)
+        nodes = [
+            {"name": "c-cp-1", "role": "controlPlane", "ip": "10.0.0.52", "cpu": 4, "memoryGb": 8,
+             "diskGb": 40, "hostId": "host-101"},
+            # Created before hosts were chosen: no host, and nothing to change.
+            {"name": "c-wk-1", "role": "worker", "ip": "10.0.0.53", "cpu": 4, "memoryGb": 8, "diskGb": 40},
+        ]
+        config = tofu_config.render(
+            cluster_name="c", build_id=7, spec=spec, nodes=nodes,
+            network_range={"cidr": "10.0.0.0/24", "gateway": "10.0.0.1", "dnsServers": ["10.0.0.2"]},
+        )
+        vm = config["resource"]["vsphere_virtual_machine"]["node"]
+        assert vm["for_each"]["c-cp-1"]["host_system_id"] == "host-101"
+        assert vm["for_each"]["c-wk-1"]["host_system_id"] is None
+        assert "host_system_id" in vm["lifecycle"][0]["ignore_changes"]
+
+    def test_the_setting_is_saved_on_the_vcenter(self, client, admin_token, vcenter):
+        row = vcenter["connection"]
+        response = client.put(
+            f"/api/vsphere-connections/{row.id}",
+            json={"name": row.name, "baseUrl": row.base_url, "username": row.username,
+                  "allowedHosts": {"domain-c8": ["10.4.105.203", " 10.4.105.204 ", "10.4.105.203", ""],
+                                   "domain-c31": []}},
+            headers=auth_headers(admin_token),
+        )
+        assert response.status_code == 200, response.get_json()
+        assert response.get_json()["data"]["allowedHosts"] == {"domain-c8": ["10.4.105.203", "10.4.105.204"]}
+        cleared = client.put(
+            f"/api/vsphere-connections/{row.id}",
+            json={"name": row.name, "baseUrl": row.base_url, "username": row.username, "allowedHosts": {}},
+            headers=auth_headers(admin_token),
+        )
+        assert cleared.get_json()["data"]["allowedHosts"] == {}

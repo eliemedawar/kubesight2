@@ -336,3 +336,10 @@
 .sg-cb-pv-mode { margin-top: 8px; }
 .sg-cb-card > .sg-cb-pv-mode { margin: 0 0 4px; }
 .sg-cb-vmcount { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+/* Allowed ESXi hosts, per vSphere cluster */
+.sg-cb-pv-hosts { display: flex; flex-direction: column; gap: 10px; }
+.sg-cb-pv-hosts-cluster { margin: 0; padding: 8px 10px; border: 1px solid var(--border-soft); border-radius: var(--radius-md); }
+.sg-cb-pv-hosts-cluster legend { padding: 0 4px; font-size: 12.5px; font-weight: 700; }
+.sg-cb-pv-host { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 3px 0; font-size: 12.5px; }
+.sg-cb-pv-acct-msg.is-bad { color: var(--danger); }

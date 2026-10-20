@@ -13,6 +13,9 @@ Deliberate choices, each one a failure avoided:
   * **``ignore_changes`` on everything a clone copies from its template.**
     Replacing the template later (a new image under the same name) must not
     plan to rebuild a running cluster. KubeSight only creates and deletes.
+  * **An ESXi host only when the plan chose one** (``host_system_id``, see
+    host_placement), and ignored after creation: a vMotion or a host in
+    maintenance must never plan to move or rebuild a running VM.
   * **No credentials in the file.** vCenter's address, user and password
     reach the provider through its environment (VSPHERE_*), and the state
     backend's through TF_HTTP_*.
@@ -103,9 +106,11 @@ def render(
     network_range: Dict[str, Any],
     allow_unverified_ssl: bool = False,
 ) -> Dict[str, Any]:
-    """main.tf.json for ``nodes`` — [{name, role, ip, cpu, memoryGb, diskGb}].
+    """main.tf.json for ``nodes`` — [{name, role, ip, cpu, memoryGb, diskGb, hostId?}].
 
     ``role`` is the template role key: loadbalancer | controlPlane | worker.
+    ``hostId`` is the ESXi host (managed-object id) to clone onto; without one
+    vCenter picks.
     """
     template = spec.get("template") or {}
     disks = template.get("disks") or [{"unit": 0, "sizeGb": 0, "thin": True, "eagerlyScrub": False}]
@@ -125,6 +130,13 @@ def render(
         }
         for node in nodes
     }
+
+    # Every entry carries the key once any machine is placed (null: vCenter
+    # picks), so the map's values keep one shape.
+    placed = any(node.get("hostId") for node in nodes)
+    if placed:
+        for node in nodes:
+            for_each[node["name"]]["host_system_id"] = node.get("hostId") or None
 
     disk_blocks = [_disk_block(0, disks[0], "${each.value.disk_gb}")]
     disk_blocks += [
@@ -161,6 +173,7 @@ def render(
         "for_each": for_each,
         "name": "${each.key}",
         "resource_pool_id": spec["resourcePoolId"],
+        **({"host_system_id": "${each.value.host_system_id}"} if placed else {}),
         "datastore_id": spec["datastoreId"],
         "folder": ("${vsphere_folder.cluster.path}" if creates_folder(spec)
                    else folder_path(spec, cluster_name)),
@@ -204,7 +217,7 @@ def render(
         # from the template should ever plan a change to a running one.
         "ignore_changes": sorted({
             "clone", "annotation", "guest_id", "firmware", "scsi_type",
-            "disk", "network_interface", "cdrom", "vtpm", *settings,
+            "disk", "network_interface", "cdrom", "vtpm", "host_system_id", *settings,
             *(f"{kind}_controller_count" for kind in controllers),
         }),
     }]
