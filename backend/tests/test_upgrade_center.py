@@ -593,6 +593,100 @@ def test_every_node_script_leaves_its_marker_before_the_kubelet_restart():
     assert ex.UPGRADE_MARK_DIR not in ex._shell_script_upgrade_worker_node("v1.34.1")
 
 
+def test_prestage_stamps_each_node_for_its_own_upgrade_and_pulls_kubeadms_images(app, fast_executor, monkeypatch):
+    ex = fast_executor
+    cluster = FakeCluster(cps=2, workers=1)
+    monkeypatch.setattr(ex, "_run_on_node", cluster.run_on_node)
+    job_id = _start(ex, cluster)
+    ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.35.7",
+                                cluster.kubectl, job_id, options={"etcdSnapshot": False})
+    staged = {e[1]: e[2] for e in cluster.events if e[0] == "stage"}
+    for node in ("cp-1", "cp-2", "w-1"):
+        stamp = ex._staged_path(ex._done_marker(job_id, node))
+        assert stamp in staged[node]
+        # The upgrade script that node runs reads the same stamp.
+        assert stamp in ex._shell_script_upgrade_worker_node("v1.35.7", ex._done_marker(job_id, node))
+    # Control planes ask the new kubeadm for every image (etcd, CoreDNS) in the
+    # cluster's registry; workers only need kube-proxy.
+    assert "--image-repository registry.local:5000/k8s" in staged["cp-1"]
+    assert "config images list" not in staged["w-1"]
+
+
+def test_control_plane_script_applies_without_a_separate_plan():
+    from api import upgrade_executor as ex
+
+    script = ex._shell_script_control_plane_upgrade("v1.34.1", "job-1-cp-1")
+    assert "kubeadm upgrade plan" not in script
+    assert "kubeadm upgrade apply -y" in script
+
+
+def _run_node_script(tmp_path, script, *, cache_install_fails=False):
+    """Run an upgrade script against fake dnf / subscription-manager / kubeadm;
+    returns the commands they saw."""
+    import shutil
+    import subprocess
+
+    if shutil.which("sh") is None:
+        pytest.skip("needs a POSIX shell")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    log = (tmp_path / "calls.log").as_posix()
+    fakes = {
+        "dnf": 'case "$*" in *" -C "*) [ -n "$CACHE_FAILS" ] && exit 1 ;; esac\nexit 0\n',
+        "subscription-manager": 'case "$1" in repos) [ "$2" = "--list" ] && '
+                                "printf 'Repo ID: k8s-packages-v1_34\\nRepo Name: Kubernetes v1.34\\n' ;; esac\nexit 0\n",
+        "kubeadm": "exit 0\n",
+        "systemctl": "exit 0\n",
+    }
+    for name, body in fakes.items():
+        path = bin_dir / name
+        path.write_text(f'#!/bin/sh\necho "{name} $*" >> "{log}"\n{body}', newline="\n")
+        path.chmod(0o755)
+    import os
+
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+    if cache_install_fails:
+        env["CACHE_FAILS"] = "1"
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    with open(log) as handle:
+        return handle.read().splitlines()
+
+
+def test_a_prestaged_node_skips_the_repo_switch_and_installs_from_the_cache(tmp_path, monkeypatch):
+    from api import upgrade_executor as ex
+
+    monkeypatch.setattr(ex, "UPGRADE_MARK_DIR", (tmp_path / "mark").as_posix())
+    stamp = tmp_path / "mark" / "staged-job-1-w-1"
+    script = ex._shell_script_upgrade_worker_node("v1.34.1", "job-1-w-1")
+
+    # Without the stamp: the Satellite switch, then an online install.
+    calls = _run_node_script(tmp_path, script)
+    assert any(c.startswith("subscription-manager repos --list") for c in calls)
+    assert "dnf install -y kubeadm-1.34.1 kubelet-1.34.1 kubectl-1.34.1" in calls
+
+    # With this run's stamp: no Satellite round trips, the cache only, stamp used up.
+    (tmp_path / "calls.log").unlink()
+    stamp.parent.mkdir(exist_ok=True)
+    stamp.write_text("1.34.1\n")
+    calls = _run_node_script(tmp_path, script)
+    assert not [c for c in calls if c.startswith("subscription-manager")]
+    assert [c for c in calls if c.startswith("dnf")] == ["dnf install -y -C kubeadm-1.34.1 kubelet-1.34.1 kubectl-1.34.1"]
+    assert not stamp.exists()
+
+    # The cache falls short: online after all.
+    (tmp_path / "calls.log").unlink()
+    stamp.write_text("1.34.1\n")
+    calls = _run_node_script(tmp_path, script, cache_install_fails=True)
+    assert [c for c in calls if c.startswith("dnf")][-1] == "dnf install -y kubeadm-1.34.1 kubelet-1.34.1 kubectl-1.34.1"
+
+    # A stamp for another version is ignored.
+    (tmp_path / "calls.log").unlink()
+    stamp.write_text("1.33.9\n")
+    calls = _run_node_script(tmp_path, script)
+    assert any(c.startswith("subscription-manager repos --list") for c in calls)
+
+
 def test_finishing_uncordons_the_control_plane_an_earlier_run_left_cordoned(app, fast_executor, monkeypatch):
     """The cluster an old run left: CP on v1.34.0 and cordoned, worker on
     v1.33.9. Starting v1.34.0 again upgrades the worker and frees the CP."""

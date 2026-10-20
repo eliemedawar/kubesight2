@@ -312,7 +312,7 @@ class TestSatelliteMinorRepository:
         for script in (ex._shell_script_control_plane_upgrade("v1.35.2"),
                        ex._shell_script_upgrade_worker_node("v1.35.2")):
             assert "[vV-]1[._]35([^0-9]|$)" in script
-            assert script.index("subscription-manager repos $KS_KUBE_ARGS") < script.index("dnf install")
+            assert script.index("subscription-manager repos $KS_KUBE_ARGS") < script.index("_rpm_install dnf")
 
 
 def _build():

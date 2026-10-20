@@ -246,6 +246,23 @@ _apt() {
   done
   return 1
 }
+_rpm_install() {
+  # dnf/yum install of "$@" (name-version): from the local cache when this run
+  # pre-staged the packages, else online, then any release of that version.
+  ks_pm="$1"
+  shift
+  if [ -n "$KS_PRESTAGED" ] && "$ks_pm" install -y -C "$@"; then
+    return 0
+  fi
+  "$ks_pm" install -y "$@" && return 0
+  ks_globs=""
+  for ks_p in "$@"; do
+    ks_globs="$ks_globs $ks_p-*"
+  done
+  set -f
+  "$ks_pm" install -y $ks_globs
+  set +f
+}
 """
 
 
@@ -348,41 +365,64 @@ def _mark_done_script(done_marker: Optional[str]) -> str:
     return f"mkdir -p {shlex.quote(UPGRADE_MARK_DIR)}\necho \"$K8S_VER\" > {path}\n"
 
 
+def _staged_path(marker: str) -> str:
+    return f"{UPGRADE_MARK_DIR}/staged-{marker}"
+
+
+def _use_prestaged_script(marker: Optional[str], version: str) -> str:
+    """Shell that sets ``KS_PRESTAGED`` when this run's pre-staging already
+    switched the node's repositories and downloaded ``version``'s packages —
+    then the cordoned window skips the Satellite switch and the index refresh
+    and installs from the local cache. The stamp is used once."""
+    switch = satellite_kube_repo_script(version)
+    if not marker:
+        return f'KS_PRESTAGED=""\n{switch}'
+    path = shlex.quote(_staged_path(marker))
+    return f"""KS_PRESTAGED=""
+if [ "$(cat {path} 2>/dev/null)" = "$K8S_VER" ]; then
+  KS_PRESTAGED=1
+  echo "Packages for $K8S_VER were pre-staged earlier in this run: installing from the local cache."
+fi
+rm -f {path}
+if [ -z "$KS_PRESTAGED" ]; then
+{switch}
+fi
+"""
+
+
 def _shell_script_control_plane_upgrade(target_version: str, done_marker: Optional[str] = None) -> str:
-    """Single on-node script: packages, kubeadm apply, kubelet — one apt session."""
+    """Single on-node script: packages, kubeadm apply, kubelet — one apt session.
+    No ``kubeadm upgrade plan`` first: ``apply`` runs the same checks itself."""
     normalized = normalize_version(target_version)
     version = _package_version(target_version)
     return f"""set -e
 K8S_VER="{version}"
 TARGET="{normalized}"
 {_APT_SHELL_PREAMBLE}
-{satellite_kube_repo_script(version)}
+{_use_prestaged_script(done_marker, version)}
 if command -v apt-get >/dev/null 2>&1; then
   apt-mark unhold kubeadm kubelet kubectl 2>/dev/null || true
-  _apt update -qq
+  if [ -z "$KS_PRESTAGED" ]; then _apt update -qq; fi
   _apt install -y -qq kubeadm="${{K8S_VER}}-*"
   apt-mark hold kubeadm 2>/dev/null || true
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y "kubeadm-${{K8S_VER}}" || dnf install -y "kubeadm-${{K8S_VER}}-*"
+  _rpm_install dnf "kubeadm-${{K8S_VER}}"
 elif command -v yum >/dev/null 2>&1; then
-  yum install -y "kubeadm-${{K8S_VER}}" || yum install -y "kubeadm-${{K8S_VER}}-*"
+  _rpm_install yum "kubeadm-${{K8S_VER}}"
 else
   echo "Unsupported OS: install kubeadm ${{K8S_VER}} with apt, dnf, or yum before upgrading."
   exit 1
 fi
 kubeadm version -o short
-kubeadm upgrade plan "$TARGET"
 kubeadm upgrade apply -y "$TARGET"
 if command -v apt-get >/dev/null 2>&1; then
   apt-mark unhold kubelet kubectl 2>/dev/null || true
   _apt install -y -qq kubelet="${{K8S_VER}}-*" kubectl="${{K8S_VER}}-*"
   apt-mark hold kubelet kubectl 2>/dev/null || true
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y "kubelet-${{K8S_VER}}" "kubectl-${{K8S_VER}}" || \\
-    dnf install -y "kubelet-${{K8S_VER}}-*" "kubectl-${{K8S_VER}}-*"
+  _rpm_install dnf "kubelet-${{K8S_VER}}" "kubectl-${{K8S_VER}}"
 elif command -v yum >/dev/null 2>&1; then
-  yum install -y "kubelet-${{K8S_VER}}" "kubectl-${{K8S_VER}}" || \\
-    yum install -y "kubelet-${{K8S_VER}}-*" "kubectl-${{K8S_VER}}-*"
+  _rpm_install yum "kubelet-${{K8S_VER}}" "kubectl-${{K8S_VER}}"
 fi
 {_mark_done_script(done_marker)}systemctl daemon-reload
 systemctl restart kubelet
@@ -397,19 +437,17 @@ def _shell_script_upgrade_worker_node(target_version: str, done_marker: Optional
     return f"""set -e
 K8S_VER="{version}"
 {_APT_SHELL_PREAMBLE}
-{satellite_kube_repo_script(version)}
+{_use_prestaged_script(done_marker, version)}
 if command -v apt-get >/dev/null 2>&1; then
   apt-mark unhold kubeadm kubelet kubectl 2>/dev/null || true
-  _apt update -qq
+  if [ -z "$KS_PRESTAGED" ]; then _apt update -qq; fi
   _apt install -y -qq \\
     kubeadm="${{K8S_VER}}-*" kubelet="${{K8S_VER}}-*" kubectl="${{K8S_VER}}-*"
   apt-mark hold kubeadm kubelet kubectl 2>/dev/null || true
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y "kubeadm-${{K8S_VER}}" "kubelet-${{K8S_VER}}" "kubectl-${{K8S_VER}}" || \\
-    dnf install -y "kubeadm-${{K8S_VER}}-*" "kubelet-${{K8S_VER}}-*" "kubectl-${{K8S_VER}}-*"
+  _rpm_install dnf "kubeadm-${{K8S_VER}}" "kubelet-${{K8S_VER}}" "kubectl-${{K8S_VER}}"
 elif command -v yum >/dev/null 2>&1; then
-  yum install -y "kubeadm-${{K8S_VER}}" "kubelet-${{K8S_VER}}" "kubectl-${{K8S_VER}}" || \\
-    yum install -y "kubeadm-${{K8S_VER}}-*" "kubelet-${{K8S_VER}}-*" "kubectl-${{K8S_VER}}-*"
+  _rpm_install yum "kubeadm-${{K8S_VER}}" "kubelet-${{K8S_VER}}" "kubectl-${{K8S_VER}}"
 else
   echo "Unsupported OS: install kubeadm/kubelet/kubectl ${{K8S_VER}} on the worker first."
   exit 1
@@ -420,10 +458,42 @@ systemctl restart kubelet
 """
 
 
-def _shell_script_prestage(target_version: str, images: List[str]) -> str:
+def _shell_script_prestage(target_version: str, images: List[str], *, marker: Optional[str] = None,
+                           image_repository: Optional[str] = None) -> str:
     """Download the target's packages and pull its images without installing or
-    restarting anything, so a node's cordoned window holds only the install."""
+    restarting anything, so a node's cordoned window holds only the install.
+
+    ``marker``: leave the stamp that tells this node's upgrade script the
+    repositories are switched and the packages are in the cache.
+    ``image_repository`` (control planes): also pull every image the new
+    kubeadm lists — etcd, CoreDNS and pause included — with the kubeadm binary
+    taken out of the downloaded package. Best effort throughout."""
     version = _package_version(target_version)
+    stamp = ""
+    if marker:
+        path = shlex.quote(_staged_path(marker))
+        stamp = (f'if [ -n "$KS_STAGED" ]; then\n  mkdir -p {shlex.quote(UPGRADE_MARK_DIR)}\n'
+                 f'  echo "$K8S_VER" > {path}\nfi\n')
+    kubeadm_pulls = ""
+    if image_repository:
+        kubeadm_pulls = f"""if command -v crictl >/dev/null 2>&1; then
+  (
+    KS_PKG=$(find /var/cache/apt/archives /var/cache/dnf /var/cache/yum -name "kubeadm[_-]${{K8S_VER}}-*" 2>/dev/null | head -n 1)
+    KS_TMP=$(mktemp -d)
+    case "$KS_PKG" in
+      *.deb) dpkg-deb --fsys-tarfile "$KS_PKG" | tar -xf - -C "$KS_TMP" ./usr/bin/kubeadm ;;
+      *.rpm) cd "$KS_TMP" && rpm2cpio "$KS_PKG" | cpio -idm --quiet ./usr/bin/kubeadm ;;
+    esac
+    if [ -x "$KS_TMP/usr/bin/kubeadm" ]; then
+      for KS_IMG in $("$KS_TMP/usr/bin/kubeadm" config images list --kubernetes-version "v$K8S_VER" \\
+          --image-repository {shlex.quote(image_repository)} 2>/dev/null); do
+        crictl pull "$KS_IMG" >/dev/null 2>&1 && echo "Pulled $KS_IMG" || echo "Could not pre-pull $KS_IMG; the upgrade pulls it itself."
+      done
+    fi
+    rm -rf "$KS_TMP"
+  ) || true
+fi
+"""
     pulls = "\n".join(
         f"  crictl pull {shlex.quote(image)} >/dev/null 2>&1 && echo \"Pulled \"{shlex.quote(image)} || "
         f"echo \"Could not pre-pull \"{shlex.quote(image)}\"; the upgrade pulls it itself.\""
@@ -433,23 +503,27 @@ def _shell_script_prestage(target_version: str, images: List[str]) -> str:
 K8S_VER="{version}"
 {_APT_SHELL_PREAMBLE}
 {satellite_kube_repo_script(version)}
+KS_STAGED=""
 if command -v apt-get >/dev/null 2>&1; then
   _apt update -qq
   _apt install -y -qq --download-only --allow-change-held-packages \\
     kubeadm="${{K8S_VER}}-*" kubelet="${{K8S_VER}}-*" kubectl="${{K8S_VER}}-*"
+  KS_STAGED=1
 elif command -v dnf >/dev/null 2>&1; then
   dnf install -y --downloadonly "kubeadm-${{K8S_VER}}" "kubelet-${{K8S_VER}}" "kubectl-${{K8S_VER}}" || \\
     dnf install -y --downloadonly "kubeadm-${{K8S_VER}}-*" "kubelet-${{K8S_VER}}-*" "kubectl-${{K8S_VER}}-*"
+  KS_STAGED=1
 elif command -v yum >/dev/null 2>&1; then
   yum install -y --downloadonly "kubeadm-${{K8S_VER}}" "kubelet-${{K8S_VER}}" "kubectl-${{K8S_VER}}" || \\
     yum install -y --downloadonly "kubeadm-${{K8S_VER}}-*" "kubelet-${{K8S_VER}}-*" "kubectl-${{K8S_VER}}-*"
+  KS_STAGED=1
 fi
 echo "Packages for ${{K8S_VER}} downloaded."
-if command -v crictl >/dev/null 2>&1; then
+{stamp}if command -v crictl >/dev/null 2>&1; then
   :
 {pulls}
 fi
-"""
+{kubeadm_pulls}"""
 
 
 def _is_control_plane_node(labels: Dict[str, Any]) -> bool:
@@ -1068,12 +1142,14 @@ dnf -q --showduplicates --disableexcludes=all list kubeadm kubelet kubectl 2>/de
 _RELEASE_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 
 
-def _prestage_images(access: ClusterAccess, run_kubectl: RunKubectlFn, target: str) -> Tuple[List[str], List[str]]:
-    """(control-plane images, every node's images) at ``target``, from the
-    registry the API server runs from now. kubeadm keeps etcd's and CoreDNS's
-    tags in its own tables, so those are left for ``upgrade apply`` to pull."""
+def _prestage_images(access: ClusterAccess, run_kubectl: RunKubectlFn,
+                     target: str) -> Tuple[List[str], List[str], Optional[str]]:
+    """(control-plane images, every node's images, registry) at ``target``,
+    from the registry the API server runs from now. kubeadm keeps etcd's and
+    CoreDNS's tags in its own tables: the control planes' pre-stage asks the
+    new kubeadm for them (``image_repository``)."""
     if not _RELEASE_TAG_RE.match(target):
-        return [], []
+        return [], [], None
     pods = _get_json(access, run_kubectl, ["get", "pods", "-n", "kube-system", "-l", "component=kube-apiserver", "-o", "json"])
     containers = next(iter(pods.get("items") or []), {}).get("spec", {}).get("containers") or []
     image = (containers[0].get("image") if containers else "") or ""
@@ -1081,14 +1157,14 @@ def _prestage_images(access: ClusterAccess, run_kubectl: RunKubectlFn, target: s
     if ":" in name.rsplit("/", 1)[-1]:
         name = name.rsplit(":", 1)[0]
     if "/" not in name:
-        return [], []
+        return [], [], None
     registry = name.rsplit("/", 1)[0]
     proxy = [f"{registry}/kube-proxy:{target}"]
     control_plane = [
         f"{registry}/{component}:{target}"
         for component in ("kube-apiserver", "kube-controller-manager", "kube-scheduler")
     ]
-    return control_plane + proxy, proxy
+    return control_plane + proxy, proxy, registry
 
 
 def _prestage(access: ClusterAccess, run_kubectl: RunKubectlFn, tracker: "RunTracker",
@@ -1098,14 +1174,16 @@ def _prestage(access: ClusterAccess, run_kubectl: RunKubectlFn, tracker: "RunTra
     if not nodes:
         return
     try:
-        cp_images, node_images = _prestage_images(access, run_kubectl, target)
+        cp_images, node_images, registry = _prestage_images(access, run_kubectl, target)
     except Exception as exc:  # noqa: BLE001 — packages are still worth fetching
-        cp_images, node_images = [], []
+        cp_images, node_images, registry = [], [], None
         tracker.log(None, f"Images not pre-pulled: could not read the API server's image ({str(exc)[:200]}).")
     tracker.log(None, f"Pre-staging {target} packages and images on {len(nodes)} node(s) before the first is cordoned.")
 
     def _one(name: str, is_cp: bool) -> None:
-        script = _shell_script_prestage(target, cp_images if is_cp else node_images)
+        script = _shell_script_prestage(target, cp_images if is_cp else node_images,
+                                        marker=_done_marker(tracker.job_id, name),
+                                        image_repository=registry if is_cp else None)
         try:
             _run_on_node(access, run_kubectl, name, script, timeout_seconds=PRESTAGE_TIMEOUT_SECONDS)
             tracker.log(name, "Packages downloaded and images pre-pulled.")
