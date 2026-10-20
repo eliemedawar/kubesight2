@@ -19,6 +19,12 @@ process) and the end of its maintenance window (it pauses there).
 
 A node already on the target is skipped, so starting the same upgrade again
 after a stop or failure resumes where it left off.
+
+The API server goes away during the run — ``kubeadm upgrade apply`` restarts
+it, and with one control plane there is no other. Every kubectl call retries
+through that (``_retry_transient``), and a step that still fails only because
+the API was gone does not end the run: it waits for the API to answer and
+continues from the first node not on the target (``AUTO_RESUME_ATTEMPTS``).
 """
 
 from __future__ import annotations
@@ -39,7 +45,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .cluster_access import ClusterAccess
 from .k8s_provider import K8sCommandError
-from .upgrade_jobs import LOG_LIMIT, create_job, get_control, mutate_job, run_job_async, update_job
+from .upgrade_jobs import LOG_LIMIT, create_job, get_control, get_job, mutate_job, run_job_async, update_job
 from .upgrade_provider import UPGRADE_PLAN_STEPS, normalize_version, parse_k8s_version
 
 RunKubectlFn = Callable[..., str]
@@ -57,6 +63,10 @@ PAUSE_POLL_SECONDS = 5
 # gives up on it.
 TRANSIENT_RETRY_SECONDS = int(os.getenv("UPGRADE_TRANSIENT_RETRY_SECONDS", "180"))
 TRANSIENT_RETRY_INTERVAL_SECONDS = 5
+# When a step still fails because the API server was gone, the run waits up to
+# this long for it to answer, then carries on — at most this many times.
+API_RECOVERY_SECONDS = int(os.getenv("UPGRADE_API_RECOVERY_SECONDS", "900"))
+AUTO_RESUME_ATTEMPTS = int(os.getenv("UPGRADE_AUTO_RESUME_ATTEMPTS", "5"))
 # Pre-staging downloads every node's packages and images at once before the
 # first node is cordoned. It is best effort: a node that does not finish in time
 # downloads what it needs during its own upgrade, as it would without it.
@@ -74,26 +84,49 @@ NODE_PHASES = ["cordon", "drain", "upgrade", "uncordon", "ready"]
 
 # Substrings that indicate the API server is temporarily unavailable (e.g. restarting
 # during kubeadm upgrade apply). These are retried rather than treated as failures.
-_TRANSIENT_API_ERROR_MARKERS = (
+#
+# The API server could not be reached at all: anything may be retried, drain too.
+_CONNECTION_ERROR_MARKERS = (
     "connectex",
     "connection refused",
     "dial tcp",
     "unable to connect to the server",
     "no connection could be made",
+    "no route to host",
+    "connection reset by peer",
+    "broken pipe",
+    "use of closed network connection",
+    "http2: client connection lost",
+    "tls handshake timeout",
+    # KubeSight's own breaker (k8s_provider): a recent call timed out, so calls
+    # fail fast for a while. This is what a run saw right after the control
+    # plane restarted, and it used to end the run.
+    "cluster api is unreachable",
+)
+# It answered slowly or half-way (restarting, etcd leader change). Not retried
+# for a drain: a drain that times out is usually a PodDisruptionBudget.
+_SLOW_API_ERROR_MARKERS = (
     "i/o timeout",
     "eof",
     "context deadline exceeded",
+    "client.timeout exceeded",
     "net/http: request canceled",
-    "tls handshake timeout",
+    "service unavailable",
+    "the server is currently unable to handle the request",
+    "the server was unable to return a response",
+    "etcdserver:",
+    "kubectl command timed out after",
 )
+_TRANSIENT_API_ERROR_MARKERS = _CONNECTION_ERROR_MARKERS + _SLOW_API_ERROR_MARKERS
 
 
-def _is_transient_api_error(exc: Exception) -> bool:
+def _is_transient_api_error(exc: Exception, *, connection_only: bool = False) -> bool:
     lower = str(exc).lower()
-    return any(marker in lower for marker in _TRANSIENT_API_ERROR_MARKERS)
+    markers = _CONNECTION_ERROR_MARKERS if connection_only else _TRANSIENT_API_ERROR_MARKERS
+    return any(marker in lower for marker in markers)
 
 
-def _retry_transient(call: Callable[[], str]) -> str:
+def _retry_transient(call: Callable[[], str], *, connection_only: bool = False) -> str:
     """``call()``, retried while the API server is unreachable — up to
     ``TRANSIENT_RETRY_SECONDS``, then the last error is raised."""
     deadline = time.time() + TRANSIENT_RETRY_SECONDS
@@ -101,9 +134,42 @@ def _retry_transient(call: Callable[[], str]) -> str:
         try:
             return call()
         except Exception as exc:
-            if not _is_transient_api_error(exc) or time.time() >= deadline:
+            if not _is_transient_api_error(exc, connection_only=connection_only) or time.time() >= deadline:
                 raise
         time.sleep(TRANSIENT_RETRY_INTERVAL_SECONDS)
+
+
+class NodeCommandFailed(RuntimeError):
+    """The on-node upgrade Job ran and failed: retrying will not help."""
+
+
+class DrainFailed(RuntimeError):
+    """A drain did not finish (usually a PodDisruptionBudget)."""
+
+
+def _resumable(exc: BaseException) -> bool:
+    """Whether the run may pick itself up after ``exc``: only when the API
+    server was gone, never after a node really failed."""
+    seen: Optional[BaseException] = exc
+    while seen is not None:
+        if isinstance(seen, (NodeCommandFailed, DrainFailed, RunStopped)):
+            return False
+        seen = seen.__cause__
+    return isinstance(exc, Exception) and _is_transient_api_error(exc)
+
+
+def _kubectl_verb(args: List[str]) -> str:
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg in ("-n", "--namespace"):
+            skip = True
+            continue
+        if not str(arg).startswith("-"):
+            return str(arg)
+    return ""
 
 
 def _package_version(target_version: str) -> str:
@@ -436,9 +502,10 @@ def _run_upgrade_kubectl(
     repeat."""
     if "-n" not in args and "--namespace" not in args:
         args = ["--namespace", "default", *args]
+    connection_only = _kubectl_verb(args) == "drain"
     if timeout and _accepts_timeout(run_kubectl):
-        return _retry_transient(lambda: run_kubectl(access, args, timeout=timeout))
-    return _retry_transient(lambda: run_kubectl(access, args))
+        return _retry_transient(lambda: run_kubectl(access, args, timeout=timeout), connection_only=connection_only)
+    return _retry_transient(lambda: run_kubectl(access, args), connection_only=connection_only)
 
 
 def _kubectl_command(
@@ -469,15 +536,18 @@ def _kubectl_apply_manifest(access: ClusterAccess, manifest: Dict[str, Any]) -> 
         elif not env.get("KUBECONFIG") and env.get("K8S_KUBECONFIG"):
             env["KUBECONFIG"] = env["K8S_KUBECONFIG"]
 
-        completed = subprocess.run(
-            _kubectl_command(access, ["apply", "-f", "-"], kubeconfig_path or ""),
-            input=json.dumps(manifest),
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-            env=env,
-        )
+        try:
+            completed = subprocess.run(
+                _kubectl_command(access, ["apply", "-f", "-"], kubeconfig_path or ""),
+                input=json.dumps(manifest),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("kubectl command timed out after 120s: apply") from exc
     combined = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
     if completed.returncode != 0:
         raise RuntimeError(combined or "Failed to apply upgrade job manifest.")
@@ -532,7 +602,7 @@ def _wait_for_job_completion(
                     logs = _run_upgrade_kubectl(
                         access, run_kubectl, ["logs", pod_name, "-n", DEFAULT_DEBUG_NAMESPACE]
                     )
-                    raise RuntimeError(logs[:1000] or f"Remote command failed on node (exit {exit_code}).")
+                    raise NodeCommandFailed(logs[:1000] or f"Remote command failed on node (exit {exit_code}).")
             return _run_upgrade_kubectl(access, run_kubectl, ["logs", pod_name, "-n", DEFAULT_DEBUG_NAMESPACE])
         if status.get("failed"):
             pods_output = _run_upgrade_kubectl(
@@ -546,7 +616,7 @@ def _wait_for_job_completion(
                 logs = _run_upgrade_kubectl(access, run_kubectl, ["logs", pod_name, "-n", DEFAULT_DEBUG_NAMESPACE])
             except K8sCommandError:
                 logs = ""
-            raise RuntimeError(logs[:1000] or f"Upgrade job {job_name} failed.")
+            raise NodeCommandFailed(logs[:1000] or f"Upgrade job {job_name} failed.")
         time.sleep(POD_POLL_INTERVAL_SECONDS)
     raise RuntimeError(f"Timed out waiting for upgrade job {job_name}.")
 
@@ -638,7 +708,7 @@ def _run_on_node(
         "package not available in the repository",
     )
     if any(marker in lowered for marker in failure_markers):
-        raise RuntimeError(output[:1000] or f"Remote command failed on node {node_name}")
+        raise NodeCommandFailed(output[:1000] or f"Remote command failed on node {node_name}")
     return output
 
 
@@ -1054,6 +1124,25 @@ def _drain(access: ClusterAccess, run_kubectl: RunKubectlFn, node: str, minutes:
     )
 
 
+def _wait_for_api(access: ClusterAccess, run_kubectl: RunKubectlFn, job_id: str) -> bool:
+    """Until the API server answers. False when Stop was pressed meanwhile."""
+    deadline = time.time() + API_RECOVERY_SECONDS
+    while True:
+        if get_control(job_id).get("stop"):
+            return False
+        try:
+            _read_server_version(access, run_kubectl)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            if not _is_transient_api_error(exc) or time.time() >= deadline:
+                raise RuntimeError(
+                    f"The API server did not answer for {API_RECOVERY_SECONDS // 60} min after the upgrade "
+                    f"lost it, so the run stopped. Start the upgrade again once the cluster answers: nodes "
+                    f"already on the target are skipped. Detail: {str(exc)[:300]}"
+                ) from exc
+        time.sleep(TRANSIENT_RETRY_INTERVAL_SECONDS)
+
+
 def _execute_kubeadm_upgrade(
     access: ClusterAccess,
     target_version: str,
@@ -1063,42 +1152,110 @@ def _execute_kubeadm_upgrade(
     options: Optional[Dict[str, Any]] = None,
     window_end: Optional[str] = None,
 ) -> None:
+    """The kubeadm run. When an attempt ends only because the API server was
+    gone, it waits for the API and runs again: nodes already on the target are
+    skipped, so it carries on with the next one (the CP done, the worker next)."""
     options = normalize_options(options)
-    normalized = normalize_version(target_version)
-    target_tuple = parse_k8s_version(normalized)
-    steps = _step_states()
     tracker = RunTracker(job_id, window_end=window_end)
+    cordoned: List[str] = []
+    attempt = 0
+    while True:
+        try:
+            _kubeadm_attempt(access, target_version, run_kubectl, job_id, tracker, options,
+                             cordoned=cordoned, resume=attempt > 0)
+            return
+        except Exception as exc:
+            if attempt >= AUTO_RESUME_ATTEMPTS or not _resumable(exc):
+                raise
+            attempt += 1
+            tracker.log(None, f"Lost the API server: {str(exc)[:200]}. Continuing automatically once it "
+                              f"answers (attempt {attempt + 1} of {AUTO_RESUME_ATTEMPTS + 1}).")
+            tracker.save(status="running", message="Waiting for the API server to come back, then continuing.")
+        if not _wait_for_api(access, run_kubectl, job_id):
+            tracker.log(None, "Stopped while waiting for the API server.")
+            update_job(job_id, status="stopped", cordonedNodes=list(cordoned), finishedAt=_now(),
+                       message="Stopped while waiting for the API server. Nodes already done keep the new "
+                               "version; check cordoned nodes before starting again.")
+            return
+        tracker.log(None, "API server is back: continuing with the nodes not on the target yet.")
+
+
+def _kubeadm_attempt(
+    access: ClusterAccess,
+    target_version: str,
+    run_kubectl: RunKubectlFn,
+    job_id: str,
+    tracker: RunTracker,
+    options: Dict[str, Any],
+    *,
+    cordoned: List[str],
+    resume: bool,
+) -> None:
+    """One pass over the cluster. ``resume``: a pass after the API server came
+    back — the first pass's baseline, snapshot, target and finished nodes are kept."""
+    normalized = normalize_version(target_version)
+    prior = (get_job(job_id) or {}) if resume else {}
+    # A first pass that lost the API before it wrote its plan left nothing to keep.
+    resume = resume and bool(prior.get("nodes"))
+    if resume and prior.get("requestedVersion") and prior.get("targetVersion"):
+        normalized = normalize_version(prior["targetVersion"])  # the capsule's patch, chosen by the first pass
+    target_tuple = parse_k8s_version(normalized)
+    steps = prior.get("steps") or _step_states()
 
     node_items = _get_json(access, run_kubectl, ["get", "nodes", "-o", "json"]).get("items", [])
     control_planes = _control_plane_nodes(node_items)
     workers = _worker_nodes(node_items, control_planes)
     if not control_planes:
         raise RuntimeError("No control plane node found for kubeadm upgrade.")
-    previous_version = _read_server_version(access, run_kubectl)
-
-    baseline = _pods_snapshot(access, run_kubectl)
-    nodes = initial_nodes(node_items, control_planes, workers, options["waveSize"], (baseline or {}).get("podsByNode"))
-    tracker.save(
-        steps=steps, activeStep=0, options=options, nodes=nodes,
-        stages=initial_stages(options, control_planes, workers),
-        baseline=baseline, versionBefore=previous_version, startedAt=_now(),
-    )
-    tracker.log(None, f"Upgrading {access.cluster_id} from {previous_version} to {normalized}.")
-    capsule_version = _capsule_target(access, run_kubectl, tracker, control_planes[0], normalized)
-    if capsule_version != normalized:
-        tracker.save(targetVersion=capsule_version, requestedVersion=normalized)
-        normalized = capsule_version
-        target_tuple = parse_k8s_version(normalized)
+    server_now = _read_server_version(access, run_kubectl)
 
     def at_target(name: str) -> bool:
         return parse_k8s_version(_worker_kubelet_version(name, node_items)) >= target_tuple
+
+    prior_nodes = {n.get("name"): n for n in prior.get("nodes") or []}
+    if resume:
+        previous_version = prior.get("versionBefore") or server_now
+        baseline = prior.get("baseline")
+        nodes = initial_nodes(node_items, control_planes, workers, options["waveSize"],
+                              (baseline or {}).get("podsByNode"))
+        for index, row in enumerate(nodes):
+            old = prior_nodes.get(row["name"])
+            if old and old.get("status") == "done":
+                nodes[index] = old
+            elif old and old.get("versionBefore"):
+                row["versionBefore"] = old["versionBefore"]
+        tracker.save(nodes=nodes, steps=steps, error=None)
+        # A node upgraded just before the API dropped may still be cordoned.
+        for name in list(cordoned):
+            if at_target(name):
+                _run_upgrade_kubectl(access, run_kubectl, ["uncordon", name])
+                cordoned.remove(name)
+                tracker.log(name, f"uncordon node/{name} (it was upgraded before the API server dropped)")
+    else:
+        previous_version = server_now
+        baseline = _pods_snapshot(access, run_kubectl)
+        nodes = initial_nodes(node_items, control_planes, workers, options["waveSize"],
+                              (baseline or {}).get("podsByNode"))
+        tracker.save(
+            steps=steps, activeStep=0, options=options, nodes=nodes,
+            stages=initial_stages(options, control_planes, workers),
+            baseline=baseline, versionBefore=previous_version, startedAt=_now(),
+        )
+        tracker.log(None, f"Upgrading {access.cluster_id} from {previous_version} to {normalized}.")
+        capsule_version = _capsule_target(access, run_kubectl, tracker, control_planes[0], normalized)
+        if capsule_version != normalized:
+            tracker.save(targetVersion=capsule_version, requestedVersion=normalized)
+            normalized = capsule_version
+            target_tuple = parse_k8s_version(normalized)
 
     # -- 0. safety net --------------------------------------------------------
     tracker.stage("safety", "active")
     _mark_step(steps, 0, "completed", "Cluster readiness validated.")
     _mark_step(steps, 1, "completed", f"Target version {normalized} validated.")
-    cp_done = parse_k8s_version(previous_version) >= target_tuple
-    if options["etcdSnapshot"] and not cp_done:
+    cp_done = parse_k8s_version(server_now) >= target_tuple
+    if (prior.get("snapshot") or {}).get("status") == "done":
+        pass  # taken by the first pass
+    elif options["etcdSnapshot"] and not cp_done:
         tracker.log(control_planes[0], "Taking an etcd snapshot.")
         try:
             snapshot = _etcd_snapshot(access, run_kubectl, control_planes[0])
@@ -1115,13 +1272,12 @@ def _execute_kubeadm_upgrade(
         tracker.save(snapshot={"status": "skipped", "message": "Control plane already on the target (resuming)."})
     else:
         tracker.save(snapshot={"status": "skipped", "message": "Switched off in the plan."})
-    if baseline:
+    if baseline and not resume:
         tracker.log(None, f"Baseline: {baseline['readyPods']} ready pods.")
     tracker.stage("safety", "done", "Snapshot and baseline taken." if options["etcdSnapshot"] else "Baseline taken.")
     tracker.save(steps=steps, activeStep=1)
 
     schedulable_elsewhere = len(node_items) > 1
-    cordoned: List[str] = []
     # The API server is on the target: from here a failure leaves a cluster to
     # finish (re-run the same target), not one to roll back.
     control_plane_upgraded = cp_done
@@ -1133,7 +1289,8 @@ def _execute_kubeadm_upgrade(
         tracker.node(name, status="active")
         tracker.node(name, phase="cordon", status="active", message="Cordoning")
         _run_upgrade_kubectl(access, run_kubectl, ["cordon", name])
-        cordoned.append(name)
+        if name not in cordoned:
+            cordoned.append(name)
         tracker.node(name, phase="cordon", status="done")
         tracker.log(name, f"cordon node/{name}")
         if drain:
@@ -1152,7 +1309,7 @@ def _execute_kubeadm_upgrade(
                 tracker.node(name, phase="drain", status="failed", state="failed",
                              message="Drain did not finish; uncordoned, nothing changed on the node.")
                 tracker.log(name, f"drain failed: {str(exc)[:300]}")
-                raise RuntimeError(
+                raise DrainFailed(
                     f"Draining {name} did not finish within {options['drainTimeoutMinutes']} min, so the run "
                     f"stopped. {name} was uncordoned and nothing changed on it. Usually a PodDisruptionBudget "
                     f"allows no evictions — re-run the readiness checks. Detail: {str(exc)[:300]}"
@@ -1185,20 +1342,32 @@ def _execute_kubeadm_upgrade(
         tracker.log(name, f"Ready · kubelet {version}")
 
     def skip_node(name: str) -> None:
-        tracker.node(name, state="skipped", message="Already on the target", versionAfter=_worker_kubelet_version(name, node_items))
+        version = _worker_kubelet_version(name, node_items)
+        old = prior_nodes.get(name) or {}
+        if old.get("status") == "done":
+            return
+        if old.get("status") in ("active", "failed"):
+            # The first pass upgraded it, then lost the API before seeing it Ready.
+            for phase in NODE_PHASES:
+                tracker.node(name, phase=phase, status="done")
+            tracker.node(name, state="done", versionAfter=version, finishedAt=_now(),
+                         message=f"On {version} (confirmed after the API server came back)")
+            return
+        tracker.node(name, state="skipped", message="Already on the target", versionAfter=version)
         for phase in NODE_PHASES:
             tracker.node(name, phase=phase, status="skipped")
 
     try:
         # -- 1. pre-stage: downloads off every node's cordoned window ------------
         tracker.checkpoint("pre-staging")
-        _prestage(
-            access, run_kubectl, tracker,
-            [(cp, True) for index, cp in enumerate(control_planes)
-             if not (at_target(cp) and (index > 0 or cp_done))]
-            + [(w, False) for w in workers if not at_target(w)],
-            normalized,
-        )
+        if not resume:  # the first pass already downloaded what it could
+            _prestage(
+                access, run_kubectl, tracker,
+                [(cp, True) for index, cp in enumerate(control_planes)
+                 if not (at_target(cp) and (index > 0 or cp_done))]
+                + [(w, False) for w in workers if not at_target(w)],
+                normalized,
+            )
 
         # -- 2 + 3. control planes ---------------------------------------------
         tracker.stage("control-plane", "active")

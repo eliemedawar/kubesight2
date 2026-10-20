@@ -150,6 +150,9 @@ class FakeCluster:
         # What `dnf --showduplicates list` prints on the first control plane;
         # by default the node is not registered with Satellite.
         self.capsule = "KS_NOT_SATELLITE\n"
+        # Calls that fail as if the API server were down, set when `apply` runs.
+        self.outage = 0
+        self.outage_after_apply = 0
         self.lock = threading.Lock()
 
     def kubectl(self, access, args, timeout=None):
@@ -158,6 +161,12 @@ class FakeCluster:
             args = args[2:]
         key = " ".join(args)
         with self.lock:
+            if self.outage > 0:
+                from api.k8s_provider import K8sCommandError
+
+                self.outage -= 1
+                raise K8sCommandError("Cluster API is unreachable (a recent request timed out). "
+                                      "Retrying automatically within 20s.")
             if key == "get nodes -o json":
                 return json.dumps({"items": list(self.nodes.values())})
             if key == "version -o json":
@@ -199,6 +208,7 @@ class FakeCluster:
             self.nodes[node]["status"]["nodeInfo"]["kubeletVersion"] = f"v{target}"
             if "kubeadm upgrade apply" in script:
                 self.server = f"v{target}"
+                self.outage = self.outage_after_apply
         return "ok"
 
 
@@ -440,6 +450,72 @@ def test_a_dropped_connection_after_the_control_plane_is_retried(app, fast_execu
                                 kubectl, job_id, options={"etcdSnapshot": False})
     assert {e[1] for e in cluster.events if e[0] == "upgrade"} == {"cp-1", "w-1", "w-2"}
     assert get_job(job_id)["status"] == "completed"
+
+
+def test_the_unreachable_breaker_after_the_control_plane_is_ridden_out(app, fast_executor, monkeypatch):
+    """1 CP + 1 worker: right after `kubeadm upgrade apply` KubeSight's breaker
+    answers "Cluster API is unreachable"; the worker must still be upgraded."""
+    from api.upgrade_jobs import get_job
+
+    ex = fast_executor
+    cluster = FakeCluster(cps=1, workers=1, version="v1.33.9")
+    cluster.outage_after_apply = 6
+    monkeypatch.setattr(ex, "_run_on_node", cluster.run_on_node)
+    job_id = _start(ex, cluster)
+    ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.34.1",
+                                cluster.kubectl, job_id, options={"etcdSnapshot": False})
+    assert [e[1] for e in cluster.events if e[0] == "upgrade"] == ["cp-1", "w-1"]
+    job = get_job(job_id)
+    assert job["status"] == "completed"
+    assert all(n["status"] == "done" and n["versionAfter"] == "v1.34.1" for n in job["nodes"])
+
+
+def test_run_continues_by_itself_when_a_step_lost_the_api(app, fast_executor, monkeypatch):
+    """A call that gives up on the API does not end the run: it waits for the
+    API and carries on from the first node not on the target."""
+    from api.upgrade_jobs import get_job
+
+    ex = fast_executor
+    monkeypatch.setattr(ex, "TRANSIENT_RETRY_SECONDS", 0)  # each call gives up at once
+    cluster = FakeCluster(cps=1, workers=1, version="v1.33.9")
+    cluster.outage_after_apply = 1
+    monkeypatch.setattr(ex, "_run_on_node", cluster.run_on_node)
+    job_id = _start(ex, cluster)
+    ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.34.1",
+                                cluster.kubectl, job_id)
+    upgrades = [e for e in cluster.events if e[0] == "upgrade"]
+    # The control plane ran `apply` once; the second pass went on to the worker.
+    assert upgrades == [("upgrade", "cp-1", "apply"), ("upgrade", "w-1", "node")]
+    # The CP was left cordoned when the API dropped; the second pass uncordoned it.
+    assert cluster.events.count(("uncordon", "cp-1")) == 1
+    # Pre-staging ran once, on the first pass.
+    assert len([e for e in cluster.events if e[0] == "stage"]) == 2
+    job = get_job(job_id)
+    assert job["status"] == "completed"
+    assert job["versionBefore"] == "v1.33.9"
+    assert job["snapshot"]["status"] == "done"
+    nodes = {n["name"]: n for n in job["nodes"]}
+    assert nodes["cp-1"]["status"] == "done" and nodes["w-1"]["status"] == "done"
+    assert any("Continuing automatically" in line["message"] for line in job["log"])
+
+
+def test_a_node_whose_upgrade_failed_is_not_retried(app, fast_executor, monkeypatch):
+    ex = fast_executor
+    cluster = FakeCluster(cps=1, workers=1)
+    upgrades = []
+
+    def run_on_node(access, run_kubectl, node, script, **kwargs):
+        if "--showduplicates" in script or "--download-only" in script:
+            return cluster.run_on_node(access, run_kubectl, node, script)
+        upgrades.append(node)
+        raise ex.NodeCommandFailed("E: dial tcp pkgs.k8s.io: connection refused")
+
+    monkeypatch.setattr(ex, "_run_on_node", run_on_node)
+    job_id = _start(ex, cluster)
+    with pytest.raises(RuntimeError, match="pkgs.k8s.io"):
+        ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.35.7",
+                                    cluster.kubectl, job_id, options={"etcdSnapshot": False})
+    assert upgrades == ["cp-1"]
 
 
 def test_a_worker_failure_after_the_control_plane_says_how_to_finish(app, fast_executor, monkeypatch):
