@@ -1143,6 +1143,33 @@ def _wait_for_api(access: ClusterAccess, run_kubectl: RunKubectlFn, job_id: str)
         time.sleep(TRANSIENT_RETRY_INTERVAL_SECONDS)
 
 
+def _left_cordoned_by_earlier_run(job_id: str, cluster_id: str) -> set:
+    """Nodes the cluster's previous upgrade run cordoned and never uncordoned —
+    only when that run failed or was stopped. A node a person cordoned is not
+    in it, so it is left alone."""
+    from .upgrade_jobs import _with_app, list_jobs
+
+    def _previous() -> Optional[Dict[str, Any]]:
+        for job in list_jobs(cluster_ids=[cluster_id], statuses=("completed", "failed", "stopped"), limit=5):
+            if job.get("jobId") != job_id:
+                return job
+        return None
+
+    try:
+        previous = _with_app(job_id, _previous)
+    except Exception:  # noqa: BLE001 — a nicety; the verify step still names cordoned nodes
+        logger.debug("Could not read the previous upgrade run", exc_info=True)
+        return set()
+    if not previous or previous.get("status") not in ("failed", "stopped"):
+        return set()
+    names = set(previous.get("cordonedNodes") or [])
+    for node in previous.get("nodes") or []:
+        phases = node.get("phases") or {}
+        if phases.get("cordon") == "done" and phases.get("uncordon") != "done":
+            names.add(node.get("name"))
+    return names
+
+
 def _execute_kubeadm_upgrade(
     access: ClusterAccess,
     target_version: str,
@@ -1247,6 +1274,15 @@ def _kubeadm_attempt(
             tracker.save(targetVersion=capsule_version, requestedVersion=normalized)
             normalized = capsule_version
             target_tuple = parse_k8s_version(normalized)
+        # An earlier run that ended badly may have left a node it had already
+        # upgraded cordoned. Skipping it as "on the target" would leave it so.
+        left = _left_cordoned_by_earlier_run(job_id, access.cluster_id)
+        for item in node_items:
+            name = item.get("metadata", {}).get("name") or ""
+            if name in left and item.get("spec", {}).get("unschedulable") and at_target(name):
+                _run_upgrade_kubectl(access, run_kubectl, ["uncordon", name])
+                item.setdefault("spec", {})["unschedulable"] = False
+                tracker.log(name, f"uncordon node/{name} (an earlier run upgraded it and left it cordoned)")
 
     # -- 0. safety net --------------------------------------------------------
     tracker.stage("safety", "active")
@@ -1473,6 +1509,10 @@ def _kubeadm_attempt(
     if behind:
         verdict = "warning"
         notes.append(f"Still behind: {', '.join(behind)}.")
+    still_cordoned = [n.get("metadata", {}).get("name") for n in final_nodes if n.get("spec", {}).get("unschedulable")]
+    if still_cordoned:
+        verdict = "warning"
+        notes.append(f"Still cordoned: {', '.join(still_cordoned)} (kubectl uncordon when it should take pods).")
     if baseline and after and after["readyPods"] < baseline["readyPods"]:
         verdict = "warning"
         notes.append(f"{after['readyPods']} ready pods now vs {baseline['readyPods']} before.")

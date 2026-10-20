@@ -183,6 +183,7 @@ class FakeCluster:
                 return ""
             if args[0] in ("cordon", "uncordon"):
                 self.events.append((args[0], args[1]))
+                self.nodes[args[1]]["spec"]["unschedulable"] = args[0] == "cordon"
                 return ""
             if args[0] == "drain":
                 self.events.append(("drain", args[1]))
@@ -516,6 +517,52 @@ def test_a_node_whose_upgrade_failed_is_not_retried(app, fast_executor, monkeypa
         ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.35.7",
                                     cluster.kubectl, job_id, options={"etcdSnapshot": False})
     assert upgrades == ["cp-1"]
+
+
+def test_finishing_uncordons_the_control_plane_an_earlier_run_left_cordoned(app, fast_executor, monkeypatch):
+    """The cluster an old run left: CP on v1.34.0 and cordoned, worker on
+    v1.33.9. Starting v1.34.0 again upgrades the worker and frees the CP."""
+    from api.upgrade_jobs import create_job, get_job, update_job
+
+    ex = fast_executor
+    cluster = FakeCluster(cps=1, workers=1, version="v1.33.9")
+    cluster.server = "v1.34.0"
+    cluster.nodes["cp-1"]["status"]["nodeInfo"]["kubeletVersion"] = "v1.34.0"
+    cluster.nodes["cp-1"]["spec"]["unschedulable"] = True
+    monkeypatch.setattr(ex, "_run_on_node", cluster.run_on_node)
+    earlier = create_job(cluster_id="kubeadm-1", target_version="v1.34.0", provider="kubeadm")["jobId"]
+    update_job(earlier, status="failed", nodes=[
+        {"name": "cp-1", "phases": {"cordon": "done", "drain": "done", "upgrade": "done",
+                                    "uncordon": "active", "ready": "pending"}},
+        {"name": "w-1", "phases": {"cordon": "pending"}},
+    ])
+    job_id = create_job(cluster_id="kubeadm-1", target_version="v1.34.0", provider="kubeadm")["jobId"]
+    ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.34.0",
+                                cluster.kubectl, job_id, options={"etcdSnapshot": False})
+    assert [e[1] for e in cluster.events if e[0] == "upgrade"] == ["w-1"]
+    # Freed before the worker was drained, so its pods had somewhere to go.
+    assert cluster.events.index(("uncordon", "cp-1")) < cluster.events.index(("drain", "w-1"))
+    assert not any(n["spec"].get("unschedulable") for n in cluster.nodes.values())
+    job = get_job(job_id)
+    assert job["status"] == "completed" and job["verdict"] == "clean"
+
+
+def test_a_node_a_person_cordoned_is_left_alone_and_named(app, fast_executor, monkeypatch):
+    from api.upgrade_jobs import get_job
+
+    ex = fast_executor
+    cluster = FakeCluster(cps=1, workers=1)
+    cluster.server = "v1.35.7"
+    for name in ("cp-1", "w-1"):
+        cluster.nodes[name]["status"]["nodeInfo"]["kubeletVersion"] = "v1.35.7"
+    cluster.nodes["w-1"]["spec"]["unschedulable"] = True
+    monkeypatch.setattr(ex, "_run_on_node", cluster.run_on_node)
+    job_id = _start(ex, cluster)
+    ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.35.7",
+                                cluster.kubectl, job_id, options={"etcdSnapshot": False})
+    assert ("uncordon", "w-1") not in cluster.events
+    job = get_job(job_id)
+    assert job["verdict"] == "warning" and "Still cordoned: w-1" in job["message"]
 
 
 def test_a_worker_failure_after_the_control_plane_says_how_to_finish(app, fast_executor, monkeypatch):
