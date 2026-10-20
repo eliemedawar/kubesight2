@@ -956,10 +956,14 @@ def _phase_pull_images(build: ClusterBuild, resolved) -> None:
         except Exception as exc:  # noqa: BLE001
             results[node_id] = (False, str(exc), False)
 
+    # Ids read before any thread starts: _step_start's commit expired these
+    # rows, and reloading them while the pulls write their logs raced on the
+    # connection (seen with SQLite as "row is otherwise not present").
+    submissions = [(node.id, step.id, target, pull_commands) for node, step, target, pull_commands in jobs]
     # Every node pulls at once: the registry, not the node count, sets the pace.
     with ThreadPoolExecutor(max_workers=_NODE_PARALLELISM) as pool:
-        for node, step, target, pull_commands in jobs:
-            pool.submit(_pull, node.id, step.id, target, pull_commands)
+        for node_id, step_id, target, pull_commands in submissions:
+            pool.submit(_pull, node_id, step_id, target, pull_commands)
 
     failures = []
     timed_out = []
@@ -1446,9 +1450,11 @@ def _phase_join_workers(build: ClusterBuild) -> None:
         except Exception as exc:  # noqa: BLE001
             results[node_id] = (False, str(exc))
 
+    # Ids read before any thread starts (see _phase_pull_images).
+    submissions = [(node.id, step.id, target, node_name) for node, step, target, node_name in jobs]
     with ThreadPoolExecutor(max_workers=_NODE_PARALLELISM) as pool:
-        for node, step, target, node_name in jobs:
-            pool.submit(_join, node.id, step.id, target, node_name)
+        for node_id, step_id, target, node_name in submissions:
+            pool.submit(_join, node_id, step_id, target, node_name)
 
     failures = []
     for node, step, _, _ in jobs:
