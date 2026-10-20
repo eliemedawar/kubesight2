@@ -490,6 +490,64 @@ def test_the_unreachable_breaker_after_the_control_plane_is_ridden_out(app, fast
     assert all(n["status"] == "done" and n["versionAfter"] == "v1.34.1" for n in job["nodes"])
 
 
+_RBAC_WARMUP = ('Error from server (Forbidden): jobs.batch "kubesight-upg-56c9f7ec" is forbidden: User '
+                '"kubernetes-admin" cannot get resource "jobs" in API group "batch" in the namespace "default"')
+
+
+def test_rbac_refusals_right_after_the_api_server_restart_are_ridden_out(app, fast_executor, monkeypatch):
+    """The user's testing cluster (1 CP + 1 worker, 1.34.0 -> 1.35.0) failed on
+    the CP: the new API server refused kubernetes-admin until RBAC loaded."""
+    from api.upgrade_jobs import get_job
+
+    ex = fast_executor
+    cluster = FakeCluster(cps=1, workers=1, version="v1.34.0")
+    cluster.outage_after_apply = 4
+    cluster.outage_message = _RBAC_WARMUP
+    monkeypatch.setattr(ex, "_run_on_node", cluster.run_on_node)
+    job_id = _start(ex, cluster)
+    ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.35.0",
+                                cluster.kubectl, job_id, options={"etcdSnapshot": False})
+    job = get_job(job_id)
+    assert job["status"] == "completed"
+    assert all(n["status"] == "done" and n["versionAfter"] == "v1.35.0" for n in job["nodes"])
+    # Retried, but a refusal that outlasts the retries is a permission: no auto-resume loop.
+    assert ex._is_transient_api_error(RuntimeError(_RBAC_WARMUP))
+    assert not ex._resumable(RuntimeError(_RBAC_WARMUP))
+
+
+def test_a_job_the_run_lost_sight_of_is_left_running(fast_executor, monkeypatch):
+    """Deleting it used to kill the upgrade script half-way (after kubeadm
+    apply, before the kubelet). Only a Job seen failing or timing out is removed."""
+    ex = fast_executor
+    deleted = []
+    monkeypatch.setattr(ex, "_kubectl_apply_manifest", lambda access, manifest: "")
+
+    def kubectl(access, args, timeout=None):
+        if "delete" in args:
+            deleted.append(args)
+            return ""
+        raise RuntimeError("Error from server (InternalError): an error on the server has prevented the request")
+
+    with pytest.raises(RuntimeError) as caught:
+        ex._run_on_node(ClusterAccess(cluster_id="c", context_name="c"), kubectl, "cp-1", "true")
+    assert caught.value.upgrade_job.startswith("kubesight-upg-")
+    assert deleted == []
+
+    def failed_job(access, args, timeout=None):
+        if "delete" in args:
+            deleted.append(args)
+            return ""
+        if "pods" in args:
+            return json.dumps({"items": [{"metadata": {"name": "p"}}]})
+        if "logs" in args:
+            return "boom"
+        return json.dumps({"status": {"failed": 1}})
+
+    with pytest.raises(ex.NodeCommandFailed):
+        ex._run_on_node(ClusterAccess(cluster_id="c", context_name="c"), failed_job, "cp-1", "true")
+    assert len(deleted) == 1
+
+
 def test_kubectls_connection_was_refused_is_ridden_out(app, fast_executor, monkeypatch):
     """The user's testing cluster (1 CP + 1 worker, 1.33.9 -> 1.34.0) stopped on
     kubectl's own wording for the API server restarting under kubeadm."""

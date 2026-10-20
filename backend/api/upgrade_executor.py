@@ -128,13 +128,25 @@ _SLOW_API_ERROR_MARKERS = (
     "etcdserver:",
     "kubectl command timed out after",
 )
-_TRANSIENT_API_ERROR_MARKERS = _CONNECTION_ERROR_MARKERS + _SLOW_API_ERROR_MARKERS
+# It answered, but RBAC was not loaded yet. Since 1.29 kubeadm's admin.conf user
+# is in kubeadm:cluster-admins, not system:masters, so for a few seconds after
+# `kubeadm upgrade apply` restarts the API server it is refused everything
+# ('jobs.batch "kubesight-upg-…" is forbidden: User "kubernetes-admin" cannot
+# get resource "jobs"…'). That ended a user's run with the control plane
+# half-way. Retried like a restart; a refusal that outlasts the retries is real.
+_AUTHZ_WARMUP_MARKERS = ("is forbidden: user",)
+_TRANSIENT_API_ERROR_MARKERS = _CONNECTION_ERROR_MARKERS + _SLOW_API_ERROR_MARKERS + _AUTHZ_WARMUP_MARKERS
 
 
 def _is_transient_api_error(exc: Exception, *, connection_only: bool = False) -> bool:
     lower = str(exc).lower()
     markers = _CONNECTION_ERROR_MARKERS if connection_only else _TRANSIENT_API_ERROR_MARKERS
     return any(marker in lower for marker in markers)
+
+
+def _is_authz_refusal(exc: BaseException) -> bool:
+    lower = str(exc).lower()
+    return any(marker in lower for marker in _AUTHZ_WARMUP_MARKERS)
 
 
 def _retry_transient(call: Callable[[], str], *, connection_only: bool = False) -> str:
@@ -166,7 +178,8 @@ def _resumable(exc: BaseException) -> bool:
         if isinstance(seen, (NodeCommandFailed, DrainFailed, RunStopped)):
             return False
         seen = seen.__cause__
-    return isinstance(exc, Exception) and _is_transient_api_error(exc)
+    # A refusal still there after the retries is a permission, not a restart.
+    return isinstance(exc, Exception) and _is_transient_api_error(exc) and not _is_authz_refusal(exc)
 
 
 def _kubectl_verb(args: List[str]) -> str:
@@ -779,11 +792,20 @@ def _run_on_node(
             },
         },
     }
+    _retry_transient(lambda: _kubectl_apply_manifest(access, manifest))
     try:
-        _retry_transient(lambda: _kubectl_apply_manifest(access, manifest))
         output = _wait_for_job_completion(access, run_kubectl, job_name, timeout_seconds=timeout_seconds)
-    finally:
-        _delete_upgrade_job(access, run_kubectl, job_name)
+    except Exception as exc:
+        # The run only lost sight of the Job (API restarting, RBAC not loaded):
+        # it may still be running, between `kubeadm upgrade apply` and the
+        # kubelet say. Deleting it would kill the script there, so leave it to
+        # finish (its TTL removes it) and say which Job it is.
+        if isinstance(exc, NodeCommandFailed) or str(exc).startswith("Timed out waiting for upgrade job"):
+            _delete_upgrade_job(access, run_kubectl, job_name)
+        else:
+            exc.upgrade_job = job_name  # type: ignore[attr-defined]
+        raise
+    _delete_upgrade_job(access, run_kubectl, job_name)
 
     output = output.strip()
     lowered = output.lower()
@@ -1195,9 +1217,35 @@ def _prestage(access: ClusterAccess, run_kubectl: RunKubectlFn, tracker: "RunTra
         list(pool.map(lambda node: _one(*node), nodes))
 
 
-def _upgraded_despite_job(access: ClusterAccess, run_kubectl: RunKubectlFn, node: str, done_marker: str) -> bool:
+def _wait_job_finished(access: ClusterAccess, run_kubectl: RunKubectlFn, job_name: str) -> None:
+    """Until ``job_name`` (one the run lost sight of) has finished or is gone,
+    then remove it. Best effort: gives up quietly when the API stays away."""
+    deadline = time.time() + POD_WAIT_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        try:
+            job = _get_json(access, run_kubectl, ["get", "job", job_name, "-n", DEFAULT_DEBUG_NAMESPACE, "-o", "json"])
+        except Exception as exc:  # noqa: BLE001
+            lower = str(exc).lower()
+            if "not found" in lower or "notfound" in lower.replace(" ", ""):
+                return
+            if not _is_transient_api_error(exc):
+                return
+        else:
+            status = job.get("status") or {}
+            if status.get("succeeded") or status.get("failed"):
+                _delete_upgrade_job(access, run_kubectl, job_name)
+                return
+        time.sleep(POD_POLL_INTERVAL_SECONDS)
+
+
+def _upgraded_despite_job(access: ClusterAccess, run_kubectl: RunKubectlFn, node: str, done_marker: str,
+                          *, still_running: Optional[str] = None) -> bool:
     """Whether ``node`` holds the marker its upgrade script leaves once every
-    step passed — read (and removed) by a fresh Job once the kubelet is back."""
+    step passed — read (and removed) by a fresh Job once the kubelet is back.
+    ``still_running``: the upgrade Job the run lost sight of; it is waited for
+    first, so the marker is read after the script ended, not half-way."""
+    if still_running:
+        _wait_job_finished(access, run_kubectl, still_running)
     path = shlex.quote(f"{UPGRADE_MARK_DIR}/{done_marker}")
     script = f"if [ -f {path} ]; then rm -f {path}; echo {_MARK_FOUND}; fi"
     try:
@@ -1475,8 +1523,15 @@ def _kubeadm_attempt(
             _run_on_node(access, run_kubectl, name, script)
         except Exception as exc:
             # An API outage is the auto-resume's to handle; anything else may
-            # only be the kubelet restart ending the Job's own pod.
-            if _resumable(exc) or not _upgraded_despite_job(access, run_kubectl, name, _done_marker(job_id, name)):
+            # only be the kubelet restart ending the Job's own pod. A Job the
+            # run only lost sight of is waited for first either way: a resume
+            # must not start a second script on the node beside it.
+            running = getattr(exc, "upgrade_job", None)
+            if running:
+                tracker.log(name, f"Lost sight of the upgrade job ({str(exc)[:160]}); waiting for it to "
+                                  "finish on the node.")
+            if (_resumable(exc) and not running) or not _upgraded_despite_job(
+                    access, run_kubectl, name, _done_marker(job_id, name), still_running=running):
                 tracker.node(name, phase="upgrade", status="failed", state="failed",
                              message="Upgrade failed on the node; left cordoned for inspection.")
                 tracker.log(name, f"upgrade failed: {str(exc)[:300]}")
