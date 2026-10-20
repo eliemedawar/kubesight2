@@ -153,6 +153,8 @@ class FakeCluster:
         # Calls that fail as if the API server were down, set when `apply` runs.
         self.outage = 0
         self.outage_after_apply = 0
+        self.outage_message = ("Cluster API is unreachable (a recent request timed out). "
+                               "Retrying automatically within 20s.")
         # Nodes whose upgrade Job's pod the restarted kubelet ends: the node is
         # upgraded, the Job reads as failed.
         self.kubelet_kills_job = set()
@@ -169,8 +171,7 @@ class FakeCluster:
                 from api.k8s_provider import K8sCommandError
 
                 self.outage -= 1
-                raise K8sCommandError("Cluster API is unreachable (a recent request timed out). "
-                                      "Retrying automatically within 20s.")
+                raise K8sCommandError(self.outage_message)
             if key == "get nodes -o json":
                 return json.dumps({"items": list(self.nodes.values())})
             if key == "version -o json":
@@ -487,6 +488,27 @@ def test_the_unreachable_breaker_after_the_control_plane_is_ridden_out(app, fast
     job = get_job(job_id)
     assert job["status"] == "completed"
     assert all(n["status"] == "done" and n["versionAfter"] == "v1.34.1" for n in job["nodes"])
+
+
+def test_kubectls_connection_was_refused_is_ridden_out(app, fast_executor, monkeypatch):
+    """The user's testing cluster (1 CP + 1 worker, 1.33.9 -> 1.34.0) stopped on
+    kubectl's own wording for the API server restarting under kubeadm."""
+    from api.upgrade_jobs import get_job
+
+    ex = fast_executor
+    cluster = FakeCluster(cps=1, workers=1, version="v1.33.9")
+    cluster.outage_after_apply = 6
+    cluster.outage_message = ("The connection to the server 10.4.112.2:6443 was refused - "
+                              "did you specify the right host or port?")
+    assert ex._is_transient_api_error(RuntimeError(cluster.outage_message), connection_only=True)
+    monkeypatch.setattr(ex, "_run_on_node", cluster.run_on_node)
+    job_id = _start(ex, cluster)
+    ex._execute_kubeadm_upgrade(ClusterAccess(cluster_id="kubeadm-1", context_name="k"), "v1.34.0",
+                                cluster.kubectl, job_id, options={"etcdSnapshot": False})
+    assert [e[1] for e in cluster.events if e[0] == "upgrade"] == ["cp-1", "w-1"]
+    job = get_job(job_id)
+    assert job["status"] == "completed"
+    assert all(n["status"] == "done" and n["versionAfter"] == "v1.34.0" for n in job["nodes"])
 
 
 def test_run_continues_by_itself_when_a_step_lost_the_api(app, fast_executor, monkeypatch):

@@ -96,6 +96,10 @@ NODE_PHASES = ["cordon", "drain", "upgrade", "uncordon", "ready"]
 _CONNECTION_ERROR_MARKERS = (
     "connectex",
     "connection refused",
+    # kubectl's own wording when nothing listens on the API port — what a run
+    # sees while kubeadm restarts the only API server ("The connection to the
+    # server 10.0.0.2:6443 was refused - did you specify the right host or port?").
+    "the connection to the server",
     "dial tcp",
     "unable to connect to the server",
     "no connection could be made",
