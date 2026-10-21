@@ -12,3 +12,7 @@ concept/.runtime-preview-profile/
 
 __pycache__/
 *.pyc
+
+# Live-cluster export (charts/export-live-objects.sh): ConfigMaps and env as-is.
+uat-export/
+uat-export.tar.gz
