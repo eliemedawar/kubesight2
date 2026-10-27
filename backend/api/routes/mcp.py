@@ -131,18 +131,29 @@ def _audit(message, user) -> None:
     # rows reads "deploys, workloads" faster than eleven tool names, and the
     # names are still there when they want them.
     domains = sorted({tools.domain_of(name) for name in called} - {""})
+    details = {
+        "tools": called,
+        "count": len(called),
+        "writes": writes,
+        "domains": domains,
+    }
+    # Who an agent says it is acting for ("infra:zoho#4521"). A claim for the
+    # record, never a grant: the token's own user is what is checked.
+    on_behalf_of = _on_behalf_of()
+    if on_behalf_of:
+        details["onBehalfOf"] = on_behalf_of
     log_audit(
         "mcp_tools_called",
         actor=user,
         target_type="mcp",
         target_id="kubesight",
-        details={
-            "tools": called,
-            "count": len(called),
-            "writes": writes,
-            "domains": domains,
-        },
+        details=details,
     )
+
+
+def _on_behalf_of() -> str:
+    raw = request.headers.get("X-KubeSight-On-Behalf-Of", "")
+    return "".join(ch for ch in raw if ch.isprintable())[:200].strip()
 
 
 @mcp_bp.route("/access", methods=["GET"])

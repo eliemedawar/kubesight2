@@ -276,10 +276,24 @@ def _normalize_omitted_metadata(candidate: object) -> object:
     return normalized
 
 
+def analysis_target() -> tuple[str, str, str]:
+    """(endpoint, token, model) for source analysis: Hermes, or the agent
+    platform when AGENT_ENGINE_ANALYSIS=platform. The analysis Job is handed
+    these as its HERMES_* variables, so the worker itself never changes."""
+    from .agent_platform import chat_target
+
+    target = chat_target("analysis")
+    if target is not None:
+        return target.endpoint, target.token, target.model
+    return (
+        os.getenv("HERMES_API_URL", "").strip(),
+        _secret_value("HERMES_API_TOKEN"),
+        os.getenv("HERMES_APPLICATION_MODEL", "hermes-analysis").strip(),
+    )
+
+
 def analyze(evidence: dict) -> tuple[dict, str, str]:
-    endpoint = os.getenv("HERMES_API_URL", "").strip()
-    token = _secret_value("HERMES_API_TOKEN")
-    model = os.getenv("HERMES_APPLICATION_MODEL", "hermes-analysis").strip()
+    endpoint, token, model = analysis_target()
     if not endpoint or not token:
         raise HermesError("Hermes source analysis is not configured.")
     _validate_endpoint(endpoint)

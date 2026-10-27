@@ -58,6 +58,16 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- printf "http://kubesight-hermes.%s.svc.cluster.local:8642/v1/chat/completions" (include "kubesight.namespace" .) -}}
 {{- end -}}
 
+{{- define "kubesight.agentPlatformImage" -}}
+{{- $tag := .Values.agentPlatform.image.tag | default .Values.image.tag -}}
+{{- printf "%s/%s:%s" .Values.image.registry .Values.agentPlatform.image.repository (required "image.tag (or agentPlatform.image.tag) is required" $tag) -}}
+{{- end -}}
+
+{{/* The agent platform's API, which the backend and the analysis Jobs call. */}}
+{{- define "kubesight.agentPlatformUrl" -}}
+{{- printf "http://kubesight-agent-platform.%s.svc.cluster.local:8000" .Values.agentPlatform.namespace -}}
+{{- end -}}
+
 {{- define "kubesight.imagePullSecrets" -}}
 {{- if .Values.imagePullSecret.name }}
 imagePullSecrets:

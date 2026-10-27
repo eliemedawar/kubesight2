@@ -266,3 +266,62 @@ hermes:
     #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ai-proxy}}
     #   - ipBlock: {cidr: 10.4.27.50/32}
     extraIngressFrom: []
+
+# --- Agent platform ------------------------------------------------------------
+# PydanticAI agents running durably on Temporal; replaces Hermes one flow at a
+# time. KubeSight stays the system of record and the approval authority: the
+# platform reaches it only through the MCP server, with its own narrow account
+# (agent-platform), and reports back to the backend. See "Agent platform" in
+# the README.
+agentPlatform:
+  enabled: false
+  # Its own namespace, so a stuck model call never ties up the backend.
+  namespace: kubesight-agents
+  image:
+    repository: kubesight-agent-platform
+    # Empty = image.tag (it is built with every KubeSight release).
+    tag: ""
+  # Which engine each flow uses: hermes or platform. Switching back is the
+  # same edit. Hermes stays installed until every flow is on the platform.
+  flows:
+    tickets: hermes
+    analysis: hermes
+    ciAssist: hermes
+  # The model, through the AI proxy (any OpenAI-compatible chat-completions
+  # API). The key comes from a Secret you create in agentPlatform.namespace
+  # AFTER the install (the chart creates the namespace):
+  #   kubectl -n kubesight-agents create secret generic agent-platform-model \
+  #     --from-literal=MODEL_API_KEY=...
+  model:
+    baseUrl: ""        # e.g. https://ai-proxy.example.com/v1
+    name: gpt-5.6-sol
+    apiKeySecret: agent-platform-model
+  temporal:
+    # The Temporal frontend (a separate release of the official chart; see
+    # the README). The platform's workflows live in this Temporal namespace.
+    address: temporal-frontend.temporal.svc.cluster.local:7233
+    namespace: agents
+  # How long a ticket's workflow stays open with nothing to do.
+  ticketIdleDays: 30
+  api:
+    replicas: 2
+    resources:
+      requests: {cpu: 100m, memory: 256Mi, ephemeral-storage: 64Mi}
+      limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 256Mi}
+  worker:
+    replicas: 2
+    resources:
+      requests: {cpu: 250m, memory: 512Mi, ephemeral-storage: 64Mi}
+      limits: {cpu: "2", memory: 1Gi, ephemeral-storage: 512Mi}
+  networkPolicy:
+    enabled: true
+    # The AI proxy and the model providers are reached on 443 anywhere except
+    # these ranges; add an in-cluster proxy under extraEgress.
+    egressExcept: [172.16.0.0/12, 192.168.0.0/16]
+    # The Temporal frontend's namespace and port.
+    temporalNamespace: temporal
+    temporalPort: 7233
+    # More egress peers, as NetworkPolicy rules, e.g. an in-cluster AI proxy:
+    #   - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ai-proxy}}}]
+    #     ports: [{port: 8080, protocol: TCP}]
+    extraEgress: []

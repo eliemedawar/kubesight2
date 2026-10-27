@@ -10,6 +10,7 @@ One release installs everything KubeSight runs in a cluster:
 | Native CI | `kubesight-ci` | build ServiceAccount, launcher Role, quota, limits, dependency cache volume |
 | BuildKit | `kubesight-buildkit` | `buildkitd` (2 replicas), `buildkitd` + `buildkitd-pods` Services, NetworkPolicy |
 | Application Intelligence | `kubesight-analysis` | worker ServiceAccount, launcher Role, quota, limits |
+| Agent platform (off by default) | `kubesight-agents` | API + worker Deployments, `kubesight-agent-platform` Service, department ConfigMap, Secrets, NetworkPolicies |
 
 PostgreSQL is not part of it: KubeSight uses an external database.
 
@@ -19,7 +20,7 @@ PostgreSQL is not part of it: KubeSight uses an external database.
 - An ingress controller, and a DNS record for the host name pointing at it.
 - metrics-server (CPU alerts, `kubectl top`).
 - PostgreSQL 14+ with an empty database and a user that owns it.
-- The images in the registry: `kubesight-backend` and `kubesight-frontend` at the release tag, `kubesight-hermes`, and `moby/buildkit` reachable.
+- The images in the registry: `kubesight-backend` and `kubesight-frontend` at the release tag (plus `kubesight-agent-platform` when the agent platform is on), `kubesight-hermes`, and `moby/buildkit` reachable.
 - Storage: a StorageClass, or NFS exports for the backend data, Hermes data and CI cache (set `nfs.server` and `nfs.path` per volume). The CI cache export must belong to uid 65532:
   `sudo mkdir -p <path> && sudo chown 65532:65532 <path> && sudo chmod 2775 <path>`
 
@@ -153,6 +154,64 @@ The proxy must:
 **Integrations** in KubeSight shows the configured URL, and the ticket agent's **Test
 connection** confirms the proxy answers. Hermes's own calls to KubeSight's MCP server do
 not go through the proxy.
+
+## Agent platform
+
+The agent platform replaces Hermes: PydanticAI agents, run durably on Temporal, one flow
+at a time. KubeSight stays the system of record and the approval authority. The
+platform reaches it only through the MCP server, with its own `agent-platform` account,
+and reports back to the backend.
+
+| Flow | Switch (`agentPlatform.flows`) | On the platform |
+|---|---|---|
+| Tickets | `tickets` | One Temporal workflow per ticket. Every task on the ticket (new ticket, deploy follow-up, requester reply) is a signal to it. No backend thread waits on a model. |
+| Source analysis | `analysis` | The analysis Job calls the platform's OpenAI-compatible endpoint instead of Hermes. |
+| CI assist | `ciAssist` | Pipeline generation and repair, the same way. |
+
+Each switch is `hermes` or `platform`, and switching back is the same edit. The ticket
+agent sees only the `kubesight_ticket_*` tools and the read-only tools. No other write
+tool is shown to it, and the `agent-platform` role makes KubeSight refuse one anyway.
+
+**1. Temporal.** Install the official chart as its own release, on the external PostgreSQL
+in separate databases. [`../temporal-values.example.yaml`](../temporal-values.example.yaml)
+has the values and commands. The platform uses the Temporal namespace `agents`.
+
+**2. Turn it on**, with every flow still on Hermes:
+
+```yaml
+agentPlatform:
+  enabled: true
+  model:
+    baseUrl: https://ai-proxy.example.com/v1
+    name: gpt-5.6-sol
+```
+
+**3. The model key.** The chart creates the `kubesight-agents` namespace, so create the key
+after the install (creating the namespace first makes Helm refuse it). The worker waits in
+`CreateContainerConfigError` until the Secret exists, then starts by itself:
+
+```bash
+kubectl -n kubesight-agents create secret generic agent-platform-model --from-literal=MODEL_API_KEY=<key>
+```
+
+The image `kubesight-agent-platform` is built with every release at the same tag. The chart
+generates the platform's MCP token and the shared secret, and keeps them across upgrades.
+The backend registers the token for `agent-platform` on boot. **Integrations → Agent
+platform → Test connection** confirms the backend reaches the platform and the platform
+reaches Temporal.
+
+**4. Give it clusters to read.** Troubleshooting tickets read pods, logs and events. In
+**Users**, grant the `agent-platform` account the clusters (and namespaces) it may read.
+Its role is fixed and holds only `:view` permissions besides the ticket tools.
+
+**5. Move one flow at a time**, for example `--set agentPlatform.flows.tickets=platform`,
+check it in UAT, then the next. When all three are on the platform, `hermes.enabled=false`
+removes Hermes.
+
+The department file and the ticket prompt are in `agent-platform/departments/infra`.
+`files/agent-platform` is the chart's copy: run `charts/kubesight/sync-agent-platform.sh`
+after editing it. `backend/tests/test_chart_agent_platform.py` fails while the copies
+differ, or while the ticket rules differ from Hermes' prompt.
 
 ## Hermes skill
 

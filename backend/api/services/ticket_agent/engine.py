@@ -42,6 +42,7 @@ from ...models import (
     TicketInterpretation,
     ZohoInboundTicket,
 )
+from .. import agent_platform
 from . import catalog, hermes, schema, settings as agent_settings, telegram, validator, vm_requests
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,11 @@ def _max_attempts() -> int:
 
 
 def _stale_seconds() -> int:
+    if agent_platform.uses_platform("tickets"):
+        # The platform reports when it is done; this only catches a report
+        # that never came. Re-sending is safe: the workflow answers a task it
+        # finished with the same report and ignores one it is still on.
+        return max(300, _int_env("TICKET_AGENT_PLATFORM_STALE_SECONDS", 3600))
     # Longer than the Hermes timeout: a worker blocks on one call the whole time.
     return max(120, _int_env("TICKET_AGENT_STALE_SECONDS", 1200))
 
@@ -293,7 +299,9 @@ def kick() -> int:
     """
     now = _now()
     testing = _testing()
-    if testing:
+    on_platform = agent_platform.uses_platform("tickets")
+    if testing or on_platform:
+        # The platform holds no thread of ours while it works.
         room = 10
     else:
         with _executor_lock:
@@ -318,6 +326,10 @@ def kick() -> int:
     db.session.commit()
     if not claimed:
         return 0
+    if on_platform:
+        for task_id in claimed:
+            submit(task_id)
+        return len(claimed)
     if testing:
         for task_id in claimed:
             process(task_id)
@@ -403,24 +415,106 @@ def _task_message(task: TicketInterpretation, ticket: ZohoInboundTicket) -> Dict
     }
 
 
-def process(task_id: int) -> None:
-    """One worker's job: hand the task to Hermes, then see what it recorded."""
+def _prepare(task_id: int):
+    """The claimed task, its ticket and the message for the agent — or None
+    after failing the task when it cannot be handed over."""
     task = db.session.get(TicketInterpretation, int(task_id))
     if task is None or task.status != RUNNING:
-        return
+        return None
     ticket = db.session.get(ZohoInboundTicket, task.ticket_record_id) if task.ticket_record_id else None
     if ticket is None:
         _fail(task, "The ticket is no longer in the inbound log.")
-        return
+        return None
     try:
         message = _task_message(task, ticket)
     except Exception as exc:  # noqa: BLE001
-        _fail(task, f"Could not prepare the task for Hermes: {exc}")
-        return
+        _fail(task, f"Could not prepare the task for the agent: {exc}")
+        return None
     if task.kind == "handle" and not message.get("catalog") and not message.get("vmProfiles"):
         _fail(task, "No deploy targets are published for this provider — pick a source cluster and "
                     "namespaces in its Field sync first.")
+        return None
+    return task, ticket, message
+
+
+def _retry_later(task: TicketInterpretation, message: str) -> None:
+    if (task.attempts or 0) < _max_attempts():
+        task.status = PENDING
+        task.retry_at = _now() + timedelta(minutes=2 * (task.attempts or 1))
+        task.error = f"{message} Retrying."
+        db.session.commit()
         return
+    _fail(task, message)
+
+
+def submit(task_id: int) -> None:
+    """Hand a claimed task to the agent platform; its report comes back later
+    (:func:`on_platform_report`). Returns as soon as the platform took it."""
+    prepared = _prepare(task_id)
+    if prepared is None:
+        return
+    task, ticket, message = prepared
+    db.session.commit()
+    try:
+        agent_platform.submit_ticket_task(
+            provider=ticket.provider or "zoho",
+            record_id=ticket.id,
+            task_id=task.id,
+            kind=task.kind,
+            message=message,
+        )
+    except agent_platform.PlatformUnavailable as exc:
+        task = _reload(task_id)
+        if task is not None and task.status == RUNNING:
+            _retry_later(task, str(exc))
+        return
+    except agent_platform.PlatformError as exc:
+        task = _reload(task_id)
+        if task is not None and task.status == RUNNING:
+            _fail(task, str(exc))
+        return
+    task = _reload(task_id)
+    if task is not None and task.status == RUNNING:
+        # From here the platform owns the work; the reaper only steps in if
+        # no report arrives for a long time.
+        task.heartbeat_at = _now()
+        task.error = None
+        db.session.commit()
+
+
+def on_platform_report(task_id: int, report: Dict[str, Any]) -> Dict[str, Any]:
+    """The platform finished a task: the same check as after a Hermes call.
+
+    What the agent did was recorded by the tools as it went. A task still
+    running here means the agent ended without settling it.
+    """
+    task = _reload(task_id)
+    if task is None:
+        raise AgentError("Ticket agent task not found.", 404)
+    summary = str(report.get("summary") or "")[:1000] or None
+    model = str(report.get("model") or "")[:120] or None
+    if model:
+        task.model = model
+    if summary:
+        task.final_message = summary
+    if task.status != RUNNING:
+        db.session.commit()
+        return {"status": task.status, "settled": True}
+    if report.get("status") == "failed":
+        _fail(task, "The agent platform could not finish this task: "
+                    + str(report.get("error") or "no reason given")[:500])
+    else:
+        _fail(task, "The agent finished without acting on the ticket"
+                    + (f": {summary}" if summary else "."))
+    return {"status": task.status, "settled": False}
+
+
+def process(task_id: int) -> None:
+    """One worker's job: hand the task to Hermes, then see what it recorded."""
+    prepared = _prepare(task_id)
+    if prepared is None:
+        return
+    task, ticket, message = prepared
 
     # Hermes can take up to its timeout (minutes) and calls back into KubeSight
     # over MCP: hold no transaction (and no pooled connection) meanwhile.
@@ -431,13 +525,7 @@ def process(task_id: int) -> None:
         task = _reload(task_id)
         if task is None or task.status != RUNNING:
             return  # a tool settled it before the connection dropped
-        if (task.attempts or 0) < _max_attempts():
-            task.status = PENDING
-            task.retry_at = _now() + timedelta(minutes=2 * (task.attempts or 1))
-            task.error = f"{exc} Retrying."
-            db.session.commit()
-            return
-        _fail(task, str(exc))
+        _retry_later(task, str(exc))
         return
     except hermes.HermesError as exc:
         task = _reload(task_id)

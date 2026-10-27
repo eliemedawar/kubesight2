@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from ...db import db
 from ...models import TicketAgentSettings
 from ...secret_encryption import decrypt_secret, encrypt_secret
+from .. import agent_platform
 from . import hermes, telegram
 
 CONFIDENCE_BARS = ("High", "Medium")
@@ -38,10 +39,15 @@ def is_active() -> bool:
     Hermes unconfigured means the deterministic path keeps working exactly as
     before — turning the agent on must never be what stops deployments. The
     agent needs its OWN Hermes endpoint: the shared one has no MCP tools and
-    could only fail every ticket.
+    could only fail every ticket. With AGENT_ENGINE_TICKETS=platform the
+    agent platform takes Hermes' place, and must be configured instead.
     """
     row = db.session.get(TicketAgentSettings, 1)
-    return bool(row and row.enabled and hermes.dedicated() and hermes.is_configured())
+    if not (row and row.enabled):
+        return False
+    if agent_platform.uses_platform("tickets"):
+        return agent_platform.is_configured()
+    return hermes.dedicated() and hermes.is_configured()
 
 
 def troubleshooting_enabled() -> bool:
@@ -102,6 +108,10 @@ def serialize(row: Optional[TicketAgentSettings] = None) -> Dict[str, Any]:
         "hermesConfigured": hermes.is_configured(),
         "hermesHint": hermes.configuration_hint(),
         "hermesDedicated": hermes.dedicated(),
+        # hermes | platform (AGENT_ENGINE_TICKETS): who handles the tickets.
+        "engine": agent_platform.engine("tickets"),
+        "platformConfigured": agent_platform.is_configured(),
+        "platformHint": agent_platform.configuration_hint(),
         # Stored with the rest of deploy automation (every ticket run builds the
         # same way, whoever started it); edited here because it is the choice of
         # what Hermes' deploys build with.

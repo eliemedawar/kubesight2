@@ -1,0 +1,56 @@
+# Temporal for the KubeSight agent platform: the official chart, its own
+# release in its own namespace, on the external PostgreSQL (separate databases,
+# never KubeSight's own). See "Agent platform" in charts/kubesight/README.md.
+#
+#   Create the databases first (owner: temporal): temporal, temporal_visibility
+#   helm repo add temporal https://go.temporal.io/helm-charts
+#   kubectl create namespace temporal
+#   kubectl -n temporal create secret generic temporal-db-secret --from-literal=password=<password>
+#   helm upgrade --install temporal temporal/temporal --version 1.7.0 -n temporal \
+#     -f temporal-values.yaml
+#
+# Check these keys against the chart version you install (helm show values
+# temporal/temporal --version 1.7.0): Temporal's chart moves them between
+# major versions. Upgrade the server one minor version at a time.
+server:
+  replicaCount: 1
+  config:
+    # Fixed forever: it cannot change after the first install.
+    numHistoryShards: 512
+    persistence:
+      defaultStore: default
+      visibilityStore: visibility
+      datastores:
+        default:
+          sql:
+            pluginName: postgres12
+            driverName: postgres12
+            databaseName: temporal
+            connectAddr: "<pg-host>:5432"
+            user: temporal
+            existingSecret: temporal-db-secret
+            secretKey: password
+            createDatabase: false   # create both databases first (README)
+            manageSchema: true
+        visibility:
+          sql:
+            pluginName: postgres12
+            driverName: postgres12
+            databaseName: temporal_visibility
+            connectAddr: "<pg-host>:5432"
+            user: temporal
+            existingSecret: temporal-db-secret
+            secretKey: password
+            createDatabase: false   # create both databases first (README)
+            manageSchema: true
+    namespaces:
+      create: true
+      namespace:
+        # agentPlatform.temporal.namespace in KubeSight's values.
+        - name: agents
+          retention: 30d
+
+# The Web UI shows every workflow's history, ticket text included: keep it
+# behind an ingress only admins reach, or leave it off.
+web:
+  enabled: true

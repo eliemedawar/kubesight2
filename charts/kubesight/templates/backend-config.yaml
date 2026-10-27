@@ -92,6 +92,18 @@
 {{- $_ := merge $data (dict "HERMES_SERVICE_NAMESPACE" $ns "HERMES_SERVICE_PORT" "8642") }}
 {{- end }}
 {{- end }}
+{{- if .Values.agentPlatform.enabled }}
+{{- with .Values.agentPlatform }}
+{{- $_ := merge $data (dict
+  "AGENT_PLATFORM_URL" (include "kubesight.agentPlatformUrl" $)
+  "AGENT_PLATFORM_SERVICE_NAMESPACE" .namespace
+  "AGENT_PLATFORM_SERVICE_PORT" "8000"
+  "AGENT_ENGINE_TICKETS" .flows.tickets
+  "AGENT_ENGINE_ANALYSIS" .flows.analysis
+  "AGENT_ENGINE_CI_ASSIST" .flows.ciAssist
+) }}
+{{- end }}
+{{- end }}
 {{- /* backend.config wins over everything the chart set. */ -}}
 {{- range $key, $value := .Values.backend.config }}
 {{- $_ := set $data $key (toString $value) }}

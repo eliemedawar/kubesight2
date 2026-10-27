@@ -69,3 +69,18 @@ hermes:
   persistence:
     storageClass: ""
     # nfs: {server: <nfs-server>, path: /data/NFS-DATA/kubesight-prod/hermes}
+
+# The agent platform that replaces Hermes ("Agent platform" in the README).
+# Install Temporal first (../temporal-values.example.yaml). AFTER this release is
+# installed (the chart creates the namespace), add the model key:
+# kubectl -n kubesight-agents create secret generic agent-platform-model --from-literal=MODEL_API_KEY=<key>
+agentPlatform:
+  enabled: false
+  model:
+    baseUrl: ""        # the AI proxy, e.g. https://ai-proxy.example.com/v1
+    name: gpt-5.6-sol
+  # Move one flow at a time; hermes switches it back.
+  flows:
+    tickets: hermes
+    analysis: hermes
+    ciAssist: hermes

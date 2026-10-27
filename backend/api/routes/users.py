@@ -68,6 +68,13 @@ def update_user(user_id: int):
                 "The hermes-agent identity boundary cannot be changed through user management.",
                 400,
             )
+    if getattr(user, "is_service_account", False) and user.username == "agent-platform":
+        # Its role is fixed; which clusters it may read is the admin's call.
+        if {"roleId", "password"} & set(payload):
+            return error_response(
+                "The agent-platform account's role is fixed; grant it clusters instead.",
+                400,
+            )
     if "fullName" in payload:
         user.full_name = (payload.get("fullName") or "").strip() or user.full_name
     if "email" in payload:

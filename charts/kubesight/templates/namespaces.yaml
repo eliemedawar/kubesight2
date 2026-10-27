@@ -14,6 +14,9 @@ removing the release never deletes a build or analysis still in them.
 {{- if .Values.analysis.enabled }}
 {{- $namespaces = append $namespaces (dict "name" .Values.analysis.namespace "purpose" "untrusted-source-analysis" "pss" "restricted") }}
 {{- end }}
+{{- if .Values.agentPlatform.enabled }}
+{{- $namespaces = append $namespaces (dict "name" .Values.agentPlatform.namespace "purpose" "agent-platform" "pss" "restricted") }}
+{{- end }}
 {{- range $namespaces }}
 ---
 apiVersion: v1

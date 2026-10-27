@@ -526,6 +526,21 @@ HERMES_AGENT_PERMISSIONS = [
     "promotions:view",
 ]
 
+# What the agent-platform service account can do: the Hermes set, plus the
+# read-only views its ticket agent investigates with (troubleshooting tickets
+# read pods, logs, events and alerts). Only ``:view`` keys — the platform shows
+# its agent no write tool but the kubesight_ticket_* ones, and this role makes
+# KubeSight refuse any other write even if one were called. Cluster visibility
+# still comes from the clusters an admin grants this account.
+AGENT_PLATFORM_PERMISSIONS = list(
+    dict.fromkeys(
+        HERMES_AGENT_PERMISSIONS + [key for key in VIEWER_PERMISSIONS if key.endswith(":view")]
+    )
+)
+
+# Accounts nobody signs in as: agents reach KubeSight only with an API token.
+SERVICE_ACCOUNT_USERNAMES = frozenset({"hermes-agent", "agent-platform"})
+
 ROLE_DEFINITIONS = {
     "admin": {
         "description": "Full access to everything",
@@ -551,6 +566,11 @@ ROLE_DEFINITIONS = {
         "description": "Non-interactive Hermes service account: ticket agent + source-analysis executor",
         "is_system_role": True,
         "permissions": HERMES_AGENT_PERMISSIONS,
+    },
+    "agent-platform": {
+        "description": "Non-interactive agent platform account: ticket agent tools + read-only views",
+        "is_system_role": True,
+        "permissions": AGENT_PLATFORM_PERMISSIONS,
     },
 }
 
@@ -582,5 +602,12 @@ DEFAULT_USERS = [
         "email": "hermes@kubesight.local",
         "full_name": "Hermes AI Agent",
         "role": "hermes-agent",
+    },
+    {
+        "username": "agent-platform",
+        "password": "agent-platform-disabled",
+        "email": "agent-platform@kubesight.local",
+        "full_name": "Agent Platform",
+        "role": "agent-platform",
     },
 ]

@@ -295,6 +295,15 @@ export default function ConfigurationPanel({ integration, hasPermission, onChang
     );
   }
 
+  if (key === "agent_platform") {
+    return (
+      <HandoffPanel
+        title="Set by the deployment"
+        body="The agent platform runs PydanticAI agents on Temporal and replaces Hermes one flow at a time. Each flow has its own switch on the backend — AGENT_ENGINE_TICKETS, AGENT_ENGINE_ANALYSIS and AGENT_ENGINE_CI_ASSIST, each hermes or platform (agentPlatform.flows in the Helm chart). Switching back is the same change. The card above shows which engine each flow uses now."
+      />
+    );
+  }
+
   if (key === "bitbucket") {
     return (
       <HandoffPanel

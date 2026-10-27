@@ -1,0 +1,290 @@
+{{- if .Values.agentPlatform.enabled }}
+{{- $ns := include "kubesight.namespace" . }}
+{{- $ap := .Values.agentPlatform }}
+{{- $image := include "kubesight.agentPlatformImage" . }}
+{{- $files := .Files.Glob "files/agent-platform/infra/**" }}
+{{- /* The two shared tokens: generated once, kept across upgrades. */ -}}
+{{- $old := dict }}
+{{- with (lookup "v1" "Secret" $ap.namespace "kubesight-agent-platform") }}
+{{- $old = .data | default dict }}
+{{- end }}
+{{- $platformToken := get $old "AGENT_PLATFORM_TOKEN" | default (randAlphaNum 48 | b64enc) }}
+{{- $mcpToken := get $old "KUBESIGHT_AGENT_TOKEN" | default (printf "ksa_%s" (randAlphaNum 40 | lower) | b64enc) }}
+# The platform's side: its key for KubeSight's MCP server (registered on the
+# backend's boot for the agent-platform account) and the shared secret both
+# sides present to each other.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kubesight-agent-platform
+  namespace: {{ $ap.namespace }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+data:
+  AGENT_PLATFORM_TOKEN: {{ $platformToken | quote }}
+  KUBESIGHT_AGENT_TOKEN: {{ $mcpToken | quote }}
+---
+# The backend's side: the same two values, under the names it reads.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kubesight-agent-platform-link
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+data:
+  AGENT_PLATFORM_TOKEN: {{ $platformToken | quote }}
+  KUBESIGHT_AGENT_PLATFORM_MCP_TOKEN: {{ $mcpToken | quote }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubesight-agent-platform
+  namespace: {{ $ap.namespace }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+{{- with .Values.imagePullSecret.name }}
+imagePullSecrets:
+  - name: {{ . }}
+{{- end }}
+---
+# The infra department: agents.yaml and its prompts, from
+# files/agent-platform (charts/kubesight/sync-agent-platform.sh). ConfigMap
+# keys cannot hold "/", so prompts/tickets.md is stored as prompts__tickets.md
+# and mapped back to its path where it is mounted.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubesight-agent-platform-infra
+  namespace: {{ $ap.namespace }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+data:
+  {{- range $path, $_ := $files }}
+  {{ trimPrefix "files/agent-platform/infra/" $path | replace "/" "__" }}: |
+    {{- $.Files.Get $path | nindent 4 }}
+  {{- end }}
+{{- range $role := list "api" "worker" }}
+{{- $cfg := get $ap $role }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubesight-agent-platform-{{ $role }}
+  namespace: {{ $ap.namespace }}
+  labels:
+    {{- include "kubesight.labels" $ | nindent 4 }}
+    app.kubernetes.io/name: kubesight-agent-platform-{{ $role }}
+spec:
+  replicas: {{ $cfg.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubesight-agent-platform-{{ $role }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kubesight-agent-platform-{{ $role }}
+      annotations:
+        checksum/department: {{ $files.AsConfig | sha256sum }}
+    spec:
+      serviceAccountName: kubesight-agent-platform
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- include "kubesight.imagePullSecrets" $ | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if eq $role "worker" }}
+      # A worker finishes the activity it is in before it stops.
+      terminationGracePeriodSeconds: 330
+      {{- end }}
+      containers:
+        - name: {{ $role }}
+          image: {{ $image }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          {{- if eq $role "worker" }}
+          command: ["python", "-m", "agent_platform.worker"]
+          {{- else }}
+          command: ["uvicorn", "agent_platform.api:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+          {{- end }}
+          env:
+            - {name: AGENTS_CONFIG, value: /etc/agents/agents.yaml}
+            - {name: TEMPORAL_ADDRESS, value: {{ $ap.temporal.address | quote }}}
+            - {name: TEMPORAL_NAMESPACE, value: {{ $ap.temporal.namespace | quote }}}
+            - {name: TASK_QUEUE, value: infra}
+            - {name: KUBESIGHT_URL, value: {{ include "kubesight.backendUrl" $ | quote }}}
+            - {name: TICKET_IDLE_DAYS, value: {{ $ap.ticketIdleDays | quote }}}
+            # The backend waits this long for an analysis; so does the API.
+            - {name: COMPLETION_WAIT_SECONDS, value: {{ $.Values.analysis.hermesTimeoutSeconds | quote }}}
+            - name: AGENT_PLATFORM_TOKEN
+              valueFrom:
+                secretKeyRef: {name: kubesight-agent-platform, key: AGENT_PLATFORM_TOKEN}
+            {{- if eq $role "worker" }}
+            - name: KUBESIGHT_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef: {name: kubesight-agent-platform, key: KUBESIGHT_AGENT_TOKEN}
+            - {name: MODEL_BASE_URL, value: {{ required "agentPlatform.model.baseUrl is required: the AI proxy's OpenAI-compatible base URL" $ap.model.baseUrl | quote }}}
+            - {name: MODEL_NAME, value: {{ $ap.model.name | quote }}}
+            - name: MODEL_API_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ $ap.model.apiKeySecret }}, key: MODEL_API_KEY}
+            {{- end }}
+          resources:
+            {{- toYaml $cfg.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: department
+              mountPath: /etc/agents
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 128Mi}
+        - name: department
+          configMap:
+            name: kubesight-agent-platform-infra
+            items:
+              {{- range $path, $_ := $files }}
+              {{- $rel := trimPrefix "files/agent-platform/infra/" $path }}
+              - key: {{ $rel | replace "/" "__" }}
+                path: {{ $rel }}
+              {{- end }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubesight-agent-platform
+  namespace: {{ $ap.namespace }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kubesight-agent-platform-api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP
+{{- if $ap.networkPolicy.enabled }}
+{{- $np := $ap.networkPolicy }}
+---
+# The API: called by the backend and the analysis Jobs; calls Temporal only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kubesight-agent-platform-api
+  namespace: {{ $ap.namespace }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kubesight-agent-platform-api
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  - {{ $ns }}
+                  {{- if .Values.analysis.enabled }}
+                  - {{ .Values.analysis.namespace }}
+                  {{- end }}
+      ports:
+        - {port: 8000, protocol: TCP}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.temporalNamespace }}
+      ports:
+        - {port: {{ $np.temporalPort }}, protocol: TCP}
+---
+# The worker: nobody calls it. It calls Temporal, KubeSight's MCP server and
+# callback route, and the model through the AI proxy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kubesight-agent-platform-worker
+  namespace: {{ $ap.namespace }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kubesight-agent-platform-worker
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.temporalNamespace }}
+      ports:
+        - {port: {{ $np.temporalPort }}, protocol: TCP}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $ns }}
+      ports:
+        - {port: 5000, protocol: TCP}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            {{- with $np.egressExcept }}
+            except:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+      ports:
+        - {port: 443, protocol: TCP}
+    {{- with $np.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- end }}

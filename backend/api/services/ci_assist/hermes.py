@@ -43,6 +43,8 @@ from ..application_intelligence_hermes import (  # noqa: F401
     _secret_value,
     _validate_endpoint,
 )
+from ..agent_platform import chat_target, uses_platform
+from ..agent_platform import configuration_hint as platform_hint
 from ..application_intelligence_security import bounded_json_bytes, redact_structure
 from . import schema
 
@@ -122,7 +124,19 @@ it to requiredInputs. Do not work around a rule by removing the stage that broke
 the stage genuinely is not needed."""
 
 
+def _target() -> Tuple[str, str]:
+    """(endpoint, token): Hermes, or the agent platform when
+    AGENT_ENGINE_CI_ASSIST=platform."""
+    platform = chat_target("ci_assist")
+    if platform is not None:
+        return platform.endpoint, platform.token
+    return os.getenv("HERMES_API_URL", "").strip(), _secret_value("HERMES_API_TOKEN")
+
+
 def _model() -> str:
+    platform = chat_target("ci_assist")
+    if platform is not None:
+        return platform.model
     return (
         os.getenv("CI_ASSIST_HERMES_MODEL", "").strip()
         or os.getenv("HERMES_APPLICATION_MODEL", "").strip()
@@ -144,23 +158,17 @@ def is_configured() -> bool:
     installation with no Hermes should see manual configuration and a reason,
     not a control that fails.
     """
-    if not os.getenv("HERMES_API_URL", "").strip():
-        return False
-    if not _secret_value("HERMES_API_TOKEN"):
-        return False
-    try:
-        _validate_endpoint(os.getenv("HERMES_API_URL", "").strip())
-    except HermesError:
-        return False
-    return True
+    return not configuration_hint()
 
 
 def configuration_hint() -> str:
     """Why the assisted path is unavailable, in words an operator can act on."""
-    endpoint = os.getenv("HERMES_API_URL", "").strip()
+    if uses_platform("ci_assist"):
+        return platform_hint()
+    endpoint, token = _target()
     if not endpoint:
         return "Hermes is not configured on this installation (HERMES_API_URL is unset)."
-    if not _secret_value("HERMES_API_TOKEN"):
+    if not token:
         return "Hermes has no API token configured (HERMES_API_TOKEN is unset)."
     try:
         _validate_endpoint(endpoint)
@@ -189,8 +197,7 @@ def _request_body(message: Dict[str, Any], *, repair: bool) -> bytes:
 
 
 def _call(body: bytes) -> Dict[str, Any]:
-    endpoint = os.getenv("HERMES_API_URL", "").strip()
-    token = _secret_value("HERMES_API_TOKEN")
+    endpoint, token = _target()
     if not endpoint or not token:
         raise HermesError("Hermes pipeline generation is not configured.")
     _validate_endpoint(endpoint)

@@ -11,6 +11,8 @@ import subprocess
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+from .application_intelligence_hermes import analysis_target
+
 
 @dataclass(frozen=True)
 class JobLaunch:
@@ -18,8 +20,34 @@ class JobLaunch:
     callback_token: str
 
 
+def _namespace_port_rule(namespace: str, port: int) -> dict:
+    return {
+        "to": [
+            {
+                "namespaceSelector": {
+                    "matchLabels": {"kubernetes.io/metadata.name": namespace}
+                }
+            }
+        ],
+        "ports": [{"protocol": "TCP", "port": port}],
+    }
+
+
 def _hermes_internal_egress_rule() -> dict | None:
-    """Allow only the configured in-cluster Hermes namespace and TCP port."""
+    """Allow only the configured in-cluster model endpoint's namespace and port:
+    the agent platform's when analysis is switched to it, else Hermes'."""
+    from .agent_platform import service_location, uses_platform
+
+    if uses_platform("analysis"):
+        location = service_location()
+        if location is None:
+            return None
+        namespace, port = location
+        if not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", namespace) or not 1 <= port <= 65535:
+            raise ValueError(
+                "AGENT_PLATFORM_SERVICE_NAMESPACE / AGENT_PLATFORM_SERVICE_PORT are invalid."
+            )
+        return _namespace_port_rule(namespace, port)
     endpoint = os.getenv("HERMES_API_URL", "").strip()
     if not endpoint:
         return None
@@ -51,16 +79,7 @@ def _hermes_internal_egress_rule() -> dict | None:
     port = int(raw_port) if raw_port else (parsed.port or 80)
     if not 1 <= port <= 65535:
         raise ValueError("HERMES_SERVICE_PORT is invalid.")
-    return {
-        "to": [
-            {
-                "namespaceSelector": {
-                    "matchLabels": {"kubernetes.io/metadata.name": namespace}
-                }
-            }
-        ],
-        "ports": [{"protocol": "TCP", "port": port}],
-    }
+    return _namespace_port_rule(namespace, port)
 
 
 def _dns_name(value: str) -> str:
@@ -108,6 +127,8 @@ def build_job_resources(
     image = os.getenv("APPLICATION_ANALYSIS_WORKER_IMAGE", "kubesight-backend:latest")
     job_name = f"ks-app-analysis-{analysis_id}-{_dns_name(callback_token[:8])}"
     secret_name = f"{job_name}-credentials"
+    # Hermes, or the agent platform when analysis is switched to it.
+    model_endpoint, model_token, model_name = analysis_target()
     labels = {
         "app.kubernetes.io/name": "kubesight-application-analysis",
         "kubesight.io/analysis-id": str(analysis_id),
@@ -132,7 +153,7 @@ def build_job_resources(
         "repository-credential-type": repository_credential_type,
         "repository-principal": repository_principal,
         "callback-token": callback_token,
-        "hermes-token": os.getenv("HERMES_API_TOKEN", ""),
+        "hermes-token": model_token,
     }
     secret = {
         "apiVersion": "v1",
@@ -372,13 +393,11 @@ def build_job_resources(
                                 },
                                 {
                                     "name": "HERMES_API_URL",
-                                    "value": os.getenv("HERMES_API_URL", ""),
+                                    "value": model_endpoint,
                                 },
                                 {
                                     "name": "HERMES_APPLICATION_MODEL",
-                                    "value": os.getenv(
-                                        "HERMES_APPLICATION_MODEL", "hermes-analysis"
-                                    ),
+                                    "value": model_name,
                                 },
                                 *proxy_env,
                             ],

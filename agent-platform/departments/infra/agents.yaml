@@ -1,0 +1,53 @@
+# The infrastructure department: KubeSight's tickets, source analysis and CI
+# assist. Validated on worker start; any error stops the worker.
+#
+# Never rename an agent or a toolset id once deployed: running workflows
+# replay by those names.
+department: infra
+taskQueue: infra
+
+models:
+  # The AI proxy (OpenAI-compatible chat completions). URL and key come from
+  # the environment, never from this file.
+  default:
+    provider: openai
+    model: gpt-5.6-sol
+    baseUrlEnv: MODEL_BASE_URL
+    apiKeyEnv: MODEL_API_KEY
+    timeoutSeconds: 300
+  fallbacks: []
+
+mcp:
+  kubesight:
+    id: kubesight
+    # Empty = KUBESIGHT_URL/api/mcp.
+    url:
+    timeoutSeconds: 120
+
+agents:
+  # Every Zoho/Jira ticket task. Sees the kubesight_ticket_* tools (the only
+  # writes it may make, each with its own guard rails) and the read-only
+  # tools it investigates with — no other write tool exists for it.
+  tickets:
+    kind: ticket
+    instructions: prompts/tickets.md
+    toolset: kubesight
+    tools:
+      allow: ["kubesight_ticket_*"]
+      readOnly: true
+      deny: []
+    retries: 2
+    maxRequests: 40
+
+  # Source analysis (Application Intelligence): KubeSight sends the prompt and
+  # the result contract, and validates the answer itself.
+  analysis:
+    kind: completion
+    retries: 2
+    maxRequests: 4
+
+  # CI assist (pipeline generation and repair).
+  ci_assist:
+    kind: completion
+    retries: 2
+    maxRequests: 4

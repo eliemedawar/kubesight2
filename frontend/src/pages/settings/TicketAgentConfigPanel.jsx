@@ -144,7 +144,12 @@ export default function TicketAgentConfigPanel({ canManage = false, onChanged })
 
   if (loading) return <LoadingState label="Loading ticket agent settings..." />;
 
-  const hermesOk = settings?.hermesConfigured && settings?.hermesDedicated;
+  // AGENT_ENGINE_TICKETS on the backend: Hermes, or the agent platform.
+  const onPlatform = settings?.engine === "platform";
+  const agentName = onPlatform ? "The agent platform" : "Hermes";
+  const agentOk = onPlatform
+    ? settings?.platformConfigured
+    : settings?.hermesConfigured && settings?.hermesDedicated;
 
   return (
     <div className="zoho-page">
@@ -154,24 +159,33 @@ export default function TicketAgentConfigPanel({ canManage = false, onChanged })
       <form onSubmit={save}>
         <section className="card sg-zh-setsec">
           <div className="card-header-row">
-            <h3>Hermes</h3>
-            <span className={`status-pill ${settings?.active ? "ok" : hermesOk ? "muted" : "warn"}`}>
-              {settings?.active ? "Handling tickets" : hermesOk ? "Off" : "Hermes not connected"}
+            <h3>{onPlatform ? "Agent platform" : "Hermes"}</h3>
+            <span className={`status-pill ${settings?.active ? "ok" : agentOk ? "muted" : "warn"}`}>
+              {settings?.active ? "Handling tickets" : agentOk ? "Off" : `${agentName} is not connected`}
             </span>
           </div>
           <p className="muted">
-            When this is on, every ticket Zoho or Jira sends is handed to your Hermes (the one with
-            the <span className="mono">kubesight</span> skill). Hermes reads it and acts through
+            When this is on, every ticket Zoho or Jira sends is handed to{" "}
+            {onPlatform ? (
+              <>the agent platform&apos;s ticket agent</>
+            ) : (
+              <>
+                your Hermes (the one with the <span className="mono">kubesight</span> skill)
+              </>
+            )}
+            . {agentName} reads it and acts through
             KubeSight's MCP tools: it deploys, changes a variable or restarts — or, when the
             ticket reports a problem, investigates and answers why — moves the ticket (In Progress
             → Done, or Impediment) and writes every comment. The deploy itself goes
             through the normal deploy automation, so cluster approvals, rollback and the pod-health
             check still apply.
           </p>
-          {!hermesOk ? (
+          {!agentOk ? (
             <p className="sg-zh-inline-error">
-              {settings?.hermesHint ||
-                "Set TICKET_AGENT_HERMES_URL and TICKET_AGENT_HERMES_TOKEN on the backend."}
+              {onPlatform
+                ? settings?.platformHint || "Set AGENT_PLATFORM_URL and AGENT_PLATFORM_TOKEN on the backend."
+                : settings?.hermesHint ||
+                  "Set TICKET_AGENT_HERMES_URL and TICKET_AGENT_HERMES_TOKEN on the backend."}
             </p>
           ) : null}
           <div className="settings-form sg-zh-setform">
@@ -182,7 +196,7 @@ export default function TicketAgentConfigPanel({ canManage = false, onChanged })
                 onChange={(e) => set("enabled", e.target.checked)}
                 disabled={ro}
               />
-              Hand every inbound ticket to Hermes
+              Hand every inbound ticket to {onPlatform ? "the agent platform" : "Hermes"}
             </label>
             <p className="sg-ap-moved">
               <span>

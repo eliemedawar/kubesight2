@@ -45,6 +45,10 @@ spec:
                 name: kubesight-config
             - secretRef:
                 name: {{ include "kubesight.secretName" . }}
+            {{- if .Values.agentPlatform.enabled }}
+            - secretRef:
+                name: kubesight-agent-platform-link
+            {{- end }}
             {{- range .Values.backend.extraEnvFromSecrets }}
             - secretRef:
                 name: {{ . }}

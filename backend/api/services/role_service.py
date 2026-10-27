@@ -199,6 +199,15 @@ def update_role(
                     "The hermes-agent role is fixed to its ticket-agent and source-analysis permissions.",
                     400,
                 )
+        if role.name == "agent-platform":
+            from ..rbac_data import AGENT_PLATFORM_PERMISSIONS
+
+            if new_keys != set(AGENT_PLATFORM_PERMISSIONS):
+                return (
+                    None,
+                    "The agent-platform role is fixed to its ticket-agent and read-only permissions.",
+                    400,
+                )
         lockout_error = _actor_retains_management(actor, role, new_keys)
         if lockout_error:
             return None, lockout_error, 400

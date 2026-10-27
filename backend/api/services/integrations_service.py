@@ -393,19 +393,68 @@ def _hermes(user, can_manage: bool) -> Optional[Dict[str, Any]]:
     )
 
 
+_FLOW_LABELS = {"tickets": "Tickets", "analysis": "Source analysis", "ci_assist": "CI assist"}
+
+
+def _agent_platform(user, can_manage: bool) -> Optional[Dict[str, Any]]:
+    from . import agent_platform
+
+    state = agent_platform.summary()
+    on_platform = [flow for flow, engine in state["flows"].items() if engine == agent_platform.PLATFORM]
+    flows = " · ".join(
+        f"{_FLOW_LABELS[flow]}: {'platform' if engine == agent_platform.PLATFORM else 'Hermes'}"
+        for flow, engine in state["flows"].items()
+    )
+    if not state["configured"]:
+        message = f"{state['hint']} {flows}"
+    else:
+        message = f"Configured against {state['url']} · {flows}"
+    return _descriptor(
+        key="agent_platform",
+        name="Agent platform",
+        category="Intelligence",
+        configured=state["configured"],
+        enabled=state["configured"] and bool(on_platform),
+        last_outcome=None,
+        message=message,
+        capabilities=["ticket-handling", "llm-analysis", "durable-workflows"],
+        used_by=[_FLOW_LABELS[flow] for flow in on_platform] or ["Nothing yet (every flow is on Hermes)"],
+        can_manage=False,
+        testable=state["configured"],
+    )
+
+
+def _test_agent_platform() -> Dict[str, Any]:
+    from . import agent_platform
+
+    try:
+        agent_platform.check()
+    except agent_platform.PlatformError as exc:
+        return {"ok": False, "message": str(exc)}
+    return {"ok": True, "message": "The agent platform answered and can reach Temporal."}
+
+
 def _ticket_agent(user, can_manage: bool) -> Optional[Dict[str, Any]]:
+    from . import agent_platform
     from .ticket_agent import hermes as agent_hermes, settings as agent_settings
 
     row = agent_settings.get_or_create()
-    hermes_ok = agent_hermes.dedicated() and agent_hermes.is_configured()
+    if agent_platform.uses_platform("tickets"):
+        who = "The agent platform"
+        hermes_ok = agent_platform.is_configured()
+        hint = agent_platform.configuration_hint()
+    else:
+        who = "Hermes"
+        hermes_ok = agent_hermes.dedicated() and agent_hermes.is_configured()
+        hint = agent_hermes.configuration_hint()
     configured = hermes_ok
     if not hermes_ok:
-        message = agent_hermes.configuration_hint()
+        message = hint
     elif not row.enabled:
-        message = "Hermes is reachable; the agent is off, so tickets use the dropdown automation."
+        message = f"{who} is reachable; the agent is off, so tickets use the dropdown automation."
     else:
         approvals = "Telegram approvals" if agent_settings.telegram_ready(row) else "approvals in KubeSight only"
-        message = f"Hermes handles every inbound ticket · confidence bar {row.min_confidence} · {approvals}"
+        message = f"{who} handles every inbound ticket · confidence bar {row.min_confidence} · {approvals}"
     outcome = None
     if row.last_test_status:
         outcome = row.last_test_status == "ok"
@@ -449,6 +498,8 @@ _ADAPTERS: List[Dict[str, Any]] = [
      "view": "applications:view", "manage": "applications:manage"},
     {"key": "ticket_agent", "name": "Hermes ticket agent", "category": "Intelligence",
      "fn": _ticket_agent, "view": "ticketing:view", "manage": "ticketing:manage"},
+    {"key": "agent_platform", "name": "Agent platform", "category": "Intelligence",
+     "fn": _agent_platform, "view": "applications:view", "manage": "applications:manage"},
 ]
 
 _BY_KEY = {entry["key"]: entry for entry in _ADAPTERS}
@@ -646,6 +697,8 @@ def run_test(user, key: str) -> Dict[str, Any]:
         return _test_registries()
     if key == "hermes":
         return _test_hermes(user)
+    if key == "agent_platform":
+        return _test_agent_platform()
     if key == "ticket_agent":
         from .ticket_agent.settings import test_telegram
 

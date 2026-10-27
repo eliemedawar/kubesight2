@@ -10,8 +10,10 @@ from .models import AccessRule, ApiToken, AppSettings, Permission, Role, User, U
 from .passwords import hash_password
 from .runtime_config import env_flag
 from .rbac_data import (
+    AGENT_PLATFORM_PERMISSIONS,
     DEFAULT_USERS,
     HERMES_AGENT_PERMISSIONS,
+    SERVICE_ACCOUNT_USERNAMES,
     OPERATOR_PERMISSIONS,
     PERMISSIONS,
     ROLE_DEFINITIONS,
@@ -34,6 +36,8 @@ DEMO_USERNAMES = frozenset({"viewer", "operator"})
 # The API token a deployment hands Hermes (KUBESIGHT_HERMES_MCP_TOKEN) is
 # registered under this name, so a changed value can retire the old one.
 DEPLOYMENT_HERMES_TOKEN_NAME = "Hermes MCP (set by the deployment)"
+# Same for the agent platform's token (KUBESIGHT_AGENT_PLATFORM_MCP_TOKEN).
+DEPLOYMENT_AGENT_PLATFORM_TOKEN_NAME = "Agent platform MCP (set by the deployment)"
 
 
 def _seed_permissions() -> dict:
@@ -146,8 +150,8 @@ def _seed_users(roles_by_name: dict) -> None:
                 full_name=spec["full_name"],
                 role=role,
                 is_active=True,
-                is_service_account=spec["username"] == "hermes-agent",
-                interactive_login_enabled=spec["username"] != "hermes-agent",
+                is_service_account=spec["username"] in SERVICE_ACCOUNT_USERNAMES,
+                interactive_login_enabled=spec["username"] not in SERVICE_ACCOUNT_USERNAMES,
                 must_change_password=first_login,
                 first_login_completed=not first_login,
             )
@@ -158,43 +162,47 @@ def _seed_users(roles_by_name: dict) -> None:
             user.role = role
         if not user.password_hash:
             user.password_hash = hash_password(spec["password"])
-        if spec["username"] == "hermes-agent":
+        if spec["username"] in SERVICE_ACCOUNT_USERNAMES:
             user.role = role
             user.is_service_account = True
             user.interactive_login_enabled = False
 
 
-def _seed_hermes_mcp_token(hermes: User | None) -> None:
-    """Register the ``ksa_`` token the deployment gave Hermes for the MCP server.
+def _seed_deployment_token(owner: User | None, env_name: str, token_name: str) -> None:
+    """Register the ``ksa_`` token the deployment gave an agent for the MCP server.
 
-    Lets the Helm chart connect Hermes without anyone minting a token in the
+    Lets the Helm chart connect an agent without anyone minting a token in the
     UI. Only the hash is stored, as for any API token. A value that is already
     registered is left as it is, so revoking it in the UI sticks across
     restarts; a new value retires the one the deployment set before.
     """
-    raw = os.getenv("KUBESIGHT_HERMES_MCP_TOKEN", "").strip()
-    if not raw or hermes is None:
+    raw = os.getenv(env_name, "").strip()
+    if not raw or owner is None:
         return
     if not raw.startswith("ksa_") or len(raw) < 24:
-        logger.warning("KUBESIGHT_HERMES_MCP_TOKEN ignored: it must start with ksa_ and be at least 24 characters")
+        logger.warning("%s ignored: it must start with ksa_ and be at least 24 characters", env_name)
         return
     digest = sha256(raw.encode()).hexdigest()
     existing = ApiToken.query.filter_by(token_hash=digest).first()
     if existing is not None:
-        if existing.user_id != hermes.id:
-            logger.warning("KUBESIGHT_HERMES_MCP_TOKEN ignored: that token already belongs to another user")
+        if existing.user_id != owner.id:
+            logger.warning("%s ignored: that token already belongs to another user", env_name)
         return
-    for old in ApiToken.query.filter_by(user_id=hermes.id, name=DEPLOYMENT_HERMES_TOKEN_NAME, is_active=True):
+    for old in ApiToken.query.filter_by(user_id=owner.id, name=token_name, is_active=True):
         old.is_active = False
     db.session.add(
         ApiToken(
-            user_id=hermes.id,
-            name=DEPLOYMENT_HERMES_TOKEN_NAME,
+            user_id=owner.id,
+            name=token_name,
             token_prefix=raw[:12],
             token_hash=digest,
             is_active=True,
         )
     )
+
+
+def _seed_hermes_mcp_token(hermes: User | None) -> None:
+    _seed_deployment_token(hermes, "KUBESIGHT_HERMES_MCP_TOKEN", DEPLOYMENT_HERMES_TOKEN_NAME)
 
 
 def _seed_role_cluster_access(username: str, cluster_ids: tuple[str, ...]) -> None:
@@ -544,6 +552,17 @@ def seed_defaults() -> None:
         AccessRule.query.filter_by(user_id=hermes.id).delete()
         UserClusterAccess.query.filter_by(user_id=hermes.id).delete()
     _seed_hermes_mcp_token(hermes)
+    # The agent platform's account keeps exactly its role too. Unlike Hermes,
+    # the clusters an admin grants it are kept: its ticket agent reads them
+    # when it troubleshoots.
+    platform_user = User.query.filter_by(username="agent-platform").first()
+    if platform_user and platform_user.role:
+        allowed = set(AGENT_PLATFORM_PERMISSIONS)
+        platform_user.role.permissions = [
+            permission for permission in permissions_by_key.values() if permission.key in allowed
+        ]
+    _seed_deployment_token(platform_user, "KUBESIGHT_AGENT_PLATFORM_MCP_TOKEN",
+                           DEPLOYMENT_AGENT_PLATFORM_TOKEN_NAME)
 
     import threading
     from flask import current_app as _cur_app

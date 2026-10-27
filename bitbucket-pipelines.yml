@@ -45,6 +45,17 @@ definitions:
           - npm test
           - npm run build
 
+    - step: &agent-platform-tests
+        name: Agent platform tests (pytest, local Temporal)
+        image: python:3.12
+        caches:
+          - pip
+        script:
+          - cd agent-platform
+          - pip install -r requirements-dev.txt
+          # The workflow tests start a Temporal dev server the SDK downloads.
+          - python -m pytest tests -q --junitxml=test-results/agent-platform-junit.xml
+
     - step: &build-images
         name: Build + push Docker images
         services:
@@ -63,6 +74,8 @@ definitions:
           - docker build -t "$DOCKER_REGISTRY/kubesight-frontend:$IMAGE_TAG" frontend
           - docker push "$DOCKER_REGISTRY/kubesight-backend:$IMAGE_TAG"
           - docker push "$DOCKER_REGISTRY/kubesight-frontend:$IMAGE_TAG"
+          - docker build -t "$DOCKER_REGISTRY/kubesight-agent-platform:$IMAGE_TAG" agent-platform
+          - docker push "$DOCKER_REGISTRY/kubesight-agent-platform:$IMAGE_TAG"
 
 pipelines:
   branches:
@@ -72,6 +85,7 @@ pipelines:
       - parallel:
           - step: *backend-tests
           - step: *frontend-build
+          - step: *agent-platform-tests
 
   tags:
     # Bitbucket selects this more-specific glob for x.y.0 tags.
@@ -79,6 +93,7 @@ pipelines:
       - parallel:
           - step: *backend-tests
           - step: *frontend-build
+          - step: *agent-platform-tests
       - step:
           name: Generate Initial Confluence Release Notes
           image: gradle:9.1.0-jdk17
@@ -103,6 +118,7 @@ pipelines:
       - parallel:
           - step: *backend-tests
           - step: *frontend-build
+          - step: *agent-platform-tests
       - step:
           name: Generate Confluence Patch Release Notes
           image: gradle:9.1.0-jdk17
@@ -129,6 +145,7 @@ pipelines:
       - parallel:
           - step: *backend-tests
           - step: *frontend-build
+          - step: *agent-platform-tests
       - step: *build-images
 
   pull-requests:
@@ -136,6 +153,7 @@ pipelines:
       - parallel:
           - step: *backend-tests
           - step: *frontend-build
+          - step: *agent-platform-tests
 
 triggers:
   pullrequest-fulfilled:
