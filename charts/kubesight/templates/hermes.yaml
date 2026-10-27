@@ -1,0 +1,317 @@
+{{- if .Values.hermes.enabled }}
+{{- $ns := include "kubesight.namespace" . }}
+{{- $secret := include "kubesight.secretName" . }}
+{{- $dataClaim := include "kubesight.claimName" (dict "cfg" .Values.hermes.persistence "name" "kubesight-hermes-data") }}
+{{- /* config.yaml = hermes.config + the KubeSight MCP server. */ -}}
+{{- $config := deepCopy .Values.hermes.config }}
+{{- $mcp := dict "kubesight" (dict
+  "url" (printf "%s/api/mcp" (include "kubesight.backendUrl" .))
+  "headers" (dict "Authorization" "Bearer ${MCP_KUBESIGHT_API_KEY}")
+  "timeout" 120
+  "connect_timeout" 30
+) }}
+{{- $_ := set $config "mcp_servers" (merge (get $config "mcp_servers" | default dict) $mcp) }}
+{{- $configYaml := toYaml $config }}
+{{- $skill := .Files.Glob "files/hermes-skills/kubesight/**" }}
+{{- include "kubesight.volume" (dict "root" . "cfg" .Values.hermes.persistence "name" "kubesight-hermes-data" "namespace" $ns "purpose" "hermes-data") }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubesight-hermes
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+{{- with .Values.imagePullSecret.name }}
+imagePullSecrets:
+  - name: {{ . }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubesight-hermes-config
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- $configYaml | nindent 4 }}
+{{- if .Values.hermes.installSkill }}
+---
+# ConfigMap keys cannot hold "/", so references/ci.md is stored as
+# references__ci.md and mapped back to its path where it is mounted.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubesight-hermes-skill
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+data:
+  {{- range $path, $_ := $skill }}
+  {{ trimPrefix "files/hermes-skills/kubesight/" $path | replace "/" "__" }}: |
+    {{- $.Files.Get $path | nindent 4 }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubesight-hermes
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+    app.kubernetes.io/name: kubesight-hermes
+spec:
+  replicas: 1
+  # One Hermes at a time owns its data volume.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubesight-hermes
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kubesight-hermes
+      annotations:
+        checksum/config: {{ $configYaml | sha256sum }}
+        {{- if .Values.hermes.installSkill }}
+        checksum/skill: {{ $skill.AsConfig | sha256sum }}
+        {{- end }}
+    spec:
+      serviceAccountName: kubesight-hermes
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- include "kubesight.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        fsGroup: 10000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # s6 needs a /run its user owns.
+        - name: prepare-s6-run
+          image: {{ include "kubesight.hermesImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [/bin/sh, -ec]
+          args:
+            - chown 10000:10000 /run && chmod 0700 /run
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: s6-run
+              mountPath: /run
+        # Hermes edits its own config.yaml, so it gets a fresh copy of the
+        # chart's on every start rather than a read-only mount. The same goes
+        # for the KubeSight skill, and the MCP token goes into .env, where
+        # Hermes resolves ${MCP_KUBESIGHT_API_KEY}.
+        - name: stage-hermes-files
+          image: {{ include "kubesight.hermesImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [/bin/sh, -ec]
+          args:
+            - |
+              cp /config/config.yaml /data/config.yaml
+              chmod 0644 /data/config.yaml
+              if [ -d /skill ]; then
+                rm -rf /data/skills/kubesight
+                mkdir -p /data/skills/kubesight
+                find /skill -mindepth 1 -maxdepth 1 ! -name '..*' -exec cp -RL {} /data/skills/kubesight/ \;
+              fi
+              touch /data/.env
+              grep -v '^MCP_KUBESIGHT_API_KEY=' /data/.env > /data/.env.new || true
+              printf 'MCP_KUBESIGHT_API_KEY=%s\n' "$MCP_KUBESIGHT_API_KEY" >> /data/.env.new
+              mv /data/.env.new /data/.env
+              chmod 0600 /data/.env
+          env:
+            - name: MCP_KUBESIGHT_API_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ $secret }}, key: KUBESIGHT_HERMES_MCP_TOKEN}
+          securityContext:
+            runAsUser: 10000
+            runAsGroup: 10000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /config
+              readOnly: true
+            {{- if .Values.hermes.installSkill }}
+            - name: skill
+              mountPath: /skill
+              readOnly: true
+            {{- end }}
+      containers:
+        - name: hermes
+          image: {{ include "kubesight.hermesImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [gateway, run]
+          ports:
+            - name: http
+              containerPort: 8642
+              protocol: TCP
+          envFrom:
+            {{- range .Values.hermes.extraEnvFromSecrets }}
+            - secretRef:
+                name: {{ . }}
+            {{- end }}
+          env:
+            - {name: HERMES_HOME, value: /opt/data}
+            - {name: HOME, value: /opt/data}
+            - {name: HERMES_UID, value: "10000"}
+            - {name: HERMES_GID, value: "10000"}
+            - {name: API_SERVER_ENABLED, value: "true"}
+            - {name: API_SERVER_HOST, value: 0.0.0.0}
+            - {name: API_SERVER_PORT, value: "8642"}
+            - {name: API_SERVER_MODEL_NAME, value: hermes-agent}
+            - {name: HERMES_MAX_ITERATIONS, value: {{ .Values.hermes.maxIterations | quote }}}
+            # The backend calls Hermes with HERMES_API_TOKEN; same value.
+            - name: API_SERVER_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ $secret }}, key: HERMES_API_TOKEN}
+            - name: MCP_KUBESIGHT_API_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ $secret }}, key: KUBESIGHT_HERMES_MCP_TOKEN}
+            {{- if .Values.hermes.codexAuth.existingSecret }}
+            - {name: CODEX_HOME, value: /opt/codex}
+            {{- end }}
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 4
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.hermes.resources | nindent 12 }}
+          securityContext:
+            runAsUser: 10000
+            runAsGroup: 10000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: s6-run
+              mountPath: /run
+            - name: data
+              mountPath: /opt/data
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.hermes.codexAuth.existingSecret }}
+            - name: codex-auth
+              mountPath: /opt/codex
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: s6-run
+          emptyDir: {medium: Memory, sizeLimit: 64Mi}
+        - name: tmp
+          emptyDir: {sizeLimit: 256Mi}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $dataClaim }}
+        - name: config
+          configMap:
+            name: kubesight-hermes-config
+        {{- if .Values.hermes.installSkill }}
+        - name: skill
+          configMap:
+            name: kubesight-hermes-skill
+            items:
+              {{- range $path, $_ := $skill }}
+              {{- $rel := trimPrefix "files/hermes-skills/kubesight/" $path }}
+              - key: {{ $rel | replace "/" "__" }}
+                path: {{ $rel }}
+              {{- end }}
+        {{- end }}
+        {{- with .Values.hermes.codexAuth.existingSecret }}
+        - name: codex-auth
+          secret:
+            secretName: {{ . }}
+            defaultMode: 0440
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubesight-hermes
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kubesight-hermes
+  ports:
+    - name: http
+      port: 8642
+      targetPort: http
+      protocol: TCP
+{{- if .Values.hermes.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kubesight-hermes
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kubesight-hermes
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # The backend and the analysis Jobs call Hermes, plus an AI proxy in
+    # front of it when extraIngressFrom names one.
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  - {{ $ns }}
+                  {{- if .Values.analysis.enabled }}
+                  - {{ .Values.analysis.namespace }}
+                  {{- end }}
+        {{- with .Values.hermes.networkPolicy.extraIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - {port: 8642, protocol: TCP}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+    # KubeSight's MCP server.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $ns }}
+      ports:
+        - {port: 5000, protocol: TCP}
+    # The LLM provider, Telegram and other HTTPS APIs.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            {{- with .Values.hermes.networkPolicy.egressExcept }}
+            except:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+      ports:
+        - {port: 443, protocol: TCP}
+{{- end }}
+{{- end }}

@@ -191,6 +191,9 @@ With `APP_ENV=production` the backend **refuses to start** unless the four
 | `K8S_REAL_MODE` | `true` | Default `auto`. |
 | `CI_WORKER_IMAGE`, `CI_WORKER_CALLBACK_URL` | for native CI | See `k8s/ci-backend-config.yaml`. |
 | `HERMES_API_TOKEN` | for Application Intelligence | Handed to analysis worker Jobs. |
+| `KUBESIGHT_INITIAL_ADMIN_PASSWORD` | recommended | First boot only: the `admin` user is created with this one-time password (change + MFA at first sign-in) instead of `admin123`. Ignored once `admin` exists. |
+| `KUBESIGHT_SEED_DEMO_USERS` | `false` in production | Default `true`. `false` = an empty database gets no `viewer`/`operator` demo accounts. |
+| `KUBESIGHT_HERMES_MCP_TOKEN` | for Hermes | A `ksa_…` token registered for `hermes-agent` on every boot, so Hermes reaches `/api/mcp` without a token minted in the UI. A new value retires the previous one; a revoked one stays revoked. |
 
 Keep secret values out of git — reference them from a Kubernetes Secret:
 
@@ -244,7 +247,13 @@ the `image:` fields in `k8s/backend-deployment.yaml` and `k8s/frontend-deploymen
 
 ## 6. Production Deployment (Kubernetes)
 
-All manifests live in `k8s/`. Apply in dependency order:
+> **Install a new environment with the Helm chart: [charts/kubesight/README.md](charts/kubesight/README.md).**
+> It deploys the backend, frontend, native CI, BuildKit, Application Intelligence and
+> Hermes in one release. The manifest steps below describe the older hand-applied
+> layout; most of the files they name (`namespace.yaml`, `rbac.yaml`,
+> `backend-deployment.yaml`, ...) are no longer in `k8s/`.
+
+Old layout — apply in dependency order:
 
 ```powershell
 # 1. Namespace
@@ -336,6 +345,10 @@ Add `kubesight.local` to DNS/hosts pointing at the ingress controller, then open
 - [ ] **Set resource requests/limits and replicas** appropriately for production load.
 
 ## 8. Deploying to Production — Step by Step
+
+> Superseded by the Helm chart ([charts/kubesight/README.md](charts/kubesight/README.md)),
+> which also covers secrets, the first admin sign-in, upgrades and rollback. Kept for the
+> older hand-applied layout.
 
 The steps in §6 work for a single-node / local-style cluster. For a **real production deployment**
 on a remote cluster (cloud or on-prem), follow this end-to-end runbook.

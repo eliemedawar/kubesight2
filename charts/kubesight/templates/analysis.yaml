@@ -1,0 +1,78 @@
+{{- if .Values.analysis.enabled }}
+{{- $ns := include "kubesight.namespace" . }}
+{{- with .Values.analysis }}
+# Source-analysis Jobs run as this account, with no API access.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubesight-analysis-worker
+  namespace: {{ .namespace }}
+  labels:
+    {{- include "kubesight.labels" $ | nindent 4 }}
+automountServiceAccountToken: false
+{{- with $.Values.imagePullSecret.name }}
+imagePullSecrets:
+  - name: {{ . }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubesight-analysis-launcher
+  namespace: {{ .namespace }}
+  labels:
+    {{- include "kubesight.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list, watch, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, get, delete, patch]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [create, get, delete, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubesight-analysis-launcher
+  namespace: {{ .namespace }}
+  labels:
+    {{- include "kubesight.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubesight-analysis-launcher
+subjects:
+  - kind: ServiceAccount
+    name: kubesight-backend
+    namespace: {{ $ns }}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: analysis-quota
+  namespace: {{ .namespace }}
+  labels:
+    {{- include "kubesight.labels" $ | nindent 4 }}
+spec:
+  hard:
+    {{- toYaml .quota | nindent 4 }}
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: analysis-defaults
+  namespace: {{ .namespace }}
+  labels:
+    {{- include "kubesight.labels" $ | nindent 4 }}
+spec:
+  limits:
+    - type: Container
+      default:
+        {{- toYaml .limitRange.default | nindent 8 }}
+      defaultRequest:
+        {{- toYaml .limitRange.defaultRequest | nindent 8 }}
+{{- end }}
+{{- end }}

@@ -419,12 +419,15 @@ def build_job_resources(
             ],
         },
         {
-            # Worker callbacks stay inside the KubeSight namespace.
+            # Worker callbacks stay inside the KubeSight namespace (the same
+            # setting the CI runner's job policies use for the backend).
             "to": [
                 {
                     "namespaceSelector": {
                         "matchLabels": {
-                            "kubernetes.io/metadata.name": "kubesight"
+                            "kubernetes.io/metadata.name": os.getenv(
+                                "CI_BACKEND_NAMESPACE", "kubesight"
+                            ).strip() or "kubesight"
                         }
                     }
                 }

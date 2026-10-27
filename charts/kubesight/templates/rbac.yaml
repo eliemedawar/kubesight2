@@ -1,0 +1,94 @@
+{{- $ns := include "kubesight.namespace" . }}
+{{- $name := include "kubesight.fullname" . }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubesight-backend
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+---
+# Read-only fleet view of the cluster KubeSight runs in.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}-backend-reader
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [nodes, pods, pods/log, services, endpoints, namespaces, events, persistentvolumeclaims, configmaps]
+    verbs: [get, list, watch]
+  # Disk/PVC usage from the kubelet Summary API (dashboard + disk alerts).
+  - apiGroups: [""]
+    resources: [nodes/proxy]
+    verbs: [get]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses]
+    verbs: [get, list, watch]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, watch]
+  - apiGroups: [apiregistration.k8s.io]
+    resources: [apiservices]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses, ingressclasses]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets, daemonsets]
+    verbs: [get, list, watch]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch]
+  - apiGroups: [metrics.k8s.io]
+    resources: [nodes, pods]
+    verbs: [get, list]
+---
+# Deploys, YAML/Helm apply, restarts and scaling. KubeSight's own RBAC and
+# approval gates still decide who may do what.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}-backend-deployer
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods, services, configmaps, secrets, serviceaccounts, persistentvolumeclaims, persistentvolumes]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch, create]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets, daemonsets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+{{- range list "reader" "deployer" }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}-backend-{{ . }}
+  labels:
+    {{- include "kubesight.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}-backend-{{ . }}
+subjects:
+  - kind: ServiceAccount
+    name: kubesight-backend
+    namespace: {{ $ns }}
+{{- end }}

@@ -1,0 +1,109 @@
+{{- $ns := include "kubesight.namespace" . }}
+{{- $public := include "kubesight.publicUrl" . }}
+{{- $backend := include "kubesight.backendUrl" . }}
+{{- $backendImage := include "kubesight.image" (dict "root" . "repo" .Values.image.backendRepository) }}
+{{- $data := dict
+  "APP_ENV" "production"
+  "AUTH_REQUIRED" "true"
+  "FLASK_DEBUG" "false"
+  "K8S_REAL_MODE" "true"
+  "K8S_CONTEXT_NAME" .Values.backend.inClusterContextName
+  "HELM_BINARY" "helm"
+  "KUBESIGHT_AUTO_UPGRADE" (ternary "true" "false" .Values.backend.autoUpgrade)
+  "KUBESIGHT_SEED_DEMO_USERS" (ternary "true" "false" .Values.backend.seedDemoUsers)
+  "CORS_ORIGINS" $public
+  "PUBLIC_BASE_URL" $public
+  "KUBESIGHT_PUBLIC_URL" $public
+  "KUBESIGHT_INTERNAL_URL" $backend
+  "PUBLIC_API_URL" ""
+  "KUBESIGHT_KUBECONFIG_DIR" "/var/lib/kubesight/kubeconfigs"
+  "CI_ARTIFACT_DIR" "/var/lib/kubesight/ci-artifacts"
+  "MOBILE_ARTIFACT_DIR" "/var/lib/kubesight/mobile-artifacts"
+  "KUBESIGHT_TOFU_WORKDIR" "/var/lib/kubesight/tofu"
+  "APPLICATION_ANALYSIS_ARTIFACT_ROOT" "/var/lib/kubesight/application-analysis-artifacts"
+  "CI_BACKEND_NAMESPACE" $ns
+  "CI_BACKEND_PORT" "5000"
+}}
+{{- if include "kubesight.ciEnabled" . }}
+{{- with .Values.ci }}
+{{- $_ := merge $data (dict
+  "CI_KUBERNETES_NAMESPACE" .namespace
+  "CI_SERVICE_ACCOUNT" "kubesight-ci-build"
+  "CI_WORKER_CALLBACK_URL" (printf "%s/api/ci/worker" $backend)
+  "CI_WORKER_IMAGE" $backendImage
+  "CI_IMAGE_PULL_POLICY" $.Values.image.pullPolicy
+  "CI_JOB_TTL_SECONDS" (toString .jobTtlSeconds)
+  "CI_STALE_BUILD_MINUTES" (toString .staleBuildMinutes)
+  "CI_STAGE_CPU_LIMIT" (toString .stage.cpuLimit)
+  "CI_STAGE_MEMORY_LIMIT" (toString .stage.memoryLimit)
+  "CI_STAGE_EPHEMERAL_REQUEST" (toString .stage.ephemeralRequest)
+  "CI_STAGE_EPHEMERAL_LIMIT" (toString .stage.ephemeralLimit)
+  "CI_WORKSPACE_SIZE_LIMIT" (toString .stage.workspaceSizeLimit)
+  "CI_EXTRA_EGRESS_PORTS" (toString .extraEgressPorts)
+  "CI_ARTIFACT_AUTOCLEAN" (ternary "true" "false" .artifacts.autoclean)
+  "CI_ARTIFACT_KEEP_LAST" (toString .artifacts.keepLast)
+  "CI_ARTIFACT_RETENTION_DAYS" (toString .artifacts.retentionDays)
+) }}
+{{- if .cache.enabled }}
+{{- $_ := set $data "CI_CACHE_CLAIM_NAME" (include "kubesight.claimName" (dict "cfg" .cache "name" .cache.claimName)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if include "kubesight.buildkitEnabled" . }}
+{{- $_ := set $data "CI_BUILDKIT_ADDR" (printf "tcp://buildkitd.%s.svc.cluster.local:1234" .Values.buildkit.namespace) }}
+{{- $_ := set $data "CI_BUILDKIT_POOL" (printf "buildkitd-pods.%s.svc.cluster.local" .Values.buildkit.namespace) }}
+{{- end }}
+{{- if .Values.analysis.enabled }}
+{{- with .Values.analysis }}
+{{- $_ := merge $data (dict
+  "APPLICATION_ANALYSIS_EXECUTION_MODE" "kubernetes"
+  "APPLICATION_ANALYSIS_NAMESPACE" .namespace
+  "APPLICATION_ANALYSIS_SERVICE_ACCOUNT" "kubesight-analysis-worker"
+  "APPLICATION_ANALYSIS_WORKER_IMAGE" $backendImage
+  "APPLICATION_ANALYSIS_IMAGE_PULL_POLICY" $.Values.image.pullPolicy
+  "APPLICATION_ANALYSIS_CALLBACK_URL" (printf "%s/api/application-analysis-worker" $backend)
+  "APPLICATION_PULL_REQUEST_CALLBACK_URL" (printf "%s/api/application-pull-request-worker" $backend)
+  "APPLICATION_ANALYSIS_CPU_LIMIT" (toString .cpuLimit)
+  "APPLICATION_ANALYSIS_MEMORY_LIMIT" (toString .memoryLimit)
+  "APPLICATION_ANALYSIS_EPHEMERAL_LIMIT" (toString .ephemeralLimit)
+  "APPLICATION_BUILD_CPU_LIMIT" (toString .buildCpuLimit)
+  "APPLICATION_BUILD_MEMORY_LIMIT" (toString .buildMemoryLimit)
+  "APPLICATION_ANALYSIS_DEADLINE_SECONDS" (toString .deadlineSeconds)
+  "APPLICATION_ANALYSIS_JOB_TTL_SECONDS" (toString .jobTtlSeconds)
+  "APPLICATION_ANALYSIS_BACKOFF_LIMIT" "1"
+  "APPLICATION_BUILD_COMMAND_TIMEOUT_SECONDS" "600"
+  "APPLICATION_ANALYSIS_HERMES_TIMEOUT_SECONDS" (toString .hermesTimeoutSeconds)
+  "APPLICATION_ANALYSIS_HERMES_MAX_BYTES" "4000000"
+  "APPLICATION_ANALYSIS_HERMES_RESPONSE_MAX_BYTES" "4000000"
+) }}
+{{- end }}
+{{- end }}
+{{- $hermesApiUrl := trim (.Values.hermes.apiUrl | default "") }}
+{{- if or .Values.hermes.enabled $hermesApiUrl }}
+{{- $hermes := $hermesApiUrl | default (include "kubesight.hermesUrl" .) }}
+{{- $_ := merge $data (dict
+  "HERMES_API_URL" $hermes
+  "TICKET_AGENT_HERMES_URL" $hermes
+  "HERMES_APPLICATION_MODEL" "hermes-agent"
+) }}
+{{- /* With apiUrl the backend reads an in-cluster proxy's namespace and port
+       off the URL for the analysis Jobs' egress rule. */ -}}
+{{- if not $hermesApiUrl }}
+{{- $_ := merge $data (dict "HERMES_SERVICE_NAMESPACE" $ns "HERMES_SERVICE_PORT" "8642") }}
+{{- end }}
+{{- end }}
+{{- /* backend.config wins over everything the chart set. */ -}}
+{{- range $key, $value := .Values.backend.config }}
+{{- $_ := set $data $key (toString $value) }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubesight-config
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+data:
+  {{- range $key := keys $data | sortAlpha }}
+  {{ $key }}: {{ get $data $key | quote }}
+  {{- end }}

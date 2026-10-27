@@ -1,0 +1,10 @@
+apiVersion: v2
+name: kubesight
+description: >-
+  KubeSight in one release: backend, frontend, native CI (build namespace,
+  BuildKit, dependency cache), Application Intelligence and the Hermes agent.
+type: application
+# The chart's own version. The KubeSight release it runs is image.tag.
+version: 0.1.0
+appVersion: "1.1.171"
+kubeVersion: ">=1.29.0-0"

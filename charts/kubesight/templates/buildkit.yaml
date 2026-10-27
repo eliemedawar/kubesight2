@@ -1,0 +1,154 @@
+{{- if include "kubesight.buildkitEnabled" . }}
+{{- with .Values.buildkit }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: buildkitd
+  namespace: {{ .namespace }}
+  labels:
+    {{- include "kubesight.labels" $ | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: buildkitd
+  namespace: {{ .namespace }}
+  labels:
+    {{- include "kubesight.labels" $ | nindent 4 }}
+    app: buildkitd
+spec:
+  # Image stages use the first builder that answers from its own node, so a
+  # second replica on another node is the failover.
+  replicas: {{ .replicas }}
+  selector:
+    matchLabels:
+      app: buildkitd
+  template:
+    metadata:
+      labels:
+        app: buildkitd
+      annotations:
+        container.apparmor.security.beta.kubernetes.io/buildkitd: unconfined
+    spec:
+      serviceAccountName: buildkitd
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: buildkitd
+      containers:
+        - name: buildkitd
+          image: {{ .image }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --addr
+            - tcp://0.0.0.0:1234
+            - --oci-worker-no-process-sandbox
+          ports:
+            - containerPort: 1234
+              protocol: TCP
+          readinessProbe:
+            exec:
+              command: [buildctl, --addr, tcp://127.0.0.1:1234, debug, workers]
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            {{- toYaml .resources | nindent 12 }}
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop: [ALL]
+              add: [SETUID, SETGID]
+            seccompProfile:
+              type: Unconfined
+          volumeMounts:
+            - name: cache
+              mountPath: /home/user/.local/share/buildkit
+      volumes:
+        - name: cache
+          emptyDir:
+            sizeLimit: {{ .cacheSize }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: buildkitd
+  namespace: {{ .namespace }}
+  labels:
+    {{- include "kubesight.labels" $ | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: buildkitd
+  ports:
+    - port: 1234
+      targetPort: 1234
+      protocol: TCP
+---
+# One DNS record per builder (CI_BUILDKIT_POOL), for failover.
+apiVersion: v1
+kind: Service
+metadata:
+  name: buildkitd-pods
+  namespace: {{ .namespace }}
+  labels:
+    {{- include "kubesight.labels" $ | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    app: buildkitd
+  ports:
+    - port: 1234
+      targetPort: 1234
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: buildkitd
+  namespace: {{ .namespace }}
+  labels:
+    {{- include "kubesight.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: buildkitd
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Only build pods talk to the builders.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $.Values.ci.namespace }}
+      ports:
+        - port: 1234
+          protocol: TCP
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+    # Registries and base-image sources.
+    - ports:
+        {{- range .egressPorts }}
+        - {port: {{ . }}, protocol: TCP}
+        {{- end }}
+{{- end }}
+{{- end }}

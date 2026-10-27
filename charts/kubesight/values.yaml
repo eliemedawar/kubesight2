@@ -1,0 +1,268 @@
+# KubeSight — everything KubeSight runs in a cluster, in one release.
+#
+# Install into the namespace the backend should live in (normally kubesight):
+#   helm upgrade --install kubesight charts/kubesight -n kubesight --create-namespace \
+#     -f values-production.yaml --set image.tag=1.2.0
+#
+# No secret belongs in a values file. The chart generates its own keys and
+# tokens on first install and keeps them across upgrades; the database URL,
+# registry login, certificate and Hermes's LLM login come from Secrets you
+# create (README.md lists them). Defaults below match the UAT installation.
+
+# --- Images ------------------------------------------------------------------
+image:
+  registry: registry.areeba.com
+  # The KubeSight release to run (the x.y.z tag the Bitbucket tag pipeline
+  # pushed). Required. The CI build pods and the analysis worker run the
+  # backend image at this same tag, so they never drift from the backend.
+  tag: ""
+  backendRepository: kubesight-backend
+  frontendRepository: kubesight-frontend
+  pullPolicy: IfNotPresent
+
+# Registry login, attached to every pod and to the build/analysis service
+# accounts. Leave name empty when nodes can pull without one.
+imagePullSecret:
+  name: areeba-registry
+  # true: the chart creates the Secret in every KubeSight namespace from the
+  # three fields below (pass password with --set, never commit it).
+  # false: a Secret with this name must already exist in every namespace.
+  create: false
+  server: registry.areeba.com
+  username: ""
+  password: ""
+
+# --- Where people reach it --------------------------------------------------
+# The host name people open, without https://. Required.
+publicHost: ""
+
+ingress:
+  enabled: true
+  className: nginx
+  # Extra annotations, e.g. kubernetes.io/ingress.class for a controller that
+  # is chosen by annotation (UAT: ingress-nginx-external).
+  annotations: {}
+  # Mobile binaries (APK/AAB/IPA) are uploaded through /api.
+  proxyBodySize: 512m
+  tls:
+    # existingSecret — a certificate Secret you load into this namespace
+    # certManager    — cert-manager issues it (set clusterIssuer or issuer)
+    # none           — plain HTTP; for a test install only
+    mode: existingSecret
+    secretName: kubesight-tls
+    clusterIssuer: ""
+    issuer: ""
+
+# --- Database ----------------------------------------------------------------
+# The external PostgreSQL 14+. Reach it directly or through a SESSION-mode
+# pooler (leader election holds session advisory locks). Give the URL either
+# as a Secret you create in this namespace (recommended) ...
+database:
+  existingSecret: ""
+  existingSecretKey: DATABASE_URL
+  # ... or here, from a values file that stays out of git.
+  url: ""
+
+# --- Keys and tokens the chart generates --------------------------------------
+# JWT_SECRET_KEY, FLASK_SECRET_KEY, KUBESIGHT_SECRET_KEY, HERMES_API_TOKEN,
+# KUBESIGHT_HERMES_MCP_TOKEN and KUBESIGHT_INITIAL_ADMIN_PASSWORD are created
+# on first install, kept on every upgrade, and kept on uninstall.
+# KUBESIGHT_SECRET_KEY encrypts every stored credential: it must never change.
+secrets:
+  # Name a Secret you manage yourself with those six keys to skip generation.
+  existingSecret: ""
+
+# --- Backend -----------------------------------------------------------------
+backend:
+  # Keep 1: the read caches are per process (see backend/k8s_entrypoint.sh).
+  replicas: 1
+  resources:
+    requests: {cpu: 250m, memory: 1Gi}
+    limits: {memory: 2Gi}
+  # The name the cluster KubeSight runs in is listed under.
+  inClusterContextName: kubesight-prod
+  # Let KubeSight run kubeadm upgrades itself (Upgrade Center); off = it only
+  # prints the manual plan.
+  autoUpgrade: true
+  # viewer/viewer123 and operator/operator123. The first admin always gets a
+  # generated one-time password instead of admin123.
+  seedDemoUsers: false
+  # Extra hosts for /etc/hosts, e.g. a name internal DNS does not resolve.
+  hostAliases: []
+  #  - ip: 193.123.81.215
+  #    hostnames: [api-oci.areeba.com]
+  # Any other backend setting (plain values only), e.g. SMTP_HOST,
+  # ZOHO_ALLOWED_LAYOUT_IDS, LOG_LEVEL. Wins over what the chart sets.
+  config:
+    ALERT_CPU_THRESHOLD_PERCENT: "80"
+    JWT_EXPIRY_HOURS: "8"
+  # Secrets in this namespace whose keys become backend environment
+  # variables, e.g. one holding SMTP_PASSWORD.
+  extraEnvFromSecrets: []
+  # CI artifacts, mobile binaries, analysis artifacts, cluster kubeconfigs and
+  # OpenTofu work dirs, under /var/lib/kubesight. Without it they are lost on
+  # every backend restart.
+  persistence:
+    size: 20Gi
+    accessMode: ReadWriteOnce
+    # "" = the cluster's default StorageClass, "-" = no class (a PV you made).
+    storageClass: ""
+    existingClaim: ""
+    # Set server and path to have the chart create an NFS PersistentVolume
+    # (for a cluster with no StorageClass). The export must exist.
+    nfs: {server: "", path: "", mountOptions: []}
+
+frontend:
+  replicas: 1
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 200m, memory: 128Mi}
+
+# --- Native CI ---------------------------------------------------------------
+ci:
+  enabled: true
+  namespace: kubesight-ci
+  # Installation defaults; a service or a stage can override them in the UI.
+  stage:
+    cpuLimit: "2"
+    memoryLimit: 4Gi
+    ephemeralRequest: "off"
+    ephemeralLimit: "off"
+    workspaceSizeLimit: "off"
+  # Dependency repositories on non-standard ports build pods must reach
+  # (4443 = Nexus Maven).
+  extraEgressPorts: "4443"
+  jobTtlSeconds: 900
+  staleBuildMinutes: 120
+  artifacts: {autoclean: true, keepLast: 1, retentionDays: 1}
+  quota:
+    count/jobs.batch: "30"
+    count/secrets: "60"
+    requests.cpu: "12"
+    requests.memory: 24Gi
+    limits.cpu: "24"
+    limits.memory: 48Gi
+  limitRange:
+    default: {cpu: "2", memory: 4Gi}
+    defaultRequest: {cpu: 100m, memory: 256Mi}
+  # The shared dependency cache (Maven, Gradle, npm, ...). ReadWriteMany.
+  # On NFS the export directory must belong to uid 65532 before the first
+  # build: sudo chown 65532:65532 <path> && sudo chmod 2775 <path>.
+  cache:
+    enabled: true
+    claimName: ci-cache
+    size: 20Gi
+    accessMode: ReadWriteMany
+    storageClass: ""
+    existingClaim: ""
+    nfs: {server: "", path: "", mountOptions: []}
+
+buildkit:
+  # Container image builds for CI. Ignored when ci.enabled is false.
+  enabled: true
+  namespace: kubesight-buildkit
+  replicas: 2
+  image: moby/buildkit:v0.23.2-rootless
+  resources:
+    requests: {cpu: 500m, memory: 1Gi, ephemeral-storage: 2Gi}
+    limits: {cpu: "4", memory: 8Gi, ephemeral-storage: 10Gi}
+  cacheSize: 10Gi
+  # Registry ports buildkitd pushes to and pulls from.
+  egressPorts: [443, 8443, 8082, 5000, 9443]
+  hostAliases: []
+  #  - ip: 10.4.23.182
+  #    hostnames: [registry.areeba.com]
+
+# --- Application Intelligence --------------------------------------------------
+analysis:
+  enabled: true
+  namespace: kubesight-analysis
+  cpuLimit: "2"
+  memoryLimit: 4Gi
+  ephemeralLimit: 2Gi
+  buildCpuLimit: "2"
+  buildMemoryLimit: 4Gi
+  deadlineSeconds: 1800
+  jobTtlSeconds: 900
+  hermesTimeoutSeconds: 900
+  quota:
+    count/jobs.batch: "20"
+    count/secrets: "30"
+    requests.cpu: "8"
+    requests.memory: 16Gi
+    requests.ephemeral-storage: 20Gi
+    limits.cpu: "16"
+    limits.memory: 32Gi
+    limits.ephemeral-storage: 40Gi
+  limitRange:
+    default: {cpu: "2", memory: 4Gi, ephemeral-storage: 2Gi}
+    defaultRequest: {cpu: 100m, memory: 128Mi, ephemeral-storage: 256Mi}
+
+# --- Hermes --------------------------------------------------------------------
+# The agent behind Application Intelligence, the ticket agent and CI assist.
+# It reaches KubeSight's MCP server with a token the chart generates and
+# registers, so nothing has to be minted in the UI.
+hermes:
+  enabled: true
+  image:
+    repository: kubesight-hermes
+    tag: v2026.7.20
+  resources:
+    requests: {cpu: 250m, memory: 512Mi, ephemeral-storage: 256Mi}
+    limits: {cpu: "2", memory: 2Gi, ephemeral-storage: 2Gi}
+  maxIterations: 20
+  # Where KubeSight sends its Hermes requests (Application Intelligence, the
+  # ticket agent, CI assist). Empty = the bundled Hermes. Set it to an AI
+  # proxy that forwards to Hermes, e.g.
+  # https://ai-proxy.example.com/v1/chat/completions; it also works with
+  # hermes.enabled=false. See "Calling Hermes through an AI proxy" in the README.
+  apiUrl: ""
+  # The LLM login. UAT uses the ChatGPT/Codex provider, whose login is an
+  # auth.json; create it once and name the Secret here:
+  #   kubectl -n kubesight create secret generic hermes-codex-auth --from-file=auth.json
+  codexAuth:
+    existingSecret: ""
+  # Secrets whose keys become Hermes environment variables: an LLM API key for
+  # a key-based provider, TELEGRAM_BOT_TOKEN, and so on.
+  extraEnvFromSecrets: []
+  # Hermes config.yaml. The chart adds mcp_servers.kubesight itself.
+  config:
+    model:
+      default: gpt-5.6-sol
+      provider: openai-codex
+      base_url: https://chatgpt.com/backend-api/codex
+      max_tokens: 8192
+    providers: {}
+    fallback_providers: []
+    toolsets: []
+    agent:
+      max_turns: 20
+      gateway_timeout: 900
+      api_max_retries: 1
+      task_completion_guidance: false
+      environment_probe: false
+      coding_context: "off"
+      reasoning_effort: low
+      verbose: false
+    platform_toolsets:
+      api_server:
+        - kubesight
+  # Copy the KubeSight skill (files/hermes-skills/kubesight) into Hermes on
+  # every start, so it always matches this release.
+  installSkill: true
+  # Memory, sessions, cron and login state. Lose it and Hermes starts over.
+  persistence:
+    size: 10Gi
+    accessMode: ReadWriteOnce
+    storageClass: ""
+    existingClaim: ""
+    nfs: {server: "", path: "", mountOptions: []}
+  networkPolicy:
+    enabled: true
+    # Hermes may call out on 443 anywhere except these ranges.
+    egressExcept: [172.16.0.0/12, 192.168.0.0/16]
+    # Who else may call Hermes on 8642, as NetworkPolicy peers: the AI proxy
+    # in front of it, e.g.
+    #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ai-proxy}}
+    #   - ipBlock: {cidr: 10.4.27.50/32}
+    extraIngressFrom: []

@@ -1,0 +1,53 @@
+{{- if .Values.ingress.enabled }}
+{{- $tls := .Values.ingress.tls }}
+{{- if not (has $tls.mode (list "existingSecret" "certManager" "none")) }}
+{{- fail "ingress.tls.mode must be existingSecret, certManager or none" }}
+{{- end }}
+{{- if and (eq $tls.mode "certManager") (not (or $tls.clusterIssuer $tls.issuer)) }}
+{{- fail "ingress.tls.mode certManager needs ingress.tls.clusterIssuer or ingress.tls.issuer" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kubesight-ingress
+  namespace: {{ include "kubesight.namespace" . }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: {{ .Values.ingress.proxyBodySize | quote }}
+    {{- if eq $tls.mode "certManager" }}
+    {{- if $tls.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ $tls.clusterIssuer }}
+    {{- else }}
+    cert-manager.io/issuer: {{ $tls.issuer }}
+    {{- end }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if ne $tls.mode "none" }}
+  tls:
+    - hosts: [{{ .Values.publicHost | quote }}]
+      secretName: {{ $tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ required "publicHost is required: the host name people open, e.g. kubesight.areeba.com" .Values.publicHost | quote }}
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service: {name: backend-service, port: {number: 5000}}
+          - path: /health
+            pathType: Exact
+            backend:
+              service: {name: backend-service, port: {number: 5000}}
+          - path: /
+            pathType: Prefix
+            backend:
+              service: {name: frontend-service, port: {number: 80}}
+{{- end }}

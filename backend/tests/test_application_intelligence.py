@@ -688,6 +688,32 @@ def test_job_security_controls_and_no_secret_in_job_spec(monkeypatch):
         assert security["capabilities"]["drop"] == ["ALL"]
 
 
+def _callback_rule_namespaces(network_policy):
+    return [
+        rule["to"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"]
+        for rule in network_policy["spec"]["egress"]
+        if rule.get("ports") == [{"protocol": "TCP", "port": 5000}]
+    ]
+
+
+def test_job_callbacks_reach_the_backend_namespace_it_runs_in(monkeypatch):
+    def policy():
+        resources = build_job_resources(
+            analysis_id=47,
+            repository_url="https://bitbucket.org/workspace/payment-service.git",
+            revision="main",
+            subdirectory="",
+            repository_token="read-token",
+            callback_token="callback-token",
+        )
+        return next(item for item in resources if item["kind"] == "NetworkPolicy")
+
+    monkeypatch.delenv("CI_BACKEND_NAMESPACE", raising=False)
+    assert _callback_rule_namespaces(policy()) == ["kubesight"]
+    monkeypatch.setenv("CI_BACKEND_NAMESPACE", "kubesight-prod")
+    assert _callback_rule_namespaces(policy()) == ["kubesight-prod"]
+
+
 def test_job_launcher_sends_one_valid_kubernetes_list(monkeypatch):
     resources = build_job_resources(
         analysis_id=46,

@@ -1,0 +1,237 @@
+# Platform — registries, tickets, mobile releases, and who can do what
+
+The surfaces a question lands on a few times a week. What they have in common is
+that they are **configuration and provenance** rather than running state — so
+when an answer somewhere else ends in "…and it was refused", the reason is often
+a row in here.
+
+## Registries and images
+
+```
+kubesight_registries_list
+kubesight_image_check {image: "registry.areeba.com/payment-api:4.2.1"}
+```
+
+**`kubesight_image_check` is the fastest answer to an `ImagePullBackOff`**, and
+to "will this deploy work". A manifest referencing an image that was never
+pushed looks like a cluster problem from inside the cluster and stays looking
+like one until somebody checks the registry.
+
+Run it before telling anybody a deploy will succeed. `kubesight_deploy_apply`
+runs the same check itself and refuses — but finding out here costs one call and
+no failed deploy.
+
+## Ticketing and deploy automation
+
+```
+kubesight_ticketing_providers                              ← the provider keys
+kubesight_tickets_list        {provider: "zoho"}
+kubesight_automation_runs_list{provider: "zoho"}
+```
+
+Every other ticketing tool needs a provider key from the first call — `zoho` or
+`jira`, depending on what the installation has connected.
+
+`kubesight_automation_runs_list` is the place to look when somebody says **"the
+ticket was approved but nothing happened"**: it shows what KubeSight did in
+response to each ticket and how far the run got, including the stage it stopped
+at and the error.
+
+```
+kubesight_automation_run_start  {provider: "zoho", ticketRecordId: 88, confidence: "High", concerns: []}
+kubesight_automation_run_cancel {provider: "zoho", runId: 412}
+```
+
+**A run you start is checked by the ticket validator first** — the same check
+the ticket agent's own plans go through (published targets, your confidence,
+the approval route). Say how sure you are with `confidence` (High / Medium /
+Low) and list anything doubtful in `concerns`. Without `confidence` it counts
+as Low, which routes to a human approval and is refused here: ask for that
+approval with `kubesight_ticket_request_approval` instead.
+
+**Starting a run is a deploy.** It deploys what the ticket asks for, into the
+cluster the ticket names, through the ordinary deploy path — so an
+approval-gated cluster still gates it, and the refusal will be the one described
+in [deploys.md](deploys.md). Read the ticket first with `kubesight_tickets_list`
+and say what it is about to deploy and where.
+
+**Cancelling stops a run; it does not undo one.** Anything already applied stays
+applied. Say that, rather than letting "cancelled" be heard as "reverted".
+
+## Handling a ticket (the ticket agent)
+
+When the ticket agent is on, KubeSight hands you each new ticket as a task
+("handle_new_ticket", with its `ticketRecordId`, the ticket and the catalog) and
+you handle it end to end. You write every comment the requester sees.
+
+```
+kubesight_ticket_get               {ticketRecordId: 88}   ← ticket + catalog + runs
+kubesight_ticket_execute           {ticketRecordId, action, environment, application,
+                                    tag | variable+value, confidence, understanding, comment}
+                                   or, for several applications:
+                                   {ticketRecordId, changes: [{action, environment,
+                                    application, tag | variable+value}, …],
+                                    confidence, understanding, comment}
+kubesight_ticket_request_approval  {…same…, reasons, comment, commentOnApprove}
+kubesight_ticket_set_status        {ticketRecordId, status, comment}
+kubesight_ticket_comment           {ticketRecordId, comment}
+kubesight_ticket_answer            {ticketRecordId, comment, diagnosis,
+                                    findings: [{finding, evidence}], checked,
+                                    recommendation, confidence, status: on_hold|done,
+                                    proposedFix?: {…same as request_approval…}}
+kubesight_ticket_request_vms       {ticketRecordId, profile, name, count, size?: {cpu,
+                                    memoryGb, diskGb}, kubernetes?: {shape | counts,
+                                    version?, addons?: [add-on ids]}, apps?: [appProfile
+                                    names], confidence,
+                                    understanding, comment, commentOnApprove}
+kubesight_ticket_install_apps      {ticketRecordId, cluster, apps: [appProfile names],
+                                    confidence, understanding, comment, commentOnApprove}
+```
+
+**One ticket can name several applications** — "deploy issuing-ms 1.4.2 and
+processing-ms 2.0.1 to UAT". Handle them in ONE execute (or approval) call with
+one `changes` entry per application; never split the ticket and never ask the
+requester to raise one ticket per application. An environment or tag written
+once for all of them applies to each. If one of them cannot be matched or has no
+tag, ask about that one (naming the ones you understood) instead of deploying
+the rest.
+
+**You do not pick how an image gets built.** A `deploy_image` whose tag is
+already in one of the cluster's linked registries only swaps the tag on the
+deployment. A missing tag is built first — by KubeSight CI or Jenkins, whichever
+the DevOps team set — then verified in the registry and deployed. On a cluster
+that needs approval, all of the ticket's changes go to the approvers in ONE
+change bundle, once every one of them is ready.
+
+**A ticket that reports a problem is troubleshooting, not an impediment.**
+"payments-api returns 502", "why is issuing-ms restarting?" — find where it runs
+(each catalog entry carries its `cluster`; the environment is the namespace),
+look with read-only tools only (`kubesight_inventory_get`, `kubesight_pod_issues`,
+`kubesight_namespace_events`, `kubesight_pod_logs` with `previous` after a
+restart, `kubesight_alerts_list`, `kubesight_rollout_history`), and answer once
+with `kubesight_ticket_answer`: the comment for the requester, the diagnosis and
+the evidence behind it, the recommendation. `on_hold` when they should confirm
+or act (their reply comes back to you), `done` when nothing is left. A fix that
+is one of KubeSight's three actions goes in `proposedFix` — it is sent for
+approval, never run. Change nothing while troubleshooting. When the task says
+`"troubleshooting": false`, set such tickets to `impediment` instead.
+
+**A ticket asking for new VMs goes to `kubesight_ticket_request_vms`.** "Two
+RHEL VMs, 4 vCPU / 8 GB, in DR", or "a small Kubernetes cluster for team X".
+Pick the `profile` from `vmProfiles` in the task (or `kubesight_ticket_get`) —
+copied exactly; each says where the VMs go, their OS, the default and largest
+size, how many one ticket may ask for, and whether Kubernetes is allowed. Give a
+`name` — the name the ticket gives the VMs (lowercase, hyphens; they become
+`<name>-vm-1` …). A ticket that does not name them is an `impediment`: ask the
+requester for a name; never make one up and never use the ticket number. Then
+`count`, and `size` only for what the ticket states. For a cluster
+add `kubernetes: {shape: lab|small|standard-ha}` (2, 4 or 8 VMs) or `counts`.
+Add-ons (Metrics Server, NGINX Ingress, MetalLB): a profile's `addons.alwaysInstalled`
+come with every cluster — do not pass them; when the ticket asks for one listed in
+`addons.onRequest`, pass its id in `kubernetes.addons`. One the profile does not
+offer is refused: tell the requester, never pick another. You never set add-on
+settings (a MetalLB address pool is the profile's).
+Nothing is created by the call: KubeSight makes the OpenTofu plan and a VM
+approver ALWAYS approves it first — no confidence skips that. If no profile
+fits, the ask is over a profile's limits, or `vmProfiles` is empty, set the
+ticket to `impediment` and say why (the limit, or that DevOps will do it). You
+get ONE `vm_request_finished` follow-up with every VM's name and address (and
+the cluster id): `done` when `result` is `ready` or `cluster_ready`, `on_hold`
+for `needs_attention` (VMs exist, Kubernetes waits for DevOps), `failed` for
+`failed`. A `vm_request_failed` follow-up (the plan could not be made) is an
+`impediment`. Never reach for a Cluster Builder or OpenTofu tool to do this.
+
+**Applications a ticket asks for come from `appProfiles`.** Each profile is an
+administrator's Inventory Helm chart with its version, values, namespace and
+release — you never write values or pick versions, and you never see the
+values. A profile installs with its `valuesFile`; when the ticket names
+another one ("values-uat") that the profile lists in `ticketMayPick`, pass
+`valuesFiles: {"<profile>": "<that file>"}` — the administrator's own settings
+(passwords) still go on top. A file it does not list is an `impediment`: say
+which it allows. On a new cluster, add `apps` (names copied exactly) to
+`kubesight_ticket_request_vms`: the charts are installed once Kubernetes is up,
+under the same single approval, and the follow-up carries `apps` with each
+release's status. On a cluster the Cluster Builder already built, call
+`kubesight_ticket_install_apps` with its name as `cluster`: an approver ALWAYS
+approves first, and a cluster that needs approval for changes then asks its own
+approvers (the phase reads `waiting_cluster_approval`). One follow-up:
+`vm_request_finished` with `result: apps_ready` (→ `done`) or `failed`. When an
+installed chart made Ingresses, the follow-up carries `ingresses` (release,
+namespace, `hosts`, `addresses`, `urls`, `via`): write each host as the DNS name
+to create, the address(es) it must point at, and the URL to open — with `via:
+nodePort` the port in the URL is part of it. `ingressNote` says they could not
+be read; mention it, the apps are still installed. An app
+that is not in `appProfiles`, or a cluster the Cluster Builder did not build,
+is an `impediment`. Never install a chart for a ticket with a Helm tool.
+
+**Call exactly one of the settling tools per new ticket.**
+`kubesight_ticket_execute` when you understand it exactly and are confident: it
+starts the deploy (`deploy_image`, `set_env_var` or `restart`) and moves the
+ticket to In Progress. `kubesight_ticket_request_approval` when you understand it
+but are not sure: a DevOps engineer approves it on Telegram, and approving runs
+exactly what you proposed. `kubesight_ticket_set_status` with `impediment` when
+the ticket is unclear, impossible, or missing something — the comment says what
+and asks.
+
+**`environment` and `application` are copied from the catalog, never guessed.**
+Execute refuses anything that is not one catalog entry, and turns a request
+under the confidence bar, one that contradicts the ticket's dropdowns, or one
+with `concerns` into "request approval instead" — then call the approval tool
+with the same action.
+
+**Only these tools change a ticketed deploy.** Never reach for
+`kubesight_automation_run_start`, a workload restart or `kubesight_deploy_apply`
+to carry out a ticket: they skip the ticket's status and the approval.
+
+**Parking and picking up again.** `impediment` = unclear or missing information;
+`on_hold` = clear, but waiting on the requester (a time, a confirmation). When
+they comment, you get the ticket back as `continue_ticket` with the conversation
+so far and the new comments — carry on from there, and don't ask again what they
+already answered.
+
+**Follow-ups.** When the run finishes (or an approval is rejected or expires)
+you get a "followup" task describing it. Write the requester a comment and move
+the ticket: `done` when the change is live, `failed` when it failed,
+`impediment` when the approval was refused. `done` is refused while the run is
+still going. A ticket with several applications gets ONE `runs_finished`
+follow-up once every run is over, with each result in `runs`: one comment
+covering all of them, `done` only if every one deployed, `failed` if any failed.
+
+## Mobile releases
+
+```
+kubesight_mobile_apps_list
+kubesight_mobile_builds_list   {appId: 3}
+kubesight_mobile_publishes_list{appId: 3}
+```
+
+Read-only. Builds are the binaries KubeSight holds — platform, version, build
+number, whether it is signed. Publishes are what went to Google Play or App
+Store Connect, and whether the store accepted it.
+
+An unsigned build cannot be published, and the builds listing says so per build.
+That is usually the answer to "why can't we publish this".
+
+## Users, roles and permissions
+
+```
+kubesight_users_list
+kubesight_roles_list
+kubesight_settings_get
+```
+
+**`kubesight_roles_list` is what turns a permission error into something
+actionable.** When any tool refuses with
+
+> `'X' needs the 'Y' permission, which this token does not have.`
+
+look up which roles grant `Y` and name them: "that needs `helm:uninstall`, which
+the `platform-admin` role has — ask an administrator to grant it or run it
+themselves." A bare "I don't have permission" leaves the person nowhere.
+
+`kubesight_users_list` shows account state — active, locked, MFA enrolled. It is
+read-only: unlocking an account, resetting MFA and changing a role are
+administrator actions in the UI, not tools here.
+
+`kubesight_settings_get` is thin, and mostly useful for one thing: `defaultCluster`
+tells you which cluster somebody means when they say "the cluster".

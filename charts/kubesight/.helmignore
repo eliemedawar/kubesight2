@@ -1,0 +1,7 @@
+.DS_Store
+.git/
+*.swp
+*.bak
+*.tmp
+sync-hermes-skill.sh
+values-*.example.yaml

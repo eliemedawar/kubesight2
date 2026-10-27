@@ -1,0 +1,71 @@
+# Production values — copy to values-production.yaml (outside git, or with
+# nothing secret in it) and fill in the <...> parts. Everything not set here
+# keeps the default in values.yaml.
+#
+#   helm upgrade --install kubesight charts/kubesight -n kubesight --create-namespace \
+#     -f values-production.yaml --set image.tag=<x.y.z>
+
+publicHost: <kubesight.areeba.com>
+
+ingress:
+  className: nginx
+  # A controller selected by annotation instead of className (UAT does this):
+  # annotations:
+  #   kubernetes.io/ingress.class: ingress-nginx-external
+  tls:
+    # Either a certificate Secret you load first:
+    #   kubectl -n kubesight create secret tls kubesight-tls --cert=tls.crt --key=tls.key
+    mode: existingSecret
+    secretName: kubesight-tls
+    # ... or cert-manager:
+    # mode: certManager
+    # clusterIssuer: <issuer-name>
+
+database:
+  # kubectl -n kubesight create secret generic kubesight-database \
+  #   --from-literal=DATABASE_URL='postgresql://kubesight:<password>@<host>:5432/kubesight'
+  existingSecret: kubesight-database
+
+imagePullSecret:
+  name: areeba-registry
+  # Let the chart create it in every namespace (password via --set):
+  # create: true
+  # username: <user>
+
+backend:
+  inClusterContextName: kubesight-prod
+  hostAliases: []
+  #  - ip: <ip>
+  #    hostnames: [api-oci.areeba.com]
+  config:
+    ALERT_CPU_THRESHOLD_PERCENT: "80"
+    JWT_EXPIRY_HOURS: "8"
+    # ZOHO_ALLOWED_LAYOUT_IDS: "<layout id>"
+    # ZOHO_LAYOUT_WRITE_ENABLED: "true"
+  # Storage: a StorageClass (leave as is, or name one) ...
+  persistence:
+    storageClass: ""
+    # ... or an NFS export, as UAT does:
+    # nfs: {server: <nfs-server>, path: /data/NFS-DATA/kubesight-prod/backend}
+
+ci:
+  cache:
+    # ReadWriteMany: NFS, or a class that supports it.
+    storageClass: ""
+    # nfs: {server: <nfs-server>, path: /data/NFS-DATA/kubesight-prod/ci-cache}
+
+buildkit:
+  hostAliases: []
+  #  - ip: <registry ip>
+  #    hostnames: [registry.areeba.com]
+
+hermes:
+  # kubectl -n kubesight create secret generic hermes-codex-auth --from-file=auth.json
+  codexAuth:
+    existingSecret: hermes-codex-auth
+  # Telegram bot token and similar:
+  # kubectl -n kubesight create secret generic hermes-env --from-literal=TELEGRAM_BOT_TOKEN=<token>
+  extraEnvFromSecrets: []
+  persistence:
+    storageClass: ""
+    # nfs: {server: <nfs-server>, path: /data/NFS-DATA/kubesight-prod/hermes}

@@ -1,0 +1,30 @@
+KubeSight {{ .Values.image.tag }} is installed in namespace {{ include "kubesight.namespace" . }}.
+
+Open {{ include "kubesight.publicUrl" . }} once the backend is ready:
+  kubectl -n {{ include "kubesight.namespace" . }} rollout status deploy/kubesight-backend
+
+{{- if not .Values.secrets.existingSecret }}
+
+First sign-in: user "admin" with this one-time password (it must be replaced,
+and MFA set up, before anything else opens; it does nothing once the admin
+exists):
+  kubectl -n {{ include "kubesight.namespace" . }} get secret {{ include "kubesight.secretName" . }} \
+    -o jsonpath='{.data.KUBESIGHT_INITIAL_ADMIN_PASSWORD}' | base64 -d; echo
+{{- end }}
+
+{{- if .Values.hermes.enabled }}
+
+Hermes is connected to KubeSight's MCP server with a token the chart generated
+(API Tokens shows it as "Hermes MCP (set by the deployment)").
+{{- if not .Values.hermes.codexAuth.existingSecret }}
+No LLM login is configured yet (hermes.codexAuth.existingSecret): Hermes runs,
+but cannot answer until it has one.
+{{- end }}
+{{- end }}
+
+{{- if and (include "kubesight.ciEnabled" .) .Values.ci.cache.enabled .Values.ci.cache.nfs.server }}
+
+CI cache on NFS: the export {{ .Values.ci.cache.nfs.path }} must belong to uid 65532
+before the first build, or every build fails to write it:
+  ssh {{ .Values.ci.cache.nfs.server }} 'sudo mkdir -p {{ .Values.ci.cache.nfs.path }} && sudo chown 65532:65532 {{ .Values.ci.cache.nfs.path }} && sudo chmod 2775 {{ .Values.ci.cache.nfs.path }}'
+{{- end }}

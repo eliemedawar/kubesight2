@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import logging
+import os
+from hashlib import sha256
+
 from .db import db
 from .mock_data import SETTINGS
-from .models import AccessRule, AppSettings, Permission, Role, User, UserClusterAccess
+from .models import AccessRule, ApiToken, AppSettings, Permission, Role, User, UserClusterAccess
 from .passwords import hash_password
+from .runtime_config import env_flag
 from .rbac_data import (
     DEFAULT_USERS,
     HERMES_AGENT_PERMISSIONS,
@@ -19,6 +24,16 @@ DEMO_USER_SYNC = {
     "operator": OPERATOR_PERMISSIONS,
     "hermes-agent": HERMES_AGENT_PERMISSIONS,
 }
+
+logger = logging.getLogger(__name__)
+
+# Accounts with well-known passwords (viewer123, operator123). A deployment
+# turns them off with KUBESIGHT_SEED_DEMO_USERS=false; admin and hermes-agent
+# are always created.
+DEMO_USERNAMES = frozenset({"viewer", "operator"})
+# The API token a deployment hands Hermes (KUBESIGHT_HERMES_MCP_TOKEN) is
+# registered under this name, so a changed value can retire the old one.
+DEPLOYMENT_HERMES_TOKEN_NAME = "Hermes MCP (set by the deployment)"
 
 
 def _seed_permissions() -> dict:
@@ -107,19 +122,34 @@ def grant_new_role_defaults(role: Role, role_name: str, default_permissions) -> 
 
 
 def _seed_users(roles_by_name: dict) -> None:
+    # Both only matter the first time, when the user is created: an existing
+    # admin keeps the password it has.
+    initial_admin_password = os.getenv("KUBESIGHT_INITIAL_ADMIN_PASSWORD", "").strip()
+    seed_demo_users = env_flag("KUBESIGHT_SEED_DEMO_USERS", True)
     for spec in DEFAULT_USERS:
         user = User.query.filter_by(username=spec["username"]).first()
         role = roles_by_name.get(spec["role"])
         if not user:
+            if spec["username"] in DEMO_USERNAMES and not seed_demo_users:
+                continue
+            password = spec["password"]
+            first_login = False
+            if spec["username"] == "admin" and initial_admin_password:
+                # Treated like a temporary password: the first sign-in must
+                # replace it and enrol MFA before anything else opens.
+                password = initial_admin_password
+                first_login = True
             user = User(
                 username=spec["username"],
                 email=spec["email"],
-                password_hash=hash_password(spec["password"]),
+                password_hash=hash_password(password),
                 full_name=spec["full_name"],
                 role=role,
                 is_active=True,
                 is_service_account=spec["username"] == "hermes-agent",
                 interactive_login_enabled=spec["username"] != "hermes-agent",
+                must_change_password=first_login,
+                first_login_completed=not first_login,
             )
             db.session.add(user)
             continue
@@ -132,6 +162,39 @@ def _seed_users(roles_by_name: dict) -> None:
             user.role = role
             user.is_service_account = True
             user.interactive_login_enabled = False
+
+
+def _seed_hermes_mcp_token(hermes: User | None) -> None:
+    """Register the ``ksa_`` token the deployment gave Hermes for the MCP server.
+
+    Lets the Helm chart connect Hermes without anyone minting a token in the
+    UI. Only the hash is stored, as for any API token. A value that is already
+    registered is left as it is, so revoking it in the UI sticks across
+    restarts; a new value retires the one the deployment set before.
+    """
+    raw = os.getenv("KUBESIGHT_HERMES_MCP_TOKEN", "").strip()
+    if not raw or hermes is None:
+        return
+    if not raw.startswith("ksa_") or len(raw) < 24:
+        logger.warning("KUBESIGHT_HERMES_MCP_TOKEN ignored: it must start with ksa_ and be at least 24 characters")
+        return
+    digest = sha256(raw.encode()).hexdigest()
+    existing = ApiToken.query.filter_by(token_hash=digest).first()
+    if existing is not None:
+        if existing.user_id != hermes.id:
+            logger.warning("KUBESIGHT_HERMES_MCP_TOKEN ignored: that token already belongs to another user")
+        return
+    for old in ApiToken.query.filter_by(user_id=hermes.id, name=DEPLOYMENT_HERMES_TOKEN_NAME, is_active=True):
+        old.is_active = False
+    db.session.add(
+        ApiToken(
+            user_id=hermes.id,
+            name=DEPLOYMENT_HERMES_TOKEN_NAME,
+            token_prefix=raw[:12],
+            token_hash=digest,
+            is_active=True,
+        )
+    )
 
 
 def _seed_role_cluster_access(username: str, cluster_ids: tuple[str, ...]) -> None:
@@ -480,6 +543,7 @@ def seed_defaults() -> None:
         ]
         AccessRule.query.filter_by(user_id=hermes.id).delete()
         UserClusterAccess.query.filter_by(user_id=hermes.id).delete()
+    _seed_hermes_mcp_token(hermes)
 
     import threading
     from flask import current_app as _cur_app

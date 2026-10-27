@@ -1,0 +1,98 @@
+{{- $ns := include "kubesight.namespace" . }}
+{{- $dataClaim := include "kubesight.claimName" (dict "cfg" .Values.backend.persistence "name" "kubesight-backend-data") }}
+{{- include "kubesight.volume" (dict "root" . "cfg" .Values.backend.persistence "name" "kubesight-backend-data" "namespace" $ns "purpose" "backend-data") }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubesight-backend
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+    app: kubesight-backend
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  # One pod at a time: the data volume is ReadWriteOnce and boot-time
+  # migrations run before the new pod serves.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: kubesight-backend
+  template:
+    metadata:
+      labels:
+        app: kubesight-backend
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/backend-config.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: kubesight-backend
+      automountServiceAccountToken: true
+      {{- include "kubesight.imagePullSecrets" . | nindent 6 }}
+      {{- with .Values.backend.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: backend
+          image: {{ include "kubesight.image" (dict "root" . "repo" .Values.image.backendRepository) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 5000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: kubesight-config
+            - secretRef:
+                name: {{ include "kubesight.secretName" . }}
+            {{- range .Values.backend.extraEnvFromSecrets }}
+            - secretRef:
+                name: {{ . }}
+            {{- end }}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.database.existingSecret }}
+                  name: {{ .Values.database.existingSecret }}
+                  key: {{ .Values.database.existingSecretKey }}
+                  {{- else }}
+                  {{- $_ := required "database.existingSecret or database.url is required: the external PostgreSQL" .Values.database.url }}
+                  name: {{ include "kubesight.fullname" . }}-database
+                  key: DATABASE_URL
+                  {{- end }}
+          readinessProbe:
+            httpGet: {path: /health, port: 5000}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: 5000}
+            # Boot runs the database migrations before /health answers.
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kubesight
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $dataClaim }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: kubesight-backend
+  ports:
+    - port: 5000
+      targetPort: 5000
+      protocol: TCP
