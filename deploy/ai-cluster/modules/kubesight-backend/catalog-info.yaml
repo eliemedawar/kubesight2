@@ -1,0 +1,23 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: kubesight-backend
+  title: KubeSight backend
+  description: KubeSight's API and engine (fleet view, CI engine, deploys, approvals, ticket automation, MCP server for Hermes).
+  labels: {areeba.com/module: kubesight-backend}
+  annotations:
+    backstage.io/techdocs-ref: dir:.
+    areeba.com/version: "1.0.0"
+    areeba.com/status: planned
+  tags: [kubesight, ai-cluster]
+  links:
+    - {url: https://bitbucket.org/areebasal/devops-ai/src/main/charts/kubesight, title: Helm chart}
+    - {url: https://bitbucket.org/areebasal/devops-ai/src/main/deploy/ai-cluster/values-ai-cluster.yaml, title: AI cluster values}
+    - {url: https://bitbucket.org/areebasal/devops-ai/src/main/deploy/ai-cluster/changes/CHG-KS-001-openbao-secrets.md, title: "Change CHG-KS-001: secrets"}
+    - {url: https://bitbucket.org/areebasal/devops-ai/src/main/deploy/ai-cluster/changes/CHG-KS-002-install.md, title: "Change CHG-KS-002: install"}
+spec:
+  type: service
+  lifecycle: production
+  owner: group:devops
+  system: kubesight
+  dependsOn: [component:hermes]

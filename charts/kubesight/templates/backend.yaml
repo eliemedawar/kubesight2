@@ -1,6 +1,6 @@
 {{- $ns := include "kubesight.namespace" . }}
 {{- $dataClaim := include "kubesight.claimName" (dict "cfg" .Values.backend.persistence "name" "kubesight-backend-data") }}
-{{- include "kubesight.volume" (dict "root" . "cfg" .Values.backend.persistence "name" "kubesight-backend-data" "namespace" $ns "purpose" "backend-data") }}
+{{- include "kubesight.volume" (dict "root" . "cfg" .Values.backend.persistence "name" "kubesight-backend-data" "namespace" $ns "purpose" "backend-data" "module" "kubesight-backend") }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -8,7 +8,7 @@ metadata:
   name: kubesight-backend
   namespace: {{ $ns }}
   labels:
-    {{- include "kubesight.labels" . | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" . "module" "kubesight-backend") | nindent 4 }}
     app: kubesight-backend
 spec:
   replicas: {{ .Values.backend.replicas }}
@@ -23,6 +23,7 @@ spec:
     metadata:
       labels:
         app: kubesight-backend
+        {{- with include "kubesight.podLabels" (dict "root" . "module" "kubesight-backend") }}{{ . | nindent 8 }}{{ end }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/backend-config.yaml") . | sha256sum }}
     spec:
@@ -50,6 +51,21 @@ spec:
                 name: {{ . }}
             {{- end }}
           env:
+            {{- with .Values.database.fromLogin }}
+            {{- if .secret }}
+            # The URL is put together in the pod from the login Secret, so a
+            # rotated password follows without anyone copying it.
+            - name: KUBESIGHT_DB_USERNAME
+              valueFrom:
+                secretKeyRef: {name: {{ .secret }}, key: {{ .usernameKey }}}
+            - name: KUBESIGHT_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ .secret }}, key: {{ .passwordKey }}}
+            - name: DATABASE_URL
+              value: {{ printf "postgresql://$(KUBESIGHT_DB_USERNAME):$(KUBESIGHT_DB_PASSWORD)@%s:%v/%s%s" (required "database.fromLogin.host is required" .host) .port (required "database.fromLogin.name is required" .name) (ternary (printf "?%s" .params) "" (ne (toString .params) "")) | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if not .Values.database.fromLogin.secret }}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -57,10 +73,11 @@ spec:
                   name: {{ .Values.database.existingSecret }}
                   key: {{ .Values.database.existingSecretKey }}
                   {{- else }}
-                  {{- $_ := required "database.existingSecret or database.url is required: the external PostgreSQL" .Values.database.url }}
+                  {{- $_ := required "database.existingSecret, database.url or database.fromLogin.secret is required: the external PostgreSQL" .Values.database.url }}
                   name: {{ include "kubesight.fullname" . }}-database
                   key: DATABASE_URL
                   {{- end }}
+            {{- end }}
           readinessProbe:
             httpGet: {path: /health, port: 5000}
             initialDelaySeconds: 15
@@ -76,10 +93,16 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/kubesight
+            {{- with .Values.backend.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: {{ $dataClaim }}
+        {{- with .Values.backend.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -87,7 +110,7 @@ metadata:
   name: backend-service
   namespace: {{ $ns }}
   labels:
-    {{- include "kubesight.labels" . | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" . "module" "kubesight-backend") | nindent 4 }}
 spec:
   type: ClusterIP
   selector:

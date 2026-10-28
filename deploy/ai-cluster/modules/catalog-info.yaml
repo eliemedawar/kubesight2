@@ -1,0 +1,27 @@
+# KubeSight on the AI cluster: the system and its modules, for the platform's
+# portal (Backstage). Each module has its own catalog-info.yaml and docs.
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: kubesight
+  title: KubeSight
+  description: Kubernetes control plane for Areeba's clusters (fleet view, native CI, deploys, approvals, ticket automation), with its Hermes agent.
+  labels: {areeba.com/module: kubesight}
+  tags: [kubesight, ai-cluster]
+  links:
+    - {url: https://bitbucket.org/areebasal/devops-ai/src/main/deploy/ai-cluster/README.md, title: Deployment plan}
+spec:
+  owner: group:devops
+---
+apiVersion: backstage.io/v1alpha1
+kind: Location
+metadata:
+  name: kubesight-modules
+  description: The KubeSight modules deployed on OCIDUAI-K8S.
+spec:
+  targets:
+    - ./kubesight-backend/catalog-info.yaml
+    - ./kubesight-frontend/catalog-info.yaml
+    - ./hermes/catalog-info.yaml
+    - ./kubesight-ci/catalog-info.yaml
+    - ./kubesight-buildkit/catalog-info.yaml

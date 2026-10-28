@@ -1,0 +1,22 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: kubesight-frontend
+  title: KubeSight frontend
+  description: The KubeSight web app (nginx serving the single-page app), which also forwards /api to the backend and serves HTTPS behind an internal load balancer.
+  labels: {areeba.com/module: kubesight-frontend}
+  annotations:
+    backstage.io/techdocs-ref: dir:.
+    areeba.com/version: "1.0.0"
+    areeba.com/status: planned
+  tags: [kubesight, ai-cluster]
+  links:
+    - {url: https://bitbucket.org/areebasal/devops-ai/src/main/charts/kubesight, title: Helm chart}
+    - {url: https://bitbucket.org/areebasal/devops-ai/src/main/deploy/ai-cluster/values-ai-cluster.yaml, title: AI cluster values}
+    - {url: https://bitbucket.org/areebasal/devops-ai/src/main/deploy/ai-cluster/changes/CHG-KS-002-install.md, title: "Change CHG-KS-002: install"}
+spec:
+  type: website
+  lifecycle: production
+  owner: group:devops
+  system: kubesight
+  dependsOn: [component:kubesight-backend]

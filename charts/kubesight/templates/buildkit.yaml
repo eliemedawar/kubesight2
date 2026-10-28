@@ -6,7 +6,7 @@ metadata:
   name: buildkitd
   namespace: {{ .namespace }}
   labels:
-    {{- include "kubesight.labels" $ | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-buildkit") | nindent 4 }}
 automountServiceAccountToken: false
 ---
 apiVersion: apps/v1
@@ -15,12 +15,16 @@ metadata:
   name: buildkitd
   namespace: {{ .namespace }}
   labels:
-    {{- include "kubesight.labels" $ | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-buildkit") | nindent 4 }}
     app: buildkitd
 spec:
   # Image stages use the first builder that answers from its own node, so a
   # second replica on another node is the failover.
   replicas: {{ .replicas }}
+  {{- with .strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       app: buildkitd
@@ -28,8 +32,12 @@ spec:
     metadata:
       labels:
         app: buildkitd
+        {{- with include "kubesight.podLabels" (dict "root" $ "module" "kubesight-buildkit") }}{{ . | nindent 8 }}{{ end }}
+      {{- /* Kubernetes 1.30+ takes securityContext.appArmorProfile instead. */ -}}
+      {{- if not (hasKey .securityContext "appArmorProfile") }}
       annotations:
         container.apparmor.security.beta.kubernetes.io/buildkitd: unconfined
+      {{- end }}
     spec:
       serviceAccountName: buildkitd
       automountServiceAccountToken: false
@@ -66,15 +74,7 @@ spec:
           resources:
             {{- toYaml .resources | nindent 12 }}
           securityContext:
-            runAsUser: 1000
-            runAsGroup: 1000
-            runAsNonRoot: true
-            allowPrivilegeEscalation: true
-            capabilities:
-              drop: [ALL]
-              add: [SETUID, SETGID]
-            seccompProfile:
-              type: Unconfined
+            {{- toYaml .securityContext | nindent 12 }}
           volumeMounts:
             - name: cache
               mountPath: /home/user/.local/share/buildkit
@@ -89,7 +89,7 @@ metadata:
   name: buildkitd
   namespace: {{ .namespace }}
   labels:
-    {{- include "kubesight.labels" $ | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-buildkit") | nindent 4 }}
 spec:
   type: ClusterIP
   selector:
@@ -106,7 +106,7 @@ metadata:
   name: buildkitd-pods
   namespace: {{ .namespace }}
   labels:
-    {{- include "kubesight.labels" $ | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-buildkit") | nindent 4 }}
 spec:
   clusterIP: None
   selector:
@@ -122,7 +122,7 @@ metadata:
   name: buildkitd
   namespace: {{ .namespace }}
   labels:
-    {{- include "kubesight.labels" $ | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-buildkit") | nindent 4 }}
 spec:
   podSelector:
     matchLabels:

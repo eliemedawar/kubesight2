@@ -1,14 +1,16 @@
 {{- $ns := include "kubesight.namespace" . }}
+{{- $fe := .Values.frontend }}
+{{- $tlsSecret := and $fe.serveApi $fe.tls.secretName }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: kubesight-frontend
   namespace: {{ $ns }}
   labels:
-    {{- include "kubesight.labels" . | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" . "module" "kubesight-frontend") | nindent 4 }}
     app: kubesight-frontend
 spec:
-  replicas: {{ .Values.frontend.replicas }}
+  replicas: {{ $fe.replicas }}
   selector:
     matchLabels:
       app: kubesight-frontend
@@ -16,6 +18,11 @@ spec:
     metadata:
       labels:
         app: kubesight-frontend
+        {{- with include "kubesight.podLabels" (dict "root" . "module" "kubesight-frontend") }}{{ . | nindent 8 }}{{ end }}
+      {{- if $fe.serveApi }}
+      annotations:
+        checksum/nginx: {{ include (print $.Template.BasePath "/frontend-nginx.yaml") . | sha256sum }}
+      {{- end }}
     spec:
       automountServiceAccountToken: false
       {{- include "kubesight.imagePullSecrets" . | nindent 6 }}
@@ -24,8 +31,14 @@ spec:
           image: {{ include "kubesight.image" (dict "root" . "repo" .Values.image.frontendRepository) }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
-            - containerPort: 80
+            - name: http
+              containerPort: 80
               protocol: TCP
+            {{- if $tlsSecret }}
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+            {{- end }}
           readinessProbe:
             httpGet: {path: /, port: 80}
             initialDelaySeconds: 5
@@ -35,7 +48,30 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 10
           resources:
-            {{- toYaml .Values.frontend.resources | nindent 12 }}
+            {{- toYaml $fe.resources | nindent 12 }}
+          {{- if $fe.serveApi }}
+          volumeMounts:
+            - name: nginx
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+              readOnly: true
+            {{- if $tlsSecret }}
+            - name: tls
+              mountPath: /etc/nginx/tls
+              readOnly: true
+            {{- end }}
+          {{- end }}
+      {{- if $fe.serveApi }}
+      volumes:
+        - name: nginx
+          configMap:
+            name: kubesight-frontend-nginx
+        {{- if $tlsSecret }}
+        - name: tls
+          secret:
+            secretName: {{ $tlsSecret }}
+        {{- end }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -43,12 +79,27 @@ metadata:
   name: frontend-service
   namespace: {{ $ns }}
   labels:
-    {{- include "kubesight.labels" . | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" . "module" "kubesight-frontend") | nindent 4 }}
+  {{- with $fe.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
-  type: ClusterIP
+  type: {{ $fe.service.type }}
+  {{- with $fe.service.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
   selector:
     app: kubesight-frontend
   ports:
-    - port: 80
-      targetPort: 80
+    {{- if $tlsSecret }}
+    - name: https
+      port: 443
+      targetPort: https
       protocol: TCP
+    {{- else }}
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+    {{- end }}

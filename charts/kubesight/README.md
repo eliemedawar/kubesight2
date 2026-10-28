@@ -154,6 +154,27 @@ The proxy must:
 connection** confirms the proxy answers. Hermes's own calls to KubeSight's MCP server do
 not go through the proxy.
 
+## On a cluster a platform team runs
+
+Where namespaces, cluster-wide objects, secrets and network rules belong to a platform
+team, these settings keep the release inside its namespaces:
+
+| Setting | Effect |
+|---|---|
+| `createNamespaces: false` | the CI, BuildKit and analysis namespaces must already exist |
+| `rbac.clusterWide: false` | no ClusterRoles: the backend has only the launcher Roles in the CI and analysis namespaces |
+| `ci.manageQuota`, `analysis.manageQuota: false` | the namespace's own quota and container defaults apply |
+| `externalSecrets.items` | every Secret comes from a secret store through an ExternalSecret; name them in `secrets.existingSecret`, `database.existingSecret`, `frontend.tls.secretName`, `hermes.extraEnvFromSecrets`, `imagePullSecret.name` |
+| `database.fromLogin` | `DATABASE_URL` is put together in the pod from a login Secret the platform keeps (user name and password keys), so a rotated password follows by itself |
+| `frontend.serveApi`, `frontend.tls.secretName`, `frontend.service` | no ingress controller: the frontend's nginx sends `/api` to the backend and serves HTTPS on 8443 behind a load balancer |
+| `networkPolicies.*` | default deny in every KubeSight namespace, then DNS, the database, the API server, callbacks, the load balancer and named outside hosts (Cilium) |
+| `hermes.networkPolicy.egressFQDNs` | Hermes reaches only these host names (Cilium) |
+| `buildkit.securityContext`, `buildkit.strategy` | fit a builder namespace's admission fence and quota |
+| `moduleLabelKey`, `commonLabels` | a module label on every object and pod, and a change ID on every object |
+
+[`deploy/ai-cluster/values-ai-cluster.yaml`](../../deploy/ai-cluster/values-ai-cluster.yaml)
+uses all of them.
+
 ## Hermes skill
 
 `files/hermes-skills/kubesight` is a copy of `.claude/skills/kubesight` (Helm can only

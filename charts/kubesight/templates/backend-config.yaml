@@ -52,6 +52,8 @@
 {{- if include "kubesight.buildkitEnabled" . }}
 {{- $_ := set $data "CI_BUILDKIT_ADDR" (printf "tcp://buildkitd.%s.svc.cluster.local:1234" .Values.buildkit.namespace) }}
 {{- $_ := set $data "CI_BUILDKIT_POOL" (printf "buildkitd-pods.%s.svc.cluster.local" .Values.buildkit.namespace) }}
+{{- /* The build pods' egress rule to the builders names this namespace. */ -}}
+{{- $_ := set $data "CI_BUILDKIT_NAMESPACE" .Values.buildkit.namespace }}
 {{- end }}
 {{- if .Values.analysis.enabled }}
 {{- with .Values.analysis }}
@@ -102,7 +104,7 @@ metadata:
   name: kubesight-config
   namespace: {{ $ns }}
   labels:
-    {{- include "kubesight.labels" . | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" . "module" "kubesight-backend") | nindent 4 }}
 data:
   {{- range $key := keys $data | sortAlpha }}
   {{ $key }}: {{ get $data $key | quote }}

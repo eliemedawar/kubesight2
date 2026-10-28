@@ -8,7 +8,7 @@ metadata:
   name: kubesight-analysis-worker
   namespace: {{ .namespace }}
   labels:
-    {{- include "kubesight.labels" $ | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-analysis") | nindent 4 }}
 automountServiceAccountToken: false
 {{- with $.Values.imagePullSecret.name }}
 imagePullSecrets:
@@ -21,7 +21,7 @@ metadata:
   name: kubesight-analysis-launcher
   namespace: {{ .namespace }}
   labels:
-    {{- include "kubesight.labels" $ | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-analysis") | nindent 4 }}
 rules:
   - apiGroups: [batch]
     resources: [jobs]
@@ -39,7 +39,7 @@ metadata:
   name: kubesight-analysis-launcher
   namespace: {{ .namespace }}
   labels:
-    {{- include "kubesight.labels" $ | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-analysis") | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -48,6 +48,8 @@ subjects:
   - kind: ServiceAccount
     name: kubesight-backend
     namespace: {{ $ns }}
+{{- /* Off where the platform already sets the namespace's quota and defaults. */ -}}
+{{- if .manageQuota }}
 ---
 apiVersion: v1
 kind: ResourceQuota
@@ -55,7 +57,7 @@ metadata:
   name: analysis-quota
   namespace: {{ .namespace }}
   labels:
-    {{- include "kubesight.labels" $ | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-analysis") | nindent 4 }}
 spec:
   hard:
     {{- toYaml .quota | nindent 4 }}
@@ -66,7 +68,7 @@ metadata:
   name: analysis-defaults
   namespace: {{ .namespace }}
   labels:
-    {{- include "kubesight.labels" $ | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-analysis") | nindent 4 }}
 spec:
   limits:
     - type: Container
@@ -74,5 +76,6 @@ spec:
         {{- toYaml .limitRange.default | nindent 8 }}
       defaultRequest:
         {{- toYaml .limitRange.defaultRequest | nindent 8 }}
+{{- end }}
 {{- end }}
 {{- end }}

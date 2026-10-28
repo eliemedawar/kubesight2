@@ -1,0 +1,22 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: kubesight-buildkit
+  title: KubeSight BuildKit builders
+  description: Two rootless BuildKit daemons in kubesight-build that build and push the container images of KubeSight's CI image stages.
+  labels: {areeba.com/module: kubesight-buildkit}
+  annotations:
+    backstage.io/techdocs-ref: dir:.
+    areeba.com/version: "v0.23.2-rootless"
+    areeba.com/status: planned
+  tags: [kubesight, ai-cluster]
+  links:
+    - {url: https://bitbucket.org/areebasal/devops-ai/src/main/charts/kubesight, title: Helm chart}
+    - {url: https://bitbucket.org/areebasal/devops-ai/src/main/deploy/ai-cluster/values-ai-cluster.yaml, title: AI cluster values}
+    - {url: https://bitbucket.org/areebasal/devops-ai/src/main/deploy/ai-cluster/changes/CHG-KS-002-install.md, title: "Change CHG-KS-002: install"}
+spec:
+  type: service
+  lifecycle: production
+  owner: group:devops
+  system: kubesight
+  dependsOn: [component:kubesight-backend]

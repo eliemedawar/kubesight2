@@ -1,6 +1,8 @@
 # Local Hermes installation/runtime snapshot. It contains credentials, auth
 # state, histories, sessions, databases, caches, and generated dependencies.
 hermes/
+# ...but not the hermes module documents of a deployment.
+!deploy/ai-cluster/modules/hermes/
 hermes-local.runtime.env
 
 # Backend runtime data: cluster kubeconfigs (embedded credentials) and CI /

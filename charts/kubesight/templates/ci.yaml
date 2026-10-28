@@ -8,7 +8,7 @@ metadata:
   name: kubesight-ci-build
   namespace: {{ .namespace }}
   labels:
-    {{- include "kubesight.labels" $ | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-ci") | nindent 4 }}
 automountServiceAccountToken: false
 {{- with $.Values.imagePullSecret.name }}
 imagePullSecrets:
@@ -22,7 +22,7 @@ metadata:
   name: kubesight-ci-launcher
   namespace: {{ .namespace }}
   labels:
-    {{- include "kubesight.labels" $ | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-ci") | nindent 4 }}
 rules:
   - apiGroups: [batch]
     resources: [jobs]
@@ -49,7 +49,7 @@ metadata:
   name: kubesight-ci-launcher
   namespace: {{ .namespace }}
   labels:
-    {{- include "kubesight.labels" $ | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-ci") | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -58,6 +58,8 @@ subjects:
   - kind: ServiceAccount
     name: kubesight-backend
     namespace: {{ $ns }}
+{{- /* Off where the platform already sets the namespace's quota and defaults. */ -}}
+{{- if .manageQuota }}
 ---
 apiVersion: v1
 kind: ResourceQuota
@@ -65,7 +67,7 @@ metadata:
   name: ci-quota
   namespace: {{ .namespace }}
   labels:
-    {{- include "kubesight.labels" $ | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-ci") | nindent 4 }}
 spec:
   hard:
     {{- toYaml .quota | nindent 4 }}
@@ -76,7 +78,7 @@ metadata:
   name: ci-defaults
   namespace: {{ .namespace }}
   labels:
-    {{- include "kubesight.labels" $ | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-ci") | nindent 4 }}
 spec:
   limits:
     - type: Container
@@ -84,8 +86,9 @@ spec:
         {{- toYaml .limitRange.default | nindent 8 }}
       defaultRequest:
         {{- toYaml .limitRange.defaultRequest | nindent 8 }}
+{{- end }}
 {{- if .cache.enabled }}
-{{- include "kubesight.volume" (dict "root" $ "cfg" .cache "name" .cache.claimName "namespace" .namespace "purpose" "ci-dependency-cache") }}
+{{- include "kubesight.volume" (dict "root" $ "cfg" .cache "name" .cache.claimName "namespace" .namespace "purpose" "ci-dependency-cache" "module" "kubesight-ci") }}
 {{- end }}
 {{- end }}
 {{- end }}

@@ -13,7 +13,7 @@
 {{- $_ := set $config "mcp_servers" (merge (get $config "mcp_servers" | default dict) $mcp) }}
 {{- $configYaml := toYaml $config }}
 {{- $skill := .Files.Glob "files/hermes-skills/kubesight/**" }}
-{{- include "kubesight.volume" (dict "root" . "cfg" .Values.hermes.persistence "name" "kubesight-hermes-data" "namespace" $ns "purpose" "hermes-data") }}
+{{- include "kubesight.volume" (dict "root" . "cfg" .Values.hermes.persistence "name" "kubesight-hermes-data" "namespace" $ns "purpose" "hermes-data" "module" "hermes") }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -21,7 +21,7 @@ metadata:
   name: kubesight-hermes
   namespace: {{ $ns }}
   labels:
-    {{- include "kubesight.labels" . | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" . "module" "hermes") | nindent 4 }}
 automountServiceAccountToken: false
 {{- with .Values.imagePullSecret.name }}
 imagePullSecrets:
@@ -34,7 +34,7 @@ metadata:
   name: kubesight-hermes-config
   namespace: {{ $ns }}
   labels:
-    {{- include "kubesight.labels" . | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" . "module" "hermes") | nindent 4 }}
 data:
   config.yaml: |
     {{- $configYaml | nindent 4 }}
@@ -48,7 +48,7 @@ metadata:
   name: kubesight-hermes-skill
   namespace: {{ $ns }}
   labels:
-    {{- include "kubesight.labels" . | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" . "module" "hermes") | nindent 4 }}
 data:
   {{- range $path, $_ := $skill }}
   {{ trimPrefix "files/hermes-skills/kubesight/" $path | replace "/" "__" }}: |
@@ -62,7 +62,7 @@ metadata:
   name: kubesight-hermes
   namespace: {{ $ns }}
   labels:
-    {{- include "kubesight.labels" . | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" . "module" "hermes") | nindent 4 }}
     app.kubernetes.io/name: kubesight-hermes
 spec:
   replicas: 1
@@ -76,6 +76,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: kubesight-hermes
+        {{- with include "kubesight.podLabels" (dict "root" . "module" "hermes") }}{{ . | nindent 8 }}{{ end }}
       annotations:
         checksum/config: {{ $configYaml | sha256sum }}
         {{- if .Values.hermes.installSkill }}
@@ -98,6 +99,8 @@ spec:
           command: [/bin/sh, -ec]
           args:
             - chown 10000:10000 /run && chmod 0700 /run
+          resources:
+            {{- toYaml .Values.hermes.initResources | nindent 12 }}
           securityContext:
             runAsUser: 0
             runAsGroup: 0
@@ -126,6 +129,8 @@ spec:
               printf 'MCP_KUBESIGHT_API_KEY=%s\n' "$MCP_KUBESIGHT_API_KEY" >> /data/.env.new
               mv /data/.env.new /data/.env
               chmod 0600 /data/.env
+          resources:
+            {{- toYaml .Values.hermes.initResources | nindent 12 }}
           env:
             - name: MCP_KUBESIGHT_API_KEY
               valueFrom:
@@ -246,7 +251,7 @@ metadata:
   name: kubesight-hermes
   namespace: {{ $ns }}
   labels:
-    {{- include "kubesight.labels" . | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" . "module" "hermes") | nindent 4 }}
 spec:
   type: ClusterIP
   selector:
@@ -264,7 +269,7 @@ metadata:
   name: kubesight-hermes
   namespace: {{ $ns }}
   labels:
-    {{- include "kubesight.labels" . | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" . "module" "hermes") | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
@@ -303,6 +308,7 @@ spec:
               kubernetes.io/metadata.name: {{ $ns }}
       ports:
         - {port: 5000, protocol: TCP}
+    {{- if not .Values.hermes.networkPolicy.egressFQDNs }}
     # The LLM provider, Telegram and other HTTPS APIs.
     - to:
         - ipBlock:
@@ -313,5 +319,37 @@ spec:
             {{- end }}
       ports:
         - {port: 443, protocol: TCP}
+    {{- end }}
+{{- with .Values.hermes.networkPolicy.egressFQDNs }}
+---
+# HTTPS to these host names only (Cilium). Cilium learns their addresses by
+# watching Hermes's DNS answers, so DNS goes through its proxy here.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kubesight-hermes-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" (dict "root" $ "module" "hermes") | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: kubesight-hermes
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports: [{port: "53", protocol: ANY}]
+          rules:
+            dns: [{matchPattern: "*"}]
+    - toFQDNs:
+        {{- range . }}
+        - matchName: {{ . | quote }}
+        {{- end }}
+      toPorts:
+        - ports: [{port: "443", protocol: TCP}]
+{{- end }}
 {{- end }}
 {{- end }}

@@ -2,7 +2,9 @@
 The namespaces KubeSight starts work in. The backend's own namespace is the
 release namespace (helm --create-namespace makes it). Kept on uninstall, so
 removing the release never deletes a build or analysis still in them.
+Off (createNamespaces=false) where a platform team makes the namespaces.
 */ -}}
+{{- if .Values.createNamespaces }}
 {{- $namespaces := list }}
 {{- if include "kubesight.ciEnabled" . }}
 {{- $namespaces = append $namespaces (dict "name" .Values.ci.namespace "purpose" "untrusted-ci-builds" "pss" "restricted") }}
@@ -11,7 +13,7 @@ removing the release never deletes a build or analysis still in them.
 {{- /* Rootless buildkitd needs an unconfined seccomp profile. */ -}}
 {{- $namespaces = append $namespaces (dict "name" .Values.buildkit.namespace "purpose" "image-builder" "pss" "privileged") }}
 {{- end }}
-{{- if .Values.analysis.enabled }}
+{{- if and .Values.analysis.enabled (not (and (include "kubesight.ciEnabled" .) (eq .Values.analysis.namespace .Values.ci.namespace))) }}
 {{- $namespaces = append $namespaces (dict "name" .Values.analysis.namespace "purpose" "untrusted-source-analysis" "pss" "restricted") }}
 {{- end }}
 {{- range $namespaces }}
@@ -21,11 +23,12 @@ kind: Namespace
 metadata:
   name: {{ .name }}
   labels:
-    {{- include "kubesight.labels" $ | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight") | nindent 4 }}
     kubesight.io/purpose: {{ .purpose }}
     pod-security.kubernetes.io/enforce: {{ .pss }}
     pod-security.kubernetes.io/audit: {{ .pss }}
     pod-security.kubernetes.io/warn: {{ .pss }}
   annotations:
     helm.sh/resource-policy: keep
+{{- end }}
 {{- end }}

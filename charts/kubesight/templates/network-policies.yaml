@@ -1,0 +1,172 @@
+{{- /*
+Closes every KubeSight namespace and opens only what each part needs. The
+components' own rules (Hermes, buildkitd, and the per-build and per-analysis
+rules the backend creates) add to these. Egress by host name and to the
+Kubernetes API uses Cilium's own policy kind.
+*/ -}}
+{{- if .Values.networkPolicies.enabled }}
+{{- $np := .Values.networkPolicies }}
+{{- $ns := include "kubesight.namespace" . }}
+{{- /* Workers call the backend back from these namespaces. */ -}}
+{{- $callers := list }}
+{{- if include "kubesight.ciEnabled" . }}{{ $callers = append $callers .Values.ci.namespace }}{{ end }}
+{{- if .Values.analysis.enabled }}{{ $callers = append $callers .Values.analysis.namespace }}{{ end }}
+{{- $callers = $callers | uniq }}
+{{- $namespaces := list $ns }}
+{{- range $callers }}{{ $namespaces = append $namespaces . }}{{ end }}
+{{- if include "kubesight.buildkitEnabled" . }}{{ $namespaces = append $namespaces .Values.buildkit.namespace }}{{ end }}
+{{- range $namespaces | uniq }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: {{ . }}
+  labels:
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight") | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# Name lookups. Pods may also talk to each other only in the backend's
+# namespace: build and analysis pods run untrusted code and stay apart.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ if eq . $ns }}allow-dns-and-same-namespace{{ else }}allow-dns{{ end }}
+  namespace: {{ . }}
+  labels:
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight") | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  {{- if eq . $ns }}
+  ingress:
+    - from: [{podSelector: {}}]
+  {{- end }}
+  egress:
+    {{- if eq . $ns }}
+    - to: [{podSelector: {}}]
+    {{- end }}
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+{{- end }}
+{{- with $np.database }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kubesight-backend-database
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-backend") | nindent 4 }}
+spec:
+  # The backend, and one-off client pods (a restore, a check) labelled
+  # app=kubesight-db-client.
+  podSelector:
+    matchExpressions:
+      - {key: app, operator: In, values: [kubesight-backend, kubesight-db-client]}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ .namespace }}}}
+          podSelector:
+            matchLabels:
+              {{- toYaml .podLabels | nindent 14 }}
+      ports: [{port: {{ .port }}, protocol: TCP}]
+{{- end }}
+{{- if $callers }}
+---
+# CI build pods and analysis Jobs report back to the backend.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kubesight-backend-callbacks
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-backend") | nindent 4 }}
+spec:
+  podSelector: {matchLabels: {app: kubesight-backend}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: {{ toJson $callers }}
+      ports: [{port: 5000, protocol: TCP}]
+{{- end }}
+{{- with $np.frontendIngressFrom }}
+---
+# Where people's requests arrive from: the load balancer's subnet.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kubesight-frontend-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-frontend") | nindent 4 }}
+spec:
+  podSelector: {matchLabels: {app: kubesight-frontend}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        {{- if and $.Values.frontend.serveApi $.Values.frontend.tls.secretName }}
+        - {port: 8443, protocol: TCP}
+        {{- else }}
+        - {port: 80, protocol: TCP}
+        {{- end }}
+{{- end }}
+{{- if or $np.kubeApiServer $np.backendEgressFQDNs $np.backendEgressCIDRs }}
+---
+# The Kubernetes API (CI and analysis Jobs) and the outside systems KubeSight
+# talks to, each by name or address and port.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kubesight-backend-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-backend") | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app: kubesight-backend
+  egress:
+    {{- if $np.kubeApiServer }}
+    - toEntities: [kube-apiserver]
+    {{- end }}
+    {{- if $np.backendEgressFQDNs }}
+    # Cilium learns the names' addresses from the backend's DNS answers.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports: [{port: "53", protocol: ANY}]
+          rules:
+            dns: [{matchPattern: "*"}]
+    {{- range $np.backendEgressFQDNs }}
+    - toFQDNs: [{matchName: {{ .name | quote }}}]
+      toPorts:
+        - ports:
+            {{- range .ports | default (list 443) }}
+            - {port: {{ . | quote }}, protocol: TCP}
+            {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- range $np.backendEgressCIDRs }}
+    - toCIDR: [{{ .cidr | quote }}]
+      toPorts:
+        - ports:
+            {{- range .ports | default (list 443) }}
+            - {port: {{ . | quote }}, protocol: TCP}
+            {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}

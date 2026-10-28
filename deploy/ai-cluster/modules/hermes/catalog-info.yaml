@@ -1,0 +1,22 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: hermes
+  title: Hermes (KubeSight agent)
+  description: The AI agent behind KubeSight's Application Intelligence, ticket agent and CI assist; it calls the Claude API and reaches KubeSight through its MCP server.
+  labels: {areeba.com/module: hermes}
+  annotations:
+    backstage.io/techdocs-ref: dir:.
+    areeba.com/version: "v2026.7.20"
+    areeba.com/status: planned
+  tags: [kubesight, ai-cluster]
+  links:
+    - {url: https://bitbucket.org/areebasal/devops-ai/src/main/charts/kubesight, title: Helm chart}
+    - {url: https://bitbucket.org/areebasal/devops-ai/src/main/deploy/ai-cluster/values-ai-cluster.yaml, title: AI cluster values}
+    - {url: https://bitbucket.org/areebasal/devops-ai/src/main/deploy/ai-cluster/changes/CHG-KS-003-hermes.md, title: "Change CHG-KS-003: add Hermes"}
+spec:
+  type: service
+  lifecycle: production
+  owner: group:devops
+  system: kubesight
+  dependsOn: [component:kubesight-backend]

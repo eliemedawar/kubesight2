@@ -1,0 +1,77 @@
+{{- $ns := include "kubesight.namespace" . }}
+{{- $fe := .Values.frontend }}
+{{- $tlsSecret := and $fe.serveApi $fe.tls.secretName }}
+{{- if $fe.serveApi }}
+{{- /*
+Without an ingress controller the frontend's nginx does the Ingress's job:
+/api and /health go to the backend, everything else is the SPA. With a TLS
+Secret it also listens on 8443 with that certificate, for a TCP load balancer.
+This replaces the image's own default.conf, so the SPA rules are repeated here.
+*/ -}}
+{{- $backend := printf "http://backend-service.%s.svc.cluster.local:5000" $ns }}
+{{- $headers := `add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;` }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubesight-frontend-nginx
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" (dict "root" . "module" "kubesight-frontend") | nindent 4 }}
+data:
+  default.conf: |
+    server {
+        # Plain HTTP stays for the probes and in-cluster callers.
+        listen 80;
+        {{- if $tlsSecret }}
+        listen 8443 ssl;
+        ssl_certificate /etc/nginx/tls/tls.crt;
+        ssl_certificate_key /etc/nginx/tls/tls.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        {{- end }}
+        server_name _;
+        root /usr/share/nginx/html;
+        index index.html;
+        server_tokens off;
+
+        # Mobile binaries (APK/AAB/IPA) are uploaded through /api.
+        client_max_body_size {{ .Values.ingress.proxyBodySize }};
+
+        gzip on;
+        gzip_types text/css application/javascript application/json image/svg+xml;
+        gzip_min_length 1024;
+
+        {{ $headers }}
+
+        location /api {
+            proxy_pass {{ $backend }};
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            # Log streams are server-sent events; long calls run up to the
+            # backend's own 300 s timeout.
+            proxy_buffering off;
+            proxy_read_timeout 310s;
+            proxy_send_timeout 310s;
+        }
+
+        location = /health {
+            proxy_pass {{ $backend }};
+        }
+
+        location /assets/ {
+            try_files $uri =404;
+            add_header Cache-Control "public, max-age=31536000, immutable";
+            {{ $headers }}
+        }
+
+        location / {
+            try_files $uri $uri/ /index.html;
+            add_header Cache-Control "no-cache";
+            {{ $headers }}
+        }
+    }
+{{- end }}

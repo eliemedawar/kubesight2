@@ -12,7 +12,7 @@ metadata:
   name: kubesight-ingress
   namespace: {{ include "kubesight.namespace" . }}
   labels:
-    {{- include "kubesight.labels" . | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" . "module" "kubesight-frontend") | nindent 4 }}
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size: {{ .Values.ingress.proxyBodySize | quote }}
     {{- if eq $tls.mode "certManager" }}

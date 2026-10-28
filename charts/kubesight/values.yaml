@@ -9,6 +9,25 @@
 # registry login, certificate and Hermes's LLM login come from Secrets you
 # create (README.md lists them). Defaults below match the UAT installation.
 
+# --- Labels and cluster-wide objects ---------------------------------------------
+# A label naming each object's part (backend, frontend, hermes, ...), e.g.
+# areeba.com/module. Empty = no such label. It goes on pods too.
+moduleLabelKey: ""
+# Labels for every object the chart creates (not pods), e.g.
+#   commonLabels: {areeba.com/change: CHG-0001}
+commonLabels: {}
+
+# Create the CI, BuildKit and analysis namespaces. false where a platform team
+# makes them; they must then exist before the install.
+createNamespaces: true
+
+rbac:
+  # The backend's ClusterRoles (read the whole cluster, deploy anywhere in it).
+  # false where cluster-wide objects belong to a platform team: the backend then
+  # has only the launcher Roles in the CI and analysis namespaces, and the
+  # cluster it runs in is not managed through its own service account.
+  clusterWide: true
+
 # --- Images ------------------------------------------------------------------
 image:
   registry: registry.areeba.com
@@ -62,6 +81,18 @@ database:
   existingSecretKey: DATABASE_URL
   # ... or here, from a values file that stays out of git.
   url: ""
+  # ... or put together in the pod from a login Secret holding the user name
+  # and password (e.g. one a platform keeps in step with its secret store).
+  # The password must not need URL escaping.
+  fromLogin:
+    secret: ""
+    usernameKey: username
+    passwordKey: password
+    host: ""
+    port: 5432
+    name: ""
+    # Query string without "?", e.g. sslmode=verify-full&sslrootcert=/etc/ca/ca.crt
+    params: ""
 
 # --- Keys and tokens the chart generates --------------------------------------
 # JWT_SECRET_KEY, FLASK_SECRET_KEY, KUBESIGHT_SECRET_KEY, HERMES_API_TOKEN,
@@ -99,6 +130,11 @@ backend:
   # Secrets in this namespace whose keys become backend environment
   # variables, e.g. one holding SMTP_PASSWORD.
   extraEnvFromSecrets: []
+  # More volumes and mounts for the backend container, e.g. a database CA:
+  #   extraVolumes: [{name: postgres-ca, configMap: {name: postgres-ca}}]
+  #   extraVolumeMounts: [{name: postgres-ca, mountPath: /etc/postgres-ca, readOnly: true}]
+  extraVolumes: []
+  extraVolumeMounts: []
   # CI artifacts, mobile binaries, analysis artifacts, cluster kubeconfigs and
   # OpenTofu work dirs, under /var/lib/kubesight. Without it they are lost on
   # every backend restart.
@@ -117,6 +153,21 @@ frontend:
   resources:
     requests: {cpu: 50m, memory: 64Mi}
     limits: {cpu: 200m, memory: 128Mi}
+  # Where there is no ingress controller: the frontend's nginx sends /api and
+  # /health to the backend itself (set ingress.enabled=false).
+  serveApi: false
+  tls:
+    # With serveApi: a kubernetes.io/tls Secret; nginx then serves HTTPS on
+    # 8443 and the Service listens on 443 (for a TCP load balancer).
+    secretName: ""
+  service:
+    # LoadBalancer exposes it directly; annotations pick the load balancer's
+    # kind (internal, shape, ...).
+    type: ClusterIP
+    annotations: {}
+    # Local keeps the load balancer's address as the source (for network rules
+    # that name its subnet); LoadBalancer and NodePort only.
+    externalTrafficPolicy: ""
 
 # --- Native CI ---------------------------------------------------------------
 ci:
@@ -135,6 +186,9 @@ ci:
   jobTtlSeconds: 900
   staleBuildMinutes: 120
   artifacts: {autoclean: true, keepLast: 1, retentionDays: 1}
+  # Create the quota and container defaults below. false where the platform
+  # already sets them on the namespace.
+  manageQuota: true
   quota:
     count/jobs.batch: "30"
     count/secrets: "60"
@@ -162,10 +216,30 @@ buildkit:
   enabled: true
   namespace: kubesight-buildkit
   replicas: 2
-  image: moby/buildkit:v0.23.2-rootless
+  # In full: CRI-O refuses short image names.
+  image: docker.io/moby/buildkit:v0.23.2-rootless
   resources:
     requests: {cpu: 500m, memory: 1Gi, ephemeral-storage: 2Gi}
     limits: {cpu: "4", memory: 8Gi, ephemeral-storage: 10Gi}
+  # The container's security settings. The default drops every capability and
+  # adds back the two rootless BuildKit's uid mapping needs. Where an admission
+  # fence refuses added capabilities, use the plain rootless profile instead
+  # (the runtime's default capabilities, Kubernetes 1.30+):
+  #   {runAsUser: 1000, runAsGroup: 1000, runAsNonRoot: true,
+  #    seccompProfile: {type: Unconfined}, appArmorProfile: {type: Unconfined}}
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    runAsNonRoot: true
+    allowPrivilegeEscalation: true
+    capabilities:
+      drop: [ALL]
+      add: [SETUID, SETGID]
+    seccompProfile:
+      type: Unconfined
+  # The Deployment's update strategy, e.g. {type: RollingUpdate, rollingUpdate:
+  # {maxSurge: 0, maxUnavailable: 1}} when the quota has no room for a third pod.
+  strategy: {}
   cacheSize: 10Gi
   # Registry ports buildkitd pushes to and pulls from.
   egressPorts: [443, 8443, 8082, 5000, 9443]
@@ -185,6 +259,8 @@ analysis:
   deadlineSeconds: 1800
   jobTtlSeconds: 900
   hermesTimeoutSeconds: 900
+  # As ci.manageQuota. With the same namespace as CI, set both alike.
+  manageQuota: true
   quota:
     count/jobs.batch: "20"
     count/secrets: "30"
@@ -210,6 +286,10 @@ hermes:
   resources:
     requests: {cpu: 250m, memory: 512Mi, ephemeral-storage: 256Mi}
     limits: {cpu: "2", memory: 2Gi, ephemeral-storage: 2Gi}
+  # The two short set-up steps before Hermes starts.
+  initResources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {cpu: 500m, memory: 128Mi}
   maxIterations: 20
   # Where KubeSight sends its Hermes requests (Application Intelligence, the
   # ticket agent, CI assist). Empty = the bundled Hermes. Set it to an AI
@@ -259,10 +339,55 @@ hermes:
     nfs: {server: "", path: "", mountOptions: []}
   networkPolicy:
     enabled: true
-    # Hermes may call out on 443 anywhere except these ranges.
+    # Hermes may call out on 443 anywhere except these ranges ...
     egressExcept: [172.16.0.0/12, 192.168.0.0/16]
+    # ... or, when this lists host names, to these only (needs Cilium), e.g.
+    #   egressFQDNs: [api.anthropic.com, api.telegram.org]
+    egressFQDNs: []
     # Who else may call Hermes on 8642, as NetworkPolicy peers: the AI proxy
     # in front of it, e.g.
     #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ai-proxy}}
     #   - ipBlock: {cidr: 10.4.27.50/32}
     extraIngressFrom: []
+
+# --- Secrets from a secret store ------------------------------------------------
+# ExternalSecrets (External Secrets Operator), so no secret value is rendered by
+# Helm. Each item becomes a Secret of that name, holding every field of the
+# store entry `key`, or, with `template`, only the keys it lists, e.g.
+#   items:
+#     - {name: kubesight-secrets, key: kubesight/backend}
+#     - name: kubesight-database
+#       key: kubesight/postgres
+#       template:
+#         DATABASE_URL: "postgresql://{{ .username }}:{{ .password }}@db:5432/kubesight"
+#     - {name: kubesight-tls, key: kubesight/tls, type: kubernetes.io/tls, module: kubesight-frontend}
+#     - {name: regcred, key: kubesight-ci/registry, namespace: kubesight-ci, type: kubernetes.io/dockerconfigjson, template: {...}}
+# An item with enabled: false stays listed but is not created.
+# Then name them in secrets.existingSecret, database.existingSecret,
+# frontend.tls.secretName, hermes.extraEnvFromSecrets and imagePullSecret.name.
+externalSecrets:
+  enabled: false
+  store: {name: openbao, kind: SecretStore}
+  refreshInterval: 1h
+  items: []
+
+# --- Network rules -------------------------------------------------------------
+# Default deny in every KubeSight namespace, then DNS, traffic inside the
+# backend's namespace, worker callbacks to the backend, and what is listed
+# here. Needs Cilium for the API server and host-name rules.
+networkPolicies:
+  enabled: false
+  # The database (or its pooler): namespace, pod labels and port, e.g.
+  #   {namespace: databases, podLabels: {cnpg.io/poolerName: pooler-kubesight}, port: 5432}
+  database: {}
+  # The backend starts CI and analysis Jobs through the Kubernetes API.
+  kubeApiServer: true
+  # Peers allowed into the frontend, e.g. a load balancer's subnet:
+  #   - ipBlock: {cidr: 10.43.10.0/24}
+  frontendIngressFrom: []
+  # Outside systems the backend calls, by name or address (ports default to 443):
+  #   - {name: bitbucket.org}
+  #   - {name: smtp.example.com, ports: [587]}
+  backendEgressFQDNs: []
+  #   - {cidr: 10.4.20.10/32, ports: [6443]}
+  backendEgressCIDRs: []

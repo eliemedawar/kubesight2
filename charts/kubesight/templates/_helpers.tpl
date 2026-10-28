@@ -7,11 +7,28 @@
 {{- end -}}
 {{- end -}}
 
+{{/* Labels for every object (dict "root" . "module" name). */}}
 {{- define "kubesight.labels" -}}
 app.kubernetes.io/part-of: kubesight
-app.kubernetes.io/instance: {{ .Release.Name }}
-app.kubernetes.io/managed-by: {{ .Release.Service }}
-helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
+app.kubernetes.io/instance: {{ .root.Release.Name }}
+app.kubernetes.io/managed-by: {{ .root.Release.Service }}
+helm.sh/chart: {{ printf "%s-%s" .root.Chart.Name .root.Chart.Version }}
+{{- with include "kubesight.podLabels" . }}
+{{ . }}
+{{- end }}
+{{- range $key, $value := .root.Values.commonLabels }}
+{{ $key }}: {{ $value | quote }}
+{{- end }}
+{{- end -}}
+
+{{/*
+The module label alone, for pod templates too (dict "root" . "module" name).
+commonLabels stay off pods: a new change ID would otherwise restart them all.
+*/}}
+{{- define "kubesight.podLabels" -}}
+{{- with .root.Values.moduleLabelKey -}}
+{{ . }}: {{ $.module }}
+{{- end -}}
 {{- end -}}
 
 {{/* The backend's namespace: the one the release is installed into. */}}
@@ -43,7 +60,9 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 
 {{- define "kubesight.publicUrl" -}}
 {{- $host := required "publicHost is required: the host name people open, e.g. kubesight.areeba.com" .Values.publicHost -}}
-{{- if and .Values.ingress.enabled (ne .Values.ingress.tls.mode "none") -}}
+{{- $ingressTls := and .Values.ingress.enabled (ne .Values.ingress.tls.mode "none") -}}
+{{- $frontendTls := and .Values.frontend.serveApi .Values.frontend.tls.secretName -}}
+{{- if or $ingressTls $frontendTls -}}
 {{- printf "https://%s" $host -}}
 {{- else -}}
 {{- printf "http://%s" $host -}}
@@ -88,7 +107,7 @@ kind: PersistentVolume
 metadata:
   name: {{ $pvName }}
   labels:
-    {{- include "kubesight.labels" .root | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" .root "module" .module) | nindent 4 }}
     kubesight.io/purpose: {{ .purpose }}
   annotations:
     helm.sh/resource-policy: keep
@@ -117,7 +136,7 @@ metadata:
   name: {{ .name }}
   namespace: {{ .namespace }}
   labels:
-    {{- include "kubesight.labels" .root | nindent 4 }}
+    {{- include "kubesight.labels" (dict "root" .root "module" .module) | nindent 4 }}
     kubesight.io/purpose: {{ .purpose }}
   annotations:
     helm.sh/resource-policy: keep

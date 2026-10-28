@@ -1,0 +1,183 @@
+# KubeSight on the AI cluster (OCIDUAI-K8S, OKE 1.36, Cilium, CRI-O).
+# Built from ai-cluster-devops-guide.md (version 1, 2026-10-28). Nothing secret
+# is in this file: every secret comes from OpenBao through an ExternalSecret.
+#
+#   helm upgrade --install kubesight charts/kubesight -n kubesight \
+#     -f deploy/ai-cluster/values-ai-cluster.yaml \
+#     --set image.tag=<x.y.z> --set-string 'commonLabels.areeba\.com/change=<change ID>'
+#
+# The namespaces exist already (the platform made them), so no --create-namespace.
+
+moduleLabelKey: areeba.com/module
+commonLabels:
+  # Set per install/upgrade with --set-string (see above).
+  areeba.com/change: ""
+
+# The platform owns namespaces and every cluster-wide object.
+createNamespaces: false
+rbac:
+  clusterWide: false
+
+# --- Images ------------------------------------------------------------------
+image:
+  # The nodes can pull from it (platform, 2026-10-28).
+  registry: registry.areeba.com
+  # The first release here: --set image.tag=1.0.0
+  tag: ""
+imagePullSecret:
+  name: regcred
+  create: false
+
+# --- Where people reach it ---------------------------------------------------
+# Free since UAT moved to another name; its DNS record points at the load balancer.
+publicHost: kubesight.areeba.com
+ingress:
+  # No ingress controller here: the frontend serves /api itself (below).
+  enabled: false
+
+frontend:
+  replicas: 2
+  serveApi: true
+  tls:
+    secretName: kubesight-tls
+  service:
+    type: LoadBalancer
+    externalTrafficPolicy: Local
+    annotations:
+      service.beta.kubernetes.io/oci-load-balancer-internal: "true"
+      service.beta.kubernetes.io/oci-load-balancer-shape: "flexible"
+      service.beta.kubernetes.io/oci-load-balancer-shape-flex-min: "10"
+      service.beta.kubernetes.io/oci-load-balancer-shape-flex-max: "100"
+
+# --- Database: pooler-kubesight, verify-full -----------------------------------
+database:
+  # The platform's Secret postgres (username, password), kept in step with
+  # OpenBao by the platform.
+  fromLogin:
+    secret: postgres
+    host: pooler-kubesight.databases.svc
+    port: 5432
+    name: kubesight
+    params: sslmode=verify-full&sslrootcert=/etc/postgres-ca/ca.crt
+secrets:
+  existingSecret: kubesight-secrets
+
+backend:
+  inClusterContextName: ociduai-k8s
+  # OKE upgrades its own control plane; KubeSight must not run kubeadm here.
+  autoUpgrade: false
+  config:
+    ALERT_CPU_THRESHOLD_PERCENT: "80"
+    JWT_EXPIRY_HOURS: "8"
+    # The login may hold 40 connections; the default pool is 16 + 20 = 36.
+    # 12 + 12 leaves room for a restore or a check pod.
+    DB_POOL_SIZE: "12"
+    DB_MAX_OVERFLOW: "12"
+  extraVolumes:
+    - {name: postgres-ca, configMap: {name: postgres-ca}}
+  extraVolumeMounts:
+    - {name: postgres-ca, mountPath: /etc/postgres-ca, readOnly: true}
+  persistence:
+    # 50 GiB is the smallest OCI block volume; -retain keeps it if the claim goes.
+    size: 50Gi
+    storageClass: oci-bv-retain
+
+# --- Native CI and analysis: both in kubesight-ci -------------------------------
+ci:
+  namespace: kubesight-ci
+  manageQuota: false
+  cache:
+    # Needs ReadWriteMany, which OCI block volumes cannot do. Off until the
+    # platform connects NFS (then ci.cache.nfs or a class, and enabled: true).
+    enabled: false
+analysis:
+  namespace: kubesight-ci
+  manageQuota: false
+
+buildkit:
+  namespace: kubesight-build
+  replicas: 2
+  image: docker.io/moby/buildkit:v0.23.2-rootless
+  # The kubesight-build fence: uid 1000, non-root, no added capabilities.
+  # null removes the chart default's drop-ALL-add-SETUID/SETGID (Helm merges
+  # maps); CRI-O's default capabilities already hold what uid mapping needs.
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    runAsNonRoot: true
+    allowPrivilegeEscalation: true
+    capabilities: null
+    seccompProfile: {type: Unconfined}
+    appArmorProfile: {type: Unconfined}
+  # Quota: 1 CPU / 2Gi requests, 10Gi memory limits, 4 pods. Two builders fill
+  # the requests, so an update replaces one at a time instead of adding a third.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 0, maxUnavailable: 1}
+  resources:
+    requests: {cpu: 500m, memory: 1Gi, ephemeral-storage: 2Gi}
+    limits: {cpu: "2", memory: 4Gi, ephemeral-storage: 10Gi}
+
+# --- Hermes: the Claude API directly, until AI Guard -----------------------------
+# Off until there is a Claude API key (CHG-KS-003 turns it on: here, and the
+# hermes item under externalSecrets).
+hermes:
+  enabled: false
+  codexAuth:
+    existingSecret: ""
+  # ANTHROPIC_API_KEY, from kv/kubesight/hermes.
+  extraEnvFromSecrets: [hermes]
+  config:
+    model:
+      default: claude-opus-5-5
+      provider: anthropic
+      base_url: https://api.anthropic.com
+      max_tokens: 8192
+  persistence:
+    size: 50Gi
+    storageClass: oci-bv-retain
+  networkPolicy:
+    egressFQDNs: [api.anthropic.com]
+
+# --- Secrets: OpenBao -> ExternalSecret -----------------------------------------
+externalSecrets:
+  enabled: true
+  store: {name: openbao, kind: SecretStore}
+  items:
+    # JWT_SECRET_KEY, FLASK_SECRET_KEY, KUBESIGHT_SECRET_KEY, HERMES_API_TOKEN,
+    # KUBESIGHT_HERMES_MCP_TOKEN, KUBESIGHT_INITIAL_ADMIN_PASSWORD
+    - {name: kubesight-secrets, key: kubesight/backend}
+    - {name: hermes, key: kubesight/hermes, module: hermes, enabled: false}
+    # Fields tls.crt and tls.key.
+    - {name: kubesight-tls, key: kubesight/tls, type: kubernetes.io/tls, module: kubesight-frontend}
+    # Fields registry, username, password; one entry per namespace, because
+    # each namespace's store reads only its own path.
+    - name: regcred
+      key: kubesight/registry
+      type: kubernetes.io/dockerconfigjson
+      template:
+        .dockerconfigjson: '{"auths":{"{{ .registry }}":{"username":"{{ .username }}","password":"{{ .password }}"}}}'
+    - name: regcred
+      namespace: kubesight-ci
+      key: kubesight-ci/registry
+      module: kubesight-ci
+      type: kubernetes.io/dockerconfigjson
+      template:
+        .dockerconfigjson: '{"auths":{"{{ .registry }}":{"username":"{{ .username }}","password":"{{ .password }}"}}}'
+
+# --- Network rules ---------------------------------------------------------------
+networkPolicies:
+  enabled: true
+  database:
+    namespace: databases
+    podLabels: {cnpg.io/poolerName: pooler-kubesight}
+    port: 5432
+  kubeApiServer: true
+  # The internal load balancers' subnet (OCIDUAILB).
+  frontendIngressFrom:
+    - ipBlock: {cidr: 10.43.10.0/24}
+  # Added one by one as integrations are configured, each with its change
+  # record and firewall request (Bitbucket, Nexus, Zoho/Jira, SMTP, the
+  # clusters KubeSight manages, ...).
+  backendEgressFQDNs: []
+  backendEgressCIDRs: []

@@ -1,0 +1,9 @@
+site_name: Hermes (KubeSight agent)
+nav:
+  - Module card: index.md
+  - Tutorial: tutorial.md
+  - How-to guides: how-to.md
+  - Explanation: explanation.md
+  - Reference: reference.md
+plugins:
+  - techdocs-core
