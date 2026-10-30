@@ -24,7 +24,7 @@ kubectl -n kubesight get configmap kubesight-hermes-config -o jsonpath='{.data.c
 ```
 
 Find these two parts:
-- `model`: provider `anthropic`, model `claude-opus-5-5`, `base_url` `https://api.anthropic.com`;
+- `model`: provider `openai-codex`, model `gpt-5.6-sol`, `base_url` `https://chatgpt.com/backend-api/codex`;
 - `mcp_servers.kubesight`: KubeSight's MCP server, with the token read from
   `${MCP_KUBESIGHT_API_KEY}` rather than written in the file.
 
@@ -55,7 +55,7 @@ kubectl -n kubesight exec deploy/kubesight-hermes -c hermes -- \
 
 Then check the whole path in KubeSight, signed in as an admin:
 - **Integrations → Hermes → Test connection** sends a request from the backend
-  to Hermes, and from Hermes to Claude;
+  to Hermes, and from Hermes to OpenAI;
 - **API Tokens** lists "Hermes MCP (set by the deployment)", the token Hermes
   uses to call KubeSight.
 
@@ -78,7 +78,7 @@ kubectl -n kubesight get ciliumnetworkpolicy kubesight-hermes-egress -o yaml
 
 - **Into Hermes:** port 8642, from `kubesight` and `kubesight-ci` only.
 - **Out of Hermes:** DNS, the backend on port 5000 (with the namespace's
-  same-namespace rule, any pod in `kubesight`), and `api.anthropic.com` on 443.
+  same-namespace rule, any pod in `kubesight`), and `chatgpt.com` and `auth.openai.com` on 443.
   Nothing else.
 
 You have seen Hermes end to end. The [how-to guides](how-to.md) cover the

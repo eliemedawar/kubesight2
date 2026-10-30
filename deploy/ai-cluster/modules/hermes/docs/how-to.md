@@ -6,29 +6,39 @@ Helm commands run from the folder that holds `charts/kubesight` and
 (`helm -n kubesight list` shows it), and `<change ID>` is your change record.
 OpenBao commands need `source openbao-login` first.
 
-## Rotate the Claude API key
+## Replace the login
 
-1. Type the new key at a hidden prompt. It goes straight into OpenBao:
+For a new account, or when Hermes reports that its login has expired.
+
+1. Make a new `auth.json` with `codex login` on a computer with a browser, as in
+   CHG-KS-003 ("Before you start"), then put it into OpenBao from the bastion:
    ```bash
-   read -rs -p 'Anthropic API key: ' v; echo; printf '%s' "$v" | bao kv put -mount=kv kubesight/hermes ANTHROPIC_API_KEY=-; unset v
+   umask 077
+   stty -echo; cat > /dev/shm/auth.json; stty echo     # paste, Enter, Ctrl-D
+   bao kv put -mount=kv kubesight/hermes auth.json=@/dev/shm/auth.json
+   shred -u /dev/shm/auth.json
    ```
 2. Copy it into the Secret now, instead of within the hour:
    ```bash
    kubectl -n kubesight annotate externalsecret hermes force-sync="$(date +%s)" --overwrite
    kubectl -n kubesight get externalsecret hermes          # SecretSynced
    ```
-3. Hermes reads the key when it starts, so restart it:
+3. Hermes keeps its own renewed copy on its volume, which may win over the new
+   file. Look for it, remove it, and restart:
    ```bash
+   kubectl -n kubesight exec deploy/kubesight-hermes -c hermes -- ls -la /opt/data
+   kubectl -n kubesight exec deploy/kubesight-hermes -c hermes -- rm -f /opt/data/auth.json
    kubectl -n kubesight rollout restart deployment/kubesight-hermes
    kubectl -n kubesight rollout status deployment/kubesight-hermes
    ```
 4. In KubeSight, **Integrations → Hermes → Test connection**.
-5. Revoke the old key in the Anthropic console.
+5. If the old account is retired, sign it out of all devices in its ChatGPT
+   security settings.
 
 ## Change the model
 
 Set `hermes.config.model.default` in `deploy/ai-cluster/values-ai-cluster.yaml`,
-for example to `claude-sonnet-5-5`. Then:
+to another model the ChatGPT account offers. Then:
 
 ```bash
 helm upgrade kubesight charts/kubesight -n kubesight -f deploy/ai-cluster/values-ai-cluster.yaml \
@@ -44,7 +54,7 @@ itself. Check the result with **Test connection**.
 For example, `api.telegram.org` for approvals by Telegram.
 
 1. Add the name to `hermes.networkPolicy.egressFQDNs` in the values file, next
-   to `api.anthropic.com`.
+   to `chatgpt.com` and `auth.openai.com`.
 2. Ask the platform to open the company firewall for that name on 443. Cilium's
    rule alone is not enough.
 3. Run `helm upgrade` as above.
@@ -58,12 +68,12 @@ For example, `api.telegram.org` for approvals by Telegram.
 
 ## Move Hermes onto AI Guard (planned)
 
-When AI Guard runs in `ai-guard`, Hermes will call it instead of the Claude API.
+When AI Guard runs in `ai-guard`, Hermes will call it instead of OpenAI.
 Expect these changes, each written up once AI Guard's address and API are known:
 - `hermes.config.model.base_url` (and `provider`, if AI Guard needs another one);
-- `hermes.networkPolicy.egressFQDNs`: `api.anthropic.com` removed;
+- `hermes.networkPolicy.egressFQDNs`: `chatgpt.com` and `auth.openai.com` removed;
 - a rule allowing Hermes to reach AI Guard's Service in `ai-guard`;
-- the key in `kv/kubesight/hermes`, if AI Guard uses its own.
+- the login in `kv/kubesight/hermes`, replaced by AI Guard's own key if it uses one.
 
 Ask the platform for the details before writing that change record.
 
@@ -97,7 +107,7 @@ kubectl -n kube-system exec <cilium pod on Hermes's node> -c cilium-agent -- \
 ```
 
 Expected:
-- **forwarded:** DNS, `backend-service:5000`, `api.anthropic.com:443`;
+- **forwarded:** DNS, `backend-service:5000`, `chatgpt.com:443`, `auth.openai.com:443`;
 - **dropped:** any other outside address.
 
 To prove the drop, try a host that is not allowed:

@@ -3,7 +3,7 @@ kind: Component
 metadata:
   name: hermes
   title: Hermes (KubeSight agent)
-  description: The AI agent behind KubeSight's Application Intelligence, ticket agent and CI assist; it calls the Claude API and reaches KubeSight through its MCP server.
+  description: The AI agent behind KubeSight's Application Intelligence, ticket agent and CI assist; it calls OpenAI through a ChatGPT/Codex login and reaches KubeSight through its MCP server.
   labels: {areeba.com/module: hermes}
   annotations:
     backstage.io/techdocs-ref: dir:.

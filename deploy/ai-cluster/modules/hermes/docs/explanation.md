@@ -1,25 +1,33 @@
 # Explanation: why Hermes is built this way
 
-## The Claude API directly, for now
+## OpenAI, through a ChatGPT/Codex login
 
-In UAT, Hermes signs in to the ChatGPT/Codex provider with an `auth.json` file.
-On the AI cluster, the platform's plan is the Claude API: directly for now, and
-through AI Guard once AI Guard runs. Hermes already has an `anthropic` provider,
-which reads `ANTHROPIC_API_KEY` and calls `https://api.anthropic.com`. So the
-change is configuration only: the same image, a different `model` block, and one
-key in OpenBao.
+The handover planned the Claude API, but there is no Claude API key. Hermes
+therefore runs as it does in UAT: its `openai-codex` provider signs in with the
+`auth.json` file that `codex login` writes, and calls
+`https://chatgpt.com/backend-api/codex`. It is the same image and chart; only
+the `model` block and the login differ.
 
-The key lives in `kv/kubesight/hermes`. The ExternalSecret `hermes` copies it
-into a Secret of the same name, and Hermes reads it as an environment variable.
-It never appears in Git, a values file or a Helm release.
+The login lives in `kv/kubesight/hermes`, field `auth.json`. The ExternalSecret
+`hermes` copies it into a Secret of the same name, mounted read-only at
+`/opt/codex` (`CODEX_HOME`). It never appears in Git, a values file or a Helm
+release.
+
+A Codex login is renewed by replacing it. On first start Hermes takes the
+mounted file and keeps its own copy in `/opt/data`, which it renews through
+`auth.openai.com`. The mounted file is only a fallback. This is why:
+- the account must be used by this Hermes only: two users of one login log
+  each other out when one of them renews it;
+- a new login in OpenBao reaches Hermes only after a restart, and its own copy
+  on the volume may still win (see the how-to).
 
 ## Outbound traffic by name, through Cilium
 
 Hermes runs a model with tools. Whatever it is asked, it should be able to reach
 only the model's API and KubeSight. A plain Kubernetes NetworkPolicy can name
-addresses but not host names, and `api.anthropic.com` has addresses we do not
+addresses but not host names, and OpenAI's hosts have addresses we do not
 control. Cilium's own rule kind can allow by name (`toFQDNs`). The chart creates
-`kubesight-hermes-egress` with `api.anthropic.com` on 443.
+`kubesight-hermes-egress` with `chatgpt.com` and `auth.openai.com` on 443.
 
 Cilium learns which addresses belong to that name by watching Hermes's DNS
 answers. That is why the same rule sends Hermes's DNS through Cilium's DNS

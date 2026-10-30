@@ -72,7 +72,7 @@ From the live export of 2026-10-21 (`charts/export-live-objects.sh`) and the cod
 |---|---|---|
 | `kubesight-secret`, `kubesight-encryption`, `kubesight-hermes-credentials` | `JWT_SECRET_KEY`, `FLASK_SECRET_KEY`, `KUBESIGHT_SECRET_KEY`, `HERMES_API_TOKEN` | `kv/kubesight/backend` (+ `KUBESIGHT_HERMES_MCP_TOKEN`, `KUBESIGHT_INITIAL_ADMIN_PASSWORD`) |
 | `kubesight-secret` | `DATABASE_URL`, `DATABASE_USER`, `DATABASE_PASSWORD` | the platform's Secret `postgres` (`username`, `password`) → `DATABASE_URL` put together in the pod |
-| `hermes-codex-auth` | `auth.json` | replaced by `ANTHROPIC_API_KEY` in `kv/kubesight/hermes` |
+| `hermes-codex-auth` | `auth.json` | `kv/kubesight/hermes` (`auth.json`), the login of an account used by this Hermes only |
 | `areebasecret-2026-2027` (TLS) | `tls.crt`, `tls.key` | `kv/kubesight/tls` |
 | `regcred` / `areeba-registry` | `.dockerconfigjson` | `kv/kubesight/registry`, `kv/kubesight-ci/registry` |
 
@@ -98,7 +98,7 @@ the integration is turned on):
 - Google Play and App Store Connect;
 - Jenkins (legacy deploys);
 - `api-oci.areeba.com`, which UAT pins in `hostAliases` to 193.123.81.215;
-- for Hermes: the model API (`api.anthropic.com`) and, if used, Telegram.
+- for Hermes: OpenAI (`chatgpt.com`, `auth.openai.com`) and, if used, Telegram.
 
 **Cluster-wide needs:** UAT gives the backend two ClusterRoles (read the
 whole cluster; deploy anywhere). That is how KubeSight manages the cluster *it
@@ -118,7 +118,7 @@ Jobs in `kubesight-ci`.
 | CI dependency cache | **off**: it needs ReadWriteMany, which block volumes cannot do |
 | Builds | BuildKit in `kubesight-build`: `docker.io/moby/buildkit:v0.23.2-rootless`, uid 1000, no added capabilities, unconfined seccomp/AppArmor, one-at-a-time updates to stay in the quota |
 | Web access | internal OCI load balancer → frontend nginx on 8443 (TLS from `kv/kubesight/tls`), which proxies `/api` to the backend (no ingress controller) |
-| Hermes's model | Claude API, `claude-opus-5-5`, key in `kv/kubesight/hermes`; egress to `api.anthropic.com` only |
+| Hermes's model | OpenAI through a ChatGPT/Codex login (as in UAT), `gpt-5.6-sol`, login in `kv/kubesight/hermes`; egress to `chatgpt.com` and `auth.openai.com` only |
 | Network | default deny in all three namespaces; DNS; same-namespace in `kubesight` only; backend → pooler, → API server; CI/analysis → backend:5000; LB subnet → frontend:8443; per-build rules created by the backend |
 | Cluster-wide | none in the release; requests below |
 
@@ -134,6 +134,10 @@ Jobs in `kubesight-ci`.
 | CI cache storage | Later, on NFS; **off** for now (Hussein) |
 | Schema migrations run by the backend at start-up | Accepted (Hussein) |
 | OpenBao backed up | Yes (Hussein) |
+
+2026-10-30: there is still no Claude API key, so Hermes moves to OpenAI through a
+ChatGPT/Codex login, as in UAT (Elie). The firewall opening above was for
+`api.anthropic.com`; `chatgpt.com` and `auth.openai.com` are asked with CHG-KS-003.
 
 Still open: the DNS record for `kubesight.areeba.com` (once the load balancer
 has its address), and the firewall openings for each integration as it is
@@ -158,7 +162,7 @@ person's "yes".
 |---|---|---|
 | [CHG-KS-001](changes/CHG-KS-001-openbao-secrets.md) | KubeSight's secrets into OpenBao | Proposed |
 | [CHG-KS-002](changes/CHG-KS-002-install.md) | Install KubeSight 1.0.0 without Hermes, and close its namespaces, checked with Hubble | Proposed (after CHG-KS-001 and the `1.0.0` images) |
-| [CHG-KS-003](changes/CHG-KS-003-hermes.md) | Add Hermes, on the Claude API | Waiting for a Claude API key |
+| [CHG-KS-003](changes/CHG-KS-003-hermes.md) | Add Hermes, on OpenAI through a ChatGPT/Codex login | Waiting for the platform's agreement and the firewall opening |
 
 ## 6. Module documents
 
@@ -170,6 +174,6 @@ portal reads (`catalog-info.yaml`, `mkdocs.yml`, `docs/`). The system entry is
 |---|---|
 | [kubesight-backend](modules/kubesight-backend/docs/index.md) | API, background work, MCP server |
 | [kubesight-frontend](modules/kubesight-frontend/docs/index.md) | web page, `/api` proxy, TLS, load balancer |
-| [hermes](modules/hermes/docs/index.md) | the agent, on the Claude API |
+| [hermes](modules/hermes/docs/index.md) | the agent, on OpenAI |
 | [kubesight-ci](modules/kubesight-ci/docs/index.md) | build pods and analysis Jobs in `kubesight-ci` |
 | [kubesight-buildkit](modules/kubesight-buildkit/docs/index.md) | rootless BuildKit in `kubesight-build` |

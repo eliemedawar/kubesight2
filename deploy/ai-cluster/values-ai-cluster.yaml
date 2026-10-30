@@ -118,26 +118,29 @@ buildkit:
     requests: {cpu: 500m, memory: 1Gi, ephemeral-storage: 2Gi}
     limits: {cpu: "2", memory: 4Gi, ephemeral-storage: 10Gi}
 
-# --- Hermes: the Claude API directly, until AI Guard -----------------------------
-# Off until there is a Claude API key (CHG-KS-003 turns it on: here, and the
+# --- Hermes: OpenAI, through a ChatGPT/Codex login, as in UAT ---------------------
+# Off until the login is in OpenBao (CHG-KS-003 turns it on: here, and the
 # hermes item under externalSecrets).
 hermes:
   enabled: false
+  # The Secret hermes (from kv/kubesight/hermes) holds one key, auth.json: the
+  # Codex login of an account used by this Hermes only. Mounted read-only at
+  # /opt/codex; Hermes keeps its own refreshed copy in /opt/data.
   codexAuth:
-    existingSecret: ""
-  # ANTHROPIC_API_KEY, from kv/kubesight/hermes.
-  extraEnvFromSecrets: [hermes]
+    existingSecret: hermes
+  extraEnvFromSecrets: []
   config:
     model:
-      default: claude-opus-5-5
-      provider: anthropic
-      base_url: https://api.anthropic.com
+      default: gpt-5.6-sol
+      provider: openai-codex
+      base_url: https://chatgpt.com/backend-api/codex
       max_tokens: 8192
   persistence:
     size: 50Gi
     storageClass: oci-bv-retain
   networkPolicy:
-    egressFQDNs: [api.anthropic.com]
+    # chatgpt.com answers the model calls; auth.openai.com renews the login.
+    egressFQDNs: [chatgpt.com, auth.openai.com]
 
 # --- Secrets: OpenBao -> ExternalSecret -----------------------------------------
 externalSecrets:
@@ -147,6 +150,7 @@ externalSecrets:
     # JWT_SECRET_KEY, FLASK_SECRET_KEY, KUBESIGHT_SECRET_KEY, HERMES_API_TOKEN,
     # KUBESIGHT_HERMES_MCP_TOKEN, KUBESIGHT_INITIAL_ADMIN_PASSWORD
     - {name: kubesight-secrets, key: kubesight/backend}
+    # Field auth.json: Hermes's Codex login.
     - {name: hermes, key: kubesight/hermes, module: hermes, enabled: false}
     # Fields tls.crt and tls.key.
     - {name: kubesight-tls, key: kubesight/tls, type: kubernetes.io/tls, module: kubesight-frontend}

@@ -39,14 +39,14 @@ Shared with the rest of `kubesight`:
 |---|---|
 | `hermes.enabled` | `true` |
 | `hermes.image` | `kubesight-hermes:v2026.7.20` (registry `registry.areeba.com`) |
-| `hermes.codexAuth.existingSecret` | `""` (not used) |
-| `hermes.extraEnvFromSecrets` | `[hermes]` |
-| `hermes.config.model` | `provider: anthropic`, `default: claude-opus-5-5`, `base_url: https://api.anthropic.com`, `max_tokens: 8192` |
+| `hermes.codexAuth.existingSecret` | `hermes` |
+| `hermes.extraEnvFromSecrets` | `[]` |
+| `hermes.config.model` | `provider: openai-codex`, `default: gpt-5.6-sol`, `base_url: https://chatgpt.com/backend-api/codex`, `max_tokens: 8192` |
 | `hermes.config.agent` | `max_turns: 20`, `gateway_timeout: 900`, `api_max_retries: 1`, `reasoning_effort: low` |
 | `hermes.maxIterations` | `20` |
 | `hermes.installSkill` | `true` |
 | `hermes.persistence` | `50Gi`, `ReadWriteOnce`, class `oci-bv-retain` |
-| `hermes.networkPolicy.egressFQDNs` | `[api.anthropic.com]` |
+| `hermes.networkPolicy.egressFQDNs` | `[chatgpt.com, auth.openai.com]` |
 | `hermes.resources` | requests 250m CPU / 512Mi / 256Mi disk; limits 2 CPU / 2Gi / 2Gi disk |
 | `hermes.initResources` | requests 10m CPU / 32Mi; limits 500m CPU / 128Mi |
 
@@ -61,7 +61,7 @@ Shared with the rest of `kubesight`:
 | `HERMES_MAX_ITERATIONS` | `20` |
 | `API_SERVER_KEY` | Secret `kubesight-secrets`, key `HERMES_API_TOKEN` |
 | `MCP_KUBESIGHT_API_KEY` | Secret `kubesight-secrets`, key `KUBESIGHT_HERMES_MCP_TOKEN` |
-| `ANTHROPIC_API_KEY` | Secret `hermes` (all its keys, through `envFrom`) |
+| `CODEX_HOME` | `/opt/codex`, where the Secret `hermes` is mounted |
 
 `config.yaml` also names the MCP server `kubesight` at
 `http://backend-service.kubesight.svc.cluster.local:5000/api/mcp`, with a timeout
@@ -76,16 +76,18 @@ of 120 s.
 | `tmp` | emptyDir, 256Mi | `/tmp` |
 | `config` | ConfigMap `kubesight-hermes-config` | `/config` (init only) |
 | `skill` | ConfigMap `kubesight-hermes-skill` | `/skill` (init only) → `/opt/data/skills/kubesight` |
+| `codex-auth` | Secret `hermes` (mode 0440) | `/opt/codex`, read-only |
 
 ## Secrets
 
 | Secret | Keys | From OpenBao |
 |---|---|---|
-| `hermes` | `ANTHROPIC_API_KEY` | `kv/kubesight/hermes` |
+| `hermes` | `auth.json` | `kv/kubesight/hermes` |
 | `kubesight-secrets` | `HERMES_API_TOKEN`, `KUBESIGHT_HERMES_MCP_TOKEN` (and the backend's keys) | `kv/kubesight/backend` |
 | `regcred` | `.dockerconfigjson` | `kv/kubesight/registry` |
 
-All refresh every hour. A changed key reaches Hermes only after a restart.
+All refresh every hour. A changed key reaches Hermes only after a restart. Hermes
+keeps its own renewed copy of the login in `/opt/data`.
 
 ## Network rules
 
@@ -94,9 +96,11 @@ All refresh every hour. A changed key reaches Hermes only after a restart.
 | `default-deny` | nothing in or out unless allowed below |
 | `allow-dns-and-same-namespace` | DNS to `kube-dns`; traffic to and from pods in `kubesight` |
 | `kubesight-hermes` | in: TCP 8642 from namespaces `kubesight`, `kubesight-ci`; out: DNS (kube-system, 53), TCP 5000 to `kubesight` |
-| `kubesight-hermes-egress` (Cilium) | out: DNS through Cilium's DNS proxy; TCP 443 to `api.anthropic.com` only |
+| `kubesight-hermes-egress` (Cilium) | out: DNS through Cilium's DNS proxy; TCP 443 to `chatgpt.com` and `auth.openai.com` only |
 
-Firewall: `api.anthropic.com:443` is open for the cluster (platform, 2026-10-28).
+Firewall: `chatgpt.com:443` and `auth.openai.com:443` must be opened for the
+cluster (asked with CHG-KS-003). The opening agreed on 2026-10-28 was for
+`api.anthropic.com`.
 
 ## Labels
 
