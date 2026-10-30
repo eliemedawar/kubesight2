@@ -66,6 +66,10 @@ def _resolve_database_url() -> str:
     # Heroku-style URLs may use `postgres://`; SQLAlchemy expects `postgresql://`.
     if database_url.startswith("postgres://"):
         database_url = database_url.replace("postgres://", "postgresql://", 1)
+    # A bare `postgresql://` means psycopg 3 from SQLAlchemy 2.1 on, and the
+    # image ships psycopg2 only — name the driver so the default can't move.
+    if database_url.startswith("postgresql://"):
+        database_url = database_url.replace("postgresql://", "postgresql+psycopg2://", 1)
     if database_url.startswith("sqlite"):
         if production:
             _db_logger.warning("Production is running on SQLite (%s).", database_url)
