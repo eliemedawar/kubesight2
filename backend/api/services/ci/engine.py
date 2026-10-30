@@ -1934,6 +1934,9 @@ def _registry_for(
             # mounts it beside the context rather than writing into the
             # workspace, so the repository is never modified by building it.
             "dockerfileContent": service.dockerfile or "",
+            # Which builder set: "data" (large /data disk, the default) or
+            # "var" (node scratch). The runner tries that set first.
+            "buildkitDisk": "var" if str(env.get("BUILDKIT_DISK") or "").strip().lower() == "var" else "data",
             "username": row.username or "",
             "password": decrypt_secret(row.password_encrypted or ""),
             "verifyTls": bool(row.verify_tls),

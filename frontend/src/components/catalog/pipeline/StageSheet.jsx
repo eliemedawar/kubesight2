@@ -28,6 +28,8 @@ import ParallelGroupFields, { parallelSummary } from "./ParallelGroupFields.jsx"
 import { groupAt, PARALLEL_STAGE_TYPES } from "./parallelModel.js";
 import { PlIcon } from "./icons.jsx";
 import {
+  BUILD_DISKS,
+  buildDisk,
   codeScanArmed,
   conditionSummary,
   DEFAULT_TIMEOUT_SECONDS,
@@ -801,6 +803,23 @@ function ImageStageFields({ ids, service, stage, editable, onChange, onGoToTab }
           />
         </Field>
       </div>
+
+      <Field
+        label="Build disk"
+        hint={
+          buildDisk(stage) === "var"
+            ? "Builders that keep their cache in node scratch space under /var. Small (a few GB): a heavy build there can be evicted mid-way."
+            : "Builders that keep their cache on the large /data disk. Use this for heavy images. If those builders are down, the stage uses the /var ones and says so in its log."
+        }
+      >
+        <Segmented
+          label="Build disk"
+          value={buildDisk(stage)}
+          options={BUILD_DISKS}
+          disabled={!editable}
+          onChange={(disk) => setEnv(IMAGE_ENV_KEYS.disk, disk === "var" ? "var" : "")}
+        />
+      </Field>
 
       <div className={`pl-scan${armed ? " is-on" : ""}`}>
         <div className="pl-scan-head">

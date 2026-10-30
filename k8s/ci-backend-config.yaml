@@ -54,6 +54,10 @@ data:
   # and builds on the first that answers from its own node. Unset = the one
   # address above only, and a builder the build pod cannot reach fails the stage.
   CI_BUILDKIT_POOL: buildkitd-pods.kubesight-buildkit.svc.cluster.local
+  # The /var builders (cache in node scratch space), for image stages whose
+  # "Build disk" is /var. The pool above is the /data builders and the default.
+  # Each set is the other's fallback. Unset = /var stages use the /data builders.
+  CI_BUILDKIT_POOL_VAR: buildkitd-var-pods.kubesight-buildkit.svc.cluster.local
 
   # --- Parallel stage groups -------------------------------------------------
   # Stages sharing a parallelGroup run side by side as native sidecar

@@ -309,12 +309,24 @@ export function firstCommand(stage) {
 export const commandCount = (stage) =>
   (stage.commands || []).filter((line) => String(line || "").trim()).length;
 
-/** The image stage's three build inputs live in env; these are their keys. */
+/** The image stage's build inputs live in env; these are their keys. */
 export const IMAGE_ENV_KEYS = {
   name: "IMAGE_NAME",
   tag: "IMAGE_TAG",
   dockerfile: "DOCKERFILE_PATH",
+  disk: "BUILDKIT_DISK",
 };
+
+/** Which builders an image stage uses, by where they keep their cache. Absent
+ * means "data"; only "var" is ever stored. Keep in step with the backend's
+ * BUILDKIT_DISKS. */
+export const BUILD_DISKS = [
+  { value: "data", label: "/data — large disk" },
+  { value: "var", label: "/var — node scratch" },
+];
+
+export const buildDisk = (stage) =>
+  stage.env?.[IMAGE_ENV_KEYS.disk] === "var" ? "var" : "data";
 
 const IMAGE_ENV_KEY_SET = new Set(Object.values(IMAGE_ENV_KEYS));
 

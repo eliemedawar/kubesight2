@@ -153,45 +153,93 @@ def _resolve_host(host: str) -> List[str]:
     return [info[4][0] for info in infos]
 
 
-def buildkit_pool_host() -> str:
-    """Headless Service host over every buildkitd pod. Empty = no failover."""
-    return os.getenv("CI_BUILDKIT_POOL", "").strip()
+# Two builder sets, told apart by where they keep their layer cache: "data"
+# builders on the large local /data disk (the default), "var" builders in node
+# scratch space under /var, which is small and evicts a heavy build. An image
+# stage picks one (env BUILDKIT_DISK); the other set is its fallback.
+BUILDKIT_DISKS = ("data", "var")
 
 
-def buildkit_candidates(service_slug: str) -> List[str]:
-    """Builder addresses an image stage tries, in order.
+def buildkit_disk(value: Any) -> str:
+    """A stage's BUILDKIT_DISK as one of BUILDKIT_DISKS. Anything else is data."""
+    return "var" if str(value or "").strip().lower() == "var" else "data"
 
-    Just ``[CI_BUILDKIT_ADDR]`` when no pool is configured or it resolves to
-    nothing, which keeps the stage script exactly what it was before failover.
-    """
-    primary = buildkit_addr()
-    host = buildkit_pool_host()
-    if not primary or not host:
-        return [primary] if primary else []
-    port_match = re.search(r":(\d+)$", primary)
-    port = port_match.group(1) if port_match else "1234"
+
+def buildkit_pool_host(disk: str = "data") -> str:
+    """Headless Service host over one builder set's pods. Empty = not deployed."""
+    name = "CI_BUILDKIT_POOL_VAR" if disk == "var" else "CI_BUILDKIT_POOL"
+    return os.getenv(name, "").strip()
+
+
+def _pool_addrs(host: str, port: str, service_slug: str) -> List[str]:
+    """One address per Ready pod behind ``host``, rotated by service."""
+    if not host:
+        return []
     try:
         ips = sorted(set(_resolve_host(host)))
     except (OSError, UnicodeError) as exc:
-        logger.warning("Could not resolve BuildKit pool %s (%s); using %s only", host, exc, primary)
-        return [primary]
+        logger.warning("Could not resolve BuildKit pool %s (%s)", host, exc)
+        return []
     if not ips:
-        return [primary]
+        return []
     start = zlib.crc32(str(service_slug or "").encode("utf-8")) % len(ips)
     ordered = ips[start:] + ips[:start]
-    addrs = [f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}" for ip in ordered]
-    return addrs + [primary]
+    return [f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}" for ip in ordered]
 
 
-def _buildkit_select_script(candidates: List[str]) -> str:
+def buildkit_plan(service_slug: str, disk: str = "data") -> Tuple[List[str], List[str]]:
+    """``(candidates, own)``: every address to try in order, and which of them
+    belong to ``disk``'s own builder set.
+
+    The chosen set's builders come first, then the other set's, then
+    CI_BUILDKIT_ADDR. That Service selects the data builders, so it counts as
+    "own" only for a data stage. Just ``[CI_BUILDKIT_ADDR]`` when no pool is
+    configured or none resolves, which keeps the stage script exactly what it
+    was before failover.
+    """
+    primary = buildkit_addr()
+    if not primary:
+        return [], []
+    port_match = re.search(r":(\d+)$", primary)
+    port = port_match.group(1) if port_match else "1234"
+    other = "data" if disk == "var" else "var"
+    own = _pool_addrs(buildkit_pool_host(disk), port, service_slug)
+    if not own and disk == "data" and buildkit_pool_host("data"):
+        logger.warning("BuildKit pool %s gave no builders; using %s", buildkit_pool_host("data"), primary)
+    fallback = [a for a in _pool_addrs(buildkit_pool_host(other), port, service_slug) if a not in own]
+    candidates = own + fallback + [primary]
+    return candidates, own + ([primary] if disk == "data" else [])
+
+
+def buildkit_candidates(service_slug: str, disk: str = "data") -> List[str]:
+    """Builder addresses an image stage tries, in order (see buildkit_plan)."""
+    return buildkit_plan(service_slug, disk)[0]
+
+
+def _buildkit_select_script(
+    candidates: List[str], own: Optional[List[str]] = None, disk: str = "data"
+) -> str:
     """Shell that sets $KS_BUILDKIT_ADDR to the first builder that answers.
 
     ``debug workers`` is the cheapest call that proves the whole path: TCP
     through every NetworkPolicy, the gRPC handshake, and a daemon with a worker.
     ``timeout`` bounds it when present, because a dial into a black-holed node
     otherwise waits for as long as the kernel keeps retrying the SYN.
+
+    ``own`` is the subset that belongs to the stage's chosen ``disk``; when the
+    stage ends up on any other builder, the log says so.
     """
     words = " ".join(_q(addr) for addr in candidates)
+    own_set = set(candidates if own is None else own)
+    fallback_note = ""
+    if any(addr not in own_set for addr in candidates):
+        patterns = "|".join(_q(addr) for addr in candidates if addr in own_set)
+        fallback_note = (
+            'case "$KS_BUILDKIT_ADDR" in\n'
+            + (f"  {patterns}) ;;\n" if patterns else "")
+            + f'  *) echo "[kubesight] No /{disk} builder answered; this image builds on a builder from the other disk instead." >&2 ;;\n'
+            "esac\n"
+        )
     return (
         'KS_BUILDKIT_ADDR=""\n'
         'KS_BK_LIMIT=""\n'
@@ -208,6 +256,7 @@ def _buildkit_select_script(candidates: List[str]) -> str:
         "  exit 1\n"
         "fi\n"
         'echo "[kubesight] BuildKit: $KS_BUILDKIT_ADDR"\n'
+        + fallback_note
     )
 
 
@@ -1393,11 +1442,16 @@ def _buildctl_args(
     prelude = (cache_prelude + _image_ref_prelude(registry)) if with_prelude else ""
     # Several builders: pick one that answers from THIS pod, right before the
     # build, after the tag and cache preludes (neither talks to buildkitd).
-    candidates = buildkit_candidates(execution.service_slug)
+    # The stage's chosen builder set comes first; the other set is a fallback.
+    disk = buildkit_disk(registry.get("buildkitDisk"))
+    candidates, own = buildkit_plan(execution.service_slug, disk)
     if len(candidates) > 1:
-        prelude += _buildkit_select_script(candidates)
+        prelude += _buildkit_select_script(candidates, own, disk)
         addr_word = '"$KS_BUILDKIT_ADDR"'
     else:
+        if candidates and not own:
+            # Only the shared Service is left, and it fronts the data builders.
+            prelude += f'echo "[kubesight] No /{disk} builders are deployed; this image builds on the /data builders." >&2\n'
         addr_word = _q(buildkit_addr())
     output_word = output or _buildctl_output(registry)
     context = "/workspace/source"

@@ -42,7 +42,10 @@
 #   - runAsUser 1000 / runAsNonRoot: true   (never root)
 #   - capabilities: drop ALL, then add back exactly those two
 #   - privileged: NOT set (false)
-#   - no host mounts, no docker socket, no hostNetwork/hostPID
+#   - ONE host mount: /data/buildkit (layer cache, see "Layer cache on /data"
+#     below); no docker socket, no hostNetwork/hostPID
+#   - a short root init container that only chowns that one directory to
+#     uid 1000 (CHOWN is its only capability), then exits
 #
 # BLAST RADIUS / IMPACT
 #   The relaxation applies to THIS one Deployment in its own namespace
@@ -55,7 +58,8 @@
 #   real boundary, so deploy nothing else into this namespace.
 #   Build pods in kubesight-ci remain fully `restricted`; they only hold a
 #   buildctl *client*, which needs no relaxation. An escape from buildkitd is
-#   bounded by: non-root uid, only SETUID/SETGID available, no host mounts, and
+#   bounded by: non-root uid, only SETUID/SETGID available, no host mount but
+#   its own /data/buildkit cache directory, and
 #   a NetworkPolicy that only admits traffic from kubesight-ci and
 #   only lets buildkitd reach registries/DNS. What this concedes is a larger
 #   kernel syscall attack surface for the buildkitd process itself, and a
@@ -98,6 +102,33 @@ metadata:
   namespace: kubesight-buildkit
 automountServiceAccountToken: false
 ---
+# Garbage collection for the /data/buildkit cache. Sizes are of the WHOLE /data
+# filesystem, which buildkitd shares with containerd's images on that node.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: buildkitd-config
+  namespace: kubesight-buildkit
+data:
+  buildkitd.toml: |
+    [worker.oci]
+      gc = true
+      # Never trim the cache below this.
+      reservedSpace = "2GB"
+      # Trim anything above this.
+      maxUsedSpace = "20GB"
+      # Trim until /data has at least this much free, so the node's images
+      # always have room (never below reservedSpace).
+      minFreeSpace = "15GB"
+  # The /var builder (buildkitd-var below). Its cache sits in node scratch
+  # space on the ~5 GiB kubelet disk, so it is kept small and trimmed early.
+  buildkitd-var.toml: |
+    [worker.oci]
+      gc = true
+      reservedSpace = "512MB"
+      maxUsedSpace = "2GB"
+      minFreeSpace = "1500MB"
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -110,10 +141,19 @@ spec:
   # (firewalld back after a reboot, a sick calico-node) takes out one builder,
   # not image builds. Build pods reach each one directly through the headless
   # `buildkitd-pods` Service below and use the first that answers — see
-  # CI_BUILDKIT_POOL in ci-backend-config.yaml. Each has its own emptyDir layer
-  # cache; KubeSight keeps each service on the same builder while it is healthy
-  # so that cache stays warm.
+  # CI_BUILDKIT_POOL in ci-backend-config.yaml. Each keeps its layer cache in
+  # /data/buildkit on its node (see "Layer cache on /data" at the volume);
+  # KubeSight keeps each service on the same builder while it is healthy so
+  # that cache stays warm.
   replicas: 2
+  # The two builders may never share a node (required anti-affinity below), so
+  # a rollout must free a slot before it fills one: without this the surge pod
+  # waits for a third labelled node.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: buildkitd
@@ -144,16 +184,55 @@ spec:
       # the address must serve both. Addressing the registry by IP in its
       # KubeSight connection avoids the question entirely.
       affinity:
+        # Only nodes whose /data is the big local disk. Label each such node:
+        #   kubectl label node <node> kubesight.io/buildkit-disk=true
+        # A builder may move to ANY labelled node (node failure, drain,
+        # eviction); it starts with a cold cache on a node it has not used yet.
+        # Without the label it would land on a node where /data/buildkit is a
+        # folder on the 5 GiB root disk, which is the problem this solves.
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubesight.io/buildkit-disk
+                    operator: In
+                    values: ["true"]
         podAntiAffinity:
-          # Preferred, not required: on a cluster with one schedulable node the
-          # second builder still starts instead of sitting Pending forever.
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                topologyKey: kubernetes.io/hostname
-                labelSelector:
-                  matchLabels:
-                    app: buildkitd
+          # Required: two buildkitd daemons on one node would share the same
+          # /data/buildkit directory, and the second cannot open the first's
+          # state database. Label at least three nodes so a builder always has
+          # somewhere to go while another node is down.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app: buildkitd
+      initContainers:
+        # hostPath DirectoryOrCreate makes /data/buildkit as root:root 0755,
+        # which rootless buildkitd (uid 1000) cannot write. Hand it over, every
+        # start, on whichever node this pod landed.
+        - name: own-cache
+          image: moby/buildkit:v0.23.2-rootless
+          command: ["chown", "1000:1000", "/cache"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+              ephemeral-storage: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+              ephemeral-storage: 64Mi
       serviceAccountName: buildkitd
       automountServiceAccountToken: false
       enableServiceLinks: false
@@ -198,30 +277,124 @@ spec:
           volumeMounts:
             - name: cache
               mountPath: /home/user/.local/share/buildkit
+            # Rootless buildkitd reads ~/.config/buildkit/buildkitd.toml on its
+            # own; no --config flag needed.
+            - name: config
+              mountPath: /home/user/.config/buildkit/buildkitd.toml
+              subPath: buildkitd.toml
+              readOnly: true
           resources:
-            # Requests are what the SCHEDULER matches against free capacity;
-            # limits only cap. Give ephemeral-storage an explicit, small request
-            # — omitting it makes Kubernetes default the request to the limit,
-            # so a 20Gi cap turned into a 20Gi demand and the pod went
-            # unschedulable on every worker. The limit still bounds a runaway
-            # build. If your nodes are disk-tight (check `kubectl describe node`
-            # → Allocatable → ephemeral-storage), lower both and the emptyDir
-            # sizeLimit below to match, or switch the cache volume to a PVC.
+            # Ephemeral storage is now only the container's own writable layer
+            # and logs: every build lands in /data/buildkit, which is a hostPath
+            # and not counted here. Keep these small — every node's kubelet disk
+            # is ~5 GiB, and that is what got builders evicted mid-build.
             requests:
               cpu: 500m
               memory: 1Gi
-              ephemeral-storage: 2Gi
+              ephemeral-storage: 256Mi
             limits:
               cpu: "4"
               memory: 8Gi
-              ephemeral-storage: 10Gi
+              ephemeral-storage: 2Gi
       volumes:
-        # Layer cache. Swap for a PVC to keep cache across restarts — and do
-        # that rather than raising this if node disk is the constraint.
-        # Keep in step with the container's ephemeral-storage limit above.
+        # Layer cache on /data. /data is a 100 GB local xfs disk on the workers
+        # (vg_data-lv_data), separate from the ~5 GiB kubelet disk, which a
+        # single heavy build used to fill — DiskPressure, then the builder was
+        # evicted mid-build ("graceful_stop"). The disk is shared with
+        # containerd's images (/data/containerd), so buildkitd.toml caps the
+        # cache and always leaves free space for them.
+        - name: cache
+          hostPath:
+            path: /data/buildkit
+            type: DirectoryOrCreate
+        - name: config
+          configMap:
+            name: buildkitd-config
+---
+# The /var builder: same daemon and the same security context as buildkitd
+# above (see the disclosure at the top), but its layer cache is an emptyDir in
+# node scratch space under /var/lib/kubelet, so it needs no /data disk and may
+# run on any node. That disk is ~5 GiB on these nodes: a heavy image here can be
+# evicted mid-build, which is why image stages default to the /data builders
+# and only use this one when a stage's "Build disk" is /var. One replica: when
+# it is down, /var stages fall back to the /data builders (and say so).
+# Its own app label keeps it out of the buildkitd Deployment's selector, the
+# `buildkitd` ClusterIP Service and the /data builders' anti-affinity.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: buildkitd-var
+  namespace: kubesight-buildkit
+  labels:
+    app: buildkitd-var
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: buildkitd-var
+  template:
+    metadata:
+      labels:
+        app: buildkitd-var
+      annotations:
+        container.apparmor.security.beta.kubernetes.io/buildkitd: unconfined
+    spec:
+      hostAliases:
+        - ip: "10.4.23.182"
+          hostnames: ["registry.areeba.com"]
+      serviceAccountName: buildkitd
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      containers:
+        - name: buildkitd
+          image: moby/buildkit:v0.23.2-rootless
+          args:
+            - --addr
+            - tcp://0.0.0.0:1234
+            - --oci-worker-no-process-sandbox
+          ports:
+            - containerPort: 1234
+          securityContext:
+            seccompProfile:
+              type: Unconfined
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["SETUID", "SETGID"]
+          readinessProbe:
+            exec:
+              command: ["buildctl", "--addr", "tcp://127.0.0.1:1234", "debug", "workers"]
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          volumeMounts:
+            - name: cache
+              mountPath: /home/user/.local/share/buildkit
+            - name: config
+              mountPath: /home/user/.config/buildkit/buildkitd.toml
+              subPath: buildkitd-var.toml
+              readOnly: true
+          resources:
+            # The cache counts as ephemeral storage here. 3Gi of a ~4.6 GB
+            # allocatable disk: past it the kubelet evicts this pod rather than
+            # letting it push the whole node into DiskPressure.
+            requests:
+              cpu: 500m
+              memory: 1Gi
+              ephemeral-storage: 1Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+              ephemeral-storage: 3Gi
+      volumes:
         - name: cache
           emptyDir:
-            sizeLimit: 10Gi
+            sizeLimit: 3Gi
+        - name: config
+          configMap:
+            name: buildkitd-config
 ---
 apiVersion: v1
 kind: Service
@@ -253,8 +426,24 @@ spec:
       targetPort: 1234
       protocol: TCP
 ---
+# The same for the /var builder: CI_BUILDKIT_POOL_VAR in ci-backend-config.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: buildkitd-var-pods
+  namespace: kubesight-buildkit
+spec:
+  clusterIP: None
+  selector:
+    app: buildkitd-var
+  ports:
+    - port: 1234
+      targetPort: 1234
+      protocol: TCP
+---
 # Only CI build pods may talk to buildkitd; buildkitd may only reach DNS and
-# registries (TLS + optional custom Nexus docker port).
+# registries (TLS + optional custom Nexus docker port). Covers both builder
+# sets (/data and /var).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -262,8 +451,10 @@ metadata:
   namespace: kubesight-buildkit
 spec:
   podSelector:
-    matchLabels:
-      app: buildkitd
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["buildkitd", "buildkitd-var"]
   policyTypes: ["Ingress", "Egress"]
   ingress:
     - from:
@@ -289,6 +480,11 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
+        # Plain HTTP for OS package mirrors: Debian/Ubuntu apt uses
+        # http://deb.debian.org, so a Dockerfile `apt-get update` times out
+        # without it. apt verifies every package's signature.
+        - protocol: TCP
+          port: 80
         # Common self-hosted Nexus docker connector ports.
         - protocol: TCP
           port: 8443

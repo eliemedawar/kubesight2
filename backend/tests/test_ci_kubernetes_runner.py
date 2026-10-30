@@ -506,6 +506,66 @@ def test_scanned_stage_picks_a_builder_after_its_tool_guard(monkeypatch):
     assert script.index('buildctl --addr "$KS_BUILDKIT_ADDR" build') < script.index("crane push")
 
 
+_VAR_POOL = "buildkitd-var-pods.kubesight-buildkit.svc.cluster.local"
+
+
+def _pools(monkeypatch, data_ips, var_ips):
+    monkeypatch.setenv("CI_BUILDKIT_ADDR", _PRIMARY)
+    monkeypatch.setenv("CI_BUILDKIT_POOL", _POOL)
+    monkeypatch.setenv("CI_BUILDKIT_POOL_VAR", _VAR_POOL)
+    answers = {_POOL: data_ips, _VAR_POOL: var_ips}
+    monkeypatch.setattr(k8s, "_buildkit_resolver", lambda host: answers[host])
+
+
+def _disk_script(monkeypatch, disk):
+    registry = dict(_SCAN_REGISTRY, buildkitDisk=disk)
+    execution = _execution(1, "container_image", registry=registry)
+    return k8s.image_stage_script(execution, "/workspace/.kubesight/image-meta-1.json")
+
+
+def test_a_data_stage_tries_the_data_builders_first_then_the_var_ones(monkeypatch):
+    _pools(monkeypatch, ["10.0.0.1", "10.0.0.2"], ["10.0.9.9"])
+    candidates, own = k8s.buildkit_plan("payment-service", "data")
+
+    assert sorted(candidates[:2]) == ["tcp://10.0.0.1:1234", "tcp://10.0.0.2:1234"]
+    assert candidates[2:] == ["tcp://10.0.9.9:1234", _PRIMARY]
+    # The shared Service fronts the data builders, so it is a data stage's own.
+    assert "tcp://10.0.9.9:1234" not in own and _PRIMARY in own
+
+
+def test_a_var_stage_tries_the_var_builders_first_and_says_when_it_falls_back(monkeypatch):
+    _pools(monkeypatch, ["10.0.0.1"], ["10.0.9.9"])
+    candidates, own = k8s.buildkit_plan("payment-service", "var")
+    assert candidates == ["tcp://10.0.9.9:1234", "tcp://10.0.0.1:1234", _PRIMARY]
+    assert own == ["tcp://10.0.9.9:1234"]
+
+    script = _disk_script(monkeypatch, "var")
+    note = script.index("No /var builder answered")
+    assert script.index('echo "[kubesight] BuildKit: $KS_BUILDKIT_ADDR"') < note
+    assert note < script.index('buildctl --addr "$KS_BUILDKIT_ADDR" build')
+
+
+def test_a_var_stage_without_var_builders_uses_the_data_ones(monkeypatch):
+    _pool(monkeypatch, ["10.0.0.1", "10.0.0.2"])
+    monkeypatch.delenv("CI_BUILDKIT_POOL_VAR", raising=False)
+    candidates, own = k8s.buildkit_plan("payment-service", "var")
+    assert own == [] and candidates[-1] == _PRIMARY
+
+    monkeypatch.delenv("CI_BUILDKIT_POOL", raising=False)
+    script = _disk_script(monkeypatch, "var")
+    assert "No /var builders are deployed" in script
+    assert f"buildctl --addr {_PRIMARY} build" in script
+
+
+def test_a_data_stage_with_only_data_builders_is_unchanged(monkeypatch):
+    _pool(monkeypatch, ["10.0.0.1", "10.0.0.2"])
+    monkeypatch.delenv("CI_BUILDKIT_POOL_VAR", raising=False)
+    plain = _image_script()
+
+    assert _disk_script(monkeypatch, "data") == plain
+    assert "No /" not in plain and "esac" not in plain[plain.index("for KS_BK_TRY in"):]
+
+
 def test_unresolvable_pool_falls_back_to_the_service_address(monkeypatch):
     _pool(monkeypatch, OSError("Name or service not known"))
     assert k8s.buildkit_candidates("payment-service") == [_PRIMARY]
