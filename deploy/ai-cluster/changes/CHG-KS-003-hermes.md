@@ -6,7 +6,7 @@
 | Modules | hermes |
 | Status | Waiting: the platform's agreement to OpenAI instead of the Claude API, and the firewall opening below |
 | Asked by | Elie, 2026-10-30: "install Hermes on OpenAI", with the ChatGPT/Codex login, as in UAT. This replaces the handover's plan (2026-10-28: the Claude API, `api.anthropic.com` only). |
-| Depends on | CHG-KS-002 done, with its evidence; KubeSight `1.0.3` running; a ChatGPT account used by this Hermes only; the firewall opening to `chatgpt.com:443` and `auth.openai.com:443` |
+| Depends on | CHG-KS-002 done, with its evidence; KubeSight `1.0.3` running; a new Codex login of UAT's ChatGPT account (Elie, 2026-10-30); the firewall opening to `chatgpt.com:443` and `auth.openai.com:443` |
 | Prepared by | ____ |
 | Approved by | ____ (name, date) |
 | Run by | ____ (name, date) |
@@ -46,12 +46,15 @@ the ChatGPT/Codex login is what UAT already runs on.
 
 ## Before you start: the login file
 
-The login must belong to **this Hermes only**. Codex renews its login by
-replacing it: if UAT's Hermes or a laptop uses the same login, whichever renews
-first logs the other out.
+Hermes uses UAT's ChatGPT account, but with **a login of its own**. Do not
+copy UAT's `auth.json` (the Secret `hermes-codex-auth`). Codex renews a login by
+replacing it, and each renewal cancels the one before. A copied file may
+already be cancelled, because UAT's Hermes has renewed its own copy since. If it
+still works, whichever Hermes renews first logs the other out, UAT included. A
+new `codex login` with the same account is a separate session: both run, and
+they share only the account's usage limits.
 
-On a computer with a browser, signed in to the ChatGPT account meant for this
-Hermes:
+On a computer with a browser, with UAT's ChatGPT account:
 
 ```bash
 npm install -g @openai/codex     # if Codex is not installed yet

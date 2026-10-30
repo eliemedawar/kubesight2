@@ -16,8 +16,9 @@ release.
 A Codex login is renewed by replacing it. On first start Hermes takes the
 mounted file and keeps its own copy in `/opt/data`, which it renews through
 `auth.openai.com`. The mounted file is only a fallback. This is why:
-- the account must be used by this Hermes only: two users of one login log
-  each other out when one of them renews it;
+- Hermes needs a login of its own: two users of one login log each other out
+  when one of them renews it. The account itself can be shared (here it is
+  UAT's), as long as each Hermes signs in separately;
 - a new login in OpenBao reaches Hermes only after a restart, and its own copy
   on the volume may still win (see the how-to).
 

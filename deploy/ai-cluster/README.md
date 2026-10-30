@@ -72,7 +72,7 @@ From the live export of 2026-10-21 (`charts/export-live-objects.sh`) and the cod
 |---|---|---|
 | `kubesight-secret`, `kubesight-encryption`, `kubesight-hermes-credentials` | `JWT_SECRET_KEY`, `FLASK_SECRET_KEY`, `KUBESIGHT_SECRET_KEY`, `HERMES_API_TOKEN` | `kv/kubesight/backend` (+ `KUBESIGHT_HERMES_MCP_TOKEN`, `KUBESIGHT_INITIAL_ADMIN_PASSWORD`) |
 | `kubesight-secret` | `DATABASE_URL`, `DATABASE_USER`, `DATABASE_PASSWORD` | the platform's Secret `postgres` (`username`, `password`) → `DATABASE_URL` put together in the pod |
-| `hermes-codex-auth` | `auth.json` | `kv/kubesight/hermes` (`auth.json`), the login of an account used by this Hermes only |
+| `hermes-codex-auth` | `auth.json` | `kv/kubesight/hermes` (`auth.json`), a new login of UAT's ChatGPT account, never a copy of UAT's file |
 | `areebasecret-2026-2027` (TLS) | `tls.crt`, `tls.key` | `kv/kubesight/tls` |
 | `regcred` / `areeba-registry` | `.dockerconfigjson` | `kv/kubesight/registry`, `kv/kubesight-ci/registry` |
 
