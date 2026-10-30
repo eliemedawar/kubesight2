@@ -21,6 +21,7 @@ import {
   unfilledRequired,
 } from "../../utils/clusterApps.js";
 import { confirmDialog } from "../../lib/dialogs.js";
+import YamlFileButton from "../common/YamlFileButton.jsx";
 
 /** values-*.yaml files of one chart version, cached per slug@version. */
 function useValuesFiles(charts) {
@@ -93,6 +94,24 @@ function AppCard({
       return;
     }
     onChange({ ...patch, valuesEdited: false });
+  };
+
+  // A values.yaml from disk takes the editor's place; it is still layered over
+  // the chart's defaults and the values file picked above.
+  const importValues = async (text, name) => {
+    if (
+      (item.valuesEdited || masked)
+      && !(await confirmDialog({
+        title: "Replace your values?",
+        message: `Replace what is in values.yaml with ${name}?`
+          + (masked ? ` Saved passwords shown as ${VALUES_MASK} are kept only if ${name} has them as ${VALUES_MASK} too.` : ""),
+        confirmLabel: "Replace",
+        cancelLabel: "Keep my values",
+      }))
+    ) {
+      return;
+    }
+    onChange({ valuesYaml: text, valuesEdited: true });
   };
 
   const id = (field) => `cb-app-${item.key}-${field}`;
@@ -208,6 +227,18 @@ function AppCard({
           onChange={(event) => onChange({ valuesYaml: event.target.value, valuesEdited: true })}
         />
       </Field>
+      <div className="sg-cb-app-values-tools">
+        <YamlFileButton
+          className="btn-ghost btn-sm"
+          disabled={!item.chartSlug || loading}
+          onLoad={importValues}
+          onError={(message) => notify(message, true)}
+        />
+        <span className="muted">
+          Fills the box with your file, secrets included. Anything it leaves out keeps the
+          chart&apos;s value.
+        </span>
+      </div>
       {missing.length ? (
         <p className="sg-cb-app-missing">
           <b>Still to fill in:</b>{" "}

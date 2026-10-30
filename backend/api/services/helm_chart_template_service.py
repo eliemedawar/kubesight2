@@ -2434,6 +2434,191 @@ def build_values_yaml(
     return yaml.safe_dump(values, sort_keys=False, default_flow_style=False)
 
 
+# An imported values.yaml is a person's file, not a chart: a few hundred KiB is
+# already far more than any real one.
+MAX_IMPORTED_VALUES_BYTES = 1024 * 1024
+# How many paths each list in an import report names; the counts stay exact.
+MAX_IMPORT_REPORT_PATHS = 200
+VALUES_FILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
+
+
+def _covers(parent: str, path: str) -> bool:
+    """True when ``path`` is ``parent`` itself or sits inside it."""
+    return path == parent or path.startswith(parent + ".")
+
+
+def _imported_values(values_yaml: str) -> Dict[str, Any]:
+    text = str(values_yaml or "")
+    if len(text.encode("utf-8")) > MAX_IMPORTED_VALUES_BYTES:
+        raise ChartTemplateError("values.yaml is larger than 1 MiB.")
+    values = parse_values_overlay(text)
+    if not values:
+        raise ChartTemplateError("values.yaml has no values in it.")
+    return values
+
+
+def _import_secret_paths(definition: Dict[str, Any], leaves: Sequence[str]) -> List[str]:
+    """The imported paths that hold credentials: a sensitive key name, or a
+    value the chart itself marks sensitive (schema ``format: password``, the
+    literal Secret values import moved into ``kubesightSecrets``)."""
+    sensitive_fields = [
+        str(item.get("path") or "")
+        for item in definition.get("variables") or []
+        if item.get("sensitive") and item.get("path")
+    ]
+    return [
+        leaf
+        for leaf in leaves
+        if _is_sensitive_key_path(leaf.split("."))
+        or any(_covers(field, leaf) for field in sensitive_fields)
+    ]
+
+
+def _known_in_chart(defaults: Dict[str, Any], path: str) -> bool:
+    """True when the chart's values.yaml declares ``path``, or declares an empty
+    map or a non-map above it that takes free-form keys (``podAnnotations: {}``)."""
+    cursor: Any = defaults
+    for part in path.split("."):
+        if not isinstance(cursor, dict):
+            return True
+        if not cursor:
+            return True
+        if part not in cursor:
+            return False
+        cursor = cursor[part]
+    return True
+
+
+def inspect_values_import(
+    slug: str, values_yaml: str, version: str = "", values_file: str = ""
+) -> Dict[str, Any]:
+    """What an imported values.yaml does to a chart's deploy form.
+
+    The deploy applies the whole file over the chart defaults and the chosen
+    ``values-*.yaml``; this returns the form fields it fills (secrets
+    included, with the merged value the field must show), the values it sets
+    that have no field, keys the chart never declares (likely typos), and the
+    required values still empty. Nothing is stored.
+    """
+    resolved = resolve_chart(slug, version, values_file)
+    definition = _definition_for(_get_row(slug), resolved["version"])
+    overlay = _imported_values(values_yaml)
+    merged = _merge_values(
+        starting_values(slug, resolved["version"], resolved["valuesFile"]), overlay
+    )
+    leaves = [".".join(path) for path, _ in _flatten_values(overlay) if path]
+    variables = [item for item in definition.get("variables") or [] if item.get("path")]
+
+    fields: Dict[str, Any] = {}
+    for variable in variables:
+        path = str(variable["path"])
+        if not any(_covers(path, leaf) or _covers(leaf, path) for leaf in leaves):
+            continue
+        # The merged value, not the file's: a file that sets one key of an
+        # object field must not wipe that object's other defaults.
+        missing = object()
+        value = _get_nested(merged, path.split("."), missing)
+        if value is not missing:
+            fields[path] = value
+
+    defaults = definition.get("values") or {}
+    unknown = [leaf for leaf in leaves if not _known_in_chart(defaults, leaf)]
+    # Declared by the chart but given no form field (past the field cap, or
+    # inside a list). Unknown keys are reported on their own, not twice.
+    field_paths = [str(item["path"]) for item in variables]
+    without_field = [
+        leaf
+        for leaf in leaves
+        if leaf not in unknown and not any(_covers(path, leaf) for path in field_paths)
+    ]
+    missing_required = [
+        {"path": str(item["path"]), "label": item.get("label") or item["path"]}
+        for item in variables
+        if item.get("required")
+        and str(_get_nested(merged, str(item["path"]).split("."), "") or "").strip() == ""
+    ]
+    secrets = _import_secret_paths(definition, leaves)
+    cap = MAX_IMPORT_REPORT_PATHS
+    return {
+        "version": resolved["version"],
+        "valuesFile": resolved["valuesFile"],
+        "valueCount": len(leaves),
+        "fields": fields,
+        "secretCount": len(secrets),
+        "secrets": secrets[:cap],
+        "withoutFieldCount": len(without_field),
+        "withoutField": without_field[:cap],
+        "unknownCount": len(unknown),
+        "unknown": unknown[:cap],
+        "missingRequired": missing_required,
+    }
+
+
+def _values_file_path(name: str) -> str:
+    clean = str(name or "").strip().lower()
+    clean = re.sub(r"\.ya?ml$", "", clean)
+    clean = re.sub(r"^values[-_.]?", "", clean)
+    if not VALUES_FILE_NAME_RE.match(clean):
+        raise ChartTemplateError(
+            "Name the file with 1-40 letters, digits, dots, dashes or underscores, "
+            "for example prod or uat-2."
+        )
+    return f"values-{clean}.yaml"
+
+
+def save_values_file(
+    slug: str, payload: Dict[str, Any], actor_user_id: Optional[int] = None
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    """Store an imported values.yaml on one chart version as ``values-<name>.yaml``.
+
+    Every credential in it is blanked first, the same rule as the
+    ``values-*.yaml`` files that come inside an uploaded chart: the stored file
+    can be picked at deploy time, and its passwords are asked for again.
+    """
+    row = HelmChartTemplate.query.filter_by(slug=slug).first()
+    if not row:
+        return None, "Helm chart template not found.", 404
+    try:
+        path = _values_file_path(payload.get("name"))
+        version = _clean_text(payload.get("version"), 64) or (row.version or "")
+        definition = _definition_for(row, version)
+        values = _imported_values(str(payload.get("valuesYaml") or ""))
+        files = _decode_files(definition)
+        replaced = path in files
+        if replaced and not payload.get("replace"):
+            return None, f"{path} already exists on version {version}.", 409
+        leaves = [".".join(item) for item, _ in _flatten_values(values) if item]
+        secrets = _import_secret_paths(definition, leaves)
+        for leaf in secrets:
+            _set_nested(values, leaf.split("."), "")
+        files[path] = yaml.safe_dump(values, sort_keys=False).encode("utf-8")
+        updated = {**definition, "files": _encode_files(files), "chart": _chart_inspection(files)}
+        _backfill_versions(row)
+        target = next((item for item in row.versions if item.version == version), None)
+        if target is not None:
+            target.definition = updated
+        if version == (row.version or ""):
+            row.definition = updated
+        db.session.commit()
+    except ChartTemplateError as exc:
+        db.session.rollback()
+        return None, str(exc), 400
+    log_audit(
+        "helm_chart_values_file_saved",
+        actor_user_id=actor_user_id,
+        target_type="helm_chart_template",
+        target_id=row.slug,
+        details={
+            "name": row.name,
+            "version": version,
+            "path": path,
+            "replaced": replaced,
+            "secretsBlanked": len(secrets),
+        },
+    )
+    return {**_detail(row, version), "savedValuesFile": path, "secretsBlanked": secrets}, None, 201
+
+
 def prepare_chart_template_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     source = str(payload.get("chartSource") or payload.get("chart_source") or "").lower()
     if source != "template":

@@ -306,6 +306,7 @@ export default function HelmChartCatalog({
       <HelmChartDeployModal
         open={Boolean(selectedTemplate)}
         template={selectedTemplate}
+        canManage={canManage}
         clusterOptions={clusterOptions}
         defaultClusterId={defaultClusterId}
         onClose={() => setSelectedTemplate(null)}

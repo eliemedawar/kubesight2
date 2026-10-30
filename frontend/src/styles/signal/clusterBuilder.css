@@ -1230,6 +1230,9 @@ button.sg-cb-step:hover { border-color: var(--accent); color: var(--accent-stron
 .sg-cb-input.sg-cb-app-values {
   min-height: 220px; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55; tab-size: 2;
 }
+.sg-cb-app-values-tools {
+  display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 12px;
+}
 .sg-cb-app-missing {
   margin: 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline;
   font-size: 12px; color: var(--warn);

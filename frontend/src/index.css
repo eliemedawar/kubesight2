@@ -8040,6 +8040,116 @@ kbd {
   margin-bottom: var(--space-4);
 }
 
+/* Import a values.yaml into the chart deploy form. */
+.helm-values-import {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+}
+
+.helm-values-import.is-applied {
+  border-style: solid;
+  background: var(--bg-panel-strong);
+}
+
+.helm-values-import-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.helm-values-import-head > div:first-child {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.helm-values-import-head strong {
+  overflow-wrap: anywhere;
+}
+
+.helm-values-import-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.helm-values-import-paste {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+}
+
+.helm-values-import-paste textarea {
+  width: 100%;
+}
+
+.helm-import-summary {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--font-size-sm);
+}
+
+.helm-import-summary li {
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.helm-import-summary li.is-ok {
+  border-left-color: var(--ok);
+}
+
+.helm-import-summary li.is-warn {
+  border-left-color: var(--warn);
+}
+
+.helm-import-summary li.is-error {
+  border-left-color: var(--danger);
+  color: var(--danger);
+}
+
+.helm-values-import-save {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-2) var(--space-3);
+}
+
+.helm-values-import-save > small {
+  flex-basis: 100%;
+}
+
+.helm-values-file-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-family: var(--font-mono, monospace);
+}
+
+.helm-values-file-name input {
+  width: 10rem;
+}
+
+.helm-variable-from-file {
+  margin-left: var(--space-2);
+  padding: 0 0.4rem;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--ok-border);
+  background: var(--ok-soft);
+  color: var(--ok);
+  font-size: var(--font-size-xs);
+  font-style: normal;
+  font-weight: 500;
+}
+
 .helm-ready-message {
   margin: 0;
   padding: var(--space-3) var(--space-4);

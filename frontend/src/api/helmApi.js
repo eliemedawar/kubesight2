@@ -43,6 +43,22 @@ export function addHelmChartVersion(templateId, payload) {
   });
 }
 
+// Checks a person's values.yaml against a chart; nothing is stored.
+export function inspectHelmValuesImport(templateId, payload) {
+  return request(`/api/helm/chart-templates/${encodeURIComponent(templateId)}/values-import`, {
+    method: "POST",
+    body: payload,
+  });
+}
+
+// Stores a values.yaml on one chart version as values-<name>.yaml, secrets blanked.
+export function saveHelmValuesFile(templateId, payload) {
+  return request(`/api/helm/chart-templates/${encodeURIComponent(templateId)}/values-files`, {
+    method: "POST",
+    body: payload,
+  });
+}
+
 export function setHelmChartVersionCurrent(templateId, version) {
   return request(
     `/api/helm/chart-templates/${encodeURIComponent(templateId)}/versions/${encodeURIComponent(

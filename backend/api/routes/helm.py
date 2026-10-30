@@ -32,7 +32,9 @@ from ..services.helm_chart_template_service import (
     import_archive_chart,
     import_git_chart,
     import_yaml_chart,
+    inspect_values_import,
     list_chart_templates,
+    save_values_file,
     set_current_chart_version,
 )
 from ..services.helm_namespace_import import (
@@ -194,6 +196,35 @@ def helm_chart_template_delete_version(slug: str, version: str):
     if err:
         return error_response(err, status)
     return success_response(data)
+
+
+@helm_bp.route("/chart-templates/<slug>/values-import", methods=["POST"])
+@require_permission("helm:view")
+def helm_chart_template_values_import(slug: str):
+    """Check a person's values.yaml against a chart before deploying it. Nothing is stored."""
+    body = _body()
+    try:
+        report = inspect_values_import(
+            slug,
+            str(body.get("valuesYaml") or ""),
+            str(body.get("version") or ""),
+            str(body.get("valuesFile") or ""),
+        )
+    except ChartTemplateError as exc:
+        return error_response(str(exc), 400)
+    return success_response(report)
+
+
+@helm_bp.route("/chart-templates/<slug>/values-files", methods=["POST"])
+@require_permission("inventory:update")
+def helm_chart_template_save_values_file(slug: str):
+    user = get_current_user()
+    data, err, status = save_values_file(
+        slug, _body(), actor_user_id=user.id if user else None
+    )
+    if err:
+        return error_response(err, status)
+    return success_response(data, status_code=status)
 
 
 @helm_bp.route("/chart-templates/import/yaml", methods=["POST"])

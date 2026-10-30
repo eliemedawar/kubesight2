@@ -1,15 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   dryRunHelmRelease,
   getHelmChartTemplate,
   getHelmConfirmationPhrase,
+  inspectHelmValuesImport,
   installHelmRelease,
   renderHelmTemplate,
 } from "../../api/helmApi.js";
 import { clusterOptionLabel, normalizeClusterOptions } from "../../utils/clusterOptions.js";
 import SearchableSelect from "../common/SearchableSelect.jsx";
 import NamespaceSelect from "./NamespaceSelect.jsx";
+import HelmValuesImport from "./HelmValuesImport.jsx";
 import useEscapeKey from "../../hooks/useEscapeKey.js";
 import { isPendingApproval, pendingApprovalMessage } from "../../utils/pendingApproval.js";
 
@@ -52,7 +54,20 @@ function initialValues(detail, valuesFile = "") {
   );
 }
 
-function VariableField({ variable, value, onChange }) {
+// The form value of each field an imported values.yaml touches.
+function importedFieldValues(detail, report) {
+  const fields = report?.fields || {};
+  return Object.fromEntries(
+    (detail?.variables || [])
+      .filter((variable) => Object.hasOwn(fields, variable.path))
+      .map((variable) => [
+        variable.path,
+        initialFieldValue({ ...variable, default: fields[variable.path] }),
+      ]),
+  );
+}
+
+function VariableField({ variable, value, fromFile, onChange }) {
   const id = `helm-variable-${variable.key}`;
   const common = {
     id,
@@ -65,6 +80,7 @@ function VariableField({ variable, value, onChange }) {
       <span>
         {variable.label || variable.path}
         {variable.required ? <strong aria-label="required"> *</strong> : null}
+        {fromFile ? <em className="helm-variable-from-file">from file</em> : null}
       </span>
       {variable.type === "boolean" ? (
         <SearchableSelect {...common}>
@@ -101,6 +117,7 @@ function VariableField({ variable, value, onChange }) {
 export default function HelmChartDeployModal({
   open,
   template,
+  canManage = false,
   clusterOptions = [],
   defaultClusterId = "",
   onClose,
@@ -118,6 +135,10 @@ export default function HelmChartDeployModal({
   const [releaseName, setReleaseName] = useState("");
   const [valuesFile, setValuesFile] = useState("");
   const [values, setValues] = useState({});
+  // An imported values.yaml: { name, text, report }. Sent whole as valuesYaml.
+  const [imported, setImported] = useState(null);
+  const importedRef = useRef(null);
+  importedRef.current = imported;
   const [step, setStep] = useState("configure");
   const [preview, setPreview] = useState(null);
   const [confirmationPhrase, setConfirmationPhrase] = useState("");
@@ -126,6 +147,21 @@ export default function HelmChartDeployModal({
   const [queuedMessage, setQueuedMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  // Check the file against this chart version and environment file, then fill
+  // every field it touches. Throws when the file is not a values mapping.
+  const applyImport = async (text, name, chartDetail, environmentFile) => {
+    const report = await inspectHelmValuesImport(chartDetail.id, {
+      valuesYaml: text,
+      version: chartDetail.version,
+      valuesFile: environmentFile,
+    });
+    setImported({ text, name, report });
+    setValues({
+      ...initialValues(chartDetail, environmentFile),
+      ...importedFieldValues(chartDetail, report),
+    });
+  };
 
   useEffect(() => {
     if (!open || !template?.id) return;
@@ -147,6 +183,16 @@ export default function HelmChartDeployModal({
         );
         setValuesFile("");
         setValues(initialValues(result));
+        // Another version: the same file fills that version's fields.
+        const previous = importedRef.current;
+        if (previous) {
+          return applyImport(previous.text, previous.name, result, "").catch((err) => {
+            if (cancelled) return;
+            setImported(null);
+            setError(err.message || "The imported values.yaml no longer fits this version.");
+          });
+        }
+        return undefined;
       })
       .catch((err) => {
         if (!cancelled) setError(err.message || "Failed to load the Helm chart.");
@@ -168,6 +214,7 @@ export default function HelmChartDeployModal({
       setReleaseName("");
       setValuesFile("");
       setValues({});
+      setImported(null);
       setStep("configure");
       setPreview(null);
       setConfirmationPhrase("");
@@ -203,6 +250,7 @@ export default function HelmChartDeployModal({
     releaseName,
     valuesFile,
     values,
+    valuesYaml: imported?.text || "",
   };
 
   const previewChart = async (event) => {
@@ -299,10 +347,22 @@ export default function HelmChartDeployModal({
                 <span>Environment values</span>
                 <SearchableSelect
                   value={valuesFile}
-                  onChange={(event) => {
+                  onChange={async (event) => {
                     const selected = event.target.value;
                     setValuesFile(selected);
-                    setValues(initialValues(detail, selected));
+                    if (!imported) {
+                      setValues(initialValues(detail, selected));
+                      return;
+                    }
+                    setBusy(true);
+                    setError("");
+                    try {
+                      await applyImport(imported.text, imported.name, detail, selected);
+                    } catch (err) {
+                      setError(err.message || "The imported values.yaml could not be applied.");
+                    } finally {
+                      setBusy(false);
+                    }
                   }}
                 >
                   <option value="">Base values.yaml</option>
@@ -362,6 +422,32 @@ export default function HelmChartDeployModal({
 
             {busy && !detail ? <p className="muted">Loading chart values…</p> : null}
 
+            {detail ? (
+              <HelmValuesImport
+                templateId={detail.id}
+                version={detail.version}
+                imported={imported}
+                values={values}
+                busy={busy}
+                canSave={canManage}
+                onApply={async (text, name) => {
+                  setBusy(true);
+                  setError("");
+                  try {
+                    await applyImport(text, name, detail, valuesFile);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+                onClear={() => {
+                  setImported(null);
+                  setValues(initialValues(detail, valuesFile));
+                }}
+                // The saved file joins Environment values; the selection stays.
+                onSaved={(result) => setDetail(result)}
+              />
+            ) : null}
+
             {requiredVariables.length ? (
               <section className="helm-variable-section">
                 <h4>Required values</h4>
@@ -371,6 +457,7 @@ export default function HelmChartDeployModal({
                       key={variable.path}
                       variable={variable}
                       value={values[variable.path] ?? ""}
+                      fromFile={Boolean(imported && Object.hasOwn(imported.report.fields || {}, variable.path))}
                       onChange={(value) =>
                         setValues((previous) => ({ ...previous, [variable.path]: value }))
                       }
@@ -395,6 +482,7 @@ export default function HelmChartDeployModal({
                       key={variable.path}
                       variable={variable}
                       value={values[variable.path] ?? ""}
+                      fromFile={Boolean(imported && Object.hasOwn(imported.report.fields || {}, variable.path))}
                       onChange={(value) =>
                         setValues((previous) => ({ ...previous, [variable.path]: value }))
                       }
