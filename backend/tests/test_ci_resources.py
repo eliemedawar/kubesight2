@@ -99,6 +99,16 @@ def test_a_limit_brings_a_request_and_no_limit_brings_none(monkeypatch):
     assert resources.is_off(resources.ephemeral_request("off"))
 
 
+def test_an_installation_off_request_still_floors_a_chosen_limit(monkeypatch):
+    """The shipped config says CI_STAGE_EPHEMERAL_REQUEST "off". A service that
+    then caps disk at 4Gi must still get the 256Mi floor: with no request,
+    Kubernetes requests the whole 4Gi, more than a 5 GiB node has free."""
+    monkeypatch.setenv("CI_STAGE_EPHEMERAL_REQUEST", "off")
+
+    assert resources.ephemeral_request("4Gi") == "256Mi"
+    assert resources.is_off(resources.ephemeral_request("off"))
+
+
 def test_an_installation_request_wins_over_the_automatic_floor(monkeypatch):
     monkeypatch.setenv("CI_STAGE_EPHEMERAL_REQUEST", "1Gi")
     assert resources.ephemeral_request("8Gi") == "1Gi"

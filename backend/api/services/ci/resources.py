@@ -219,8 +219,10 @@ def ephemeral_request(limit: Any) -> str:
     eviction ranks by usage above request.
     """
     configured = env("CI_STAGE_EPHEMERAL_REQUEST", "")
-    if configured:
+    if is_set(configured):
         return configured
+    # An installation's "off" cannot mean "no request" beside a limit: Kubernetes
+    # would copy the limit into the request, which is the trap described above.
     return "256Mi" if is_set(limit) else "off"
 
 
