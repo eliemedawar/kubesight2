@@ -9,6 +9,7 @@ import {
   importHelmChartFromGit,
   importHelmChartFromNamespace,
   importHelmChartFromYaml,
+  listHelmGitCredentials,
   readChartArchiveAsBase64,
 } from "../../api/helmApi.js";
 import { listClusters, listNamespacesByCluster } from "../../api/clustersApi.js";
@@ -16,7 +17,11 @@ import HelmChartContents, { helmSourceLabel } from "./HelmChartContents.jsx";
 import SearchableSelect from "../common/SearchableSelect.jsx";
 import useEscapeKey from "../../hooks/useEscapeKey.js";
 
+// "" until the saved credentials load; then a credential id, or MANUAL_CREDENTIAL.
+const MANUAL_CREDENTIAL = "manual";
+
 const EMPTY_GIT = {
+  credentialProfileId: "",
   repositoryUrl: "",
   ref: "",
   path: "",
@@ -24,6 +29,24 @@ const EMPTY_GIT = {
   username: "",
   token: "",
 };
+
+// A saved credential is resolved on the server, so typed fields are not sent
+// alongside it; typed fields go only when no saved credential is chosen.
+function gitPayload(connection) {
+  const { credentialProfileId, username, token, ...rest } = connection;
+  if (credentialProfileId && credentialProfileId !== MANUAL_CREDENTIAL) {
+    return { ...rest, credentialProfileId };
+  }
+  return { ...rest, username, token };
+}
+
+function isBitbucketCloudUrl(url) {
+  try {
+    return new URL(url).hostname.toLowerCase() === "bitbucket.org";
+  } catch {
+    return false;
+  }
+}
 
 const EMPTY_ARCHIVE = { path: "", importType: "auto" };
 
@@ -68,6 +91,7 @@ export default function HelmChartImportModal({
   const [gitDiscoveryBusy, setGitDiscoveryBusy] = useState("");
   const [gitDiscoveryError, setGitDiscoveryError] = useState("");
   const [gitPathsTruncated, setGitPathsTruncated] = useState(false);
+  const [gitCredentials, setGitCredentials] = useState(null);
   const [source, setSource] = useState(EMPTY_NAMESPACE);
   const [clusters, setClusters] = useState([]);
   const [namespaces, setNamespaces] = useState([]);
@@ -95,6 +119,8 @@ export default function HelmChartImportModal({
       setGitDiscoveryBusy("");
       setGitDiscoveryError("");
       setGitPathsTruncated(false);
+      // Reloaded on the next open so a credential added meanwhile shows up.
+      setGitCredentials(null);
       setSource(EMPTY_NAMESPACE);
       setNamespaces([]);
       setScan(null);
@@ -121,12 +147,41 @@ export default function HelmChartImportModal({
     };
   }, [open, mode, clusters.length]);
 
+  // Saved source credentials (the ones CI uses) load once the Git tab opens; the
+  // first one is preselected. Without any, or if the list cannot be read, the
+  // dialog falls back to typed credentials.
+  useEffect(() => {
+    if (!open || mode !== "git" || gitCredentials !== null) return;
+    let cancelled = false;
+    listHelmGitCredentials()
+      .then((result) => (result?.items || []).filter((item) => item.enabled !== false))
+      .catch(() => [])
+      .then((items) => {
+        if (cancelled) return;
+        setGitCredentials(items);
+        setGit((previous) =>
+          previous.credentialProfileId
+            ? previous
+            : {
+                ...previous,
+                credentialProfileId: items.length ? String(items[0].id) : MANUAL_CREDENTIAL,
+              },
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, mode, gitCredentials]);
+
   useEscapeKey(open, onClose, busy);
 
   if (!open) return null;
 
   const versionMode = Boolean(targetTemplate?.id);
   const activeMode = versionMode ? "archive" : mode;
+  const usingSavedCredential = Boolean(
+    git.credentialProfileId && git.credentialProfileId !== MANUAL_CREDENTIAL,
+  );
 
   const updateGitConnectionField = (field, value) => {
     setGit((previous) => ({
@@ -147,7 +202,7 @@ export default function HelmChartImportModal({
     setGitPaths([]);
     setGitPathsTruncated(false);
     try {
-      const result = await discoverHelmGitPaths({ ...connection, ref });
+      const result = await discoverHelmGitPaths(gitPayload({ ...connection, ref }));
       setGitPaths(result.paths || []);
       setGitPathsTruncated(Boolean(result.truncated));
     } catch (err) {
@@ -168,7 +223,7 @@ export default function HelmChartImportModal({
     setGitPaths([]);
     setGitPathsTruncated(false);
     try {
-      const result = await discoverHelmGitRefs(git);
+      const result = await discoverHelmGitRefs(gitPayload(git));
       const refs = result.refs || [];
       const selectedRef =
         result.defaultRef && refs.some((item) => item.name === result.defaultRef)
@@ -336,7 +391,7 @@ export default function HelmChartImportModal({
         result = await importHelmChartFromGit({
           name,
           description,
-          ...git,
+          ...gitPayload(git),
         });
       }
       // Clear credentials immediately after the request completes. They are
@@ -773,30 +828,63 @@ export default function HelmChartImportModal({
                       placeholder="https://github.com/organization/repository.git"
                     />
                   </label>
-                  <div className="helm-form-grid">
-                    <label>
-                      Git username <span className="muted">(private repositories)</span>
-                      <input
-                        autoComplete="username"
-                        value={git.username}
-                        onChange={(event) =>
-                          updateGitConnectionField("username", event.target.value)
-                        }
-                        placeholder="oauth2 or your username"
-                      />
-                    </label>
-                    <label>
-                      Personal access token <span className="muted">(optional)</span>
-                      <input
-                        type="password"
-                        autoComplete="new-password"
-                        value={git.token}
-                        onChange={(event) =>
-                          updateGitConnectionField("token", event.target.value)
-                        }
-                      />
-                    </label>
-                  </div>
+                  <label>
+                    Git credential
+                    <SearchableSelect
+                      value={git.credentialProfileId}
+                      disabled={gitCredentials === null}
+                      placeholder="Loading saved credentials…"
+                      searchPlaceholder="Search saved credentials…"
+                      onChange={(event) =>
+                        updateGitConnectionField("credentialProfileId", event.target.value)
+                      }
+                      options={[
+                        ...(gitCredentials || []).map((item) => ({
+                          value: String(item.id),
+                          label: `${item.name}${item.principal ? ` (${item.principal})` : ""}`,
+                        })),
+                        {
+                          value: MANUAL_CREDENTIAL,
+                          label: "Enter credentials manually (or public repository)",
+                        },
+                      ]}
+                    />
+                  </label>
+                  {usingSavedCredential &&
+                  git.repositoryUrl.trim() &&
+                  !isBitbucketCloudUrl(git.repositoryUrl.trim()) ? (
+                    <p className="form-help">
+                      Saved credentials work with Bitbucket Cloud repositories
+                      (https://bitbucket.org/…). Choose “Enter credentials manually” for other
+                      hosts.
+                    </p>
+                  ) : null}
+                  {usingSavedCredential ? null : (
+                    <div className="helm-form-grid">
+                      <label>
+                        Git username <span className="muted">(private repositories)</span>
+                        <input
+                          autoComplete="username"
+                          value={git.username}
+                          onChange={(event) =>
+                            updateGitConnectionField("username", event.target.value)
+                          }
+                          placeholder="oauth2 or your username"
+                        />
+                      </label>
+                      <label>
+                        Personal access token <span className="muted">(optional)</span>
+                        <input
+                          type="password"
+                          autoComplete="new-password"
+                          value={git.token}
+                          onChange={(event) =>
+                            updateGitConnectionField("token", event.target.value)
+                          }
+                        />
+                      </label>
+                    </div>
+                  )}
                   <div className="helm-git-discovery">
                     <button
                       type="button"
@@ -886,8 +974,9 @@ export default function HelmChartImportModal({
                     </SearchableSelect>
                   </label>
                   <p className="form-help">
-                    Credentials are sent only for repository requests, never saved in KubeSight,
-                    and cleared when the import completes or this dialog closes.
+                    {usingSavedCredential
+                      ? "The saved credential is used on the server only; its secret never reaches your browser."
+                      : "Credentials are sent only for repository requests, never saved in KubeSight, and cleared when the import completes or this dialog closes."}
                   </p>
                 </>
               )}

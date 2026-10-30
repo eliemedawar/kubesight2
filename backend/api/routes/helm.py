@@ -220,6 +220,17 @@ def helm_chart_template_import_git():
     return success_response(data, status_code=status)
 
 
+@helm_bp.route("/chart-templates/git/credentials", methods=["GET"])
+@require_permission("inventory:update")
+def helm_chart_template_git_credentials():
+    # The saved source credentials (shared with CI), names only. Gated like the
+    # import itself: whoever may import from Git may pick one, not read it.
+    from ..services.ci.catalog import list_credential_profiles
+
+    items = list_credential_profiles()
+    return success_response({"items": items, "count": len(items)})
+
+
 @helm_bp.route("/chart-templates/git/refs", methods=["POST"])
 @require_permission("inventory:update")
 def helm_chart_template_git_refs():

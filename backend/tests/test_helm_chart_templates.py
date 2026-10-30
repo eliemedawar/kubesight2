@@ -545,6 +545,105 @@ def test_git_repository_discovery_redacts_credentials(client, admin_token):
     assert serialized.count("[redacted]") == 2
 
 
+@pytest.fixture()
+def saved_git_credential(app):
+    from api.db import db
+    from api.models_application_intelligence import BitbucketCredentialProfile
+    from api.secret_encryption import encrypt_secret
+
+    row = BitbucketCredentialProfile(
+        name="bitbucket-read",
+        provider="bitbucket",
+        credential_type="api_token",
+        principal="ops@example.com",
+        secret_cipher=encrypt_secret("saved-secret-token"),
+        enabled=True,
+    )
+    db.session.add(row)
+    db.session.commit()
+    return row.id
+
+
+def test_git_saved_credentials_are_listed_without_secrets(
+    client, admin_token, viewer_token, saved_git_credential
+):
+    response = client.get(
+        "/api/helm/chart-templates/git/credentials", headers=auth_headers(admin_token)
+    )
+    assert response.status_code == 200, response.get_json()
+    items = response.get_json()["data"]["items"]
+    assert [item["id"] for item in items] == [saved_git_credential]
+    assert items[0]["name"] == "bitbucket-read"
+    assert "saved-secret-token" not in json.dumps(items)
+
+    denied = client.get(
+        "/api/helm/chart-templates/git/credentials", headers=auth_headers(viewer_token)
+    )
+    assert denied.status_code == 403
+
+
+def test_git_saved_credential_is_resolved_on_the_server(
+    client, admin_token, saved_git_credential
+):
+    with patch("api.services.helm_chart_template_service.subprocess.run") as run:
+        run.return_value.returncode = 0
+        run.return_value.stdout = "1111111111111111111111111111111111111111\trefs/heads/main\n"
+        run.return_value.stderr = ""
+        response = client.post(
+            "/api/helm/chart-templates/git/refs",
+            headers=auth_headers(admin_token),
+            json={
+                "repositoryUrl": "https://bitbucket.org/acme/platform",
+                "credentialProfileId": str(saved_git_credential),
+                # Ignored: a saved credential wins over anything typed.
+                "username": "someone-else",
+                "token": "typed-token",
+            },
+        )
+    assert response.status_code == 200, response.get_json()
+    env = run.call_args.kwargs["env"]
+    assert env["KUBESIGHT_GIT_TOKEN"] == "saved-secret-token"
+    # The same fixed Git username CI checkout uses for an Atlassian API token.
+    assert env["KUBESIGHT_GIT_USERNAME"] == "x-bitbucket-api-token-auth"
+    assert "https://bitbucket.org/acme/platform.git" in run.call_args.args[0]
+
+
+def test_git_saved_credential_is_never_sent_to_another_host(
+    client, admin_token, saved_git_credential
+):
+    with patch("api.services.helm_chart_template_service.subprocess.run") as run:
+        response = client.post(
+            "/api/helm/chart-templates/git/refs",
+            headers=auth_headers(admin_token),
+            json={
+                "repositoryUrl": "https://git.example/team/platform.git",
+                "credentialProfileId": saved_git_credential,
+            },
+        )
+    assert response.status_code == 400
+    assert "bitbucket-read" in response.get_json()["error"]
+    run.assert_not_called()
+
+
+def test_git_saved_credential_secret_is_redacted_from_errors(
+    client, admin_token, saved_git_credential
+):
+    with patch("api.services.helm_chart_template_service.subprocess.run") as run:
+        run.return_value.returncode = 128
+        run.return_value.stdout = ""
+        run.return_value.stderr = "fatal: auth failed with saved-secret-token"
+        response = client.post(
+            "/api/helm/chart-templates/git/refs",
+            headers=auth_headers(admin_token),
+            json={
+                "repositoryUrl": "https://bitbucket.org/acme/platform.git",
+                "credentialProfileId": saved_git_credential,
+            },
+        )
+    assert response.status_code == 400
+    assert "saved-secret-token" not in json.dumps(response.get_json())
+
+
 CHART_ENTRIES = {
     "areeba-txm/Chart.yaml": (
         "apiVersion: v2\nname: areeba-txm\nversion: 0.1.0\nappVersion: '1.4.2'\n"

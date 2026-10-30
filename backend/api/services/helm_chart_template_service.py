@@ -1674,11 +1674,55 @@ def _write_askpass(directory: str) -> str:
     return path
 
 
-def _git_environment(
-    payload: Dict[str, Any], askpass_dir: str
-) -> Tuple[Dict[str, str], str, str]:
+def _saved_git_connection(
+    credential_id: Any, raw_url: Any
+) -> Tuple[str, str, str]:
+    """URL, username and token for a saved source credential (the CI/AI store).
+
+    The secret is decrypted here and never leaves the server. The URL must pass
+    the credential's own provider validator, which pins the host — otherwise a
+    typed URL could hand a saved Bitbucket token to any HTTPS server.
+    """
+    from ..application_checkout import _git_username
+    from ..models import BitbucketCredentialProfile
+    from ..secret_encryption import decrypt_secret
+    from .ci.source import SourceError, get_provider
+
+    try:
+        row = db.session.get(BitbucketCredentialProfile, int(credential_id))
+    except (TypeError, ValueError):
+        row = None
+    if row is None:
+        raise ChartTemplateError("The selected Git credential no longer exists.")
+    if not row.enabled:
+        raise ChartTemplateError(f"Git credential '{row.name}' is disabled.")
+    try:
+        url = get_provider(row.provider).parse_repository_url(str(raw_url or "")).url
+    except (SourceError, ValueError) as exc:
+        raise ChartTemplateError(
+            f"Git credential '{row.name}' only works with {row.provider} repositories: "
+            f"{exc} Choose 'Enter credentials manually' for other hosts."
+        ) from exc
+    token = decrypt_secret(row.secret_cipher or "")
+    if not token:
+        raise ChartTemplateError(
+            f"Git credential '{row.name}' has no usable secret. Re-enter it and try again."
+        )
+    return url, _git_username(row.credential_type), token
+
+
+def _git_connection(payload: Dict[str, Any]) -> Tuple[str, str, str]:
+    raw_url = payload.get("repositoryUrl") or payload.get("url")
+    credential_id = payload.get("credentialProfileId")
+    if credential_id not in (None, ""):
+        return _saved_git_connection(credential_id, raw_url)
+    url = _validate_git_url(raw_url)
     token = str(payload.get("token") or payload.get("accessToken") or "")
     username = _clean_text(payload.get("username"), 255) or "oauth2"
+    return url, username, token
+
+
+def _git_environment(username: str, token: str, askpass_dir: str) -> Dict[str, str]:
     env = os.environ.copy()
     env.update(
         {
@@ -1688,7 +1732,7 @@ def _git_environment(
             "KUBESIGHT_GIT_TOKEN": token,
         }
     )
-    return env, token, username
+    return env
 
 
 def _redact_git_message(message: str, *secrets_to_redact: str) -> str:
@@ -1700,7 +1744,7 @@ def _redact_git_message(message: str, *secrets_to_redact: str) -> str:
 
 
 def _git_clone(payload: Dict[str, Any], destination: str, askpass_dir: str) -> str:
-    url = _validate_git_url(payload.get("repositoryUrl") or payload.get("url"))
+    url, username, token = _git_connection(payload)
     ref = _clean_text(payload.get("ref") or payload.get("branch"), 200)
     command = [
         "git",
@@ -1716,7 +1760,7 @@ def _git_clone(payload: Dict[str, Any], destination: str, askpass_dir: str) -> s
     if ref:
         command.extend(["--branch", ref])
     command.extend(["--", url, destination])
-    env, token, username = _git_environment(payload, askpass_dir)
+    env = _git_environment(username, token, askpass_dir)
     try:
         completed = subprocess.run(
             command,
@@ -1783,8 +1827,8 @@ def discover_git_refs(
     """List remote branches and tags without cloning repository contents."""
     try:
         with _private_import_directory() as temp_dir:
-            url = _validate_git_url(payload.get("repositoryUrl") or payload.get("url"))
-            env, token, username = _git_environment(payload, temp_dir)
+            url, username, token = _git_connection(payload)
+            env = _git_environment(username, token, temp_dir)
             command = [
                 "git",
                 "-c",
