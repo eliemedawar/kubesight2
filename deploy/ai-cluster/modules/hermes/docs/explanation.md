@@ -28,7 +28,9 @@ Hermes runs a model with tools. Whatever it is asked, it should be able to reach
 only the model's API and KubeSight. A plain Kubernetes NetworkPolicy can name
 addresses but not host names, and OpenAI's hosts have addresses we do not
 control. Cilium's own rule kind can allow by name (`toFQDNs`). The chart creates
-`kubesight-hermes-egress` with `chatgpt.com` and `auth.openai.com` on 443.
+`kubesight-hermes-egress` with `chatgpt.com` and `auth.openai.com` on 443,
+and `models.dev`: Hermes reads model details there (context size, image
+support) when it starts, and without it waits 15 seconds per lookup.
 
 Cilium learns which addresses belong to that name by watching Hermes's DNS
 answers. That is why the same rule sends Hermes's DNS through Cilium's DNS

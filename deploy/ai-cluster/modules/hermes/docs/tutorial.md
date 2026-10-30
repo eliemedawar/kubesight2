@@ -78,7 +78,7 @@ kubectl -n kubesight get ciliumnetworkpolicy kubesight-hermes-egress -o yaml
 
 - **Into Hermes:** port 8642, from `kubesight` and `kubesight-ci` only.
 - **Out of Hermes:** DNS, the backend on port 5000 (with the namespace's
-  same-namespace rule, any pod in `kubesight`), and `chatgpt.com` and `auth.openai.com` on 443.
+  same-namespace rule, any pod in `kubesight`), and `chatgpt.com`, `auth.openai.com` and `models.dev` on 443.
   Nothing else.
 
 You have seen Hermes end to end. The [how-to guides](how-to.md) cover the

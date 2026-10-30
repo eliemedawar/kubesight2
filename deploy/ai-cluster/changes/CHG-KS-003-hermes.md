@@ -31,7 +31,7 @@ The upgrade adds, in `kubesight` only:
 | ConfigMap | `kubesight-hermes-config`, `kubesight-hermes-skill` |
 | ExternalSecret | `hermes` (from `kv/kubesight/hermes`), mounted read-only at `/opt/codex` |
 | NetworkPolicy | `kubesight-hermes` (callers: `kubesight` and `kubesight-ci`, port 8642; out: DNS and the backend's 5000) |
-| CiliumNetworkPolicy | `kubesight-hermes-egress` (HTTPS to `chatgpt.com` and `auth.openai.com` only) |
+| CiliumNetworkPolicy | `kubesight-hermes-egress` (HTTPS to `chatgpt.com`, `auth.openai.com` and `models.dev` only) |
 
 It also changes the ConfigMap `kubesight-config` (adds `HERMES_API_URL`,
 `TICKET_AGENT_HERMES_URL` and `HERMES_SERVICE_*`), so the backend restarts once.
@@ -59,6 +59,17 @@ It prints `https://auth.openai.com/codex/device` and a code: open it on your
 own computer, sign in with UAT's ChatGPT account, enter the code. The login is
 kept in `/opt/data` on Hermes's volume. Moving it to OpenBao later is its own
 change: the file to store is the one Hermes saved, not a new `codex login`.
+
+## Added after the first run (2026-10-30): `models.dev`
+
+The gateway answered through the login (`/v1/chat/completions`, 200), but the
+`hermes` chat inside the pod hung at start. Its traceback showed a lookup of
+model details at `models.dev` (`agent/models_dev.py`, `fetch_models_dev`),
+dropped by `kubesight-hermes-egress` and retried after each 15-second
+timeout. `models.dev` is a public, read-only list of models: Hermes downloads
+one JSON file and sends nothing. It is now the third name in
+`hermes.networkPolicy.egressFQDNs`. The upgrade changes only that Cilium rule;
+Hermes does not restart.
 
 ## Before you start: the login file
 
@@ -99,7 +110,7 @@ CHG=CHG-KS-003; TAG=1.0.3
 ARGS="-n kubesight -f deploy/ai-cluster/values-ai-cluster.yaml --set image.tag=$TAG --set-string commonLabels.areeba\.com/change=$CHG"
 helm template kubesight charts/kubesight $ARGS > /tmp/kubesight-$CHG.yaml
 grep -E '^kind:' /tmp/kubesight-$CHG.yaml | sort | uniq -c        # 1 more Deployment, 5 ExternalSecrets, no Ingress
-grep -A3 'toFQDNs' /tmp/kubesight-$CHG.yaml                        # chatgpt.com, auth.openai.com
+grep -A3 'toFQDNs' /tmp/kubesight-$CHG.yaml                        # chatgpt.com, auth.openai.com, models.dev
 kubectl apply --dry-run=server -f /tmp/kubesight-$CHG.yaml
 helm upgrade kubesight charts/kubesight $ARGS --dry-run=server > /dev/null && echo "helm dry run OK"
 
@@ -131,7 +142,7 @@ kubectl -n kubesight exec deploy/kubesight-hermes -c hermes -- python3 -c "impor
 ```
 
 **Must be allowed:**
-- Hermes → `chatgpt.com` 443 and `auth.openai.com` 443;
+- Hermes → `chatgpt.com`, `auth.openai.com` and `models.dev`, on 443;
 - Hermes ↔ backend.
 
 **Must be dropped:** Hermes → any other host.

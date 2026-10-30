@@ -98,7 +98,7 @@ the integration is turned on):
 - Google Play and App Store Connect;
 - Jenkins (legacy deploys);
 - `api-oci.areeba.com`, which UAT pins in `hostAliases` to 193.123.81.215;
-- for Hermes: OpenAI (`chatgpt.com`, `auth.openai.com`) and, if used, Telegram.
+- for Hermes: OpenAI (`chatgpt.com`, `auth.openai.com`), `models.dev` and, if used, Telegram.
 
 **Cluster-wide needs:** UAT gives the backend two ClusterRoles (read the
 whole cluster; deploy anywhere). That is how KubeSight manages the cluster *it
@@ -118,7 +118,7 @@ Jobs in `kubesight-ci`.
 | CI dependency cache | **off**: it needs ReadWriteMany, which block volumes cannot do |
 | Builds | BuildKit in `kubesight-build`: `docker.io/moby/buildkit:v0.23.2-rootless`, uid 1000, no added capabilities, unconfined seccomp/AppArmor, one-at-a-time updates to stay in the quota |
 | Web access | internal OCI load balancer → frontend nginx on 8443 (TLS from `kv/kubesight/tls`), which proxies `/api` to the backend (no ingress controller) |
-| Hermes's model | OpenAI through a ChatGPT/Codex login (as in UAT), `gpt-5.6-sol`, login in `kv/kubesight/hermes`; egress to `chatgpt.com` and `auth.openai.com` only |
+| Hermes's model | OpenAI through a ChatGPT/Codex login (as in UAT), `gpt-5.6-sol`, login in `kv/kubesight/hermes`; egress to `chatgpt.com`, `auth.openai.com` and `models.dev` only |
 | Network | default deny in all three namespaces; DNS; same-namespace in `kubesight` only; backend → pooler, → API server; CI/analysis → backend:5000; LB subnet → frontend:8443; per-build rules created by the backend |
 | Cluster-wide | none in the release; requests below |
 

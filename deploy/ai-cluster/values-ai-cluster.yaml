@@ -139,8 +139,9 @@ hermes:
     size: 50Gi
     storageClass: oci-bv-retain
   networkPolicy:
-    # chatgpt.com answers the model calls; auth.openai.com renews the login.
-    egressFQDNs: [chatgpt.com, auth.openai.com]
+    # chatgpt.com answers the model calls; auth.openai.com renews the login;
+    # models.dev lists model features (context size, images), read at start.
+    egressFQDNs: [chatgpt.com, auth.openai.com, models.dev]
 
 # --- Secrets: OpenBao -> ExternalSecret -----------------------------------------
 externalSecrets:

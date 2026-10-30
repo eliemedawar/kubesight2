@@ -54,7 +54,7 @@ itself. Check the result with **Test connection**.
 For example, `api.telegram.org` for approvals by Telegram.
 
 1. Add the name to `hermes.networkPolicy.egressFQDNs` in the values file, next
-   to `chatgpt.com` and `auth.openai.com`.
+   to the names already there.
 2. Ask the platform to open the company firewall for that name on 443. Cilium's
    rule alone is not enough.
 3. Run `helm upgrade` as above.
@@ -107,7 +107,7 @@ kubectl -n kube-system exec <cilium pod on Hermes's node> -c cilium-agent -- \
 ```
 
 Expected:
-- **forwarded:** DNS, `backend-service:5000`, `chatgpt.com:443`, `auth.openai.com:443`;
+- **forwarded:** DNS, `backend-service:5000`, `chatgpt.com:443`, `auth.openai.com:443`, `models.dev:443`;
 - **dropped:** any other outside address.
 
 To prove the drop, try a host that is not allowed:

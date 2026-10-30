@@ -17,7 +17,7 @@ it calls OpenAI through a ChatGPT/Codex login, as in UAT.
 | Status | Planned: added by CHG-KS-003, waiting for the platform's agreement and the firewall opening (KubeSight itself is installed by CHG-KS-002 without Hermes) |
 | Namespace | `kubesight` |
 | Runs as | Deployment `kubesight-hermes`, 1 replica (strategy `Recreate`) |
-| Depends on | `kubesight-backend` (MCP server at `backend-service:5000/api/mcp`); OpenAI (`chatgpt.com`, `auth.openai.com`) |
+| Depends on | `kubesight-backend` (MCP server at `backend-service:5000/api/mcp`); OpenAI (`chatgpt.com`, `auth.openai.com`); `models.dev` for model details |
 | Used by | `kubesight-backend` (ticket agent, CI assist); analysis Jobs in `kubesight-ci` |
 | Secrets | `hermes` (from `kv/kubesight/hermes`: `auth.json`, the Codex login); `kubesight-secrets` (from `kv/kubesight/backend`: `HERMES_API_TOKEN`, `KUBESIGHT_HERMES_MCP_TOKEN`); `regcred` |
 | Change records | [CHG-KS-001](../../../changes/CHG-KS-001-openbao-secrets.md) (secrets), [CHG-KS-002](../../../changes/CHG-KS-002-install.md) (install, without Hermes), [CHG-KS-003](../../../changes/CHG-KS-003-hermes.md) (Hermes) |

@@ -46,7 +46,7 @@ Shared with the rest of `kubesight`:
 | `hermes.maxIterations` | `20` |
 | `hermes.installSkill` | `true` |
 | `hermes.persistence` | `50Gi`, `ReadWriteOnce`, class `oci-bv-retain` |
-| `hermes.networkPolicy.egressFQDNs` | `[chatgpt.com, auth.openai.com]` |
+| `hermes.networkPolicy.egressFQDNs` | `[chatgpt.com, auth.openai.com, models.dev]` |
 | `hermes.resources` | requests 250m CPU / 512Mi / 256Mi disk; limits 2 CPU / 2Gi / 2Gi disk |
 | `hermes.initResources` | requests 10m CPU / 32Mi; limits 500m CPU / 128Mi |
 
@@ -96,9 +96,9 @@ keeps its own renewed copy of the login in `/opt/data`.
 | `default-deny` | nothing in or out unless allowed below |
 | `allow-dns-and-same-namespace` | DNS to `kube-dns`; traffic to and from pods in `kubesight` |
 | `kubesight-hermes` | in: TCP 8642 from namespaces `kubesight`, `kubesight-ci`; out: DNS (kube-system, 53), TCP 5000 to `kubesight` |
-| `kubesight-hermes-egress` (Cilium) | out: DNS through Cilium's DNS proxy; TCP 443 to `chatgpt.com` and `auth.openai.com` only |
+| `kubesight-hermes-egress` (Cilium) | out: DNS through Cilium's DNS proxy; TCP 443 to `chatgpt.com`, `auth.openai.com` and `models.dev` only |
 
-Firewall: `chatgpt.com:443` and `auth.openai.com:443` must be opened for the
+Firewall: `chatgpt.com:443`, `auth.openai.com:443` and `models.dev:443` must be opened for the
 cluster (asked with CHG-KS-003). The opening agreed on 2026-10-28 was for
 `api.anthropic.com`.
 
