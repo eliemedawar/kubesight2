@@ -3,6 +3,7 @@ import PageTitle from "../components/common/PageTitle.jsx";
 import EmptyState from "../components/common/EmptyState.jsx";
 import InfoCard from "../components/common/InfoCard.jsx";
 import HelmReleasePanel from "../components/inventory/HelmReleasePanel.jsx";
+import HelmReleaseUpgradeModal from "../components/inventory/HelmReleaseUpgradeModal.jsx";
 import ConfirmActionModal from "../components/inventory/ConfirmActionModal.jsx";
 import DataTable from "../components/common/DataTable.jsx";
 import ResourceInspectModal from "../components/resources/ResourceInspectModal.jsx";
@@ -32,6 +33,7 @@ import {
   inventoryIdsMatch,
 } from "../utils/inventoryPermissions.js";
 import { isPendingApproval, pendingApprovalMessage } from "../utils/pendingApproval.js";
+import { normalizeClusterOptions } from "../utils/clusterOptions.js";
 
 const CLOSED_INSPECT_MODAL = {
   open: false,
@@ -110,7 +112,6 @@ export default function ApplicationDetailsPage({
   onEditCatalog,
   onRemoveFromInventory,
   onDeployUpdate,
-  onHelmUpgrade,
   onHelmActionComplete,
   onRefreshDetail,
   clusterOptions = [],
@@ -119,6 +120,8 @@ export default function ApplicationDetailsPage({
   // was the same desync the router exists to remove.
   const tab = activeTab;
   const [logPod, setLogPod] = useState(null);
+  // The installed release being upgraded onto a stored chart, or null.
+  const [helmUpgradeTarget, setHelmUpgradeTarget] = useState(null);
   const [logLines, setLogLines] = useState([]);
   const [logLoading, setLogLoading] = useState(false);
   const [logError, setLogError] = useState("");
@@ -910,8 +913,26 @@ export default function ApplicationDetailsPage({
             canUpgradeHelm={canUpgradeHelm}
             canRollbackHelm={canRollbackHelm}
             canUninstallHelm={canUninstallHelm}
-            onUpgrade={() => onHelmUpgrade?.(detail)}
+            onUpgrade={() => {
+              const helm = detail.helm || {};
+              const chartName = helm.chartName || summary.chartName;
+              const chartVersion = helm.chartVersion || summary.chartVersion;
+              setHelmUpgradeTarget({
+                clusterId: summary.cluster,
+                clusterLabel: normalizeClusterOptions(clusterOptions).find((item) => item.id === summary.cluster)?.name,
+                namespace: helm.namespace || summary.namespace,
+                releaseName: helm.releaseName || summary.releaseName || summary.applicationName,
+                chart: chartName && chartVersion && chartVersion !== "-" ? `${chartName}-${chartVersion}` : chartName,
+                revision: helm.revision ?? summary.helmRevision,
+              });
+            }}
             onActionComplete={onHelmActionComplete}
+          />
+          <HelmReleaseUpgradeModal
+            release={helmUpgradeTarget}
+            canManage={canUpdateCatalog}
+            onClose={() => setHelmUpgradeTarget(null)}
+            onUpgraded={() => onHelmActionComplete?.()}
           />
         </div>
       ) : null}

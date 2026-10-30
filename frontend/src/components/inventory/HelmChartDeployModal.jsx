@@ -4,9 +4,11 @@ import {
   dryRunHelmRelease,
   getHelmChartTemplate,
   getHelmConfirmationPhrase,
+  getHelmUpgradeStart,
   inspectHelmValuesImport,
   installHelmRelease,
   renderHelmTemplate,
+  upgradeHelmRelease,
 } from "../../api/helmApi.js";
 import { clusterOptionLabel, normalizeClusterOptions } from "../../utils/clusterOptions.js";
 import SearchableSelect from "../common/SearchableSelect.jsx";
@@ -67,19 +69,39 @@ function importedFieldValues(detail, report) {
   );
 }
 
-function VariableField({ variable, value, fromFile, onChange }) {
+// Form values from field values the server worked out (an upgrade's start).
+function formValuesFrom(detail, fields) {
+  return Object.fromEntries(
+    (detail?.variables || []).map((variable) => [
+      variable.path,
+      initialFieldValue({ ...variable, default: fields?.[variable.path] }),
+    ]),
+  );
+}
+
+// An upgrade sends only the fields the person changed: everything else keeps
+// the release's current value, which the server layers in.
+function changedValues(values, start) {
+  return Object.fromEntries(
+    Object.entries(values).filter(([path, value]) => String(value ?? "") !== String(start?.[path] ?? "")),
+  );
+}
+
+function VariableField({ variable, value, fromFile, keptSecret, onChange }) {
   const id = `helm-variable-${variable.key}`;
+  // A password the release already holds is kept unless typed over.
+  const required = Boolean(variable.required) && !keptSecret;
   const common = {
     id,
     value,
-    required: Boolean(variable.required),
+    required,
     onChange: (event) => onChange(event.target.value),
   };
   return (
-    <label htmlFor={id} className={variable.required ? "helm-variable-required" : ""}>
+    <label htmlFor={id} className={required ? "helm-variable-required" : ""}>
       <span>
         {variable.label || variable.path}
-        {variable.required ? <strong aria-label="required"> *</strong> : null}
+        {required ? <strong aria-label="required"> *</strong> : null}
         {fromFile ? <em className="helm-variable-from-file">from file</em> : null}
       </span>
       {variable.type === "boolean" ? (
@@ -106,6 +128,7 @@ function VariableField({ variable, value, fromFile, onChange }) {
                 : "text"
           }
           step={variable.type === "number" ? "any" : undefined}
+          placeholder={keptSecret ? "Kept from the release. Type to replace it." : undefined}
           autoComplete={variable.sensitive ? "new-password" : undefined}
         />
       )}
@@ -114,9 +137,17 @@ function VariableField({ variable, value, fromFile, onChange }) {
   );
 }
 
+/**
+ * Deploy a stored chart, or — with ``release`` ({ clusterId, namespace,
+ * releaseName, chart, revision }) — upgrade that installed release onto a
+ * stored chart version. An upgrade starts from the release's current values;
+ * its passwords stay on the server and only changed fields are sent.
+ */
 export default function HelmChartDeployModal({
   open,
   template,
+  release = null,
+  chartOptions = [],
   canManage = false,
   clusterOptions = [],
   defaultClusterId = "",
@@ -129,6 +160,10 @@ export default function HelmChartDeployModal({
       ? defaultClusterId
       : options[0]?.id || "";
   const [detail, setDetail] = useState(null);
+  // The stored chart: the one clicked, or for an upgrade the one picked.
+  const [chartId, setChartId] = useState(template?.id || "");
+  // An upgrade's starting point: { form, keptSecrets, missingRequired, valuesShown }.
+  const [upgradeStart, setUpgradeStart] = useState(null);
   const [version, setVersion] = useState("");
   const [clusterId, setClusterId] = useState(resolvedCluster);
   const [namespace, setNamespace] = useState("");
@@ -148,32 +183,70 @@ export default function HelmChartDeployModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
+  const releaseTarget = release
+    ? { clusterId: release.clusterId, namespace: release.namespace, releaseName: release.releaseName }
+    : null;
+
+  useEffect(() => {
+    if (open) setChartId(template?.id || "");
+  }, [open, template?.id]);
+
+  // The form before any import: the chart's values, or for an upgrade the
+  // release's current values over the chart's (worked out on the server).
+  const loadBase = async (chartDetail, environmentFile) => {
+    if (!releaseTarget) return initialValues(chartDetail, environmentFile);
+    const start = await getHelmUpgradeStart({
+      ...releaseTarget,
+      chartTemplateId: chartDetail.id,
+      version: chartDetail.version,
+      valuesFile: environmentFile,
+    });
+    const form = formValuesFrom(chartDetail, start.fields);
+    setUpgradeStart({ ...start, form });
+    return form;
+  };
+
   // Check the file against this chart version and environment file, then fill
-  // every field it touches. Throws when the file is not a values mapping.
-  const applyImport = async (text, name, chartDetail, environmentFile) => {
+  // every field it touches over ``base``. Throws when the file is not a values
+  // mapping.
+  const applyImport = async (text, name, chartDetail, environmentFile, base) => {
     const report = await inspectHelmValuesImport(chartDetail.id, {
       valuesYaml: text,
       version: chartDetail.version,
       valuesFile: environmentFile,
+      ...(releaseTarget ? { ...releaseTarget, keepCurrentValues: true } : {}),
     });
     setImported({ text, name, report });
-    setValues({
-      ...initialValues(chartDetail, environmentFile),
-      ...importedFieldValues(chartDetail, report),
-    });
+    setValues({ ...base, ...importedFieldValues(chartDetail, report) });
+  };
+
+  // Refill the form for a chart version / environment file, re-applying an
+  // imported values.yaml on top.
+  const refill = async (chartDetail, environmentFile) => {
+    const base = await loadBase(chartDetail, environmentFile);
+    setValues(base);
+    const previous = importedRef.current;
+    if (!previous) return;
+    try {
+      await applyImport(previous.text, previous.name, chartDetail, environmentFile, base);
+    } catch (err) {
+      setImported(null);
+      setError(err.message || "The imported values.yaml no longer fits this chart version.");
+    }
   };
 
   useEffect(() => {
-    if (!open || !template?.id) return;
+    if (!open || !chartId) return;
     let cancelled = false;
     setBusy(true);
     setError("");
     // An empty version asks the backend for whichever version is current.
-    getHelmChartTemplate(template.id, version)
+    getHelmChartTemplate(chartId, version)
       .then((result) => {
-        if (cancelled) return;
+        if (cancelled) return undefined;
         setDetail(result);
         setReleaseName((previous) =>
+          release?.releaseName ||
           previous ||
           String(result.id || "release")
             .toLowerCase()
@@ -182,17 +255,7 @@ export default function HelmChartDeployModal({
             .slice(0, 53),
         );
         setValuesFile("");
-        setValues(initialValues(result));
-        // Another version: the same file fills that version's fields.
-        const previous = importedRef.current;
-        if (previous) {
-          return applyImport(previous.text, previous.name, result, "").catch((err) => {
-            if (cancelled) return;
-            setImported(null);
-            setError(err.message || "The imported values.yaml no longer fits this version.");
-          });
-        }
-        return undefined;
+        return refill(result, "");
       })
       .catch((err) => {
         if (!cancelled) setError(err.message || "Failed to load the Helm chart.");
@@ -203,11 +266,12 @@ export default function HelmChartDeployModal({
     return () => {
       cancelled = true;
     };
-  }, [open, template?.id, version]);
+  }, [open, chartId, version]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!open) {
       setDetail(null);
+      setUpgradeStart(null);
       setVersion("");
       setClusterId(resolvedCluster);
       setNamespace("");
@@ -227,6 +291,9 @@ export default function HelmChartDeployModal({
     }
   }, [open, resolvedCluster]);
 
+  const keptSecrets = useMemo(() => new Set(upgradeStart?.keptSecrets || []), [upgradeStart]);
+  // Kept passwords stay in this list though no longer required, so replacing
+  // one is as easy to find as typing it was.
   const requiredVariables = useMemo(
     () => (detail?.variables || []).filter((variable) => variable.required),
     [detail],
@@ -243,7 +310,7 @@ export default function HelmChartDeployModal({
   const versions = detail?.versions || [];
   const payload = {
     chartSource: "template",
-    chartTemplateId: detail?.id || template?.id,
+    chartTemplateId: detail?.id || chartId,
     chartVersion: version || detail?.version || "",
     clusterId,
     namespace,
@@ -251,6 +318,14 @@ export default function HelmChartDeployModal({
     valuesFile,
     values,
     valuesYaml: imported?.text || "",
+    ...(releaseTarget
+      ? {
+          ...releaseTarget,
+          isUpgrade: true,
+          keepCurrentValues: true,
+          values: changedValues(values, upgradeStart?.form),
+        }
+      : {}),
   };
 
   const previewChart = async (event) => {
@@ -276,7 +351,8 @@ export default function HelmChartDeployModal({
     setBusy(true);
     setError("");
     try {
-      const result = await installHelmRelease({ ...payload, confirmation });
+      const send = releaseTarget ? upgradeHelmRelease : installHelmRelease;
+      const result = await send({ ...payload, confirmation });
       if (isPendingApproval(result)) {
         // Nothing is installed yet, so no success callback.
         setQueuedMessage(pendingApprovalMessage(result));
@@ -285,7 +361,7 @@ export default function HelmChartDeployModal({
       onSuccess?.();
       onClose();
     } catch (err) {
-      setError(err.message || "Helm installation failed.");
+      setError(err.message || (releaseTarget ? "Helm upgrade failed." : "Helm installation failed."));
     } finally {
       setBusy(false);
     }
@@ -302,11 +378,15 @@ export default function HelmChartDeployModal({
       >
         <header className="modal-header">
           <div>
-            <h3 id="helm-deploy-title">Deploy {detail?.name || template?.name}</h3>
+            <h3 id="helm-deploy-title">
+              {release ? `Upgrade ${release.releaseName}` : `Deploy ${detail?.name || template?.name}`}
+            </h3>
             <p className="muted">
-              {step === "configure"
-                ? "Choose a target and review only the values this chart exposes."
-                : "Review the rendered resources before installation."}
+              {step !== "configure"
+                ? `Review the rendered resources before ${release ? "upgrading" : "installation"}.`
+                : release
+                  ? "Pick the stored chart version to move to. The release keeps its current values; change only what should change."
+                  : "Choose a target and review only the values this chart exposes."}
             </p>
           </div>
           <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
@@ -319,7 +399,56 @@ export default function HelmChartDeployModal({
 
         {step === "configure" ? (
           <form className="add-app-form" onSubmit={previewChart}>
-            {versions.length > 1 ? (
+            {release ? (
+              <dl className="helm-upgrade-target">
+                <div>
+                  <dt>Installed</dt>
+                  <dd>
+                    {release.chart || "unknown chart"}
+                    {release.revision ? <span className="muted"> · revision {release.revision}</span> : null}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Where</dt>
+                  <dd>
+                    {release.namespace} <span className="muted">on</span>{" "}
+                    {release.clusterLabel || release.clusterId}
+                  </dd>
+                </div>
+              </dl>
+            ) : null}
+
+            {release ? (
+              <label className="helm-version-picker">
+                <span>Upgrade to chart</span>
+                <SearchableSelect
+                  required
+                  value={chartId}
+                  onChange={(event) => {
+                    setImported(null);
+                    setDetail(null);
+                    setUpgradeStart(null);
+                    setVersion("");
+                    setChartId(event.target.value);
+                  }}
+                >
+                  <option value="">Pick a stored chart</option>
+                  {chartOptions.map((chart) => (
+                    <option key={chart.id} value={chart.id}>
+                      {chart.name}
+                    </option>
+                  ))}
+                </SearchableSelect>
+                {!chartId ? (
+                  <small className="form-help">
+                    No stored chart matches {release.chart || "this release"}. Pick the one to
+                    upgrade to, or import it under Helm Charts first.
+                  </small>
+                ) : null}
+              </label>
+            ) : null}
+
+            {versions.length > 1 || (release && versions.length) ? (
               <label className="helm-version-picker">
                 <span>
                   Chart version <span className="muted">({versions.length} stored)</span>
@@ -350,16 +479,12 @@ export default function HelmChartDeployModal({
                   onChange={async (event) => {
                     const selected = event.target.value;
                     setValuesFile(selected);
-                    if (!imported) {
-                      setValues(initialValues(detail, selected));
-                      return;
-                    }
                     setBusy(true);
                     setError("");
                     try {
-                      await applyImport(imported.text, imported.name, detail, selected);
+                      await refill(detail, selected);
                     } catch (err) {
-                      setError(err.message || "The imported values.yaml could not be applied.");
+                      setError(err.message || "The values could not be loaded.");
                     } finally {
                       setBusy(false);
                     }
@@ -373,11 +498,14 @@ export default function HelmChartDeployModal({
                   ))}
                 </SearchableSelect>
                 <small className="form-help">
-                  The selected file is applied first. Any value changed below overrides it.
+                  {release
+                    ? "Applied under the release's current values: it only adds what the release never set."
+                    : "The selected file is applied first. Any value changed below overrides it."}
                 </small>
               </label>
             ) : null}
 
+            {release ? null : (
             <div className="helm-target-grid">
               <label>
                 Cluster
@@ -419,6 +547,14 @@ export default function HelmChartDeployModal({
                 />
               </label>
             </div>
+            )}
+
+            {release && upgradeStart && !upgradeStart.valuesShown ? (
+              <p className="banner-message" role="note">
+                You can&apos;t view this release&apos;s values, so the fields show the chart&apos;s.
+                Anything you leave alone keeps the release&apos;s current value.
+              </p>
+            ) : null}
 
             {busy && !detail ? <p className="muted">Loading chart values…</p> : null}
 
@@ -430,18 +566,20 @@ export default function HelmChartDeployModal({
                 values={values}
                 busy={busy}
                 canSave={canManage}
+                layeredOver={release ? "the release's current values" : ""}
                 onApply={async (text, name) => {
                   setBusy(true);
                   setError("");
                   try {
-                    await applyImport(text, name, detail, valuesFile);
+                    const base = release ? upgradeStart?.form || {} : initialValues(detail, valuesFile);
+                    await applyImport(text, name, detail, valuesFile, base);
                   } finally {
                     setBusy(false);
                   }
                 }}
                 onClear={() => {
                   setImported(null);
-                  setValues(initialValues(detail, valuesFile));
+                  setValues(release ? upgradeStart?.form || {} : initialValues(detail, valuesFile));
                 }}
                 // The saved file joins Environment values; the selection stays.
                 onSaved={(result) => setDetail(result)}
@@ -450,7 +588,7 @@ export default function HelmChartDeployModal({
 
             {requiredVariables.length ? (
               <section className="helm-variable-section">
-                <h4>Required values</h4>
+                <h4>{keptSecrets.size ? "Passwords and required values" : "Required values"}</h4>
                 <div className="helm-variable-grid">
                   {requiredVariables.map((variable) => (
                     <VariableField
@@ -458,6 +596,7 @@ export default function HelmChartDeployModal({
                       variable={variable}
                       value={values[variable.path] ?? ""}
                       fromFile={Boolean(imported && Object.hasOwn(imported.report.fields || {}, variable.path))}
+                      keptSecret={keptSecrets.has(variable.path) && !String(values[variable.path] ?? "")}
                       onChange={(value) =>
                         setValues((previous) => ({ ...previous, [variable.path]: value }))
                       }
@@ -483,6 +622,7 @@ export default function HelmChartDeployModal({
                       variable={variable}
                       value={values[variable.path] ?? ""}
                       fromFile={Boolean(imported && Object.hasOwn(imported.report.fields || {}, variable.path))}
+                      keptSecret={keptSecrets.has(variable.path) && !String(values[variable.path] ?? "")}
                       onChange={(value) =>
                         setValues((previous) => ({ ...previous, [variable.path]: value }))
                       }
@@ -555,7 +695,9 @@ export default function HelmChartDeployModal({
                   disabled={busy || confirmation !== confirmationPhrase}
                   onClick={install}
                 >
-                  {busy ? "Installing…" : "Install Release"}
+                  {busy
+                    ? release ? "Upgrading…" : "Installing…"
+                    : release ? "Upgrade Release" : "Install Release"}
                 </button>
               )}
             </div>

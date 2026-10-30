@@ -1,11 +1,19 @@
 from flask import Blueprint, request
 
 from ..auth_utils import get_current_user
-from ..decorators import require_cluster_access, require_namespace_access, require_permission
+from ..access_engine import can_access_namespace, user_has_permission
+from ..decorators import (
+    require_any_permission,
+    require_cluster_access,
+    require_namespace_access,
+    require_permission,
+)
 from ..response import error_response, success_response
 from ..services.helm_service import (
     add_repository,
+    HelmCommandError,
     check_helm_available,
+    current_release_values,
     dry_run_release,
     expected_confirmation,
     get_release_detail,
@@ -19,6 +27,7 @@ from ..services.helm_service import (
     search_charts,
     uninstall_release,
     update_repositories,
+    upgrade_starting_point,
     _resolve_access,
 )
 from ..services.helm_chart_template_service import (
@@ -90,6 +99,17 @@ def helm_get_release(release_name: str):
     if not detail:
         return error_response("Release not found or Helm unavailable", 404)
     return success_response(detail)
+
+
+@helm_bp.route("/releases/upgrade-start", methods=["POST"])
+@require_permission("helm:upgrade")
+def helm_release_upgrade_start():
+    """The deploy form for upgrading an installed release onto a stored chart,
+    starting from its current values. Secret values never leave the server."""
+    data, err, status = upgrade_starting_point(get_current_user(), _body())
+    if err:
+        return error_response(err, status)
+    return success_response(data)
 
 
 @helm_bp.route("/repos", methods=["GET"])
@@ -201,14 +221,35 @@ def helm_chart_template_delete_version(slug: str, version: str):
 @helm_bp.route("/chart-templates/<slug>/values-import", methods=["POST"])
 @require_permission("helm:view")
 def helm_chart_template_values_import(slug: str):
-    """Check a person's values.yaml against a chart before deploying it. Nothing is stored."""
+    """Check a person's values.yaml against a chart before deploying it. Nothing is stored.
+
+    For an upgrade that keeps the release's values (``keepCurrentValues``), the
+    required check counts what the release already holds.
+    """
     body = _body()
+    current = None
+    if body.get("keepCurrentValues"):
+        user = get_current_user()
+        cluster_id = str(body.get("clusterId") or "")
+        namespace = str(body.get("namespace") or "")
+        if user and not (
+            user_has_permission(user, "helm:upgrade")
+            and can_access_namespace(user, cluster_id, namespace)
+        ):
+            return error_response("Forbidden", 403)
+        try:
+            current = current_release_values(
+                cluster_id, namespace, str(body.get("releaseName") or "").strip().lower()
+            )
+        except HelmCommandError as exc:
+            return error_response(str(exc), 400)
     try:
         report = inspect_values_import(
             slug,
             str(body.get("valuesYaml") or ""),
             str(body.get("version") or ""),
             str(body.get("valuesFile") or ""),
+            current,
         )
     except ChartTemplateError as exc:
         return error_response(str(exc), 400)
@@ -411,7 +452,7 @@ def helm_uninstall():
 
 
 @helm_bp.route("/confirmation-phrase", methods=["POST"])
-@require_permission("helm:install")
+@require_any_permission("helm:install", "helm:upgrade")
 def helm_confirmation_phrase():
     body = _body()
     release_name = (body.get("releaseName") or body.get("release_name") or "").strip().lower()

@@ -8,6 +8,12 @@ export function listHelmReleases({ clusterId, namespace }) {
   return request("/api/helm/releases", { query: { clusterId, namespace } });
 }
 
+// The deploy form for upgrading an installed release onto a stored chart,
+// starting from its current values (secret values stay on the server).
+export function getHelmUpgradeStart(payload) {
+  return request("/api/helm/releases/upgrade-start", { method: "POST", body: payload });
+}
+
 export function getHelmRelease({ clusterId, namespace, releaseName }) {
   return request(`/api/helm/releases/${encodeURIComponent(releaseName)}`, {
     query: { clusterId, namespace },

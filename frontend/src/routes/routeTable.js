@@ -82,7 +82,7 @@ export const TAB_VALUES = {
   // pages/ClusterBuilderPage.jsx:139
   clusterBuilder: ["floor", "new", "sources"],
   // pages/InventoryPage.jsx:53
-  inventory: ["templates", "helm"],
+  inventory: ["templates", "helm", "installed"],
   // pages/UserManagementPage.jsx:122
   userManagement: ["users", "roles"],
   // pages/MyRequestsPage.jsx:9 (and old #/deployment-requests links)

@@ -4,6 +4,7 @@ import { useRouteParam } from "../routes/RouterContext.jsx";
 import AccessScopeView from "../components/common/AccessScopeView.jsx";
 import PageTitle from "../components/common/PageTitle.jsx";
 import HelmChartCatalog from "../components/inventory/HelmChartCatalog.jsx";
+import HelmInstalledReleases from "../components/inventory/HelmInstalledReleases.jsx";
 import TemplateMarketplace from "../components/inventory/TemplateMarketplace.jsx";
 import { getWizardTemplate } from "../api/inventoryApi.js";
 import { applyImportToWizard } from "../api/deploymentFormsApi.js";
@@ -47,6 +48,8 @@ export default function InventoryPage({
   canDeploy = false,
   canHelmView = false,
   canHelmInstall = false,
+  canHelmUpgrade = false,
+  canHelmUninstall = false,
   canManageTemplates = false,
   isAdmin = false,
   onRefresh,
@@ -150,11 +153,19 @@ export default function InventoryPage({
   return (
     <div className="ops-page inventory-page template-marketplace-page">
       <PageTitle
-        title={activeSection === "helm" ? "Inventory · Helm Charts" : "Inventory Templates"}
+        title={
+          activeSection === "helm"
+            ? "Inventory · Helm Charts"
+            : activeSection === "installed"
+              ? "Inventory · Installed Releases"
+              : "Inventory Templates"
+        }
         subtitle={
           activeSection === "helm"
             ? "Import reusable charts and deploy them by supplying only target details and exposed values."
-            : "Choose a template or start from scratch to deploy workloads to your clusters. View deployed applications in Resources."
+            : activeSection === "installed"
+              ? "Helm releases running on a cluster. Upgrade one onto a stored chart version, keeping its values, or delete it."
+              : "Choose a template or start from scratch to deploy workloads to your clusters. View deployed applications in Resources."
         }
         // One entry for everyone who can add an app: the modal offers Register,
         // the Application Builder, and YAML / image / Helm deploys, each shown
@@ -185,10 +196,27 @@ export default function InventoryPage({
           >
             Helm Charts
           </button>
+          <button
+            type="button"
+            className={activeSection === "installed" ? "active" : ""}
+            aria-current={activeSection === "installed" ? "page" : undefined}
+            onClick={() => setActiveSection("installed")}
+          >
+            Installed Releases
+          </button>
         </nav>
       ) : null}
 
-      {activeSection === "helm" && canHelmView ? (
+      {activeSection === "installed" && canHelmView ? (
+        <HelmInstalledReleases
+          clusterOptions={clusterSelectOptions}
+          defaultClusterId={resolvedDefaultClusterId}
+          canUpgrade={canHelmUpgrade}
+          canUninstall={canHelmUninstall}
+          canManageCharts={canManageTemplates}
+          onChanged={() => onRefresh?.()}
+        />
+      ) : activeSection === "helm" && canHelmView ? (
         <HelmChartCatalog
           canDeploy={canHelmInstall}
           canManage={canManageTemplates}

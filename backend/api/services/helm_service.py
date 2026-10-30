@@ -45,7 +45,9 @@ def _prepare_chart_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     The catalog service owns stored chart content; the existing Helm command
     path continues to operate on the same local archive shape as uploaded tgz
-    charts.
+    charts. An upgrade with ``keepCurrentValues`` reads the release's values
+    here, every time — also when an approved change finally runs — so they are
+    never held in the request, the queue or the browser.
     """
     try:
         from .helm_chart_template_service import (
@@ -53,9 +55,82 @@ def _prepare_chart_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             prepare_chart_template_payload,
         )
 
-        return prepare_chart_template_payload(payload)
+        current = None
+        source = str(payload.get("chartSource") or payload.get("chart_source") or "").lower()
+        if payload.get("keepCurrentValues") and source == "template":
+            current = current_release_values(
+                (payload.get("clusterId") or payload.get("cluster") or "").strip(),
+                (payload.get("namespace") or "").strip(),
+                (payload.get("releaseName") or payload.get("release_name") or "").strip().lower(),
+            )
+        return prepare_chart_template_payload(payload, current)
     except ChartTemplateError as exc:
         raise HelmCommandError(str(exc)) from exc
+
+
+def current_release_values(
+    cluster_id: str,
+    namespace: str,
+    release_name: str,
+    *,
+    run_helm_fn: Optional[RunHelmFn] = None,
+) -> Dict[str, Any]:
+    """The values a release was installed with (``helm get values``), secrets
+    included. Server-side only. Raises HelmCommandError when they cannot be
+    read: an upgrade that meant to keep them must never quietly reset them."""
+    if not cluster_id or not namespace or not release_name:
+        raise HelmCommandError("Cluster, namespace and release are required to keep the current values.")
+    access = _resolve_access(cluster_id)
+    runner = run_helm_fn or run_helm
+    try:
+        raw = runner(access, ["get", "values", release_name, "-n", namespace, "-o", "json"])
+        values = json.loads(raw or "null")
+    except json.JSONDecodeError as exc:
+        raise HelmCommandError(f"The current values of {release_name} could not be read.") from exc
+    if values is None:
+        return {}
+    if not isinstance(values, dict):
+        raise HelmCommandError(f"The current values of {release_name} could not be read.")
+    return values
+
+
+def upgrade_starting_point(
+    user: Optional[User], payload: Dict[str, Any], *, run_helm_fn: Optional[RunHelmFn] = None
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
+    """The deploy form for upgrading an installed release onto a stored chart,
+    starting from the release's current values (secrets stay on the server)."""
+    from .helm_chart_template_service import ChartTemplateError, upgrade_starting_point as start
+
+    cluster_id = (payload.get("clusterId") or payload.get("cluster") or "").strip()
+    namespace = (payload.get("namespace") or "").strip()
+    release_name = (payload.get("releaseName") or payload.get("release_name") or "").strip().lower()
+    slug = str(payload.get("chartTemplateId") or "").strip()
+    if not cluster_id or not namespace or not release_name or not slug:
+        return None, "clusterId, namespace, releaseName and chartTemplateId are required.", 400
+    if user and not can_access_namespace(user, cluster_id, namespace):
+        return None, "Forbidden", 403
+    try:
+        ensure_helm_installed()
+        current = current_release_values(cluster_id, namespace, release_name, run_helm_fn=run_helm_fn)
+        data = start(
+            slug,
+            current,
+            str(payload.get("version") or ""),
+            str(payload.get("valuesFile") or ""),
+            show_values=user is None or user_has_permission(user, "helm:values:view"),
+        )
+    except HelmNotInstalledError as exc:
+        return None, str(exc), 503
+    except (HelmCommandError, ChartTemplateError) as exc:
+        return None, str(exc), 400
+    if not (user and user_has_permission(user, "secrets:reveal")):
+        # A list or map field can still carry a credential (env: {DB_PASSWORD: ..}).
+        # Masked here; the field is only sent back if the person edits it.
+        data["fields"] = {
+            path: _mask_sensitive_values(value) if isinstance(value, (dict, list)) else value
+            for path, value in data["fields"].items()
+        }
+    return data, None, 200
 
 
 def _helm_binary() -> str:
@@ -597,13 +672,15 @@ def release_exists_from_payload(
     payload: Dict[str, Any],
     run_helm_fn: Optional[RunHelmFn] = None,
 ) -> bool:
-    try:
-        payload = _prepare_chart_payload(payload)
-    except HelmCommandError:
-        return False
+    # Answered from the flags before the chart is prepared: preparing an
+    # upgrade that keeps its values reads them from the cluster.
     if payload.get("isUpgrade"):
         return True
     if payload.get("isInstall"):
+        return False
+    try:
+        payload = _prepare_chart_payload(payload)
+    except HelmCommandError:
         return False
     try:
         release_name, namespace, cluster_id, access, _, _, _ = _base_helm_args(payload)

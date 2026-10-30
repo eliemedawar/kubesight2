@@ -8040,6 +8040,65 @@ kbd {
   margin-bottom: var(--space-4);
 }
 
+/* Inventory → Installed Releases. */
+.helm-installed {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.helm-installed-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.helm-installed-filters label {
+  display: grid;
+  flex: 1 1 220px;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.helm-installed-filters > button {
+  flex: 0 0 auto;
+  width: auto;
+}
+
+.helm-release-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.helm-installed-table .col-actions {
+  width: 1%;
+  white-space: nowrap;
+}
+
+/* The release an upgrade starts from. */
+.helm-upgrade-target {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-6, 2rem);
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel-strong);
+}
+
+.helm-upgrade-target dt {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.helm-upgrade-target dd {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
 /* Import a values.yaml into the chart deploy form. */
 .helm-values-import {
   display: grid;

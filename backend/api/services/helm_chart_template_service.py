@@ -2375,11 +2375,15 @@ def build_values_yaml(
     version: str = "",
     values_file: str = "",
     overlay_yaml: str = "",
+    current_values: Optional[Dict[str, Any]] = None,
 ) -> str:
     """The values a chart is installed with: chart defaults, then the chosen
-    ``values-*.yaml``, then the person's own values.yaml (``overlay_yaml``),
-    then form answers. Required inputs (the passwords import blanked) are
-    checked against the result, so a values.yaml that fills them is enough."""
+    ``values-*.yaml``, then — for an upgrade that keeps them — the release's
+    current values (``current_values``, passwords included, read on the
+    server), then the person's own values.yaml (``overlay_yaml``), then form
+    answers. Required inputs (the passwords import blanked) are checked against
+    the result, so a values.yaml or the running release that fills them is
+    enough."""
     row = _get_row(slug)
     definition = _definition_for(row, version)
     values = deepcopy(definition.get("values") or {})
@@ -2391,6 +2395,8 @@ def build_values_yaml(
                 f"Environment values file '{selected_values_file}' is not available for this chart version."
             )
         values = _merge_values(values, environment_values[selected_values_file])
+    if current_values:
+        values = _merge_values(values, current_values)
     overlay = parse_values_overlay(overlay_yaml)
     if overlay:
         values = _merge_values(values, overlay)
@@ -2490,7 +2496,11 @@ def _known_in_chart(defaults: Dict[str, Any], path: str) -> bool:
 
 
 def inspect_values_import(
-    slug: str, values_yaml: str, version: str = "", values_file: str = ""
+    slug: str,
+    values_yaml: str,
+    version: str = "",
+    values_file: str = "",
+    current_values: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """What an imported values.yaml does to a chart's deploy form.
 
@@ -2499,13 +2509,17 @@ def inspect_values_import(
     included, with the merged value the field must show), the values it sets
     that have no field, keys the chart never declares (likely typos), and the
     required values still empty. Nothing is stored.
+
+    For an upgrade that keeps the release's values, ``current_values`` sit
+    under the file: they count for the required check but are never echoed
+    back in ``fields``.
     """
     resolved = resolve_chart(slug, version, values_file)
     definition = _definition_for(_get_row(slug), resolved["version"])
     overlay = _imported_values(values_yaml)
-    merged = _merge_values(
-        starting_values(slug, resolved["version"], resolved["valuesFile"]), overlay
-    )
+    base = starting_values(slug, resolved["version"], resolved["valuesFile"])
+    merged = _merge_values(base, overlay)
+    with_current = _merge_values(_merge_values(base, current_values or {}), overlay)
     leaves = [".".join(path) for path, _ in _flatten_values(overlay) if path]
     variables = [item for item in definition.get("variables") or [] if item.get("path")]
 
@@ -2535,7 +2549,7 @@ def inspect_values_import(
         {"path": str(item["path"]), "label": item.get("label") or item["path"]}
         for item in variables
         if item.get("required")
-        and str(_get_nested(merged, str(item["path"]).split("."), "") or "").strip() == ""
+        and str(_get_nested(with_current, str(item["path"]).split("."), "") or "").strip() == ""
     ]
     secrets = _import_secret_paths(definition, leaves)
     cap = MAX_IMPORT_REPORT_PATHS
@@ -2551,6 +2565,58 @@ def inspect_values_import(
         "unknownCount": len(unknown),
         "unknown": unknown[:cap],
         "missingRequired": missing_required,
+    }
+
+
+def upgrade_starting_point(
+    slug: str,
+    current_values: Dict[str, Any],
+    version: str = "",
+    values_file: str = "",
+    *,
+    show_values: bool = True,
+) -> Dict[str, Any]:
+    """The deploy form for upgrading a release onto this chart version while
+    keeping the release's values.
+
+    Each field shows the chart defaults (and chosen ``values-*.yaml``) with the
+    release's current values on top. Secret fields come back empty and are
+    listed in ``keptSecrets`` when the release already holds them: the upgrade
+    reuses them on the server, so they never reach the browser. Without
+    ``show_values`` (no ``helm:values:view``) fields show only the chart's
+    values; the release's values are still kept at upgrade time.
+    """
+    resolved = resolve_chart(slug, version, values_file)
+    definition = _definition_for(_get_row(slug), resolved["version"])
+    base = starting_values(slug, resolved["version"], resolved["valuesFile"])
+    merged = _merge_values(base, current_values or {})
+    shown = merged if show_values else base
+    fields: Dict[str, Any] = {}
+    kept_secrets: List[str] = []
+    missing_required: List[Dict[str, Any]] = []
+    for variable in definition.get("variables") or []:
+        path = str(variable.get("path") or "")
+        if not path:
+            continue
+        parts = path.split(".")
+        value = _get_nested(merged, parts, None)
+        empty = value is None or str(value).strip() == ""
+        if variable.get("sensitive"):
+            fields[path] = ""
+            if not empty:
+                kept_secrets.append(path)
+        else:
+            fields[path] = _get_nested(shown, parts, variable.get("default"))
+        if variable.get("required") and empty:
+            missing_required.append({"path": path, "label": variable.get("label") or path})
+    return {
+        "chartTemplateId": slug,
+        "version": resolved["version"],
+        "valuesFile": resolved["valuesFile"],
+        "fields": fields,
+        "keptSecrets": kept_secrets,
+        "missingRequired": missing_required,
+        "valuesShown": bool(show_values),
     }
 
 
@@ -2619,7 +2685,9 @@ def save_values_file(
     return {**_detail(row, version), "savedValuesFile": path, "secretsBlanked": secrets}, None, 201
 
 
-def prepare_chart_template_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+def prepare_chart_template_payload(
+    payload: Dict[str, Any], current_values: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     source = str(payload.get("chartSource") or payload.get("chart_source") or "").lower()
     if source != "template":
         return payload
@@ -2658,6 +2726,7 @@ def prepare_chart_template_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
                 version,
                 values_file,
                 overlay_yaml,
+                current_values,
             ),
             "chartName": row.name,
             "chartVersion": version or row.version,

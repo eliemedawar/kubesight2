@@ -11,6 +11,8 @@ export default function NamespaceSelect({
   required = true,
   disabled = false,
   allowCreate = true,
+  // The empty choice's label once namespaces load, e.g. "All namespaces" for a filter.
+  emptyLabel = "Select namespace",
 }) {
   const [namespaces, setNamespaces] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -67,7 +69,7 @@ export default function NamespaceSelect({
     : loading
       ? "Loading namespaces..."
       : namespaces.length
-        ? "Select namespace"
+        ? emptyLabel
         : "No namespaces available";
 
   const emitValue = (next) => onChange({ target: { value: next } });

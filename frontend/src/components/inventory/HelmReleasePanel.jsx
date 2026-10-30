@@ -6,7 +6,7 @@ import { isPendingApproval, pendingApprovalMessage } from "../../utils/pendingAp
 
 // Helm reports times as ISO strings or "2026-10-11 09:12:03.1 +0000 UTC";
 // show them in the viewer's locale, and anything unparseable as-is.
-function formatDeployedAt(value) {
+export function formatDeployedAt(value) {
   if (!value) return value;
   const text = String(value).replace(/ \+0000 UTC$/, "Z").replace(" ", "T");
   const time = Date.parse(text);

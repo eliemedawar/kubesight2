@@ -1547,6 +1547,8 @@ export default function App() {
             canDeploy={hasPermission("apps:deploy")}
             canHelmView={hasPermission("helm:view")}
             canHelmInstall={hasPermission("helm:install")}
+            canHelmUpgrade={hasPermission("helm:upgrade")}
+            canHelmUninstall={hasPermission("helm:uninstall")}
             canManageTemplates={hasPermission("inventory:update")}
             isAdmin={isAdmin}
             onRefresh={loadInventory}
@@ -1591,7 +1593,6 @@ export default function App() {
               onRemoveFromInventory={handleRemoveFromInventory}
               onDeployUpdate={() => {}}
               clusterOptions={inventoryClusterOptions}
-              onHelmUpgrade={() => handleNavigate("inventory")}
               onHelmActionComplete={() => {
                 loadApplicationDetail(selectedApplicationId);
                 loadInventory();

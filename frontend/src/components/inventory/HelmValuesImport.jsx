@@ -50,6 +50,8 @@ export default function HelmValuesImport({
   values = {},
   busy,
   canSave,
+  // What the file sits on, when it is not the chart's defaults (an upgrade).
+  layeredOver = "",
   onApply,
   onClear,
   onSaved,
@@ -168,7 +170,8 @@ export default function HelmValuesImport({
         <div>
           <strong>Imported {imported.name}</strong>
           <small className="form-help">
-            {plural(report.valueCount, "value")}, layered over the chart defaults
+            {plural(report.valueCount, "value")}, layered over{" "}
+            {layeredOver || "the chart defaults"}
             {report.valuesFile ? ` and ${report.valuesFile}` : ""}. Fields changed below still win.
           </small>
         </div>
