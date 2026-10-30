@@ -8,9 +8,9 @@
 | Asked by | Hussein (platform), handover of 2026-10-28 |
 | Decided | Start empty, `kubesight.areeba.com`, release `1.0.0` (Elie, 2026-10-28) |
 | Depends on | CHG-KS-001 done, with its evidence |
-| Prepared by | ____ |
-| Approved by | ____ (name, date) |
-| Run by | ____ (name, date) |
+| Prepared by | Elie |
+| Approved by |  (Rachid, 2026-10-28) |
+| Run by | ____ (Elie, 2026-10-28) |
 
 ## What
 
@@ -61,12 +61,17 @@ ARGS="-n kubesight -f deploy/ai-cluster/values-ai-cluster.yaml --set image.tag=$
 # 1. Read only: render, look, and let the API server judge it.
 helm template kubesight charts/kubesight $ARGS > /tmp/kubesight-$CHG.yaml
 grep -E '^kind:' /tmp/kubesight-$CHG.yaml | sort | uniq -c
-kubectl apply --dry-run=server -f /tmp/kubesight-$CHG.yaml        # quotas, pod security, the build fence
+kubectl apply --dry-run=server -f /tmp/kubesight-$CHG.yaml        # schema, namespaces, rights, claim/LB quotas, pod-security warnings
 helm upgrade --install kubesight charts/kubesight $ARGS --dry-run=server > /dev/null && echo "helm dry run OK"
 
 # 2. After a person's explicit "yes":
 helm upgrade --install kubesight charts/kubesight $ARGS
 ```
+
+The dry runs check every object as the API server would, but pods only exist
+after the real install. So the pod-count and CPU/memory quotas, and the build
+fence if it checks pods, show up only there, as pods that do not start. The
+checks below look for them.
 
 ## Check
 
@@ -140,6 +145,40 @@ To drop the data as well, after a separate "yes":
 
 Paste the real output of each **Check** command here, with the date and who
 ran it, then set **Status** to Done and each module card's status to Running.
+
+**Step 1, read only.** Run 2026-10-28 by ____ on the bastion, from the
+Bitbucket clone at `2d39610` (tag `1.0.0`):
+
+```
+$ grep -E '^kind:' /tmp/kubesight-CHG-KS-002.yaml | sort | uniq -c
+      1 kind: CiliumNetworkPolicy
+      2 kind: ConfigMap
+      3 kind: Deployment
+      4 kind: ExternalSecret
+     10 kind: NetworkPolicy
+      1 kind: PersistentVolumeClaim
+      2 kind: Role
+      2 kind: RoleBinding
+      4 kind: Service
+      4 kind: ServiceAccount
+$ kubectl apply --dry-run=server -f /tmp/kubesight-CHG-KS-002.yaml
+(all 33 objects "created (server dry run)", none refused)
+Warning: would violate PodSecurity "restricted:latest": ... container "backend" ...
+Warning: would violate PodSecurity "restricted:latest": ... container "buildkitd" (AppArmor/seccomp Unconfined) ...
+Warning: would violate PodSecurity "restricted:latest": ... container "frontend" ...
+$ helm upgrade --install kubesight charts/kubesight $ARGS --dry-run=server > /dev/null && echo "helm dry run OK"
+helm dry run OK
+```
+
+The three warnings are the known gap: `baseline` is enforced and `restricted`
+only warns. Backend and frontend run as root, and BuildKit needs Unconfined
+seccomp/AppArmor, which the guide allows in `kubesight-build`.
+
+The images were built on the UAT build VM from the same commit and pushed as
+`registry.areeba.com:9443/kubesight-{backend,frontend}:1.0.0`. (The bastion
+cannot build: `kprodai` may not use Docker there.)
+
+**Step 2, install, and the checks:**
 
 ```
 (to fill in after the change)
