@@ -99,7 +99,7 @@ the integration is turned on):
 - Google Play and App Store Connect;
 - Jenkins (legacy deploys);
 - `api-oci.areeba.com`, which UAT pins in `hostAliases` to 193.123.81.215;
-- for Hermes: OpenAI (`chatgpt.com`, `auth.openai.com`), `models.dev` and, if used, Telegram.
+- for Hermes: OpenAI (`chatgpt.com`, `auth.openai.com`), `models.dev` and Telegram (`api.telegram.org`, CHG-KS-006).
 
 **Cluster-wide needs:** UAT gives the backend two ClusterRoles (read the
 whole cluster; deploy anywhere). That is how KubeSight manages the cluster *it
@@ -115,7 +115,7 @@ UAT and manages this cluster too. The namespaced Roles to run Jobs in
 | Need | Here |
 |---|---|
 | Namespaces | the platform's `kubesight`, `kubesight-ci` (CI **and** analysis), `kubesight-build` (`createNamespaces: false`) |
-| Secrets | OpenBao → 5 ExternalSecrets in the chart (`externalSecrets.items`); the database login is the platform's Secret `postgres` |
+| Secrets | OpenBao → 6 ExternalSecrets in the chart (`hermes-env` from CHG-KS-006) (`externalSecrets.items`); the database login is the platform's Secret `postgres` |
 | Database | `pooler-kubesight.databases.svc:5432`, `verify-full`, CA from `postgres-ca` mounted at `/etc/postgres-ca`; pool cut to 12 + 12 connections (the login allows 40) |
 | Backend and Hermes data | 50 GiB each on `oci-bv-retain` (50 GiB is the smallest volume) |
 | CI dependency cache | **off**: it needs ReadWriteMany, which block volumes cannot do |
@@ -168,7 +168,8 @@ person's "yes".
 | [CHG-KS-001](changes/CHG-KS-001-openbao-secrets.md) | KubeSight's secrets into OpenBao | Proposed |
 | [CHG-KS-002](changes/CHG-KS-002-install.md) | Install KubeSight 1.0.0 without Hermes, and close its namespaces, checked with Hubble | Proposed (after CHG-KS-001 and the `1.0.0` images) |
 | [CHG-KS-003](changes/CHG-KS-003-hermes.md) | Add Hermes, on OpenAI through a ChatGPT/Codex login | Waiting for the platform's agreement and the firewall opening |
-| [CHG-KS-005](changes/CHG-KS-005-manage-this-cluster.md) | Let KubeSight show and manage this cluster (the backend's ClusterRoles, as in UAT) | Waiting for the platform's agreement |
+| [CHG-KS-005](changes/CHG-KS-005-manage-this-cluster.md) | Let KubeSight show and manage this cluster (the backend's ClusterRoles, as in UAT) | Done 2026-10-30 |
+| [CHG-KS-006](changes/CHG-KS-006-hermes-telegram.md) | Connect Hermes's gateway to Telegram (its own bot) | OpenBao entry written; waiting for the firewall opening to `api.telegram.org` |
 
 ## 6. Module documents
 

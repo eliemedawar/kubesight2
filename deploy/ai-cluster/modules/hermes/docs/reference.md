@@ -14,6 +14,7 @@ release `kubesight`, namespace `kubesight`.
 | ConfigMap | `kubesight-hermes-skill` (the KubeSight skill) | `kubesight` |
 | PersistentVolumeClaim | `kubesight-hermes-data` | `kubesight` |
 | ExternalSecret → Secret | `hermes` | `kubesight` |
+| ExternalSecret → Secret | `hermes-env` (the Telegram bot, CHG-KS-006) | `kubesight` |
 | NetworkPolicy | `kubesight-hermes` | `kubesight` |
 | CiliumNetworkPolicy | `kubesight-hermes-egress` | `kubesight` |
 
@@ -40,13 +41,14 @@ Shared with the rest of `kubesight`:
 | `hermes.enabled` | `true` |
 | `hermes.image` | `kubesight-hermes:v2026.7.20` (registry `registry.areeba.com`) |
 | `hermes.codexAuth.existingSecret` | `hermes` |
-| `hermes.extraEnvFromSecrets` | `[]` |
+| `hermes.extraEnvFromSecrets` | `[hermes-env]` |
 | `hermes.config.model` | `provider: openai-codex`, `default: gpt-5.6-sol`, `base_url: https://chatgpt.com/backend-api/codex`, `max_tokens: 8192` |
 | `hermes.config.agent` | `max_turns: 20`, `gateway_timeout: 900`, `api_max_retries: 1`, `reasoning_effort: low` |
 | `hermes.maxIterations` | `20` |
 | `hermes.installSkill` | `true` |
 | `hermes.persistence` | `50Gi`, `ReadWriteOnce`, class `oci-bv-retain` |
-| `hermes.networkPolicy.egressFQDNs` | `[chatgpt.com, auth.openai.com, models.dev]` |
+| `hermes.config.platform_toolsets` | `api_server`, `cli` and `telegram`: `[kubesight]` |
+| `hermes.networkPolicy.egressFQDNs` | `[chatgpt.com, auth.openai.com, models.dev, api.telegram.org]` |
 | `hermes.resources` | requests 250m CPU / 512Mi / 256Mi disk; limits 2 CPU / 2Gi / 2Gi disk |
 | `hermes.initResources` | requests 10m CPU / 32Mi; limits 500m CPU / 128Mi |
 
@@ -62,6 +64,7 @@ Shared with the rest of `kubesight`:
 | `API_SERVER_KEY` | Secret `kubesight-secrets`, key `HERMES_API_TOKEN` |
 | `MCP_KUBESIGHT_API_KEY` | Secret `kubesight-secrets`, key `KUBESIGHT_HERMES_MCP_TOKEN` |
 | `CODEX_HOME` | `/opt/codex`, where the Secret `hermes` is mounted |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USERS`, `TELEGRAM_HOME_CHANNEL` | Secret `hermes-env` (from `kv/kubesight/hermes-env`), all its fields |
 
 `config.yaml` also names the MCP server `kubesight` at
 `http://backend-service.kubesight.svc.cluster.local:5000/api/mcp`, with a timeout

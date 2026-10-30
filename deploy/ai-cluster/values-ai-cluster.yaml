@@ -131,7 +131,9 @@ hermes:
   # set this to hermes and turn on the hermes item under externalSecrets.
   codexAuth:
     existingSecret: ""
-  extraEnvFromSecrets: []
+  # TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USERS, TELEGRAM_HOME_CHANNEL, from
+  # kv/kubesight/hermes-env (CHG-KS-006): the gateway's Telegram bot.
+  extraEnvFromSecrets: [hermes-env]
   config:
     model:
       default: gpt-5.6-sol
@@ -143,13 +145,15 @@ hermes:
     # install their packages from PyPI at first use, which egress drops.
     platform_toolsets:
       cli: [kubesight]
+      telegram: [kubesight]
   persistence:
     size: 50Gi
     storageClass: oci-bv-retain
   networkPolicy:
     # chatgpt.com answers the model calls; auth.openai.com renews the login;
-    # models.dev lists model features (context size, images), read at start.
-    egressFQDNs: [chatgpt.com, auth.openai.com, models.dev]
+    # models.dev lists model features (context size, images), read at start;
+    # api.telegram.org carries the Telegram bot (long polling, no way in).
+    egressFQDNs: [chatgpt.com, auth.openai.com, models.dev, api.telegram.org]
 
 # --- Secrets: OpenBao -> ExternalSecret -----------------------------------------
 externalSecrets:
@@ -161,6 +165,8 @@ externalSecrets:
     - {name: kubesight-secrets, key: kubesight/backend}
     # Field auth.json: Hermes's Codex login.
     - {name: hermes, key: kubesight/hermes, module: hermes, enabled: false}
+    # Fields TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USERS, TELEGRAM_HOME_CHANNEL.
+    - {name: hermes-env, key: kubesight/hermes-env, module: hermes}
     # Fields tls.crt and tls.key.
     - {name: kubesight-tls, key: kubesight/tls, type: kubernetes.io/tls, module: kubesight-frontend}
     # Fields registry, username, password; one entry per namespace, because

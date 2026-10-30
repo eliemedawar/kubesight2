@@ -4,7 +4,7 @@
 |---|---|
 | ID | CHG-KS-005 |
 | Modules | kubesight-backend |
-| Status | Proposed, waiting for the platform's agreement (the first cluster-wide objects of this release) |
+| Status | Done on the cluster 2026-10-30 (Elie: "worked"); the after-evidence is still to paste |
 | Asked by | Elie, 2026-10-30: "i want it to manage this cluster", "same as uat" |
 | Depends on | CHG-KS-002 (the release and the service account `kubesight:kubesight-backend`) |
 | Prepared by | ____ |
