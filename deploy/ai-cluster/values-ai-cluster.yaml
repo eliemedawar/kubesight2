@@ -15,8 +15,10 @@ commonLabels:
 
 # The platform owns namespaces and every cluster-wide object.
 createNamespaces: false
+# The one exception (CHG-KS-005, as in UAT): the backend's reader and deployer
+# ClusterRoles, so KubeSight shows and manages this cluster too.
 rbac:
-  clusterWide: false
+  clusterWide: true
 
 # --- Images ------------------------------------------------------------------
 image:

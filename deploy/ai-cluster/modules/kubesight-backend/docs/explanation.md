@@ -4,19 +4,23 @@
 
 The whole of KubeSight is one Helm release of `charts/kubesight`. The same
 chart runs elsewhere. On this cluster its switches keep it inside the
-platform's rules: `createNamespaces: false`, `rbac.clusterWide: false`, and
+platform's rules: `createNamespaces: false`, and
 `externalSecrets.items`, `networkPolicies.*` and the module labels set. One
 release means one upgrade, one history and one rollback for all the parts.
 
-## No cluster-wide rights
+## Cluster-wide rights, as in UAT
 
-Elsewhere the backend gets two ClusterRoles, so it can show and manage the
-cluster it runs in. Here it manages *other* clusters, through the kubeconfigs
-people save in it. In this cluster it needs only to start Jobs in
-`kubesight-ci`. So it has two namespaced Roles there (`kubesight-ci-launcher`,
-`kubesight-analysis-launcher`) and nothing cluster-wide. If KubeSight should
-one day show this cluster too, that is a read-only ClusterRole the platform
-would grant.
+The backend starts Jobs in `kubesight-ci` through two namespaced Roles there
+(`kubesight-ci-launcher`, `kubesight-analysis-launcher`). It manages other
+clusters through the kubeconfigs people save in it.
+
+The first install stopped there (`rbac.clusterWide: false`), so this cluster
+showed empty. CHG-KS-005 turns the switch on: the backend gets the same two
+ClusterRoles as in UAT, `kubesight-backend-reader` (read everything) and
+`kubesight-backend-deployer` (deploy, restart, scale, roll back, exec, in any
+namespace), so KubeSight shows and manages this cluster too. They are the one
+exception to the platform's "no cluster-wide objects". What keeps changes in
+check is KubeSight's own roles and its cluster approval gate on `ociduai-k8s`.
 
 ## Secrets from OpenBao, and the one key that must never change
 

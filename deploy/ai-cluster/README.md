@@ -7,8 +7,9 @@ It covers the session prompt's first tasks: 1 (access check), 2 (inventory),
 
 Everything is installed by **one Helm release** of `charts/kubesight` with
 [`values-ai-cluster.yaml`](values-ai-cluster.yaml). The rendered release holds
-no Namespace, ClusterRole, ClusterRoleBinding, PersistentVolume or Secret, and
-every object carries `areeba.com/module` and `areeba.com/change`.
+no Namespace, PersistentVolume or Secret, and no ClusterRole or
+ClusterRoleBinding except the backend's two from CHG-KS-005. Every object
+carries `areeba.com/module` and `areeba.com/change`.
 
 ## 1. Check access (read only)
 
@@ -102,10 +103,12 @@ the integration is turned on):
 
 **Cluster-wide needs:** UAT gives the backend two ClusterRoles (read the
 whole cluster; deploy anywhere). That is how KubeSight manages the cluster *it
-runs in*. Here it does not need to: it manages other clusters through their
-kubeconfigs. The release therefore ships **no** ClusterRole
-(`rbac.clusterWide: false`). The backend gets only namespaced Roles to run
-Jobs in `kubesight-ci`.
+runs in*. The first install shipped none (`rbac.clusterWide: false`), so
+KubeSight managed only other clusters, through their kubeconfigs, and showed
+this one empty. With [CHG-KS-005](changes/CHG-KS-005-manage-this-cluster.md)
+(`rbac.clusterWide: true`, once the platform agrees) it gets the same two as
+UAT and manages this cluster too. The namespaced Roles to run Jobs in
+`kubesight-ci` stay.
 
 ## 3. Mapping to the platform
 
@@ -120,7 +123,7 @@ Jobs in `kubesight-ci`.
 | Web access | Envoy Gateway `kubesight-gateway` (class `areeba-fabric`, internal OCI network load balancer `10.43.10.238:443`, TLS from `kv/kubesight/tls`) → `frontend-service:80` (ClusterIP, plain HTTP) → nginx, which proxies `/api` to the backend. Gateway and route: [gateway/](gateway/), applied with kubectl (CHG-KS-004). Until 2026-10-30: an internal OCI load balancer → nginx on 8443 |
 | Hermes's model | OpenAI through a ChatGPT/Codex login (as in UAT), `gpt-5.6-sol`, login in `kv/kubesight/hermes`; egress to `chatgpt.com`, `auth.openai.com` and `models.dev` only |
 | Network | default deny in all three namespaces; DNS; same-namespace in `kubesight` only; backend → pooler, → API server; CI/analysis → backend:5000; the gateway's Envoy pods → frontend:80; per-build rules created by the backend |
-| Cluster-wide | none in the release; requests below |
+| Cluster-wide | the backend's reader and deployer ClusterRoles, as in UAT (CHG-KS-005); nothing else |
 
 ## 4. Decisions and answers (2026-10-28)
 
@@ -165,6 +168,7 @@ person's "yes".
 | [CHG-KS-001](changes/CHG-KS-001-openbao-secrets.md) | KubeSight's secrets into OpenBao | Proposed |
 | [CHG-KS-002](changes/CHG-KS-002-install.md) | Install KubeSight 1.0.0 without Hermes, and close its namespaces, checked with Hubble | Proposed (after CHG-KS-001 and the `1.0.0` images) |
 | [CHG-KS-003](changes/CHG-KS-003-hermes.md) | Add Hermes, on OpenAI through a ChatGPT/Codex login | Waiting for the platform's agreement and the firewall opening |
+| [CHG-KS-005](changes/CHG-KS-005-manage-this-cluster.md) | Let KubeSight show and manage this cluster (the backend's ClusterRoles, as in UAT) | Waiting for the platform's agreement |
 
 ## 6. Module documents
 

@@ -50,7 +50,7 @@ and `image.tag=1.0.0`.
 
 ## Values that shape it (`values-ai-cluster.yaml`)
 
-`rbac.clusterWide: false` · `database.fromLogin` (Secret `postgres`, pooler, `verify-full`) ·
+`rbac.clusterWide: true` (CHG-KS-005) · `database.fromLogin` (Secret `postgres`, pooler, `verify-full`) ·
 `secrets.existingSecret: kubesight-secrets` · `backend.persistence: {size: 50Gi, storageClass: oci-bv-retain}` ·
 `backend.extraVolumes` / `extraVolumeMounts` (postgres-ca) · `backend.autoUpgrade: false` ·
 `backend.inClusterContextName: ociduai-k8s` · `networkPolicies.*`

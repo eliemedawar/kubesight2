@@ -16,9 +16,9 @@ namespace, and they get nothing they could misuse:
 
 The backend starts them through two namespaced Roles, `kubesight-ci-launcher`
 and `kubesight-analysis-launcher`. These allow creating and deleting Jobs,
-their Secrets and NetworkPolicies, and reading pods and logs. Nothing in the
-release reaches beyond this namespace and the backend's own. The platform's
-rules allow no ClusterRole (`rbac.clusterWide: false`).
+their Secrets and NetworkPolicies, and reading pods and logs. CI runs need
+nothing more. (The backend's cluster-wide roles from CHG-KS-005 are for
+showing and managing the cluster, not for CI.)
 
 ## Network: closed, then one rule per run
 
