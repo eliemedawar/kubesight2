@@ -29,25 +29,26 @@ imagePullSecret:
   create: false
 
 # --- Where people reach it ---------------------------------------------------
-# Free since UAT moved to another name; its DNS record points at the load balancer.
+# Free since UAT moved to another name; its DNS record points at the gateway.
 publicHost: kubesight.areeba.com
+# The gateway ends TLS, so the chart cannot tell; links stay https.
+publicScheme: https
 ingress:
   # No ingress controller here: the frontend serves /api itself (below).
   enabled: false
 
 frontend:
-  replicas: 2
+  # 1 since 2026-10-30: matched to a kubectl edit made on the cluster.
+  replicas: 1
   serveApi: true
+  # No TLS in nginx (CHG-KS-004): the Envoy gateway (class areeba-fabric) ends
+  # TLS and sends plain HTTP to frontend-service:80. The Service is then
+  # ClusterIP 80 -> 80, as edited on the cluster on 2026-10-30. Until then it
+  # was an internal OCI load balancer on 443 -> nginx 8443 with kubesight-tls.
   tls:
-    secretName: kubesight-tls
+    secretName: ""
   service:
-    type: LoadBalancer
-    externalTrafficPolicy: Local
-    annotations:
-      service.beta.kubernetes.io/oci-load-balancer-internal: "true"
-      service.beta.kubernetes.io/oci-load-balancer-shape: "flexible"
-      service.beta.kubernetes.io/oci-load-balancer-shape-flex-min: "10"
-      service.beta.kubernetes.io/oci-load-balancer-shape-flex-max: "100"
+    type: ClusterIP
 
 # --- Database: pooler-kubesight, verify-full -----------------------------------
 database:
@@ -135,6 +136,11 @@ hermes:
       provider: openai-codex
       base_url: https://chatgpt.com/backend-api/codex
       max_tokens: 8192
+    # The `hermes` chat in the pod gets KubeSight's tools only, like the API
+    # server (chart default). Left open it loads every built-in tool, and some
+    # install their packages from PyPI at first use, which egress drops.
+    platform_toolsets:
+      cli: [kubesight]
   persistence:
     size: 50Gi
     storageClass: oci-bv-retain
@@ -178,9 +184,14 @@ networkPolicies:
     podLabels: {cnpg.io/poolerName: pooler-kubesight}
     port: 5432
   kubeApiServer: true
-  # The internal load balancers' subnet (OCIDUAILB).
+  # The Envoy proxy pods of kubesight-gateway (CHG-KS-004), which Envoy
+  # Gateway runs in envoy-gateway-system; only this Gateway's pods.
   frontendIngressFrom:
-    - ipBlock: {cidr: 10.43.10.0/24}
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: envoy-gateway-system}}
+      podSelector:
+        matchLabels:
+          gateway.envoyproxy.io/owning-gateway-name: kubesight-gateway
+          gateway.envoyproxy.io/owning-gateway-namespace: kubesight
   # Added one by one as integrations are configured, each with its change
   # record and firewall request (Bitbucket, Nexus, Zoho/Jira, SMTP, the
   # clusters KubeSight manages, ...).

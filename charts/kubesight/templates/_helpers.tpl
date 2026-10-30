@@ -62,7 +62,9 @@ commonLabels stay off pods: a new change ID would otherwise restart them all.
 {{- $host := required "publicHost is required: the host name people open, e.g. kubesight.areeba.com" .Values.publicHost -}}
 {{- $ingressTls := and .Values.ingress.enabled (ne .Values.ingress.tls.mode "none") -}}
 {{- $frontendTls := and .Values.frontend.serveApi .Values.frontend.tls.secretName -}}
-{{- if or $ingressTls $frontendTls -}}
+{{- if .Values.publicScheme -}}
+{{- printf "%s://%s" .Values.publicScheme $host -}}
+{{- else if or $ingressTls $frontendTls -}}
 {{- printf "https://%s" $host -}}
 {{- else -}}
 {{- printf "http://%s" $host -}}

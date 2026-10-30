@@ -54,6 +54,10 @@ imagePullSecret:
 # --- Where people reach it --------------------------------------------------
 # The host name people open, without https://. Required.
 publicHost: ""
+# http or https in the links KubeSight sends (emails, webhooks, tickets).
+# Empty: https when the ingress or the frontend has TLS. Set https when
+# something in front of the chart (a gateway, a load balancer) ends TLS.
+publicScheme: ""
 
 ingress:
   enabled: true

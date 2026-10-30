@@ -71,6 +71,13 @@ one JSON file and sends nothing. It is now the third name in
 `hermes.networkPolicy.egressFQDNs`. The upgrade changes only that Cilium rule;
 Hermes does not restart.
 
+The chat then hung on `uv pip install ... edge-tts` (text to speech), dropped
+on its way to `pypi.org` (Hubble: `Policy denied DROPPED`, 151.101.x.223). The
+chat had no tool list of its own and loaded every built-in tool; some install
+their packages at first use. PyPI stays closed: the chat now gets KubeSight's
+tools only (`hermes.config.platform_toolsets.cli: [kubesight]`), as the API
+server already does. Hermes restarts once, because its config changes.
+
 ## Before you start: the login file
 
 Hermes uses UAT's ChatGPT account, but with **a login of its own**. Do not
