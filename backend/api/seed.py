@@ -34,6 +34,19 @@ DEMO_USERNAMES = frozenset({"viewer", "operator"})
 # The API token a deployment hands Hermes (KUBESIGHT_HERMES_MCP_TOKEN) is
 # registered under this name, so a changed value can retire the old one.
 DEPLOYMENT_HERMES_TOKEN_NAME = "Hermes MCP (set by the deployment)"
+# hermes-agent's own role, held to exactly HERMES_AGENT_PERMISSIONS on every
+# start. A deployment may put it on another role instead
+# (KUBESIGHT_HERMES_AGENT_ROLE, e.g. admin); that role is then left as it is.
+HERMES_AGENT_ROLE = "hermes-agent"
+
+
+def _hermes_agent_role(roles_by_name: dict):
+    wanted = os.getenv("KUBESIGHT_HERMES_AGENT_ROLE", "").strip() or HERMES_AGENT_ROLE
+    role = roles_by_name.get(wanted)
+    if role is None:
+        logger.warning("KUBESIGHT_HERMES_AGENT_ROLE=%s is not a role; hermes-agent keeps its own", wanted)
+        return roles_by_name.get(HERMES_AGENT_ROLE)
+    return role
 
 
 def _seed_permissions() -> dict:
@@ -129,6 +142,8 @@ def _seed_users(roles_by_name: dict) -> None:
     for spec in DEFAULT_USERS:
         user = User.query.filter_by(username=spec["username"]).first()
         role = roles_by_name.get(spec["role"])
+        if spec["username"] == "hermes-agent":
+            role = _hermes_agent_role(roles_by_name)
         if not user:
             if spec["username"] in DEMO_USERNAMES and not seed_demo_users:
                 continue
@@ -534,9 +549,11 @@ def seed_defaults() -> None:
     _seed_role_cluster_access("viewer", cluster_ids)
     _seed_role_cluster_access("operator", cluster_ids)
     # Hermes holds exactly HERMES_AGENT_PERMISSIONS (ticket agent + analysis executor). It deliberately receives neither runtime
-    # cluster grants nor any interactive session capability.
+    # cluster grants nor any interactive session capability. Only on its own
+    # role: one the deployment chose instead (KUBESIGHT_HERMES_AGENT_ROLE) is
+    # shared with people and must not be cut down.
     hermes = User.query.filter_by(username="hermes-agent").first()
-    if hermes and hermes.role:
+    if hermes and hermes.role and hermes.role.name == HERMES_AGENT_ROLE:
         allowed = set(HERMES_AGENT_PERMISSIONS)
         hermes.role.permissions = [
             permission for permission in permissions_by_key.values() if permission.key in allowed

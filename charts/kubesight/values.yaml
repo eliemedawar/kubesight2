@@ -295,6 +295,11 @@ hermes:
     requests: {cpu: 10m, memory: 32Mi}
     limits: {cpu: 500m, memory: 128Mi}
   maxIterations: 20
+  # The KubeSight role of the hermes-agent account, whose token Hermes uses on
+  # the MCP server. Empty = its own narrow role (ticket agent and analysis
+  # only, reset on every start). A role name, e.g. admin, puts it on that role
+  # instead, and the backend no longer cuts it down.
+  agentRole: ""
   # Where KubeSight sends its Hermes requests (Application Intelligence, the
   # ticket agent, CI assist). Empty = the bundled Hermes. Set it to an AI
   # proxy that forwards to Hermes, e.g.
@@ -328,9 +333,12 @@ hermes:
       coding_context: "off"
       reasoning_effort: low
       verbose: false
+    # kubesight = KubeSight's MCP server; skills lets Hermes read the
+    # KubeSight skill (without a skills tool it never lists the skill).
     platform_toolsets:
       api_server:
         - kubesight
+        - skills
   # Copy the KubeSight skill (files/hermes-skills/kubesight) into Hermes on
   # every start, so it always matches this release.
   installSkill: true

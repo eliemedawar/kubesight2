@@ -125,6 +125,18 @@ spec:
                 find /skill -mindepth 1 -maxdepth 1 ! -name '..*' -exec cp -RL {} /data/skills/kubesight/ \;
               fi
               touch /data/.env
+              # Hermes connects to KubeSight's MCP server once, at start, and
+              # gives up after three quick tries. Wait for the backend (at
+              # most 5 minutes; Hermes starts anyway after that).
+              python3 -c "
+              import time, urllib.request
+              for _ in range(60):
+                  try:
+                      urllib.request.urlopen('{{ include "kubesight.backendUrl" . }}/health', timeout=5)
+                      break
+                  except Exception:
+                      time.sleep(5)
+              " || true
               grep -v '^MCP_KUBESIGHT_API_KEY=' /data/.env > /data/.env.new || true
               printf 'MCP_KUBESIGHT_API_KEY=%s\n' "$MCP_KUBESIGHT_API_KEY" >> /data/.env.new
               mv /data/.env.new /data/.env

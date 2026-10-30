@@ -134,6 +134,9 @@ hermes:
   # TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USERS, TELEGRAM_HOME_CHANNEL, from
   # kv/kubesight/hermes-env (CHG-KS-006): the gateway's Telegram bot.
   extraEnvFromSecrets: [hermes-env]
+  # hermes-agent (whose token Hermes uses on the MCP server) is an admin, as
+  # Elie decided 2026-10-30 (CHG-KS-007): every tool, every cluster.
+  agentRole: admin
   config:
     model:
       default: gpt-5.6-sol
@@ -143,9 +146,10 @@ hermes:
     # The `hermes` chat in the pod gets KubeSight's tools only, like the API
     # server (chart default). Left open it loads every built-in tool, and some
     # install their packages from PyPI at first use, which egress drops.
+    # skills: without it Hermes never sees the KubeSight skill (CHG-KS-007).
     platform_toolsets:
-      cli: [kubesight]
-      telegram: [kubesight]
+      cli: [kubesight, skills]
+      telegram: [kubesight, skills]
   persistence:
     size: 50Gi
     storageClass: oci-bv-retain

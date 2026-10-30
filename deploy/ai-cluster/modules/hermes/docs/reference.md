@@ -29,7 +29,7 @@ Shared with the rest of `kubesight`:
 | Image | `registry.areeba.com/kubesight-hermes:v2026.7.20`, pulled with `regcred` |
 | Port | `http` 8642: the OpenAI-style API, `/v1/chat/completions`, health at `/health` |
 | Service URL | `http://kubesight-hermes.kubesight.svc.cluster.local:8642/v1/chat/completions` |
-| Init containers | `prepare-s6-run` (root: owns `/run` for uid 10000), `stage-hermes-files` (uid 10000: copies config, skill, MCP token) |
+| Init containers | `prepare-s6-run` (root: owns `/run` for uid 10000), `stage-hermes-files` (uid 10000: copies config, skill, MCP token, then waits up to 5 minutes for the backend's `/health`) |
 | Main container | `hermes`, args `gateway run`, uid/gid 10000, no privilege escalation |
 | Pod | `fsGroup: 10000`, `seccompProfile: RuntimeDefault`, strategy `Recreate`, 1 replica |
 | Probes | readiness and liveness `GET /health` on `http` |
@@ -47,7 +47,8 @@ Shared with the rest of `kubesight`:
 | `hermes.maxIterations` | `20` |
 | `hermes.installSkill` | `true` |
 | `hermes.persistence` | `50Gi`, `ReadWriteOnce`, class `oci-bv-retain` |
-| `hermes.config.platform_toolsets` | `api_server`, `cli` and `telegram`: `[kubesight]` |
+| `hermes.agentRole` | `admin`: the KubeSight role of `hermes-agent`, whose token Hermes uses on the MCP server (CHG-KS-007) |
+| `hermes.config.platform_toolsets` | `api_server`, `cli` and `telegram`: `[kubesight, skills]` (`skills` lets Hermes see the KubeSight skill) |
 | `hermes.networkPolicy.egressFQDNs` | `[chatgpt.com, auth.openai.com, models.dev, api.telegram.org]` |
 | `hermes.resources` | requests 250m CPU / 512Mi / 256Mi disk; limits 2 CPU / 2Gi / 2Gi disk |
 | `hermes.initResources` | requests 10m CPU / 32Mi; limits 500m CPU / 128Mi |

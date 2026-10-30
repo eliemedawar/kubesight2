@@ -169,7 +169,8 @@ person's "yes".
 | [CHG-KS-002](changes/CHG-KS-002-install.md) | Install KubeSight 1.0.0 without Hermes, and close its namespaces, checked with Hubble | Proposed (after CHG-KS-001 and the `1.0.0` images) |
 | [CHG-KS-003](changes/CHG-KS-003-hermes.md) | Add Hermes, on OpenAI through a ChatGPT/Codex login | Waiting for the platform's agreement and the firewall opening |
 | [CHG-KS-005](changes/CHG-KS-005-manage-this-cluster.md) | Let KubeSight show and manage this cluster (the backend's ClusterRoles, as in UAT) | Done 2026-10-30 |
-| [CHG-KS-006](changes/CHG-KS-006-hermes-telegram.md) | Connect Hermes's gateway to Telegram (its own bot) | OpenBao entry written; waiting for the firewall opening to `api.telegram.org` |
+| [CHG-KS-006](changes/CHG-KS-006-hermes-telegram.md) | Connect Hermes's gateway to Telegram (its own bot) | Done 2026-10-30 (Hermes answers on Telegram) |
+| [CHG-KS-007](changes/CHG-KS-007-hermes-admin-and-skill.md) | KubeSight `1.0.5`: `hermes-agent` as an admin, Hermes reads its skill, waits for the backend at start | Proposed |
 
 ## 6. Module documents
 

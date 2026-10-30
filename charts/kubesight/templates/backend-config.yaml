@@ -94,6 +94,9 @@
 {{- $_ := merge $data (dict "HERMES_SERVICE_NAMESPACE" $ns "HERMES_SERVICE_PORT" "8642") }}
 {{- end }}
 {{- end }}
+{{- with .Values.hermes.agentRole }}
+{{- $_ := set $data "KUBESIGHT_HERMES_AGENT_ROLE" . }}
+{{- end }}
 {{- /* backend.config wins over everything the chart set. */ -}}
 {{- range $key, $value := .Values.backend.config }}
 {{- $_ := set $data $key (toString $value) }}
