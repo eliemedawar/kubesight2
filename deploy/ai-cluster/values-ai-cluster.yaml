@@ -119,16 +119,15 @@ buildkit:
     limits: {cpu: "2", memory: 4Gi, ephemeral-storage: 10Gi}
 
 # --- Hermes: OpenAI, through a ChatGPT/Codex login, as in UAT ---------------------
-# Off until the login is in OpenBao (CHG-KS-003 turns it on: here, and the
-# hermes item under externalSecrets).
+# On (CHG-KS-003). For now the login is made inside Hermes after install
+# (`hermes auth add openai-codex`, device code, UAT's ChatGPT account) and lives
+# only on its volume in /opt/data; no Secret yet.
 hermes:
-  enabled: false
-  # The Secret hermes (from kv/kubesight/hermes) holds one key, auth.json: the
-  # Codex login made for this Hermes (UAT's ChatGPT account, its own login,
-  # never a copy of UAT's auth.json). Mounted read-only at
-  # /opt/codex; Hermes keeps its own refreshed copy in /opt/data.
+  enabled: true
+  # Later, from OpenBao: put the login in kv/kubesight/hermes (field auth.json),
+  # set this to hermes and turn on the hermes item under externalSecrets.
   codexAuth:
-    existingSecret: hermes
+    existingSecret: ""
   extraEnvFromSecrets: []
   config:
     model:

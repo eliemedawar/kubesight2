@@ -44,6 +44,22 @@ The ticket agent, AI source analysis and CI assist all run through Hermes.
 CHG-KS-002 installed KubeSight without it. There is still no Claude API key;
 the ChatGPT/Codex login is what UAT already runs on.
 
+## As run first (2026-10-30): login inside Hermes, no OpenBao yet
+
+Elie chose to install Hermes first and sign it in from inside, leaving OpenBao
+for later. The values file already has `hermes.enabled: true` and
+`hermes.codexAuth.existingSecret: ""`; the `hermes` ExternalSecret item stays
+off. After the `helm upgrade` in step 2/3 below (skip step 1):
+
+```bash
+kubectl -n kubesight exec -it deploy/kubesight-hermes -c hermes -- hermes auth add openai-codex
+```
+
+It prints `https://auth.openai.com/codex/device` and a code: open it on your
+own computer, sign in with UAT's ChatGPT account, enter the code. The login is
+kept in `/opt/data` on Hermes's volume. Moving it to OpenBao later is its own
+change: the file to store is the one Hermes saved, not a new `codex login`.
+
 ## Before you start: the login file
 
 Hermes uses UAT's ChatGPT account, but with **a login of its own**. Do not
