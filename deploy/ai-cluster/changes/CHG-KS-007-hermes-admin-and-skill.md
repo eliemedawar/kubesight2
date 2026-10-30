@@ -6,14 +6,14 @@
 | Modules | hermes, kubesight-backend |
 | Status | Proposed |
 | Asked by | Elie, 2026-10-30: "i want it to use the hermes-agent but i will make him admin", "make it so hermes agent is admin", and the skill ConfigMap that Hermes "cannot read" |
-| Depends on | CHG-KS-006; images `kubesight-backend:1.0.5` and `kubesight-frontend:1.0.5` built by the tag pipeline |
+| Depends on | CHG-KS-006; images `kubesight-backend:1.0.6` and `kubesight-frontend:1.0.6` built by the tag pipeline |
 | Prepared by | ____ |
 | Approved by | ____ (name, date) |
 | Run by | ____ (name, date) |
 
 ## What
 
-Three faults seen on 2026-10-30, one upgrade to `1.0.5`:
+Three faults seen on 2026-10-30, one upgrade to `1.0.6`:
 
 1. **Hermes had 13 tools, not ~90.** Its MCP token belongs to `hermes-agent`,
    which the backend puts back on its own narrow role (ticket agent and
@@ -55,8 +55,8 @@ Elie wants Hermes to work on the clusters, as in UAT, with its own account
 ## Steps
 
 The images first, from a workstation, once the commit is pushed (done by
-Claude, 2026-10-30): the tag `1.0.5` on Bitbucket starts the pipeline (tests,
-then `kubesight-backend:1.0.5` and `kubesight-frontend:1.0.5`). Wait for it to
+Claude, 2026-10-30): the tag `1.0.6` on Bitbucket starts the pipeline (tests,
+then `kubesight-backend:1.0.6` and `kubesight-frontend:1.0.6`). Wait for it to
 finish.
 
 On the bastion: pull in `~/kubesight-ai`, copy `charts/kubesight` and
@@ -64,7 +64,7 @@ On the bastion: pull in `~/kubesight-ai`, copy `charts/kubesight` and
 
 ```bash
 CHG=CHG-KS-007
-TAG=1.0.5
+TAG=1.0.6
 ARGS="-n kubesight -f deploy/ai-cluster/values-ai-cluster.yaml --set image.tag=$TAG --set-string commonLabels.areeba\.com/change=$CHG"
 
 # Read only
