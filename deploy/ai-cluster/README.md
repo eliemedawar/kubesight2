@@ -117,9 +117,9 @@ Jobs in `kubesight-ci`.
 | Backend and Hermes data | 50 GiB each on `oci-bv-retain` (50 GiB is the smallest volume) |
 | CI dependency cache | **off**: it needs ReadWriteMany, which block volumes cannot do |
 | Builds | BuildKit in `kubesight-build`: `docker.io/moby/buildkit:v0.23.2-rootless`, uid 1000, no added capabilities, unconfined seccomp/AppArmor, one-at-a-time updates to stay in the quota |
-| Web access | internal OCI load balancer → frontend nginx on 8443 (TLS from `kv/kubesight/tls`), which proxies `/api` to the backend (no ingress controller) |
+| Web access | Envoy Gateway `kubesight-gateway` (class `areeba-fabric`, internal OCI network load balancer `10.43.10.238:443`, TLS from `kv/kubesight/tls`) → `frontend-service:80` (ClusterIP, plain HTTP) → nginx, which proxies `/api` to the backend. Gateway and route: [gateway/](gateway/), applied with kubectl (CHG-KS-004). Until 2026-10-30: an internal OCI load balancer → nginx on 8443 |
 | Hermes's model | OpenAI through a ChatGPT/Codex login (as in UAT), `gpt-5.6-sol`, login in `kv/kubesight/hermes`; egress to `chatgpt.com`, `auth.openai.com` and `models.dev` only |
-| Network | default deny in all three namespaces; DNS; same-namespace in `kubesight` only; backend → pooler, → API server; CI/analysis → backend:5000; LB subnet → frontend:8443; per-build rules created by the backend |
+| Network | default deny in all three namespaces; DNS; same-namespace in `kubesight` only; backend → pooler, → API server; CI/analysis → backend:5000; the gateway's Envoy pods → frontend:80; per-build rules created by the backend |
 | Cluster-wide | none in the release; requests below |
 
 ## 4. Decisions and answers (2026-10-28)
@@ -139,9 +139,11 @@ Jobs in `kubesight-ci`.
 ChatGPT/Codex login, as in UAT (Elie). The firewall opening above was for
 `api.anthropic.com`; `chatgpt.com` and `auth.openai.com` are asked with CHG-KS-003.
 
-Still open: the DNS record for `kubesight.areeba.com` (once the load balancer
-has its address), and the firewall openings for each integration as it is
-turned on.
+Still open: the DNS record for `kubesight.areeba.com` → `10.43.10.238` (the
+gateway); users' networks to `10.43.10.238:443` and to the nodes (the network
+load balancer keeps the client's address; from the bastion it works, from
+laptops it timed out on 2026-10-30); and the firewall openings for each
+integration as it is turned on.
 
 **Known gaps, to fix in the backend later:**
 

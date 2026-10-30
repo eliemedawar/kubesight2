@@ -1,0 +1,26 @@
+# Everything to the frontend (CHG-KS-004). Its nginx serves the app and
+# forwards /api and /health to backend-service:5000 inside the namespace.
+#
+# No /api rule to backend-service: the backend lets in only the frontend's
+# pods, so Envoy's calls time out and every API call answers 503 (as on
+# 2026-10-30, when the route had one).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: kubesight-route
+  namespace: kubesight
+  labels:
+    areeba.com/module: kubesight-frontend
+    areeba.com/change: CHG-KS-004
+spec:
+  hostnames: [kubesight.areeba.com]
+  parentRefs:
+    - name: kubesight-gateway
+      sectionName: https
+  rules:
+    - matches:
+        - path: {type: PathPrefix, value: /}
+      backendRefs:
+        # Plain HTTP: the gateway ends TLS (no BackendTLSPolicy).
+        - name: frontend-service
+          port: 80

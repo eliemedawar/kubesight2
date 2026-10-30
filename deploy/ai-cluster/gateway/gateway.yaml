@@ -1,0 +1,37 @@
+# How people reach KubeSight on the AI cluster (CHG-KS-004). Not part of the
+# Helm release: applied with kubectl, kept here so it can be rebuilt from Git.
+#
+#   kubectl diff  -f deploy/ai-cluster/gateway/
+#   kubectl apply -f deploy/ai-cluster/gateway/
+#
+# Envoy Gateway (class areeba-fabric, the platform's) runs the proxy pods in
+# envoy-gateway-system behind an internal OCI network load balancer,
+# 10.43.10.238:443 (2026-10-30). The load balancer keeps the client's address,
+# so users' networks must be open to it and to the nodes.
+#
+# The Gateway was made on the cluster by hand: compare with
+#   kubectl -n kubesight get gateway kubesight-gateway -o yaml
+# and correct this file if they differ.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: kubesight-gateway
+  namespace: kubesight
+  labels:
+    areeba.com/module: kubesight-frontend
+    areeba.com/change: CHG-KS-004
+spec:
+  # Not envoy-gateway: no such class exists, and the Gateway stays Unknown.
+  gatewayClassName: areeba-fabric
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: kubesight.areeba.com
+      tls:
+        mode: Terminate
+        # *.areeba.com, from OpenBao kv/kubesight/tls (ExternalSecret in the chart).
+        certificateRefs:
+          - name: kubesight-tls
+      allowedRoutes:
+        namespaces: {from: Same}

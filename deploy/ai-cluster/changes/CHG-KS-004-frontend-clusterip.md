@@ -4,7 +4,7 @@
 |---|---|
 | ID | CHG-KS-004 |
 | Modules | kubesight-frontend |
-| Status | Ready for approval: the proxy pod `envoy-kubesight-kubesight-gateway-*` runs in `envoy-gateway-system` (2026-10-30), and its labels are in the values file |
+| Status | Done on the cluster 2026-10-30 (Helm revision 8, route fixed); open: users' networks to the gateway, the DNS record |
 | Asked by | Elie, 2026-10-30: "make it cluster ip", then "make the service like this" (the Service edited on the cluster to ClusterIP 80 → 80) |
 | Depends on | The Gateway `kubesight-gateway` (namespace `kubesight`, class `areeba-fabric`, Envoy Gateway) with `PROGRAMMED True`, ending TLS for `kubesight.areeba.com` and routing to `frontend-service.kubesight.svc:80`; the DNS record for `kubesight.areeba.com` pointing at the gateway's address |
 | Prepared by | ____ |
@@ -32,8 +32,17 @@ In `deploy/ai-cluster/values-ai-cluster.yaml`:
 - `frontend.replicas`: 2 → 1, matching what runs (it was changed with
   `kubectl edit`, which made revisions 4 and 5 fail on a conflict).
 
-The ExternalSecret `kubesight-tls` stays: the gateway's HTTPS listener can use
+The ExternalSecret `kubesight-tls` stays: the gateway's HTTPS listener uses
 it as its certificate (same namespace).
+
+Outside the Helm release, applied with kubectl and kept in
+[`deploy/ai-cluster/gateway/`](../gateway/):
+- `gateway.yaml`: the Gateway `kubesight-gateway`, class `areeba-fabric`,
+  HTTPS 443 for `kubesight.areeba.com`, certificate `kubesight-tls`.
+- `httproute.yaml`: the route `kubesight-route`, **one rule**, `/` →
+  `frontend-service:80`. nginx forwards `/api` to the backend. A second rule
+  sending `/api` to `backend-service:5000` made every API call answer 503:
+  the backend lets in only the frontend's pods.
 
 The upgrade deletes the internal OCI load balancer if it still exists. Its
 address stops answering at once: **anything still using it, including the DNS
@@ -94,12 +103,21 @@ If the upgrade stops on a conflict over `frontend-service` (the hand edit owns
 those fields), run it again with `--force-conflicts` (Helm 4) or
 `--force` (Helm 3): the chart now writes the same values.
 
+Then the gateway objects:
+
+```bash
+kubectl diff  -f deploy/ai-cluster/gateway/      # only the labels and the route's rules should differ
+kubectl apply -f deploy/ai-cluster/gateway/ --dry-run=server && kubectl apply -f deploy/ai-cluster/gateway/
+kubectl -n kubesight get httproute kubesight-route -o jsonpath='{range .status.parents[*].conditions[*]}{.type}={.status}{"\n"}{end}'   # Accepted=True, ResolvedRefs=True
+```
+
 ## Check
 
 ```bash
 kubectl -n kubesight get service frontend-service          # TYPE ClusterIP, 80/TCP, no EXTERNAL-IP
 helm history kubesight -n kubesight | tail -1              # deployed
 curl -sS -o /dev/null -w '%{http_code}\n' https://kubesight.areeba.com/health    # 200, through the gateway
+curl -ksi -m 20 --resolve kubesight.areeba.com:443:10.43.10.238 https://kubesight.areeba.com/api/auth/me | head -3   # server: nginx, 401 = the backend answered
 ```
 
 Without the gateway, from the bastion:
@@ -125,6 +143,30 @@ items).
 
 ## Evidence
 
+2026-10-30, from the bastion:
+
 ```
-(to fill in after the change)
+$ kubectl get gatewayclass
+areeba-fabric   gateway.envoyproxy.io/gatewayclass-controller   True
+  (the Gateway first named class envoy-gateway, which does not exist: PROGRAMMED Unknown)
+$ kubectl -n kubesight get gateway
+kubesight-gateway   areeba-fabric   10.43.10.238   True
+$ kubectl -n envoy-gateway-system get svc | grep kubesight
+envoy-kubesight-kubesight-gateway-33d82a43   LoadBalancer   10.96.99.171   10.43.10.238   443:30751/TCP
+  (oci-network-load-balancer internal, is-preserve-source true, type nlb)
+
+Before the upgrade, through the gateway:
+  /health -> upstream connect error ... reset reason: connection timeout   (old rule: 10.43.10.0/24 on 8443)
+
+helm upgrade ... --force-conflicts   (revision 7 had failed: conflict with "kubectl-edit" on .spec.type)
+8   Fri Oct 30 13:15:30 2026   deployed   kubesight-0.1.0   1.1.171   Upgrade complete
+frontend-service   ClusterIP   10.96.216.197   <none>   80/TCP
+
+/health -> HTTP/2 200, server: nginx
+/api/... -> 503 upstream connect error ... connection timeout
+  (route had /api -> backend-service:5000; fixed to one rule / -> frontend-service:80)
 ```
+
+Laptops: connection timeout to 10.43.10.238:443 while the bastion connects;
+the network load balancer keeps the client's address, so the users' networks
+must be opened to the gateway and the nodes (platform).
