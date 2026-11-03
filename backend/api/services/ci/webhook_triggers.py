@@ -67,6 +67,16 @@ MAX_BODY_BYTES = 1024 * 1024
 MAX_PAYLOAD_PATHS = 200
 
 REF_TARGETS = ("ref:branch", "ref:tag", "ref:commit")
+# The Bitbucket events a webhook may build on, in the order the page offers
+# them, with how a delivery names each one in a message.
+BITBUCKET_EVENTS = {
+    "repo:push": "a push",
+    "pullrequest:created": "a pull request being opened",
+    "pullrequest:updated": "a pull request being updated",
+    "pullrequest:fulfilled": "a pull request being merged",
+}
+DEFAULT_EVENTS = ["repo:push"]
+PULL_REQUEST_EVENTS = ("pullrequest:created", "pullrequest:updated", "pullrequest:fulfilled")
 _ACTIVE_BUILD_STATUSES = ("queued", "running")
 _INPUT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 # What a ref may look like. Deliberately narrower than git allows: the value
@@ -120,6 +130,14 @@ def _new_public_id() -> str:
 # ---------------------------------------------------------------------------
 # Reads
 # ---------------------------------------------------------------------------
+
+def events_of(row: CiWebhookTrigger) -> List[str]:
+    """The events a Bitbucket webhook builds on (NULL: pushes, as before)."""
+    if row.kind != "bitbucket_push":
+        return []
+    chosen = [item for item in (row.events or []) if item in BITBUCKET_EVENTS]
+    return chosen or list(DEFAULT_EVENTS)
+
 
 def get_trigger(service: CiService, trigger_id: int) -> CiWebhookTrigger:
     row = db.session.get(CiWebhookTrigger, int(trigger_id))
@@ -229,6 +247,8 @@ def trigger_to_dict(row: CiWebhookTrigger) -> Dict[str, Any]:
         "branchFilters": list(row.branch_filters or []),
         "buildTags": bool(row.build_tags),
         "tagFilters": list(row.tag_filters or []),
+        "events": events_of(row),
+        "prTargetFilters": list(row.pr_target_filters or []),
         "enabled": bool(row.enabled),
         "skipIfRunning": bool(row.skip_if_running),
         "lastDeliveryAt": _iso(row.last_delivery_at),
@@ -502,6 +522,10 @@ def _apply(row: CiWebhookTrigger, service: CiService, payload: Dict[str, Any], *
         # does not use them never shows them as if they applied.
         row.allowed_inputs, row.mappings, row.allow_ref_override = [], [], False
         row.branch, row.ref_type = None, "branch"
+        if creating or "events" in payload:
+            row.events = _clean_events(payload.get("events"))
+        if creating or "prTargetFilters" in payload:
+            row.pr_target_filters = _clean_patterns(payload.get("prTargetFilters"), "Target branches")
         if not service.repository_url:
             raise WebhookError(
                 "Connect a repository on the Source tab first — a push webhook builds that repository."
@@ -510,6 +534,24 @@ def _apply(row: CiWebhookTrigger, service: CiService, payload: Dict[str, Any], *
             raise WebhookError("Push webhooks are for Bitbucket repositories. Use a generic webhook instead.")
 
     _check_inputs(row, service)
+
+
+def _clean_events(value: Any) -> List[str]:
+    if value in (None, ""):
+        return list(DEFAULT_EVENTS)
+    if not isinstance(value, list):
+        raise WebhookError("Events must be a list.")
+    out: List[str] = []
+    for item in value:
+        name = str(item or "").strip()
+        if name not in BITBUCKET_EVENTS:
+            raise WebhookError(f"'{name[:60]}' is not an event a Bitbucket webhook can build on.")
+        if name not in out:
+            out.append(name)
+    if not out:
+        raise WebhookError("Pick at least one event that starts a build.")
+    # Stored in the page's order, so the summary reads the same every time.
+    return [name for name in BITBUCKET_EVENTS if name in out]
 
 
 def _check_inputs(row: CiWebhookTrigger, service: CiService) -> None:
@@ -558,6 +600,8 @@ def _audit_details(row: CiWebhookTrigger, service: CiService) -> Dict[str, Any]:
         "branchFilters": list(row.branch_filters or []),
         "buildTags": bool(row.build_tags),
         "tagFilters": list(row.tag_filters or []),
+        "events": events_of(row),
+        "prTargetFilters": list(row.pr_target_filters or []),
         # Names only, as for schedules.
         "variables": sorted((row.variables or {}).keys()),
     }
@@ -869,6 +913,130 @@ def _push_ref_type(raw: Any) -> str:
     return "tag" if "tag" in str(raw or "").lower() else "branch"
 
 
+def _infer_event(payload: Dict[str, Any]) -> str:
+    """The event a body is, when no X-Event-Key came with it (Preview, a test
+    build, a hand-made call). A pull request reads as merged when its state
+    says so, as opened otherwise."""
+    if isinstance(payload.get("push"), dict):
+        return "repo:push"
+    pr = payload.get("pullrequest")
+    if isinstance(pr, dict):
+        return "pullrequest:fulfilled" if str(pr.get("state") or "").upper() == "MERGED" else "pullrequest:created"
+    return ""
+
+
+def _wrong_repository(payload: Dict[str, Any], service: CiService, what: str) -> str:
+    """Why a body is not for this service's repository, or "". A webhook
+    pointed at the wrong repository builds the wrong code."""
+    repository = payload.get("repository") if isinstance(payload.get("repository"), dict) else {}
+    sent = str(repository.get("full_name") or "").strip().lower()
+    expected = _repository_full_name(service)
+    if sent and expected and sent != expected:
+        return f"This {what} is on {sent}; this service builds {expected}."
+    return ""
+
+
+def plan_bitbucket(
+    row: CiWebhookTrigger, service: CiService, payload: Dict[str, Any], *, event: str = ""
+) -> Dict[str, Any]:
+    """A Bitbucket delivery: only the events the webhook builds on build."""
+    event = event or _infer_event(payload)
+    wanted = events_of(row)
+    if event not in wanted:
+        chosen = ", ".join(BITBUCKET_EVENTS[item] for item in wanted)
+        what = BITBUCKET_EVENTS.get(event) or (f"'{event}'" if event else "this body")
+        return _plan(
+            "bitbucket_push", [], outcome="ignored",
+            message=f"This webhook builds on {chosen}; {what} is not one of them, so nothing was built.",
+        )
+    if event == "repo:push":
+        return plan_bitbucket_push(row, service, payload)
+    return plan_pull_request(row, service, payload, event=event)
+
+
+def _short_or_full(commit: str) -> Tuple[Optional[str], Optional[str]]:
+    """(commit to check out, commit to recognise a redelivery by).
+
+    Bitbucket sends a pull request's commits as 12-character ids, and a short
+    id cannot be fetched on its own — so a pull request build checks out the
+    branch head (which is that commit, unless it moved since) and keeps the
+    short id only to recognise the same commit twice."""
+    commit = (commit or "").strip()
+    if not commit or not _COMMIT_RE.match(commit):
+        return None, None
+    return (commit if len(commit) >= 40 else None), commit
+
+
+def plan_pull_request(
+    row: CiWebhookTrigger, service: CiService, payload: Dict[str, Any], *, event: str
+) -> Dict[str, Any]:
+    """Opened / updated: the pull request's own branch, at its newest commit.
+    Merged: the branch it went into, at the merge commit."""
+    pr = payload.get("pullrequest") if isinstance(payload.get("pullrequest"), dict) else None
+    if pr is None:
+        return _plan("bitbucket_push", [], outcome="ignored", message="This body carries no pull request.")
+    wrong = _wrong_repository(payload, service, "pull request")
+    if wrong:
+        return _plan("bitbucket_push", [], outcome="ignored", message=wrong)
+
+    def part(side: str) -> Tuple[str, str, str]:
+        node = pr.get(side) if isinstance(pr.get(side), dict) else {}
+        branch = (node.get("branch") or {}).get("name") if isinstance(node.get("branch"), dict) else ""
+        commit = (node.get("commit") or {}).get("hash") if isinstance(node.get("commit"), dict) else ""
+        repo = (node.get("repository") or {}).get("full_name") if isinstance(node.get("repository"), dict) else ""
+        return str(branch or "").strip(), str(commit or "").strip(), str(repo or "").strip().lower()
+
+    number = pr.get("id")
+    label = f"Pull request #{number}" if number not in (None, "") else "The pull request"
+    source_branch, source_commit, source_repo = part("source")
+    target_branch, _target_commit, _ = part("destination")
+    notes: List[str] = []
+    if not matches(list(row.pr_target_filters or []), target_branch):
+        return _plan(
+            "bitbucket_push", [], outcome="ignored",
+            message=f"{label} goes into {target_branch or '?'}, outside this webhook's target branches "
+            f"({', '.join(row.pr_target_filters or [])}).",
+        )
+
+    if event == "pullrequest:fulfilled":
+        ref = target_branch
+        merge = pr.get("merge_commit") if isinstance(pr.get("merge_commit"), dict) else {}
+        checkout, seen = _short_or_full(str(merge.get("hash") or ""))
+        notes.append(f"{label} was merged into {ref}.")
+    else:
+        expected = _repository_full_name(service)
+        if source_repo and expected and source_repo != expected:
+            return _plan(
+                "bitbucket_push", [], outcome="ignored",
+                message=f"{label} comes from the fork {source_repo}; its commits are not in "
+                f"{expected}, so it is not built.",
+            )
+        ref = source_branch
+        checkout, seen = _short_or_full(source_commit)
+        notes.append(f"{label}: {source_branch} into {target_branch}.")
+    entry = {"type": "branch", "name": ref, "commit": seen}
+    if not ref or not _valid_ref(ref):
+        return _plan("bitbucket_push", [entry], outcome="ignored", message=f"'{ref[:80]}' is not a usable branch name.")
+    if not matches(list(row.branch_filters or []), ref):
+        return _plan(
+            "bitbucket_push", [entry], outcome="ignored",
+            message=f"Branch {ref} is outside this webhook's branch filters "
+            f"({', '.join(row.branch_filters or [])}).",
+            notes=notes,
+        )
+    if seen and not checkout:
+        notes.append(f"Builds the head of {ref} (Bitbucket names the commit {seen} only by its short id).")
+    return _plan(
+        "bitbucket_push",
+        [entry],
+        builds=[{
+            "refType": "branch", "ref": ref, "commit": checkout, "seenCommit": seen,
+            "variables": dict(row.variables or {}),
+        }],
+        notes=notes,
+    )
+
+
 def plan_bitbucket_push(
     row: CiWebhookTrigger, service: CiService, payload: Dict[str, Any], *, event: str = ""
 ) -> Dict[str, Any]:
@@ -879,16 +1047,9 @@ def plan_bitbucket_push(
     if not isinstance(changes, list):
         return _plan("bitbucket_push", [], outcome="ignored", message="This body carries no push.")
 
-    # A webhook pointed at the wrong repository builds the wrong code. The
-    # repository in the body has to be the one this service builds.
-    repository = payload.get("repository") if isinstance(payload.get("repository"), dict) else {}
-    pushed_repo = str(repository.get("full_name") or "").strip().lower()
-    expected = _repository_full_name(service)
-    if pushed_repo and expected and pushed_repo != expected:
-        return _plan(
-            "bitbucket_push", [], outcome="ignored",
-            message=f"This push is to {pushed_repo}; this service builds {expected}.",
-        )
+    wrong = _wrong_repository(payload, service, "push")
+    if wrong:
+        return _plan("bitbucket_push", [], outcome="ignored", message=wrong)
 
     notes: List[str] = []
     refs: List[Dict[str, Any]] = []
@@ -957,7 +1118,7 @@ def _repository_full_name(service: CiService) -> str:
 def plan(row: CiWebhookTrigger, payload: Dict[str, Any], *, event: str = "") -> Dict[str, Any]:
     service = row.service
     if row.kind == "bitbucket_push":
-        return plan_bitbucket_push(row, service, payload, event=event)
+        return plan_bitbucket(row, service, payload, event=event)
     return plan_generic(row, service, payload)
 
 
@@ -975,18 +1136,23 @@ def _recent_build_count(row: CiWebhookTrigger, now: datetime) -> int:
 
 def _already_built(row: CiWebhookTrigger, build: Dict[str, Any], now: datetime) -> Optional[int]:
     """A build of this exact ref and commit this trigger queued in the last
-    ten minutes — how a redelivery without a delivery id is recognised."""
-    if not build.get("commit"):
+    ten minutes — how a redelivery without a delivery id is recognised, and
+    how a push and a pull request update for the same commit build once.
+    Commits compare by prefix: pull requests name them by a short id."""
+    commit = build.get("commit") or build.get("seenCommit")
+    if not commit:
         return None
     since = now - timedelta(minutes=10)
     for delivery in row.deliveries.filter(
         CiWebhookDelivery.received_at >= since, CiWebhookDelivery.outcome == "triggered"
     ).all():
         for ref in delivery.refs or []:
+            earlier = str(ref.get("commit") or "")
             if (
                 ref.get("name") == build["ref"]
                 and ref.get("type") == build["refType"]
-                and ref.get("commit") == build["commit"]
+                and earlier
+                and (earlier.startswith(commit) or commit.startswith(earlier))
                 and delivery.build_ids
             ):
                 return int(delivery.build_ids[0])
@@ -1078,7 +1244,8 @@ def execute(
     now = _now()
     service = row.service
     paths = payload_paths(payload) if row.kind == "generic" else []
-    event = event or ("test" if tested_by else row.kind)
+    planned_event = event if event in BITBUCKET_EVENTS else ""
+    event = ("test" if tested_by else "") or event or row.kind
 
     def done(outcome: str, message: str, plan_doc=None, refs=None, builds=None) -> Dict[str, Any]:
         delivery = _record(
@@ -1116,7 +1283,9 @@ def execute(
     if not row.enabled and not tested_by:
         return done("ignored", "This webhook is switched off.")
 
-    plan_doc = plan(row, payload, event=event if row.kind == "bitbucket_push" and not tested_by else "")
+    # The sender's event (or, for a test, the one picked on the page); a body
+    # with none is read for what it is.
+    plan_doc = plan(row, payload, event=planned_event if row.kind == "bitbucket_push" else "")
     if plan_doc["outcome"] != "build":
         return done(plan_doc["outcome"], plan_doc["message"], plan_doc)
 
@@ -1153,7 +1322,8 @@ def execute(
             fresh.append(item)
         else:
             plan_doc["notes"].append(
-                f"{item['ref']} at {item['commit'][:12]} was already built from this webhook; not queued again."
+                f"{item['ref']} at {(item.get('commit') or item.get('seenCommit') or '')[:12]} was already "
+                "built from this webhook; not queued again."
             )
     if not fresh:
         return done("duplicate", "Every ref in this delivery was already built.", plan_doc)
@@ -1241,7 +1411,6 @@ def ingest(
 # One-click setup in Bitbucket
 # ---------------------------------------------------------------------------
 
-PUSH_EVENTS = ["repo:push"]
 
 
 def _source(service: CiService):
@@ -1252,7 +1421,8 @@ def _source(service: CiService):
 
 
 def configure_in_source(row: CiWebhookTrigger, *, actor=None) -> Dict[str, Any]:
-    """Create (or correct) the repository webhook that calls this trigger on push."""
+    """Create (or correct) the repository webhook that calls this trigger on
+    the events it builds on."""
     service = row.service
     if row.kind != "bitbucket_push":
         raise WebhookError("Only a push webhook is registered in Bitbucket. Give a generic one's URL to its sender.")
@@ -1275,7 +1445,7 @@ def configure_in_source(row: CiWebhookTrigger, *, actor=None) -> Dict[str, Any]:
             service.credential_profile,
             url=url,
             secret=secret,
-            events=list(PUSH_EVENTS),
+            events=events_of(row),
             description=f"KubeSight build: {row.name}"[:255],
             # Finds this trigger's webhook at an older address too (before or
             # after a gateway URL was set) and moves it instead of adding a
@@ -1325,7 +1495,8 @@ def webhook_status(row: CiWebhookTrigger) -> Dict[str, Any]:
         return {"known": False, "exists": False, "reason": str(exc)}
     if hook is None:
         return {"known": True, "exists": False, "url": url, "repository": ref.full_name}
-    missing = sorted(set(PUSH_EVENTS) - set(hook.get("events") or []))
+    wanted = events_of(row)
+    missing = [item for item in wanted if item not in (hook.get("events") or [])]
     registered = hook.get("url") or ""
     # Found by its id at another address: Bitbucket still calls the old one.
     url_matches = registered.split("?", 1)[0] == url.split("?", 1)[0]
@@ -1339,6 +1510,7 @@ def webhook_status(row: CiWebhookTrigger) -> Dict[str, Any]:
         "active": hook.get("active"),
         "secretSet": hook.get("secretSet"),
         "events": hook.get("events"),
+        "wantedEvents": wanted,
         "missingEvents": missing,
         "inSync": bool(hook.get("active")) and bool(hook.get("secretSet")) and not missing and url_matches,
     }

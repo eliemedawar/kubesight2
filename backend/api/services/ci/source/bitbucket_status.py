@@ -444,6 +444,30 @@ def list_webhooks(
     return hooks
 
 
+def get_webhook(
+    *,
+    repository_ref: str,
+    uid: str,
+    token: str,
+    credential_type: str,
+    principal: str = "",
+) -> list:
+    """One webhook's events, read on its own — for a list page that came back
+    without them, which would otherwise read as "subscribed to nothing"."""
+    try:
+        payload = _request(
+            _hooks_endpoint(repository_ref, uid),
+            repository_ref,
+            method="GET",
+            token=token,
+            credential_type=credential_type,
+            principal=principal,
+        )
+    except StatusWriteError as exc:
+        raise _webhook_error(exc) from exc
+    return [str(e) for e in (payload.get("events") or [])]
+
+
 def save_webhook(
     *,
     repository_ref: str,

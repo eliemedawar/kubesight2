@@ -14,6 +14,7 @@ import {
   samplePush,
   toForm,
   toPayload,
+  samplePullRequest,
 } from "./webhookModel.js";
 
 const PARAMS = [
@@ -181,5 +182,44 @@ describe("examples", () => {
     const shown = curlExample(hook, { secret: "s3cr'et", body: { branch: "main" } });
     expect(shown).toContain(`'X-KubeSight-Secret: s3cr'\\''et'`);
     expect(shown).toContain(`-d '{"branch":"main"}'`);
+  });
+});
+
+describe("Bitbucket events", () => {
+  const hook = (extra) => ({ kind: "bitbucket_push", branchFilters: ["main"], ...extra });
+
+  it("reads an old webhook with no events as pushes", () => {
+    expect(buildsWhat(hook({}), "main")).toBe("Pushes to main");
+    expect(toForm(hook({})).events).toEqual(["repo:push"]);
+  });
+
+  it("says which pull requests build", () => {
+    const text = buildsWhat(
+      hook({ events: ["pullrequest:created", "pullrequest:updated", "pullrequest:fulfilled"], branchFilters: [], prTargetFilters: ["develop"] }),
+      "main"
+    );
+    expect(text).toBe("Pull requests into develop when opened or updated · pull requests merged into develop");
+  });
+
+  it("sends events in a fixed order and drops what an unchosen event uses", () => {
+    const form = { ...blankWebhook("bitbucket_push", "main"), events: ["pullrequest:fulfilled", "repo:push"], buildTags: true, prTargetFilters: ["main"] };
+    const payload = toPayload(form, []);
+    expect(payload.events).toEqual(["repo:push", "pullrequest:fulfilled"]);
+    expect(payload.buildTags).toBe(true);
+    const prOnly = toPayload({ ...form, events: ["pullrequest:created"] }, []);
+    expect(prOnly.buildTags).toBe(false);
+    expect(prOnly.prTargetFilters).toEqual(["main"]);
+    expect(toPayload({ ...form, events: ["repo:push"] }, []).prTargetFilters).toEqual([]);
+  });
+
+  it("needs at least one event", () => {
+    expect(formProblems({ ...blankWebhook("bitbucket_push"), events: [] }).events).toMatch(/at least one/);
+  });
+
+  it("samples a merged pull request with a merge commit", () => {
+    const body = samplePullRequest({ repository: "a/b", event: "pullrequest:fulfilled", target: "main" });
+    expect(body.pullrequest.state).toBe("MERGED");
+    expect(body.pullrequest.merge_commit.hash).toBeTruthy();
+    expect(body.pullrequest.destination.branch.name).toBe("main");
   });
 });

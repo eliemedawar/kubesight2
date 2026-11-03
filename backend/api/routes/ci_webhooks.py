@@ -152,12 +152,16 @@ def preview_webhook(service_id: int, trigger_id: int):
 def test_webhook(service_id: int, trigger_id: int):
     """Run a sample body through the real delivery path, as the person asking."""
     row = _trigger(service_id, trigger_id)
-    sample = _payload().get("payload")
+    body = _payload()
+    sample = body.get("payload")
     if sample is None:
         sample = {}
     if not isinstance(sample, dict):
         return error_response("The sample body must be a JSON object.", 400)
-    result = webhooks_service.execute(row, sample, tested_by=get_current_user())
+    # The Bitbucket event the sample stands for, picked on the page.
+    result = webhooks_service.execute(
+        row, sample, tested_by=get_current_user(), event=str(body.get("event") or "")
+    )
     return success_response(result, status_code=201 if result["triggered"] else 200)
 
 

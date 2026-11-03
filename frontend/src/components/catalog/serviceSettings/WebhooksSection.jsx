@@ -19,8 +19,12 @@ import { PlIcon } from "../pipeline/icons.jsx";
 import { InputControl } from "./SchedulesSection.jsx";
 import { conditionsFor, effectiveValues, pipelineFor } from "./scheduleModel.js";
 import {
+  BITBUCKET_EVENTS,
   KINDS,
   blankWebhook,
+  eventLabel,
+  eventsOf,
+  hasPullRequestEvent,
   buildsWhat,
   curlExample,
   deliveryLabel,
@@ -32,6 +36,7 @@ import {
   repositoryName,
   requestChoosesRef,
   sampleBody,
+  samplePullRequest,
   samplePush,
   targetLabel,
   targetOptions,
@@ -304,7 +309,7 @@ function WebhookRow({
       <div className="sc-copy">
         <strong className="sc-name">
           {hook.name}
-          <span className="pl-tag">{isPush ? "Bitbucket push" : "Generic"}</span>
+          <span className="pl-tag">{isPush ? "Bitbucket" : "Generic"}</span>
           {!hook.enabled && <span className="pl-tag">Off</span>}
         </strong>
         <p className="sc-when wh-builds">{buildsWhat(hook, defaultBranch)}</p>
@@ -670,7 +675,12 @@ function BitbucketSetup({ hook, service, canEdit, onChanged, onError, onNotice }
     try {
       const result = await setupCiWebhookInSource(service.id, hook.id);
       const action = result.webhook?.action === "updated" ? "updated" : "created";
-      onNotice(`Webhook ${action} on ${result.webhook?.repository || "the repository"}. Pushes now start builds.`);
+      onNotice(
+        `Webhook ${action} on ${result.webhook?.repository || "the repository"}. Bitbucket now calls it on: ${eventsOf(hook)
+          .map(eventLabel)
+          .join(", ")
+          .toLowerCase()}.`
+      );
       check();
       onChanged();
     } catch (err) {
@@ -690,7 +700,10 @@ function BitbucketSetup({ hook, service, canEdit, onChanged, onError, onNotice }
           : status.urlMatches === false
             ? { tone: "warn", text: `Registered on ${status.repository} at ${status.registeredUrl}, not this URL. Resync it.` }
           : status.inSync
-            ? { tone: "ok", text: `Registered on ${status.repository} for repo:push, signed with this secret.` }
+            ? {
+                tone: "ok",
+                text: `Registered on ${status.repository} for ${(status.wantedEvents || eventsOf(hook)).join(", ")}, signed with this secret.`,
+              }
             : {
                 tone: "warn",
                 text: `Registered on ${status.repository} but out of date${
@@ -736,15 +749,29 @@ function GenericHowTo({ hook, secret, parameters, onCopy }) {
 function TryIt({ hook, service, repository, parameters, defaultBranch, canRun, onError, onNotice, onOpenBuild, onRan }) {
   const ids = useId();
   const isPush = hook.kind === "bitbucket_push";
-  const initial = () =>
+  const events = eventsOf(hook);
+  // The Bitbucket event the body stands for; Bitbucket says it in a header.
+  const [event, setEvent] = useState(events[0]);
+  const plainBranch = (patterns, fallback) => (patterns || []).find((item) => !/[*?[]/.test(item)) || fallback;
+  const initial = (forEvent = event) =>
     JSON.stringify(
-      isPush
-        ? samplePush({ repository, branch: (hook.branchFilters || []).find((item) => !/[*?[]/.test(item)) || defaultBranch })
-        : sampleBody(hook, parameters),
+      !isPush
+        ? sampleBody(hook, parameters)
+        : forEvent === "repo:push"
+          ? samplePush({ repository, branch: plainBranch(hook.branchFilters, defaultBranch) })
+          : samplePullRequest({
+              repository,
+              event: forEvent,
+              source: forEvent === "pullrequest:fulfilled" ? "feature/my-change" : plainBranch(hook.branchFilters, "feature/my-change"),
+              target: plainBranch(
+                hook.prTargetFilters,
+                forEvent === "pullrequest:fulfilled" ? plainBranch(hook.branchFilters, defaultBranch) : defaultBranch
+              ),
+            }),
       null,
       2
     );
-  const [text, setText] = useState(initial);
+  const [text, setText] = useState(() => initial());
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState("");
 
@@ -760,7 +787,7 @@ function TryIt({ hook, service, repository, parameters, defaultBranch, canRun, o
   const preview = async () => {
     setBusy("preview");
     try {
-      setResult({ mode: "preview", ...(await previewCiWebhook(service.id, hook.id, parsed, isPush ? "repo:push" : "")) });
+      setResult({ mode: "preview", ...(await previewCiWebhook(service.id, hook.id, parsed, isPush ? event : "")) });
     } catch (err) {
       onError(err.message || "Could not preview.");
     } finally {
@@ -771,7 +798,7 @@ function TryIt({ hook, service, repository, parameters, defaultBranch, canRun, o
   const test = async () => {
     setBusy("test");
     try {
-      const outcome = await testCiWebhook(service.id, hook.id, parsed);
+      const outcome = await testCiWebhook(service.id, hook.id, parsed, isPush ? event : "");
       setResult({ mode: "test", ...outcome });
       if (outcome.triggered) onNotice(`${outcome.message} Started as you, as a test.`);
       onRan();
@@ -792,9 +819,21 @@ function TryIt({ hook, service, repository, parameters, defaultBranch, canRun, o
           <PlIcon name="reset" /> Sample
         </button>
       </div>
+      {isPush && events.length > 1 && (
+        <Segmented
+          label="Event to try"
+          value={event}
+          options={events.map((value) => ({ value, label: eventLabel(value) }))}
+          onChange={(value) => {
+            setEvent(value);
+            setText(initial(value));
+            setResult(null);
+          }}
+        />
+      )}
       <p className="pl-field-hint">
         {isPush
-          ? "A Bitbucket push as it arrives. Preview shows what it would build; a test build starts it for real, as you."
+          ? `A Bitbucket ${eventLabel(event).toLowerCase()} as it arrives. Preview shows what it would build; a test build starts it for real, as you.`
           : "Paste what your tool sends. Preview runs it through the webhook's rules without building; the paths it finds are what a mapping can read."}
       </p>
       <textarea
@@ -960,36 +999,95 @@ function WebhookEditor({ initial, pipelines, defaultBranch, busy, canPush, onCan
       </div>
 
       {isPush ? (
-        <div className="pl-grid">
-          <Field
-            label="Branches that build"
-            hint={
-              (form.branchFilters || []).length
-                ? "A push to any of these builds the pushed commit. Wildcards like release/* work."
-                : "Empty: a push to ANY branch builds — every feature branch too."
-            }
-          >
-            <ChipsInput
-              value={form.branchFilters}
-              onChange={(value) => set("branchFilters", value)}
-              lowercase={false}
-              label="Branch filters"
-              placeholder={`${defaultBranch}, release/*`}
-            />
+        <>
+          <Field label="Build when" wide error={touched ? problems.events : ""}>
+            <ul className="wh-events" aria-label="Events that start a build">
+              {BITBUCKET_EVENTS.map((item) => {
+                const on = (form.events || []).includes(item.value);
+                return (
+                  <li key={item.value}>
+                    <label className={`pl-check${on ? " is-on" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={(event) =>
+                          set(
+                            "events",
+                            event.target.checked
+                              ? [...(form.events || []), item.value]
+                              : (form.events || []).filter((value) => value !== item.value)
+                          )
+                        }
+                      />
+                      <span>
+                        <strong>{item.label}</strong>
+                        <small>
+                          Builds {item.builds} · <code>{item.value}</code>
+                        </small>
+                      </span>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
           </Field>
-          <Field label="Tags" hint={form.buildTags ? "Empty: every pushed tag builds." : "Pushed tags are ignored."}>
-            <Switch checked={form.buildTags} onChange={(value) => set("buildTags", value)} label="Also build pushed tags" />
-            {form.buildTags && (
+          <div className="pl-grid">
+            <Field
+              label="Branches that build"
+              hint={
+                (form.branchFilters || []).length
+                  ? "The branch a build checks out must match one of these: the pushed branch, a pull request's own branch, or the branch a merge went into. Wildcards like release/* work."
+                  : "Empty: ANY branch builds — every feature branch too."
+              }
+            >
               <ChipsInput
-                value={form.tagFilters}
-                onChange={(value) => set("tagFilters", value)}
+                value={form.branchFilters}
+                onChange={(value) => set("branchFilters", value)}
                 lowercase={false}
-                label="Tag filters"
-                placeholder="v*"
+                label="Branch filters"
+                placeholder={`${defaultBranch}, release/*`}
               />
+            </Field>
+            {hasPullRequestEvent(form.events) && (
+              <Field
+                label="Pull requests into"
+                hint={
+                  (form.prTargetFilters || []).length
+                    ? "Only pull requests going into one of these branches build."
+                    : "Empty: pull requests into any branch build."
+                }
+              >
+                <ChipsInput
+                  value={form.prTargetFilters}
+                  onChange={(value) => set("prTargetFilters", value)}
+                  lowercase={false}
+                  label="Target branches"
+                  placeholder={`${defaultBranch}, release/*`}
+                />
+              </Field>
             )}
-          </Field>
-        </div>
+            {(form.events || []).includes("repo:push") && (
+              <Field label="Tags" hint={form.buildTags ? "Empty: every pushed tag builds." : "Pushed tags are ignored."}>
+                <Switch checked={form.buildTags} onChange={(value) => set("buildTags", value)} label="Also build pushed tags" />
+                {form.buildTags && (
+                  <ChipsInput
+                    value={form.tagFilters}
+                    onChange={(value) => set("tagFilters", value)}
+                    lowercase={false}
+                    label="Tag filters"
+                    placeholder="v*"
+                  />
+                )}
+              </Field>
+            )}
+          </div>
+          {(form.events || []).some((value) => value === "pullrequest:created" || value === "pullrequest:updated") && (
+            <p className="pl-field-hint">
+              Bitbucket names a pull request&apos;s commits by a short id, so these builds check out the head of the
+              pull request&apos;s branch. Pull requests from forks are not built.
+            </p>
+          )}
+        </>
       ) : (
         <>
           <div className="pl-grid">

@@ -466,8 +466,9 @@ export const rotateCiWebhookSecret = (serviceId, webhookId) =>
 export const previewCiWebhook = (serviceId, webhookId, payload, event = "") =>
   request(`${webhookPath(serviceId, webhookId)}/preview`, { method: "POST", body: { payload, event } });
 
-export const testCiWebhook = (serviceId, webhookId, payload) =>
-  request(`${webhookPath(serviceId, webhookId)}/test`, { method: "POST", body: { payload } });
+// ``event``: the Bitbucket event the sample stands for (repo:push, pullrequest:…).
+export const testCiWebhook = (serviceId, webhookId, payload, event = "") =>
+  request(`${webhookPath(serviceId, webhookId)}/test`, { method: "POST", body: { payload, event } });
 
 export const setupCiWebhookInSource = (serviceId, webhookId) =>
   request(`${webhookPath(serviceId, webhookId)}/setup`, { method: "POST" });

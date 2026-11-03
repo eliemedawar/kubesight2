@@ -561,3 +561,137 @@ def test_setup_refuses_a_loopback_address(client, admin_token, service_id, monke
     )
     assert response.status_code == 400
     assert "PUBLIC_BASE_URL" in response.get_json()["error"]
+
+
+# ---------------------------------------------------------------------------
+# Bitbucket: choosing which events build
+# ---------------------------------------------------------------------------
+
+def _pull_request(state="OPEN", *, source="feature/login", target="develop", commit="abc123def456",
+                  merge=None, source_repo="areeba/payment-service", repo="areeba/payment-service", number=7):
+    pr = {
+        "id": number,
+        "state": state,
+        "source": {"branch": {"name": source}, "commit": {"hash": commit}, "repository": {"full_name": source_repo}},
+        "destination": {"branch": {"name": target}, "commit": {"hash": "0123456789ab"}, "repository": {"full_name": repo}},
+    }
+    if merge:
+        pr["merge_commit"] = {"hash": merge}
+    return {"repository": {"full_name": repo}, "pullrequest": pr}
+
+
+def test_events_default_to_push_and_must_be_known(client, admin_token, service_id):
+    hook = _made(client, admin_token, service_id, name="Build on push", kind="bitbucket_push")
+    assert hook["events"] == ["repo:push"]
+    bad = _create(client, admin_token, service_id, name="Odd", kind="bitbucket_push", events=["repo:fork"])
+    assert bad.status_code == 400 and "not an event" in bad.get_json()["error"]
+    none = _create(client, admin_token, service_id, name="Nothing", kind="bitbucket_push", events=[])
+    assert none.status_code == 400 and "at least one event" in none.get_json()["error"]
+
+
+def test_an_event_the_webhook_does_not_build_on_is_ignored(client, admin_token, service_id):
+    hook = _made(client, admin_token, service_id, name="PRs only", kind="bitbucket_push",
+                 events=["pullrequest:created"], branchFilters=[])
+    pushed = _call(client, hook, _push(_change("branch", "develop")), secret=hook["secret"],
+                   headers={"X-Event-Key": "repo:push"})
+    assert pushed.status_code == 200
+    message = pushed.get_json()["data"]["message"]
+    assert "a pull request being opened" in message and "a push is not one of them" in message
+    assert _builds(service_id) == []
+
+
+def test_an_opened_pull_request_builds_its_branch(client, admin_token, service_id):
+    hook = _made(client, admin_token, service_id, name="PRs", kind="bitbucket_push",
+                 events=["pullrequest:created", "pullrequest:updated"], branchFilters=[], prTargetFilters=["develop"])
+    response = _call(client, hook, _pull_request(), secret=hook["secret"],
+                     headers={"X-Event-Key": "pullrequest:created"})
+    assert response.status_code == 202, response.get_json()
+    [build] = _builds(service_id)
+    # Bitbucket names PR commits by a short id, which cannot be fetched: the
+    # branch head is built instead.
+    assert build.branch == "feature/login" and build.commit_sha is None
+    assert any("short id" in note for note in response.get_json()["data"]["notes"])
+
+    # The same commit again as an update is not built twice.
+    again = _call(client, hook, _pull_request(), secret=hook["secret"], headers={"X-Event-Key": "pullrequest:updated"})
+    assert again.get_json()["data"]["outcome"] == "duplicate"
+
+    # Into a branch outside the targets: ignored.
+    elsewhere = _call(client, hook, _pull_request(target="main", commit="999999999999"), secret=hook["secret"],
+                      headers={"X-Event-Key": "pullrequest:created"})
+    assert elsewhere.get_json()["data"]["outcome"] == "ignored"
+    assert "outside this webhook's target branches" in elsewhere.get_json()["data"]["message"]
+    assert len(_builds(service_id)) == 1
+
+
+def test_a_pull_request_from_a_fork_is_not_built(client, admin_token, service_id):
+    hook = _made(client, admin_token, service_id, name="PRs", kind="bitbucket_push",
+                 events=["pullrequest:created"], branchFilters=[])
+    response = _call(client, hook, _pull_request(source_repo="someone/payment-service"), secret=hook["secret"],
+                     headers={"X-Event-Key": "pullrequest:created"})
+    assert "fork" in response.get_json()["data"]["message"]
+    assert _builds(service_id) == []
+
+
+def test_a_merged_pull_request_builds_the_branch_it_went_into(client, admin_token, service_id):
+    hook = _made(client, admin_token, service_id, name="On merge", kind="bitbucket_push",
+                 events=["pullrequest:fulfilled"], branchFilters=["develop"])
+    response = _call(client, hook, _pull_request("MERGED", merge=COMMIT), secret=hook["secret"],
+                     headers={"X-Event-Key": "pullrequest:fulfilled"})
+    assert response.status_code == 202, response.get_json()
+    [build] = _builds(service_id)
+    assert build.branch == "develop" and build.commit_sha == COMMIT
+
+
+def test_a_test_build_uses_the_event_picked_on_the_page(client, admin_token, service_id):
+    hook = _made(client, admin_token, service_id, name="On merge", kind="bitbucket_push",
+                 events=["pullrequest:fulfilled"], branchFilters=[])
+    base = f"/api/ci/services/{service_id}/webhooks/{hook['id']}"
+    preview = client.post(f"{base}/preview", json={"payload": _pull_request("MERGED", merge=COMMIT)},
+                          headers=auth_headers(admin_token)).get_json()["data"]
+    assert preview["outcome"] == "build" and preview["builds"][0]["ref"] == "develop"
+    wrong = client.post(f"{base}/test", json={"payload": _pull_request(), "event": "pullrequest:created"},
+                        headers=auth_headers(admin_token)).get_json()["data"]
+    assert wrong["outcome"] == "ignored"
+
+
+def test_setup_registers_the_chosen_events(client, admin_token, service_id, monkeypatch):
+    from api.services.ci.source import bitbucket_status
+
+    hooks, writes = [], []
+
+    def save_webhook(**kwargs):
+        writes.append(kwargs)
+        hooks[:] = [{"uuid": "{h1}", "url": kwargs["url"], "events": kwargs["events"], "active": True, "secretSet": True}]
+        return {"uuid": "{h1}"}
+
+    monkeypatch.setattr(bitbucket_status, "list_webhooks", lambda **kwargs: [dict(item) for item in hooks])
+    monkeypatch.setattr(bitbucket_status, "save_webhook", save_webhook)
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://kubesight.example.com")
+    hook = _made(client, admin_token, service_id, name="Push and merge", kind="bitbucket_push",
+                 events=["pullrequest:fulfilled", "repo:push"])
+    assert hook["events"] == ["repo:push", "pullrequest:fulfilled"]
+    base = f"/api/ci/services/{service_id}/webhooks/{hook['id']}"
+    assert client.post(f"{base}/setup", headers=auth_headers(admin_token)).status_code == 200
+    assert writes[-1]["events"] == ["repo:push", "pullrequest:fulfilled"]
+
+    # Adding an event makes the registration out of date until resynced.
+    client.put(base, json={"events": ["repo:push", "pullrequest:fulfilled", "pullrequest:created"]},
+               headers=auth_headers(admin_token))
+    status = client.get(f"{base}/source-status", headers=auth_headers(admin_token)).get_json()["data"]
+    assert status["inSync"] is False and status["missingEvents"] == ["pullrequest:created"]
+
+
+def test_a_listing_without_events_is_read_hook_by_hook(client, admin_token, service_id, monkeypatch):
+    from api.services.ci.source import bitbucket_status
+
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://kubesight.example.com")
+    hook = _made(client, admin_token, service_id, name="Build on push", kind="bitbucket_push")
+    url = "https://kubesight.example.com" + hook["path"]
+    monkeypatch.setattr(bitbucket_status, "list_webhooks", lambda **kwargs: [
+        {"uuid": "{h1}", "url": url, "events": [], "active": True, "secretSet": True}
+    ])
+    monkeypatch.setattr(bitbucket_status, "get_webhook", lambda **kwargs: ["repo:push"])
+    status = client.get(f"/api/ci/services/{service_id}/webhooks/{hook['id']}/source-status",
+                        headers=auth_headers(admin_token)).get_json()["data"]
+    assert status["inSync"] is True and status["missingEvents"] == []

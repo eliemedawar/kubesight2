@@ -8,9 +8,23 @@
  */
 
 export const KINDS = [
-  { value: "bitbucket_push", label: "Build on push", hint: "Bitbucket repo:push" },
+  { value: "bitbucket_push", label: "Bitbucket", hint: "Pushes and pull requests" },
   { value: "generic", label: "Generic URL", hint: "Any tool that can POST" },
 ];
+
+/** What a Bitbucket webhook can build on — webhook_triggers.BITBUCKET_EVENTS,
+ * in the same order. ``builds`` says what each one builds. */
+export const BITBUCKET_EVENTS = [
+  { value: "repo:push", label: "Push", builds: "the pushed branch at the pushed commit" },
+  { value: "pullrequest:created", label: "Pull request opened", builds: "the pull request's branch" },
+  { value: "pullrequest:updated", label: "Pull request updated", builds: "the pull request's branch, with its new commits" },
+  { value: "pullrequest:fulfilled", label: "Pull request merged", builds: "the branch it was merged into, at the merge commit" },
+];
+
+const PR_EVENTS = new Set(["pullrequest:created", "pullrequest:updated", "pullrequest:fulfilled"]);
+export const eventsOf = (hook) => (hook?.events?.length ? hook.events : ["repo:push"]);
+export const hasPullRequestEvent = (events) => (events || []).some((event) => PR_EVENTS.has(event));
+export const eventLabel = (event) => BITBUCKET_EVENTS.find((item) => item.value === event)?.label || event;
 
 export const REF_TARGETS = [
   { value: "ref:branch", label: "Branch" },
@@ -36,6 +50,8 @@ export const blankWebhook = (kind = "bitbucket_push", defaultBranch = "main") =>
   branchFilters: kind === "bitbucket_push" ? [defaultBranch || "main"] : [],
   buildTags: false,
   tagFilters: [],
+  events: kind === "bitbucket_push" ? ["repo:push"] : [],
+  prTargetFilters: [],
   enabled: true,
   skipIfRunning: false,
 });
@@ -55,6 +71,8 @@ export const toForm = (hook) => ({
   branchFilters: [...(hook.branchFilters || [])],
   buildTags: Boolean(hook.buildTags),
   tagFilters: [...(hook.tagFilters || [])],
+  events: hook.kind === "bitbucket_push" ? [...eventsOf(hook)] : [],
+  prTargetFilters: [...(hook.prTargetFilters || [])],
   enabled: hook.enabled !== false,
   skipIfRunning: Boolean(hook.skipIfRunning),
 });
@@ -80,7 +98,14 @@ export const toPayload = (form, parameters) => {
   };
   if (!form.id) common.kind = form.kind;
   if (form.kind === "bitbucket_push") {
-    return { ...common, buildTags: Boolean(form.buildTags) };
+    // Kept in the server's order, so a save that changes nothing changes nothing.
+    const events = BITBUCKET_EVENTS.map((item) => item.value).filter((value) => (form.events || []).includes(value));
+    return {
+      ...common,
+      events,
+      buildTags: Boolean(form.buildTags) && events.includes("repo:push"),
+      prTargetFilters: hasPullRequestEvent(events) ? [...(form.prTargetFilters || [])] : [],
+    };
   }
   const allowed = (form.allowedInputs || []).filter((name) => !declared.size || declared.has(name));
   return {
@@ -99,6 +124,9 @@ export const toPayload = (form, parameters) => {
 export const formProblems = (form) => {
   const problems = {};
   if (!String(form.name || "").trim()) problems.name = "Give the webhook a name.";
+  if (form.kind === "bitbucket_push" && !(form.events || []).length) {
+    problems.events = "Pick at least one event that starts a build.";
+  }
   if (form.kind === "generic" && form.refType === "tag" && !String(form.branch || "").trim()) {
     problems.branch = "Name the tag — a tag has no default to fall back to.";
   }
@@ -129,8 +157,22 @@ export const filterWords = (patterns, noun = "branch") =>
 /** One line on what a webhook builds. */
 export const buildsWhat = (hook, defaultBranch) => {
   if (hook.kind === "bitbucket_push") {
-    const branches = `Pushes to ${filterWords(hook.branchFilters)}`;
-    return hook.buildTags ? `${branches}, and tags ${filterWords(hook.tagFilters, "tag")}` : branches;
+    const events = eventsOf(hook);
+    const parts = [];
+    if (events.includes("repo:push")) {
+      const branches = `Pushes to ${filterWords(hook.branchFilters)}`;
+      parts.push(hook.buildTags ? `${branches}, and tags ${filterWords(hook.tagFilters, "tag")}` : branches);
+    }
+    const into = (hook.prTargetFilters || []).length ? ` into ${hook.prTargetFilters.join(", ")}` : "";
+    const opened = ["pullrequest:created", "pullrequest:updated"].filter((event) => events.includes(event));
+    if (opened.length) {
+      const verbs = opened.map((event) => (event === "pullrequest:created" ? "opened" : "updated")).join(" or ");
+      const from = (hook.branchFilters || []).length ? ` from ${hook.branchFilters.join(", ")}` : "";
+      parts.push(`pull requests${from}${into} when ${verbs}`);
+    }
+    if (events.includes("pullrequest:fulfilled")) parts.push(`pull requests merged${into || ` into ${filterWords(hook.branchFilters)}`}`);
+    const text = parts.join(" · ");
+    return text.charAt(0).toUpperCase() + text.slice(1);
   }
   const fixed =
     hook.refType === "tag"
@@ -235,6 +277,24 @@ export const samplePush = ({ repository = "", branch = "main", commit = "" } = {
     ],
   },
 });
+
+/** The body Bitbucket sends for a pull request event — for Preview and Test.
+ * Commits are short ids, as Bitbucket sends them. */
+export const samplePullRequest = ({ repository = "", event = "pullrequest:created", source = "feature/my-change", target = "main" } = {}) => {
+  const merged = event === "pullrequest:fulfilled";
+  const repo = repository ? { full_name: repository } : {};
+  return {
+    repository: repo,
+    pullrequest: {
+      id: 1,
+      title: "My change",
+      state: merged ? "MERGED" : "OPEN",
+      source: { branch: { name: source }, commit: { hash: "1a2b3c4d5e6f" }, repository: repo },
+      destination: { branch: { name: target }, commit: { hash: "6f5e4d3c2b1a" }, repository: repo },
+      ...(merged ? { merge_commit: { hash: "abcdef123456" } } : {}),
+    },
+  };
+};
 
 /** A body that exercises what a generic webhook allows, for Preview and curl. */
 export const sampleBody = (hook, parameters = []) => {

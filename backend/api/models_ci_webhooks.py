@@ -11,8 +11,11 @@ Two kinds share one table and one inbound URL scheme:
 * ``generic`` — anything that can POST: a script, Nexus, another CI, a release
   tool. The request may name the ref and set build inputs, but only within what
   the trigger allows.
-* ``bitbucket_push`` — Bitbucket's ``repo:push``: every pushed branch or tag
-  that matches the trigger's filters is built at the commit that was pushed.
+* ``bitbucket_push`` — Bitbucket repository events: a push builds every
+  pushed branch or tag that matches the trigger's filters at the commit that
+  was pushed; pull request events (opened, updated, merged) build the pull
+  request's branch, or the branch it was merged into. Which events build is
+  the trigger's ``events`` (the kind's name predates the choice).
 """
 
 from __future__ import annotations
@@ -92,6 +95,13 @@ class CiWebhookTrigger(db.Model):
     branch_filters = db.Column(db.JSON, nullable=False, default=list)
     build_tags = db.Column(db.Boolean, nullable=False, default=False)
     tag_filters = db.Column(db.JSON, nullable=False, default=list)
+    # Bitbucket only: the repository events that start a build (see
+    # webhook_triggers.BITBUCKET_EVENTS). NULL is ["repo:push"] — what every
+    # Bitbucket webhook built on before the events could be chosen.
+    events = db.Column(db.JSON, nullable=True)
+    # Pull request events only: the branches a pull request must be going
+    # INTO (fnmatch). Empty is any.
+    pr_target_filters = db.Column(db.JSON, nullable=True)
 
     enabled = db.Column(db.Boolean, nullable=False, default=True)
     skip_if_running = db.Column(db.Boolean, nullable=False, default=False)

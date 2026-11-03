@@ -375,3 +375,29 @@
     margin-top: 0;
   }
 }
+
+/* "Build when": the Bitbucket events a webhook builds on. */
+.st-root .wh-events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: var(--space-2);
+}
+
+.st-root .wh-events .pl-check {
+  height: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+
+.st-root .wh-events .pl-check.is-on {
+  border-color: var(--accent);
+}
+
+.st-root .wh-events small code {
+  font-size: 0.72rem;
+}

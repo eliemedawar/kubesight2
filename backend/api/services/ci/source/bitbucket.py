@@ -272,14 +272,25 @@ class BitbucketSourceProvider:
         except bitbucket_status.StatusWriteError as exc:
             raise SourceError(str(exc), retryable=exc.retryable) from exc
         wanted = _without_query(url)
-        for hook in hooks:
-            if _without_query(hook["url"]) == wanted:
-                return hook
-        if key:
-            for hook in hooks:
-                if key in (hook.get("url") or ""):
-                    return hook
-        return None
+        found = next((hook for hook in hooks if _without_query(hook["url"]) == wanted), None)
+        if found is None and key:
+            found = next((hook for hook in hooks if key in (hook.get("url") or "")), None)
+        if found is not None and not found.get("events") and found.get("uuid"):
+            # A listing without events would read as "missing every event".
+            try:
+                found = {
+                    **found,
+                    "events": bitbucket_status.get_webhook(
+                        repository_ref=ref.full_name,
+                        uid=found["uuid"],
+                        token=token,
+                        credential_type=credential_type,
+                        principal=principal,
+                    ),
+                }
+            except bitbucket_status.StatusWriteError:
+                pass
+        return found
 
     def ensure_webhook(
         self,
