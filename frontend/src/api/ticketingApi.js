@@ -33,6 +33,13 @@ export function makeTicketingApi(providerKey) {
     deleteInboundTicket: (recordId) =>
       request(`${base}/inbound-tickets/${encodeURIComponent(recordId)}`, { method: "DELETE" }),
 
+    // --- One-click webhook setup in the ticketing system itself ---
+    // A live read of the provider's webhooks — "could not look" comes back as
+    // `known: false` with a reason, not as an error.
+    getWebhookStatus: () => request(`${base}/webhooks`),
+
+    setupWebhooks: () => request(`${base}/webhooks/setup`, { method: "POST" }),
+
     // --- Deploy automation (Jenkins router + per-ticket runs) ---
     // Jenkins is a single shared connection: a build is a build whoever raised
     // the ticket. Both providers' tabs edit the same record.

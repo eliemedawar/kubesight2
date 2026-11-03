@@ -83,7 +83,20 @@ function ConfigForms({ showJenkinsOnly, canManage, onChanged }) {
       const updated = await api.updateConfig(configPayload(providerKey, form));
       setConfig(updated);
       setForm(formFromConfig(providerKey, updated));
-      setNotice("Configuration saved.");
+      // A new secret / gateway / event choice re-registers the webhooks.
+      const resync = updated.webhookResync;
+      if (resync && !resync.ok) {
+        const failed = (resync.webhooks || []).filter((w) => w.error).map((w) => w.error);
+        setError(
+          `Configuration saved, but updating the ${providerName} webhooks failed: ${
+            resync.error || failed.join(" ") || "unknown error"
+          }`
+        );
+      } else {
+        setNotice(
+          resync ? `Configuration saved. The ${providerName} webhooks were updated to match.` : "Configuration saved."
+        );
+      }
       onChanged?.();
     } catch (err) {
       setError(err.message || "Failed to save the configuration.");
@@ -163,6 +176,10 @@ function ConfigForms({ showJenkinsOnly, canManage, onChanged }) {
           dirty={dirty}
           onDiscard={() => setForm(formFromConfig(providerKey, config))}
           webhookUrl={`${window.location.origin}/api/ticketing/${providerKey}/inbound`}
+          onConfigChanged={(next) => {
+            setConfig(next);
+            setForm(formFromConfig(providerKey, next));
+          }}
           jenkins={jenkins}
           onSaveJenkins={saveJenkins}
           savingJenkins={savingJenkins}

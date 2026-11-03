@@ -204,7 +204,7 @@ const ZOHO_SECTIONS = [
     render: "webhook",
     pill: "secret",
     intro:
-      "Configure a Zoho Desk workflow rule to POST new DevOps Request tickets to this URL, sending the shared secret in the X-Ticketing-Secret header (X-Zoho-Secret is also accepted). Until a secret is saved, every delivery is rejected.",
+      "Set up in Zoho Desk registers two webhooks for you: new DevOps Request tickets, and comments + requester replies for Hermes. A hand-made workflow rule can still POST to this URL with the shared secret in the X-Ticketing-Secret header (X-Zoho-Secret is also accepted). Until a secret is saved, every delivery is rejected.",
     done: (config) => Boolean(config?.inboundSecretConfigured),
     fields: [
       {
@@ -214,6 +214,19 @@ const ZOHO_SECTIONS = [
         secretOf: "inboundSecretConfigured",
         generate: true,
         default: "",
+      },
+      {
+        key: "webhookBaseUrl",
+        label: "Gateway base URL (optional)",
+        placeholder: "https://tyk.example.com/kubesight",
+        hint: "Set when the ticketing system reaches KubeSight through a gateway such as Tyk. It replaces KubeSight's own address in the registered webhook URLs; leave blank to use KubeSight's public address.",
+        default: "",
+      },
+      {
+        key: "webhookSendUpdates",
+        type: "checkbox",
+        label: "Also send a ticket again when it is updated (Ticket_Update)",
+        default: false,
       },
     ],
   },
@@ -419,7 +432,7 @@ const JIRA_SECTIONS = [
     render: "webhook",
     pill: "secret",
     intro:
-      "Add a Jira webhook (or an Automation rule) that POSTs created/updated issues to this URL, sending the shared secret in the X-Ticketing-Secret header. The webhook must include the custom fields above in its payload. Until a secret is saved, every delivery is rejected.",
+      "Set up in Jira registers two webhooks for you, filtered to the project: new issues, and comments for Hermes (needs a Jira administrator account). A hand-made webhook or Automation rule can still POST issues to this URL with the shared secret in the X-Ticketing-Secret header. Until a secret is saved, every delivery is rejected.",
     done: (config) => Boolean(config?.inboundSecretConfigured),
     fields: [
       {
@@ -429,6 +442,19 @@ const JIRA_SECTIONS = [
         secretOf: "inboundSecretConfigured",
         generate: true,
         default: "",
+      },
+      {
+        key: "webhookBaseUrl",
+        label: "Gateway base URL (optional)",
+        placeholder: "https://tyk.example.com/kubesight",
+        hint: "Set when the ticketing system reaches KubeSight through a gateway such as Tyk. It replaces KubeSight's own address in the registered webhook URLs; leave blank to use KubeSight's public address.",
+        default: "",
+      },
+      {
+        key: "webhookSendUpdates",
+        type: "checkbox",
+        label: "Also send an issue again when it is updated (jira:issue_updated)",
+        default: false,
       },
     ],
   },

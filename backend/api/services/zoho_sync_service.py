@@ -158,6 +158,8 @@ def serialize(row: ZohoIntegration) -> Dict[str, Any]:
         "clientSecretConfigured": bool(row.client_secret_encrypted),
         "refreshTokenConfigured": bool(row.refresh_token_encrypted),
         "inboundSecretConfigured": bool(row.inbound_secret_encrypted),
+        "webhookBaseUrl": row.webhook_base_url or "",
+        "webhookSendUpdates": bool(row.webhook_send_updates),
         "syncApplication": bool(row.sync_application),
         "syncEnvironment": bool(row.sync_environment),
         "syncVariables": bool(row.sync_variables),
@@ -559,6 +561,16 @@ def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     _apply_secret(payload, "refreshToken", "clearRefreshToken", row, "refresh_token_encrypted")
     _apply_secret(payload, "inboundSecret", "clearInboundSecret", row, "inbound_secret_encrypted")
 
+    if "webhookBaseUrl" in payload:
+        from .ticketing.webhook_setup import clean_base_url
+
+        try:
+            row.webhook_base_url = clean_base_url(payload.get("webhookBaseUrl"))
+        except ValueError as exc:
+            errors.append(str(exc))
+    if "webhookSendUpdates" in payload:
+        row.webhook_send_updates = bool(payload.get("webhookSendUpdates"))
+
     # If the integration is being turned on, the essentials must be present.
     if row.enabled:
         for label, value in (
@@ -607,6 +619,7 @@ def _to_client_config(row: ZohoIntegration) -> ZohoConfig:
         client_id=row.client_id or "",
         client_secret=decrypt_secret(row.client_secret_encrypted or ""),
         refresh_token=decrypt_secret(row.refresh_token_encrypted or ""),
+        source_id=row.webhook_source_id or "",
     )
 
 

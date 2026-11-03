@@ -123,6 +123,8 @@ def serialize(row: JiraIntegration) -> Dict[str, Any]:
         "variableFieldApiName": row.variable_field_api_name or row.variable_field_id or "",
         "valueFieldApiName": row.value_field_api_name or "",
         "inboundSecretConfigured": bool(row.inbound_secret_encrypted),
+        "webhookBaseUrl": row.webhook_base_url or "",
+        "webhookSendUpdates": bool(row.webhook_send_updates),
         "syncApplication": bool(row.sync_application),
         "syncEnvironment": bool(row.sync_environment),
         "syncVariables": bool(row.sync_variables),
@@ -252,6 +254,16 @@ def update_config(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     _apply_secret(payload, "apiToken", "clearApiToken", row, "api_token_encrypted")
     _apply_secret(payload, "inboundSecret", "clearInboundSecret", row, "inbound_secret_encrypted")
+
+    if "webhookBaseUrl" in payload:
+        from .ticketing.webhook_setup import clean_base_url
+
+        try:
+            row.webhook_base_url = clean_base_url(payload.get("webhookBaseUrl"))
+        except ValueError as exc:
+            errors.append(str(exc))
+    if "webhookSendUpdates" in payload:
+        row.webhook_send_updates = bool(payload.get("webhookSendUpdates"))
 
     # If the integration is being turned on, the essentials must be present.
     if row.enabled:

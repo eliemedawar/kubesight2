@@ -699,28 +699,27 @@ def inbound_comment_webhook():
     return success_response({"comments": results})
 
 
+@zoho_bp.route("/inbound", methods=["GET"])
+@zoho_bp.route("/inbound/comment", methods=["GET"])
+def inbound_validation():
+    """Desk's URL check on webhook create; see the ticketing route's twin."""
+    return success_response({"ok": True, "provider": "zoho"})
+
+
 @zoho_bp.route("/inbound", methods=["POST"])
 def inbound_webhook():
     """Zoho -> KubeSight: a DevOps Request ticket. Secret-verified, not session auth."""
+    from ..services import ticketing
+    from .ticketing import resolve_delivery
+
     refused = _refuse_unverified_inbound()
     if refused is not None:
         return refused
-    payload = request.get_json(silent=True) or {}
-    if not isinstance(payload, dict):
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, (dict, list)):
         return error_response("Expected a JSON object body.", 400)
-    result = svc.resolve_inbound(payload)
-    log_audit(
-        "zoho_inbound_ticket",
-        actor=None,
-        target_type="zoho_inbound_ticket",
-        target_id=str(result.get("recordId") or ""),
-        details={
-            "resolved": result.get("resolved"),
-            "targetId": result.get("targetId"),
-            "deploymentName": result.get("deploymentName"),
-            "tag": result.get("tag"),
-        },
-    )
     # Always 200 so Zoho's workflow doesn't retry-storm; the resolution outcome
     # (resolved/error) is in the body and persisted for the operator to review.
-    return success_response(result)
+    return success_response(resolve_delivery(ticketing.get("zoho"), payload, "zoho_inbound_ticket"))

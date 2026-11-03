@@ -915,3 +915,58 @@ def get_issue(cfg: JiraConfig, issue_key: str) -> Dict[str, Any]:
         what=f"Reading Jira issue {issue_key}",
     )
     return payload if isinstance(payload, dict) else {}
+
+
+# ---------------------------------------------------------------------------
+# Webhooks — the one-click inbound setup (services/ticketing/webhook_setup.py).
+# The admin webhook resource ``/rest/webhooks/1.0/webhook`` exists on Cloud and
+# Data Center alike and needs the Jira Administrators global permission. A
+# webhook carries no id field of its own: the id is the last segment of ``self``.
+# ---------------------------------------------------------------------------
+
+def _webhooks_url(cfg: JiraConfig) -> str:
+    return f"{cfg.base_url.rstrip('/')}/rest/webhooks/1.0/webhook"
+
+
+def _webhook_call(cfg: JiraConfig, method: str, url: str, body=None, *, what: str) -> Any:
+    try:
+        return _call(cfg, method, url, body, what=what)
+    except JiraError as exc:
+        if exc.status in (401, 403):
+            raise JiraError(
+                f"{exc} Registering webhooks needs a Jira account with the Jira Administrators"
+                " global permission.",
+                exc.status,
+            ) from exc
+        if exc.status == 404:
+            raise JiraError(
+                f"{exc} This Jira has no /rest/webhooks/1.0/webhook resource (Jira 10 Data"
+                " Center moved it) — add the webhook in Jira by hand with the URL shown.",
+                exc.status,
+            ) from exc
+        raise
+
+
+def webhook_id(hook: Dict[str, Any]) -> str:
+    if hook.get("id") not in (None, ""):
+        return str(hook["id"])
+    return str(hook.get("self") or "").rstrip("/").rsplit("/", 1)[-1]
+
+
+def list_webhooks(cfg: JiraConfig) -> List[Dict[str, Any]]:
+    rows = _webhook_call(cfg, "GET", _webhooks_url(cfg), what="Listing Jira webhooks")
+    if isinstance(rows, dict):
+        rows = rows.get("values") or []
+    return [row for row in rows or [] if isinstance(row, dict)]
+
+
+def create_webhook(cfg: JiraConfig, body: Dict[str, Any]) -> Dict[str, Any]:
+    hook = _webhook_call(cfg, "POST", _webhooks_url(cfg), body, what="Creating the Jira webhook")
+    return hook if isinstance(hook, dict) else {}
+
+
+def update_webhook(cfg: JiraConfig, hook_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    hook = _webhook_call(
+        cfg, "PUT", f"{_webhooks_url(cfg)}/{hook_id}", body, what="Updating the Jira webhook"
+    )
+    return hook if isinstance(hook, dict) else {}

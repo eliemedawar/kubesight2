@@ -717,6 +717,75 @@
 }
 .sg-zh-copy svg { width: 0.85rem; height: 0.85rem; flex: none; }
 
+/* ── One-click webhook setup (Settings → Inbound webhook) ───────── */
+.sg-zh-hooks {
+  margin: 0.75rem 0 0.9rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+  min-width: 0;
+}
+.sg-zh-hooks-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.sg-zh-hooks-head h4 { margin: 0; font-size: 0.9rem; }
+.sg-zh-hooks-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+.sg-zh-hook-list {
+  list-style: none;
+  margin: 0.65rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+.sg-zh-hook {
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg-panel-strong);
+  min-width: 0;
+}
+.sg-zh-hook-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.sg-zh-hook-meta { margin: 0.25rem 0; font-size: 0.8rem; }
+.sg-zh-hook-url,
+.sg-zh-hooks-others code {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.sg-zh-hooks-others code { display: inline; }
+.sg-zh-hooks-result {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  margin-top: 0.6rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+}
+.sg-zh-hooks-result p { margin: 0 0 0.2rem; }
+.sg-zh-hooks-result svg { flex: 0 0 auto; width: 16px; height: 16px; margin-top: 0.1rem; }
+.sg-zh-hooks-result.ok { border: 1px solid var(--ok-border); background: var(--ok-soft); }
+.sg-zh-hooks-result.warn { border: 1px solid var(--warn-border); background: var(--warn-soft); color: var(--warn); }
+.sg-zh-hooks-others { margin-top: 0.6rem; font-size: 0.82rem; }
+.sg-zh-hooks-others ul { margin: 0.25rem 0 0; padding-left: 1.1rem; }
+.sg-zh-hooks-note { margin: 0.6rem 0 0; font-size: 0.78rem; }
+
 /* ── Agent's view — simulated Zoho ticket form (Field sync) ─────── */
 .sg-zh-zform {
   border: 1px solid var(--border);

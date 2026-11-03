@@ -2071,6 +2071,18 @@ class ZohoIntegration(db.Model):
 
     # --- Inbound webhook ---
     inbound_secret_encrypted = db.Column(db.Text, nullable=True)
+    # One-click webhook setup (services/ticketing/webhook_setup.py). The base
+    # URL replaces KubeSight's own address in the registered URLs when a
+    # gateway (Tyk) sits in front; blank = PUBLIC_BASE_URL.
+    webhook_base_url = db.Column(db.String(512), nullable=True)
+    # Also deliver Ticket_Update, not only Ticket_Add.
+    webhook_send_updates = db.Column(db.Boolean, nullable=False, default=False)
+    # JSON {"tickets": {"id", "url"}, "comments": {...}} — what setup registered,
+    # so a later resync finds the same webhook at an older address.
+    webhook_registrations = db.Column(db.Text, nullable=True)
+    # The UUID given to Desk as ignoreSourceId; sent as the sourceId header on
+    # KubeSight's own Desk calls so its write-backs do not echo back.
+    webhook_source_id = db.Column(db.String(64), nullable=True)
 
     # --- Sync behaviour ---
     # Comma-separated AppService statuses to publish (default: active,degraded).
@@ -2931,6 +2943,11 @@ class JiraIntegration(db.Model):
 
     # --- Inbound webhook ---
     inbound_secret_encrypted = db.Column(db.Text, nullable=True)
+    # One-click webhook setup — same meaning as on ZohoIntegration.
+    webhook_base_url = db.Column(db.String(512), nullable=True)
+    # Also deliver jira:issue_updated, not only jira:issue_created.
+    webhook_send_updates = db.Column(db.Boolean, nullable=False, default=False)
+    webhook_registrations = db.Column(db.Text, nullable=True)
 
     # --- Sync behaviour (mirrors the Zoho toggles) ---
     sync_interval_minutes = db.Column(db.Integer, nullable=False, default=30)

@@ -4,6 +4,7 @@ import { CopyButton } from "../zoho/common.jsx";
 import { IconAlert, IconCheck } from "../zoho/icons.jsx";
 import JenkinsSection from "./JenkinsSection.jsx";
 import { useTicketing } from "./TicketingContext.jsx";
+import WebhookSetupPanel from "./WebhookSetupPanel.jsx";
 import { JENKINS_SECTION, railFor, sectionDone, sectionsFor } from "./settingsSchema.js";
 
 // Setup room: sticky completeness rail + grouped sections + a contextual save
@@ -192,6 +193,8 @@ export default function TicketingSettingsTab({
   dirty,
   onDiscard,
   webhookUrl,
+  // Setup may store a freshly generated secret; the host merges the config.
+  onConfigChanged,
   jenkins,
   onSaveJenkins,
   savingJenkins,
@@ -275,6 +278,15 @@ export default function TicketingSettingsTab({
                   />
                   <CopyButton text={webhookUrl} />
                 </div>
+              ) : null}
+
+              {section.render === "webhook" ? (
+                <WebhookSetupPanel
+                  canManage={canManage}
+                  config={config}
+                  dirty={dirty}
+                  onConfigChanged={onConfigChanged}
+                />
               ) : null}
 
               <div

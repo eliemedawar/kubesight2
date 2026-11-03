@@ -1726,6 +1726,11 @@ def parse_comment_webhook(payload: Any) -> List[Dict[str, Any]]:
     for event in events:
         if not isinstance(event, dict):
             continue
+        if str(event.get("webhookEvent") or "").startswith("comment_"):
+            jira = _jira_comment(event)
+            if jira:
+                out.append(jira)
+            continue
         body = event.get("payload") if isinstance(event.get("payload"), dict) else event
         kind = str(event.get("eventType") or "")
         if kind == "Ticket_Thread_Add" and str(body.get("direction") or "in").lower() == "out":
@@ -1743,6 +1748,37 @@ def parse_comment_webhook(payload: Any) -> List[Dict[str, Any]]:
             "status": body.get("status") or body.get("ticketStatus"),
         })
     return [c for c in out if c.get("ticketId")]
+
+
+def _adf_text(node: Any) -> str:
+    """Plain text out of an Atlassian Document Format body (Cloud's v3 shape)."""
+    if isinstance(node, str):
+        return node
+    if isinstance(node, list):
+        return "".join(_adf_text(child) for child in node)
+    if not isinstance(node, dict):
+        return ""
+    text = node.get("text") if node.get("type") == "text" else ""
+    inner = _adf_text(node.get("content") or [])
+    return f"{text or ''}{inner}" + ("\n" if node.get("type") == "paragraph" else "")
+
+
+def _jira_comment(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A Jira ``comment_created`` webhook — the key (KUB-123) is the ticket id
+    the inbound intake stored. Edits and deletes are not new replies."""
+    if event.get("webhookEvent") != "comment_created":
+        return None
+    comment = event.get("comment") if isinstance(event.get("comment"), dict) else {}
+    issue = event.get("issue") if isinstance(event.get("issue"), dict) else {}
+    who = comment.get("author") if isinstance(comment.get("author"), dict) else {}
+    status = ((issue.get("fields") or {}).get("status") or {}) if isinstance(issue.get("fields"), dict) else {}
+    return {
+        "ticketId": issue.get("key") or issue.get("id"),
+        "text": _adf_text(comment.get("body")).strip(),
+        "author": who.get("displayName") or who.get("emailAddress") or who.get("name"),
+        "commentId": comment.get("id"),
+        "status": status.get("name") if isinstance(status, dict) else None,
+    }
 
 
 # ---------------------------------------------------------------------------

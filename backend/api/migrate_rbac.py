@@ -1341,6 +1341,14 @@ def _migrate_zoho_integration_columns() -> None:
         _add_column_if_missing(
             "jira_integration", "transition_on_hold", "VARCHAR(120) DEFAULT 'On Hold'"
         )
+    # One-click inbound webhook setup (2026-11-03).
+    for table in ("zoho_integration", "jira_integration"):
+        if table in _table_names():
+            _add_column_if_missing(table, "webhook_base_url", "VARCHAR(512)")
+            _add_column_if_missing(table, "webhook_send_updates", "BOOLEAN DEFAULT false")
+            _add_column_if_missing(table, "webhook_registrations", "TEXT")
+    if "zoho_integration" in _table_names():
+        _add_column_if_missing("zoho_integration", "webhook_source_id", "VARCHAR(64)")
 
 
 def _migrate_ticketing_tables() -> None:

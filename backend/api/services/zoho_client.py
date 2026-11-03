@@ -80,6 +80,9 @@ class ZohoConfig:
     client_secret: str
     refresh_token: str
     environment_field_id: str = ""
+    # The webhook's ignoreSourceId: sent on every call so changes KubeSight
+    # makes itself (comments, status) are not delivered back to it.
+    source_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -163,10 +166,13 @@ def get_access_token(cfg: ZohoConfig, *, force: bool = False) -> str:
 
 
 def _auth_headers(cfg: ZohoConfig, access_token: str) -> Dict[str, str]:
-    return {
+    headers = {
         "Authorization": f"Zoho-oauthtoken {access_token}",
         "orgId": cfg.org_id,
     }
+    if cfg.source_id:
+        headers["sourceId"] = cfg.source_id
+    return headers
 
 
 # ---------------------------------------------------------------------------
@@ -743,3 +749,48 @@ def _error_detail(prefix: str, status: int, payload: Dict[str, Any]) -> str:
             joined = "; ".join(specifics)
             detail = f"{detail} ({joined})" if detail else joined
     return f"{prefix} (HTTP {status}){f': {detail}' if detail else ''}."
+
+
+# ---------------------------------------------------------------------------
+# Webhooks — the one-click inbound setup (services/ticketing/webhook_setup.py).
+# ``/webhooks`` with Desk.webhooks.* scopes (READ/CREATE/UPDATE) and a profile
+# holding the Webhook permission. Desk sends a validation GET to the URL on
+# create and on a URL change and refuses the webhook unless it answers 200.
+# Not layout-guarded: a webhook is org-level and changes no ticket form.
+# ---------------------------------------------------------------------------
+
+def _webhook_error(what: str, status: int, payload: Dict[str, Any]) -> ZohoError:
+    message = _error_detail(what, status, payload)
+    if status in (401, 403):
+        message += (
+            " The Zoho token cannot manage webhooks: re-mint the refresh token with the"
+            " Desk webhook scopes added (Desk.webhooks.READ, .CREATE, .UPDATE) and make sure"
+            " the account's Desk profile has the Webhook permission."
+        )
+    return ZohoError(message, status)
+
+
+def list_webhooks(cfg: ZohoConfig) -> List[Dict[str, Any]]:
+    """Every webhook on the portal (204/empty -> [])."""
+    status, payload = _ticket_request(cfg, "GET", f"{cfg.api_base.rstrip('/')}/webhooks")
+    if status == 204:
+        return []
+    if status != 200:
+        raise _webhook_error("Listing Zoho webhooks failed", status, payload)
+    rows = payload.get("data") if isinstance(payload.get("data"), list) else []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def create_webhook(cfg: ZohoConfig, body: Dict[str, Any]) -> Dict[str, Any]:
+    status, payload = _ticket_request(cfg, "POST", f"{cfg.api_base.rstrip('/')}/webhooks", body)
+    if status not in (200, 201):
+        raise _webhook_error("Creating the Zoho webhook failed", status, payload)
+    return payload
+
+
+def update_webhook(cfg: ZohoConfig, webhook_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    url = f"{cfg.api_base.rstrip('/')}/webhooks/{webhook_id}"
+    status, payload = _ticket_request(cfg, "PATCH", url, body)
+    if status not in (200, 201):
+        raise _webhook_error("Updating the Zoho webhook failed", status, payload)
+    return payload

@@ -32,6 +32,7 @@ from ..decorators import require_permission
 from ..response import error_response, success_response
 from ..services import deploy_automation_service as automation_svc
 from ..services import ticketing
+from ..services.ticketing import webhook_setup
 from ..services.deploy_automation_service import AutomationError
 
 ticketing_bp = Blueprint("ticketing", __name__, url_prefix="/api/ticketing")
@@ -117,6 +118,7 @@ def get_config(provider_key: str):
 def update_config(provider_key: str):
     provider = _provider(provider_key)
     payload = request.get_json(silent=True) or {}
+    before = provider.sync.get_config_dict()
     try:
         data = provider.sync.update_config(payload)
     except ValueError as exc:
@@ -128,7 +130,28 @@ def update_config(provider_key: str):
         "1",
         {"enabled": data.get("enabled"), "layoutId": data.get("layoutId")},
     )
+    # A new secret, gateway or event choice changes what the registered
+    # webhooks must look like; left alone, every delivery would be refused.
+    # The form sends every field on each save, so only a real change counts.
+    if payload.get("inboundSecret") or any(
+        before.get(key) != data.get(key) for key in ("webhookBaseUrl", "webhookSendUpdates")
+    ):
+        resync = webhook_setup.resync_if_registered(provider, actor=get_current_user())
+        if resync is not None:
+            data = {**provider.sync.get_config_dict(), "webhookResync": _resync_summary(resync)}
     return success_response(data)
+
+
+def _resync_summary(result: dict) -> dict:
+    if result.get("error"):
+        return {"ok": False, "error": result["error"]}
+    return {
+        "ok": bool(result.get("ok")),
+        "webhooks": [
+            {k: hook.get(k) for k in ("kind", "label", "action", "error")}
+            for hook in result.get("webhooks") or []
+        ],
+    }
 
 
 @ticketing_bp.route("/<provider_key>/test", methods=["POST"])
@@ -828,6 +851,28 @@ def cancel_automation_run(provider_key: str, run_id: int):
 
 
 # ---------------------------------------------------------------------------
+# One-click webhook setup in the ticketing system
+# ---------------------------------------------------------------------------
+
+@ticketing_bp.route("/<provider_key>/webhooks", methods=["GET"])
+@require_permission("ticketing:view")
+def webhooks_status(provider_key: str):
+    """Live: do the ticketing system's webhooks call KubeSight, and correctly."""
+    return success_response(webhook_setup.status(_provider(provider_key)))
+
+
+@ticketing_bp.route("/<provider_key>/webhooks/setup", methods=["POST"])
+@require_permission("ticketing:manage")
+def webhooks_setup(provider_key: str):
+    provider = _provider(provider_key)
+    try:
+        result = webhook_setup.setup(provider, actor=get_current_user())
+    except webhook_setup.SetupError as exc:
+        return error_response(str(exc), 400)
+    return success_response({**result, "config": provider.sync.get_config_dict()})
+
+
+# ---------------------------------------------------------------------------
 # Inbound webhook — secret-verified, NOT session authenticated
 # ---------------------------------------------------------------------------
 
@@ -873,6 +918,45 @@ def _refuse_unverified_inbound(provider):
     return inbound_secret_refusal(provider.sync, provider.name, provided)
 
 
+@ticketing_bp.route("/<provider_key>/inbound", methods=["GET"])
+@ticketing_bp.route("/<provider_key>/inbound/comment", methods=["GET"])
+def inbound_validation(provider_key: str):
+    """Zoho Desk checks a webhook URL with a GET (and refuses the webhook
+    unless it answers 200) when the webhook is created or moved. Nothing is
+    processed, so no secret is needed to answer it."""
+    provider = _provider(provider_key)
+    return success_response({"ok": True, "provider": provider.key})
+
+
+def resolve_delivery(provider, payload, audit_event: str):
+    """Every ticket in one delivery: a provider's native webhook body (a Desk
+    event list, a Jira issue event) or a hand-rolled flat one."""
+    tickets, skipped = webhook_setup.unwrap_ticket_delivery(
+        provider.key, payload, provider.sync.get_or_create_config()
+    )
+    results = []
+    for ticket in tickets:
+        result = provider.sync.resolve_inbound(ticket)
+        log_audit(
+            audit_event,
+            actor=None,
+            target_type="ticketing_inbound_ticket",
+            target_id=str(result.get("recordId") or ""),
+            details={
+                "provider": provider.key,
+                "resolved": result.get("resolved"),
+                "targetId": result.get("targetId"),
+                "deploymentName": result.get("deploymentName"),
+                "tag": result.get("tag"),
+            },
+        )
+        results.append(result)
+    # One flat ticket answers as it always has; a batch answers per ticket.
+    if isinstance(payload, dict) and len(results) == 1:
+        return results[0]
+    return {"tickets": results, "skipped": skipped}
+
+
 @ticketing_bp.route("/<provider_key>/inbound", methods=["POST"])
 def inbound_webhook(provider_key: str):
     """A ticketing system delivering a DevOps Request. Secret-verified."""
@@ -880,26 +964,16 @@ def inbound_webhook(provider_key: str):
     refused = _refuse_unverified_inbound(provider)
     if refused is not None:
         return refused
-    payload = request.get_json(silent=True) or {}
-    if not isinstance(payload, dict):
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, (dict, list)):
         return error_response("Expected a JSON object body.", 400)
-    result = provider.sync.resolve_inbound(payload)
-    log_audit(
-        f"ticketing_{provider.key}_inbound_ticket",
-        actor=None,
-        target_type="ticketing_inbound_ticket",
-        target_id=str(result.get("recordId") or ""),
-        details={
-            "provider": provider.key,
-            "resolved": result.get("resolved"),
-            "targetId": result.get("targetId"),
-            "deploymentName": result.get("deploymentName"),
-            "tag": result.get("tag"),
-        },
-    )
     # Always 200 so the sender's workflow doesn't retry-storm; the resolution
     # outcome (resolved/error) is in the body and persisted for review.
-    return success_response(result)
+    return success_response(
+        resolve_delivery(provider, payload, f"ticketing_{provider.key}_inbound_ticket")
+    )
 
 
 @ticketing_bp.route("/<provider_key>/inbound/comment", methods=["POST"])
