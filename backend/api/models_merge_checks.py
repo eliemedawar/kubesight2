@@ -239,6 +239,9 @@ class CiMergeCheckConfig(db.Model, _GateColumns):
     # only for Node, SonarQube or Semgrep, Dependency-Check where it can read the
     # manifests; see ``merge_checks.profiles``. "custom" keeps what was ticked.
     tools_mode = db.Column(db.String(16), nullable=True, default="auto")
+    # The address Bitbucket is given when a gateway (Tyk) sits in front of
+    # KubeSight; it forwards to the inbound path. NULL = KubeSight's own URL.
+    external_url = db.Column(db.String(500), nullable=True)
 
     # Per-tool command overrides: {"eslint": ["line", "line", ...]}.
     #

@@ -327,7 +327,15 @@ class BitbucketSourceProvider:
                 principal=principal,
             )
         except bitbucket_status.StatusWriteError as exc:
-            raise SourceError(str(exc), retryable=exc.retryable) from exc
+            message = str(exc)
+            if "allowed webhook destination" in message or "URL resolution failed" in message:
+                # Bitbucket Cloud resolves the address from the internet; an
+                # internal name (kubesight-uat.areeba.com) never resolves.
+                message += (
+                    f" Bitbucket cannot reach {url} from the internet. Give it a public"
+                    " gateway URL (Tyk) that forwards to KubeSight, then set it up again."
+                )
+            raise SourceError(message, retryable=exc.retryable) from exc
         return {
             "action": "updated" if existing else "created",
             "uuid": str(saved.get("uuid") or (existing or {}).get("uuid") or ""),

@@ -1,6 +1,103 @@
+import { useState } from "react";
+// The URL row is the build webhooks' one (.wh-kv), so it is styled the same.
+import "../../../styles/signal/webhooks.css";
 import { ChipsInput, Field, SettingRow, Switch } from "../pipeline/controls.jsx";
 import { PlIcon } from "../pipeline/icons.jsx";
 import { EVENTS } from "./mergeCheckModel.js";
+
+/**
+ * The address Bitbucket is given. Normally KubeSight's own; when Bitbucket
+ * Cloud cannot resolve it (an internal name), a gateway such as Tyk that
+ * forwards to it — the same editor as a build webhook's URL. Saved on its own,
+ * not through the save bar, because Set up in Bitbucket uses the saved one.
+ */
+function CallUrl({ config, webhook, canEdit, onCopy, onSave }) {
+  const own = config.webhookUrl || config.webhookPath;
+  const callUrl = config.callUrl || own;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const save = async (value) => {
+    setBusy(true);
+    const ok = await onSave(value.trim());
+    setBusy(false);
+    if (ok) setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <div className="wh-kv wh-kv-edit">
+        <span className="wh-k">URL</span>
+        <div className="pl-field wh-v-edit">
+          <input
+            type="url"
+            className="is-mono"
+            value={draft}
+            placeholder={own}
+            aria-label="Gateway URL"
+            autoFocus
+            disabled={busy}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") save(draft);
+              if (event.key === "Escape") {
+                event.stopPropagation();
+                setEditing(false);
+              }
+            }}
+          />
+          <p className="pl-field-hint">
+            The address Bitbucket should call when a gateway such as Tyk sits in front of KubeSight. The gateway
+            must forward the request, body and headers unchanged, to <code>{own}</code>. Leave it empty to use
+            KubeSight's own URL.
+          </p>
+        </div>
+        <button type="button" className="btn-outline btn-compact" onClick={() => save(draft)} disabled={busy}>
+          {busy ? "Saving…" : "Save"}
+        </button>
+        <button type="button" className="btn-ghost st-action" onClick={() => setEditing(false)} disabled={busy}>
+          Cancel
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="wh-kv">
+        <span className="wh-k">URL</span>
+        <code className="wh-v">{callUrl}</code>
+        <button type="button" className="btn-ghost st-action" onClick={() => onCopy(callUrl, "URL")}>
+          <PlIcon name="copy" /> Copy
+        </button>
+        {canEdit && onSave && (
+          <button
+            type="button"
+            className="btn-ghost st-action"
+            onClick={() => {
+              setDraft(config.externalUrl || "");
+              setEditing(true);
+            }}
+          >
+            <PlIcon name="variable" /> Edit
+          </button>
+        )}
+      </div>
+      {config.externalUrl ? (
+        <p className="pl-field-hint wh-kv-note">
+          Through a gateway. It forwards to KubeSight at <code>{own}</code>.
+        </p>
+      ) : null}
+      {webhook?.exists && webhook.urlMatches === false ? (
+        <p className="pl-field-error" role="alert">
+          <PlIcon name="alert" /> Bitbucket still calls <code>{webhook.registeredUrl}</code>. Press Set up in
+          Bitbucket above to move it.
+        </p>
+      ) : null}
+    </>
+  );
+}
 
 /**
  * How Bitbucket and KubeSight talk: what triggers a check, what is reported
@@ -26,8 +123,10 @@ export default function ConnectionView({
   onCopy,
   onField,
   onToggleEvent,
+  // (url) => Promise<boolean>; saves the gateway URL on its own.
+  onSaveGatewayUrl,
 }) {
-  const url = config.webhookUrl || config.webhookPath;
+  const url = config.callUrl || config.webhookUrl || config.webhookPath;
   const branches = form.targetBranches || [];
   const missingUpdated = !form.events.includes("pullrequest:updated");
 
@@ -95,6 +194,11 @@ export default function ConnectionView({
             onChange={(next) => onField("targetBranches", next)}
           />
         </Field>
+      </section>
+
+      <section className="mc-card">
+        <h4 className="pl-block-title">Bitbucket calls</h4>
+        <CallUrl config={config} webhook={webhook} canEdit={canEdit} onCopy={onCopy} onSave={onSaveGatewayUrl} />
       </section>
 
       <section className="mc-card">

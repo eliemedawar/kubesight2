@@ -1194,6 +1194,64 @@ def test_setup_refuses_an_address_bitbucket_cannot_reach(
     assert fake_hooks["writes"] == []
 
 
+def _save_url(client, token, service_id, url):
+    return client.put(
+        f"/api/ci/services/{service_id}/merge-checks",
+        json={"externalUrl": url},
+        headers=auth_headers(token),
+    )
+
+
+def test_a_gateway_url_is_registered_and_moves_the_existing_webhook(
+    app, client, admin_token, service_id, fake_hooks, monkeypatch
+):
+    """Bitbucket Cloud cannot resolve an internal name (kubesight-uat.areeba.com):
+    a gateway (Tyk) address is registered instead, and the webhook already at
+    KubeSight's own address is moved there rather than duplicated."""
+    _setup(client, admin_token, service_id)
+    tyk = "https://tyk.example.com/kubesight-merge"
+    saved = _save_url(client, admin_token, service_id, tyk)
+    assert saved.status_code == 200, saved.get_json()
+    config = saved.get_json()["data"]
+    assert config["externalUrl"] == tyk and config["callUrl"] == tyk
+
+    status = client.get(
+        f"/api/ci/services/{service_id}/merge-checks/webhook", headers=auth_headers(admin_token)
+    ).get_json()["data"]
+    assert status["exists"] is True and status["urlMatches"] is False and status["inSync"] is False
+
+    data = _setup(client, admin_token, service_id).get_json()["data"]
+    assert data["webhook"]["action"] == "updated"
+    assert len(fake_hooks["hooks"]) == 1
+    assert fake_hooks["hooks"][0]["url"] == tyk
+
+    # A gateway also lifts the loopback refusal — its address is the reachable one.
+    monkeypatch.setenv("PUBLIC_BASE_URL", "http://localhost:5055")
+    assert _setup(client, admin_token, service_id).status_code == 200
+
+    bad = _save_url(client, admin_token, service_id, "tyk.example.com")
+    assert bad.status_code == 400
+
+
+def test_bitbucket_refusing_an_unresolvable_url_says_what_to_do(
+    client, admin_token, service_id, fake_hooks, monkeypatch
+):
+    from api.services.ci.source import bitbucket_status
+
+    def refuse(**kwargs):
+        raise bitbucket_status.StatusWriteError(
+            'Bitbucket rejected the request: {"url": ["Not an allowed webhook destination:'
+            ' URL resolution failed"]}',
+            status=400,
+            retryable=False,
+        )
+
+    monkeypatch.setattr(bitbucket_status, "save_webhook", refuse)
+    response = _setup(client, admin_token, service_id)
+    assert response.status_code == 400
+    assert "gateway URL (Tyk)" in response.get_json()["error"]
+
+
 def test_a_token_without_the_webhook_scope_is_explained(
     client, admin_token, service_id, fake_hooks, monkeypatch
 ):

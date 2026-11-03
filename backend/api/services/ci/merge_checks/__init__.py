@@ -277,6 +277,13 @@ def save_config(
     )
     if "postComment" in payload:
         row.post_comment = bool(payload.get("postComment"))
+    if "externalUrl" in payload:
+        from ..webhook_triggers import WebhookError, _clean_external_url
+
+        try:
+            row.external_url = _clean_external_url(payload.get("externalUrl"))
+        except WebhookError as exc:
+            raise MergeCheckError(str(exc)) from exc
     if "statusKey" in payload:
         key = str(payload.get("statusKey") or "").strip().upper()[:40]
         if key and not key.replace("-", "").replace("_", "").isalnum():
@@ -485,13 +492,18 @@ def _public_webhook_url(service: CiService) -> str:
     calls from the internet, so a loopback address would create a webhook that
     fails on every delivery — refused here, with what to set instead.
     """
+    row = get_config(service)
+    if row is not None and row.external_url:
+        # A gateway address is the reachable one by definition.
+        return row.external_url
     base = delivery.public_base_url()
     host = base.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower() if base else ""
     if not base or any(host.startswith(prefix) for prefix in _UNREACHABLE_HOSTS):
         raise MergeCheckError(
-            "This installation has no public address Bitbucket can reach. Set "
-            "PUBLIC_BASE_URL (or MERGE_CHECK_BASE_URL) to the address KubeSight "
-            "is reachable at from the internet, then try again."
+            "This installation has no public address Bitbucket can reach. Set a "
+            "gateway URL (Tyk) on the Connection tab, or PUBLIC_BASE_URL (or "
+            "MERGE_CHECK_BASE_URL) to the address KubeSight is reachable at from "
+            "the internet, then try again."
         )
     return f"{base}{webhook_path(service)}"
 
@@ -585,6 +597,9 @@ def configure_in_source(
             secret=secret,
             events=list(row.events or DEFAULT_EVENTS),
             description=f"KubeSight merge checks ({service.slug})",
+            # Finds this service's webhook at KubeSight's own address too, so
+            # setting a gateway moves it instead of adding a second one.
+            key=webhook_path(service),
         )
     except source_port.SourceError as exc:
         row.last_error = f"Webhook setup failed: {exc}"[:2000]
@@ -670,7 +685,7 @@ def webhook_status(service: CiService) -> Dict[str, Any]:
                 "reason": f"KubeSight cannot read webhooks on {service.repository_provider}.",
             }
         ref = handler.parse_repository_url(service.repository_url)
-        hook = finder(ref, service.credential_profile, url=url)
+        hook = finder(ref, service.credential_profile, url=url, key=webhook_path(service))
     except Exception as exc:  # noqa: BLE001 - "we could not look" is an answer
         return {"known": False, "exists": False, "reason": str(exc)}
     if hook is None:
@@ -678,17 +693,22 @@ def webhook_status(service: CiService) -> Dict[str, Any]:
     config = get_config(service)
     wanted = set(config.events or DEFAULT_EVENTS) if config else set(DEFAULT_EVENTS)
     missing = sorted(wanted - set(hook["events"]))
+    registered = hook.get("url") or ""
+    # Found at another address: Bitbucket still calls the old one.
+    url_matches = registered.split("?", 1)[0] == url.split("?", 1)[0]
     return {
         "known": True,
         "exists": True,
         "url": url,
+        "registeredUrl": registered,
+        "urlMatches": url_matches,
         "repository": ref.full_name,
         "active": hook["active"],
         "secretSet": hook["secretSet"],
         "events": hook["events"],
         "missingEvents": missing,
         # Anything short of this and deliveries are refused or never sent.
-        "inSync": hook["active"] and hook["secretSet"] and not missing,
+        "inSync": hook["active"] and hook["secretSet"] and not missing and url_matches,
     }
 
 
@@ -733,6 +753,10 @@ def config_payload(
         "effectiveGate": gate,
         "webhookPath": webhook_path(service),
         "webhookUrl": f"{base}{webhook_path(service)}" if base else "",
+        # What Bitbucket is given: the gateway's address when one is set.
+        "externalUrl": (row.external_url if row else None) or "",
+        "callUrl": (row.external_url if row else None)
+        or (f"{base}{webhook_path(service)}" if base else ""),
         "secretConfigured": bool(row and row.inbound_secret_encrypted),
         "pipelineId": row.pipeline_id if row else None,
         # Per tool: what it runs now, whether that is an edit, and what the

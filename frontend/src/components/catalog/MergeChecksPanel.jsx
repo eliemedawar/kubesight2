@@ -585,6 +585,15 @@ export default function MergeChecksPanel({ service, canEdit, canView = true, onD
               onCopy={copy}
               onField={set}
               onToggleEvent={(value) => toggleIn("events", value)}
+              onSaveGatewayUrl={(value) =>
+                // From the saved copy, so edits still in the save bar are kept.
+                send(saved, { externalUrl: value }, {
+                  partial: true,
+                  message: `${value ? "Gateway URL saved." : "Back to KubeSight's own URL."}${
+                    webhook?.exists ? " Press Set up in Bitbucket so Bitbucket calls the new address." : ""
+                  }`,
+                })
+              }
             />
           )}
           {section === "history" && (

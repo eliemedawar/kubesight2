@@ -1083,6 +1083,8 @@ def _migrate_merge_check_columns() -> None:
     # configuration reads as "auto": the tools follow the service's type from
     # the next save or pull request on.
     _add_column_if_missing("ci_merge_check_configs", "tools_mode", "VARCHAR(16)")
+    # Gateway (Tyk) address Bitbucket calls instead of KubeSight's own.
+    _add_column_if_missing("ci_merge_check_configs", "external_url", "VARCHAR(500)")
     # Semgrep's own cap and severity floor. The gate columns are declared on one
     # mixin and therefore exist on BOTH tables — adding them to only one is the
     # mistake this loop exists to prevent. NULL everywhere, which means
