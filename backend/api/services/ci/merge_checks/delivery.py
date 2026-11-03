@@ -75,18 +75,25 @@ def public_base_url() -> str:
 def check_url(check: CiMergeCheck) -> str:
     """The page that explains this verdict, in KubeSight's own hash routing.
 
-    Deep-links to the service's Merge Checks tab with the build open, so the
-    link on a red build status lands on the logs rather than on a dashboard.
+    Deep-links to the service's Merge Checks history, where each verdict
+    opens its build — not the dashboard an unknown route falls back to.
     """
     base = public_base_url()
     if not base:
         return ""
-    if check.build_id:
-        return (
-            f"{base}/#/catalog/{check.service_id}"
-            f"?tab=mergeChecks&build={check.build_id}"
-        )
-    return f"{base}/#/catalog/{check.service_id}?tab=mergeChecks"
+    return f"{base}/#/service-catalog/{check.service_id}/mergechecks?section=history"
+
+
+def status_link(check: CiMergeCheck) -> str:
+    """The link on the Bitbucket build status, which Bitbucket REQUIRES.
+
+    KubeSight's page when its address is known. Verdicts are posted by the
+    scheduler, outside any request, so without PUBLIC_BASE_URL there is no
+    address to read — and an empty link makes Bitbucket refuse the status
+    ("url: This field is required"), leaving every verdict unreported. The pull
+    request itself is always a valid link.
+    """
+    return check_url(check) or check.pull_request_url or ""
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +214,7 @@ def deliver(check: CiMergeCheck) -> Dict[str, Any]:
             state=_PORT_STATE.get(check.verdict or "unknown", "failed"),
             name="KubeSight merge checks",
             description=status_description(check),
-            url=check_url(check) or public_base_url(),
+            url=status_link(check),
         )
     except source_port.SourceError as exc:
         return _failed(check, str(exc), retryable=getattr(exc, "retryable", True))
@@ -466,7 +473,7 @@ def mark_running(check: CiMergeCheck) -> Optional[str]:
             state="running",
             name="KubeSight merge checks",
             description="Running ESLint, SonarQube and Dependency-Check…",
-            url=check_url(check),
+            url=status_link(check),
         )
     except Exception as exc:  # noqa: BLE001 - optimistic, never load-bearing
         logger.info("Merge check %s: in-progress status not posted (%s)", check.id, exc)

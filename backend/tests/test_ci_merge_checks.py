@@ -1685,3 +1685,22 @@ def test_every_linter_reports_skipped_and_ok_and_runs_in_a_known_image(tool):
     assert stage["image"], f"{tool} has no image"
     assert stage["env"]["KUBESIGHT_CHECK_TOOL"] == tool
     assert build_environments.resolve(stage_defs._TOOL_ENV_KEY[tool])["configured"]
+
+
+def test_the_status_link_is_never_empty(app, monkeypatch):
+    """Bitbucket refuses a build status without a link ("url: This field is
+    required"). Verdicts are posted by the scheduler, outside any request, so
+    with no PUBLIC_BASE_URL the pull request itself is the link."""
+    from api.models_merge_checks import CiMergeCheck
+    from api.services.ci.merge_checks import delivery
+
+    check = CiMergeCheck(
+        service_id=56, pull_request_url="https://bitbucket.org/areebasal/areeba-specula/pull-requests/20"
+    )
+    monkeypatch.setattr(delivery, "public_base_url", lambda: "")
+    assert delivery.status_link(check) == check.pull_request_url
+
+    monkeypatch.setattr(delivery, "public_base_url", lambda: "https://kubesight-uat.areeba.com")
+    assert delivery.status_link(check) == (
+        "https://kubesight-uat.areeba.com/#/service-catalog/56/mergechecks?section=history"
+    )
