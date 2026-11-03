@@ -2012,7 +2012,10 @@ def _ci_deploy_stage(run: DeployAutomationRun, build=None):
         if (
             str(target.get("clusterId") or "") == str(run.cluster_id or "")
             and target.get("namespace") == run.namespace
-            and target.get("deploymentName") == run.deployment_name
+            and (
+                target.get("deploymentName") == run.deployment_name
+                or run.deployment_name in (target.get("deployments") or [])
+            )
         ):
             return stage
     return None

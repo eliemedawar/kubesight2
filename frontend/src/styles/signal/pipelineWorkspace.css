@@ -3237,6 +3237,29 @@
   font-size: var(--font-size-sm);
 }
 
+.pl-root .pl-helm-image-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.pl-root .pl-helm-image-status > svg {
+  width: 0.9rem;
+  height: 0.9rem;
+  color: var(--ok);
+}
+
+.pl-root .pl-helm-image-status.is-warn,
+.pl-root .pl-helm-image-status.is-warn > svg {
+  color: var(--warn);
+}
+
 .pl-root .pl-deploy-guards {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

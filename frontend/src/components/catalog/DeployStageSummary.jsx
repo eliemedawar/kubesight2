@@ -10,7 +10,11 @@ export default function DeployStageSummary({ stage }) {
   if (!state) return null;
   const outcome = deployOutcome(state);
   const target = state.target || {};
-  const where = [target.clusterId, target.namespace, target.releaseName || target.deploymentName]
+  const where = [
+    target.clusterId,
+    target.namespace,
+    target.releaseName || target.deploymentName || (target.deployments || []).join(", "),
+  ]
     .filter(Boolean)
     .join(" / ");
   return (

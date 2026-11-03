@@ -11,10 +11,14 @@ import {
   generateManifest,
   blankHelmImage,
   guessImageRows,
+  blankDeploymentRow,
   guessImageValues,
   isHelmDeploy,
+  MAX_DEPLOYMENTS,
   MAX_HELM_IMAGES,
+  setsSeveralDeployments,
   setsSeveralImages,
+  startDeploymentRows,
   isLinkedDeploy,
   patchDeploy,
   pickLinkedDeployment,
@@ -342,9 +346,97 @@ export default function DeployStageFields({ ids, service: ciService, stage, stag
     );
   }
 
+  const severalDeployments = setsSeveralDeployments(deploy);
+  const countSwitch = (
+    <Field
+      label="Deployments"
+      hint={
+        severalDeployments
+          ? "For a pipeline that builds several images — a frontend and a backend, say. Each deployment takes its own stage's image; all of them change together, as one change."
+          : "Pick several when this pipeline builds images for more than one deployment."
+      }
+    >
+      <Segmented
+        label="How many deployments"
+        value={severalDeployments ? "several" : "one"}
+        options={[
+          { value: "one", label: "One deployment" },
+          { value: "several", label: "Several deployments" },
+        ]}
+        disabled={!editable}
+        onChange={(count) =>
+          onChange({
+            deploy:
+              count === "several"
+                ? {
+                    ...deploy,
+                    deploymentSet: "several",
+                    deployments: deploy.deployments?.length
+                      ? deploy.deployments
+                      : startDeploymentRows(deploy, imageStages.map((item) => item.name)),
+                  }
+                : { ...deploy, deploymentSet: undefined },
+          })
+        }
+      />
+    </Field>
+  );
+
+  if (severalDeployments) {
+    const setRows = (deployments) => onChange({ deploy: { ...deploy, deployments } });
+    return (
+      <div className="pl-deploy">
+        {modeSwitch}
+        {countSwitch}
+        <div className="pl-grid pl-deploy-target">
+          {clusterField((clusterId) => setHelm({ clusterId, namespace: "", deployments: (deploy.deployments || []).map((row) => ({ ...row, deploymentName: "", containerName: "" })) }))}
+          {namespaceField((namespace) => setHelm({ namespace, deployments: (deploy.deployments || []).map((row) => ({ ...row, deploymentName: "", containerName: "" })) }))}
+        </div>
+        <TargetStatus deploy={{ ...deploy, deploymentName: "" }} info={info} target={target} targetKey={targetKey} existing={null} clusterName={clusterName} />
+        <DeploymentRows
+          ids={ids}
+          rows={deploy.deployments || []}
+          info={info}
+          namespace={deploy.namespace}
+          imageStages={imageStages}
+          editable={editable}
+          onChange={setRows}
+        />
+        {!isHome && (
+          <label className="pl-check">
+            <input
+              type="checkbox"
+              checked={deploy.linkToService !== false}
+              disabled={!editable}
+              onChange={(event) => onChange({ deploy: { ...deploy, linkToService: event.target.checked } })}
+            />
+            <span>
+              <strong>Link these deployments to the service</strong>
+              <small>
+                When the pipeline is saved, and whenever this stage deploys. A deployment another service is linked
+                to stays that service's.
+              </small>
+            </span>
+          </label>
+        )}
+        <ul className="pl-deploy-guards" aria-label="What this stage checks">
+          {registryGuard}
+          {approvalGuard}
+          <Guard
+            icon="undo"
+            title="All of them, or none"
+            text={`Every image must be found and every deployment must exist before anything changes; they are applied together, as one change. The stage passes only when all of them have rolled out. Crash loops, image pull errors or not ready within ${timeoutLabel(stage.timeoutSeconds)} put every previous image back.`}
+          />
+        </ul>
+        <Authority deploy={deploy} info={info} editable={editable} />
+      </div>
+    );
+  }
+
   return (
     <div className="pl-deploy">
       {modeSwitch}
+      {countSwitch}
       {/* ── Where ─────────────────────────────────────────────────────── */}
       <div className="pl-grid pl-deploy-target">
         {clusterField((clusterId) => set({ clusterId, namespace: "", deploymentName: "", containerName: "" }))}
@@ -929,7 +1021,6 @@ function HelmImageRows({ ids, rows, imageStages, editable, onChange }) {
       )}
       {rows.map((row, index) => {
         const fixed = row.from === "fixed";
-        const known = imageStages.find((stage) => stage.name === row.stage);
         return (
           <section className="pl-helm-image" key={index} aria-label={`Image ${index + 1}`}>
             <header>
@@ -948,37 +1039,14 @@ function HelmImageRows({ ids, rows, imageStages, editable, onChange }) {
               )}
             </header>
             <div className="pl-grid pl-deploy-target">
-              <Field
-                label="Comes from"
-                hint={
-                  fixed
-                    ? "Deployed as written. ${VAR} expands from build inputs."
-                    : known && !known.enabled
-                      ? "That stage is turned off, so a build stops here with nothing deployed."
-                      : "The image that stage pushes in the same build."
-                }
-              >
-                <SearchableSelect
-                  id={`${ids}-image-${index}-from`}
-                  aria-label={`Where image ${index + 1} comes from`}
-                  value={fixed ? FIXED_IMAGE : row.stage || ""}
-                  disabled={!editable}
-                  placeholder="Pick an image stage…"
-                  options={[
-                    ...(!fixed && row.stage && !known ? [{ value: row.stage, label: `${row.stage} (not an image stage above)` }] : []),
-                    ...imageStages.map((stage) => ({ value: stage.name, label: stage.enabled ? stage.name : `${stage.name} (off)` })),
-                    { value: FIXED_IMAGE, label: "A fixed image" },
-                  ]}
-                  onChange={(event) =>
-                    setRow(
-                      index,
-                      event.target.value === FIXED_IMAGE
-                        ? { from: "fixed", stage: "" }
-                        : { from: "stage", stage: event.target.value, image: "" }
-                    )
-                  }
-                />
-              </Field>
+              <ImageSourceField
+                id={`${ids}-image-${index}-from`}
+                label={`Where image ${index + 1} comes from`}
+                row={row}
+                imageStages={imageStages}
+                editable={editable}
+                onChange={(patch) => setRow(index, patch)}
+              />
               {fixed && (
                 <TextField
                   id={`${ids}-image-${index}-ref`}
@@ -1003,6 +1071,183 @@ function HelmImageRows({ ids, rows, imageStages, editable, onChange }) {
       {editable && rows.length < MAX_HELM_IMAGES && (
         <button type="button" className="btn-ghost pl-rows-add" onClick={() => onChange([...rows, blankHelmImage(nextStage)])}>
           <PlIcon name="plus" /> Add an image
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** Where a row's image comes from: an image stage above, or a fixed image. */
+function ImageSourceField({ id, label, row, imageStages, editable, onChange }) {
+  const fixed = row.from === "fixed";
+  const known = imageStages.find((stage) => stage.name === row.stage);
+  return (
+    <Field
+      label="Image from"
+      hint={
+        fixed
+          ? "Deployed as written. ${VAR} expands from build inputs."
+          : known && !known.enabled
+            ? "That stage is turned off, so a build stops here with nothing deployed."
+            : "The image that stage pushes in the same build."
+      }
+    >
+      <SearchableSelect
+        id={id}
+        aria-label={label}
+        value={fixed ? FIXED_IMAGE : row.stage || ""}
+        disabled={!editable}
+        placeholder="Pick an image stage…"
+        options={[
+          ...(!fixed && row.stage && !known ? [{ value: row.stage, label: `${row.stage} (not an image stage above)` }] : []),
+          ...imageStages.map((stage) => ({ value: stage.name, label: stage.enabled ? stage.name : `${stage.name} (off)` })),
+          { value: FIXED_IMAGE, label: "A fixed image" },
+        ]}
+        onChange={(event) =>
+          onChange(
+            event.target.value === FIXED_IMAGE
+              ? { from: "fixed", stage: "" }
+              : { from: "stage", stage: event.target.value, image: "" }
+          )
+        }
+      />
+    </Field>
+  );
+}
+
+/** The deployments of a several-deployments target: each with the container
+ * whose image changes and the stage its image comes from. */
+function DeploymentRows({ ids, rows, info, namespace, imageStages, editable, onChange }) {
+  const setRow = (index, patch) => onChange(rows.map((row, position) => (position === index ? { ...row, ...patch } : row)));
+  const used = new Set(rows.filter((row) => row.from !== "fixed").map((row) => row.stage));
+  const nextStage = (imageStages.find((stage) => !used.has(stage.name)) || {}).name || "";
+  const deployments = info?.deployments || [];
+  return (
+    <div className="pl-helm-images">
+      {!imageStages.length && (
+        <div className="pl-note is-warn">
+          <PlIcon name="alert" />
+          <p>
+            <strong>No “Build an image” stage comes before this one.</strong> Add one per image above, or give each
+            deployment a fixed image.
+          </p>
+        </div>
+      )}
+      {rows.map((row, index) => {
+        const live = deployments.find((item) => item.name === row.deploymentName) || null;
+        const containers = live?.containers || [];
+        const container = containers.find((item) => item.name === row.containerName) || (containers.length === 1 ? containers[0] : null);
+        return (
+          <section className="pl-helm-image" key={index} aria-label={`Deployment ${index + 1}`}>
+            <header>
+              <strong>Deployment {index + 1}</strong>
+              {editable && (
+                <button
+                  type="button"
+                  className="btn-ghost pl-rows-remove"
+                  aria-label={`Remove deployment ${index + 1}`}
+                  title="Remove"
+                  disabled={rows.length === 1}
+                  onClick={() => onChange(rows.filter((_, position) => position !== index))}
+                >
+                  <PlIcon name="x" />
+                </button>
+              )}
+            </header>
+            <div className="pl-grid pl-deploy-target">
+              <Field label="Deployment">
+                <SearchableSelect
+                  id={`${ids}-deployment-${index}`}
+                  aria-label={`Deployment ${index + 1}`}
+                  value={row.deploymentName}
+                  disabled={!editable || !namespace}
+                  placeholder={namespace ? "Pick a deployment…" : "Pick a namespace first"}
+                  searchPlaceholder="Search deployments…"
+                  allowCustom
+                  customOptionLabel={(name) => `Use “${name.toLowerCase()}”`}
+                  options={deployments.map((item) => ({
+                    value: item.name,
+                    label: (
+                      <span className="pl-deploy-option">
+                        <span>{item.name}</span>
+                        <small>
+                          {item.ready}/{item.desired} ready
+                        </small>
+                      </span>
+                    ),
+                  }))}
+                  onChange={(event) => {
+                    const name = String(event.target.value || "").trim().toLowerCase();
+                    if (name !== row.deploymentName) setRow(index, { deploymentName: name, containerName: "" });
+                  }}
+                />
+              </Field>
+              <ImageSourceField
+                id={`${ids}-deployment-${index}-from`}
+                label={`Where deployment ${index + 1}'s image comes from`}
+                row={row}
+                imageStages={imageStages}
+                editable={editable}
+                onChange={(patch) => setRow(index, patch)}
+              />
+              {containers.length > 1 && (
+                <Field label="Container" hint="The one whose image this build replaces.">
+                  <SearchableSelect
+                    id={`${ids}-deployment-${index}-container`}
+                    aria-label={`Container of deployment ${index + 1}`}
+                    value={row.containerName}
+                    disabled={!editable}
+                    placeholder="Pick a container…"
+                    options={containers.map((item) => ({
+                      value: item.name,
+                      label: (
+                        <span className="pl-deploy-option">
+                          <span>{item.name}</span>
+                          <small>{item.image}</small>
+                        </span>
+                      ),
+                    }))}
+                    onChange={(event) => setRow(index, { containerName: event.target.value })}
+                  />
+                </Field>
+              )}
+              {row.from === "fixed" && (
+                <TextField
+                  id={`${ids}-deployment-${index}-image`}
+                  label="Image"
+                  value={row.image}
+                  disabled={!editable}
+                  placeholder="registry.areeba.com/frontend:${IMAGE_TAG}"
+                  onChange={(image) => setRow(index, { image })}
+                />
+              )}
+            </div>
+            {row.deploymentName && info && (
+              live ? (
+                <p className="pl-helm-image-status">
+                  <PlIcon name="check" /> {live.ready}/{live.desired} ready
+                  {container ? (
+                    <>
+                      {" "}
+                      · <code>{container.name}</code> runs <code>{container.image}</code>
+                    </>
+                  ) : containers.length > 1 ? (
+                    " · pick the container"
+                  ) : null}
+                </p>
+              ) : (
+                <p className="pl-helm-image-status is-warn">
+                  <PlIcon name="alert" /> Not in {namespace} — builds stop here until it exists. This stage never
+                  creates a deployment.
+                </p>
+              )
+            )}
+          </section>
+        );
+      })}
+      {editable && rows.length < MAX_DEPLOYMENTS && (
+        <button type="button" className="btn-ghost pl-rows-add" onClick={() => onChange([...rows, blankDeploymentRow(nextStage)])}>
+          <PlIcon name="plus" /> Add a deployment
         </button>
       )}
     </div>

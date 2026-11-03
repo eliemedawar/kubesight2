@@ -6,6 +6,8 @@ import {
   deployProblems,
   deployTarget,
   findImageValues,
+  setsSeveralDeployments,
+  startDeploymentRows,
   guessImageRows,
   guessImageValues,
   isHelmDeploy,
@@ -275,5 +277,47 @@ describe("a Helm chart that runs several images", () => {
     expect(deployProblems(target(clash), stages)[0].message).toMatch(/Images 1 and 2 both set/);
     const inside = rows.map((row, index) => (index === 2 ? { ...row, imageValues: { mode: "full", path: "api.image" } } : row));
     expect(deployProblems(target(inside), stages)[0].message).toMatch(/“api.image.repository” and “api.image”|“api.image” and/);
+  });
+});
+
+describe("a stage that deploys to several deployments", () => {
+  const stages = [
+    { name: "Build Frontend", stageType: "container_image" },
+    { name: "Build Backend", stageType: "container_image" },
+  ];
+  const target = (deployments) => ({
+    ...blankDeploy(),
+    clusterId: "prod",
+    namespace: "shop",
+    deploymentSet: "several",
+    deployments,
+  });
+
+  it("starts with one row per image stage, keeping the deployment already picked", () => {
+    const rows = startDeploymentRows({ deploymentName: "web", containerName: "app" }, ["Build Frontend", "Build Backend"]);
+    expect(rows.map((row) => [row.deploymentName, row.containerName, row.stage])).toEqual([
+      ["web", "app", "Build Frontend"],
+      ["", "", "Build Backend"],
+    ]);
+    expect(setsSeveralDeployments(target(rows))).toBe(true);
+    expect(setsSeveralDeployments({ ...target(rows), target: "helm" })).toBe(false);
+  });
+
+  it("needs a deployment and an image source on every row", () => {
+    const rows = [
+      { deploymentName: "web", containerName: "", from: "stage", stage: "Build Frontend", image: "" },
+      { deploymentName: "api", containerName: "", from: "stage", stage: "Build Backend", image: "" },
+    ];
+    expect(deployProblems(target(rows), stages)).toEqual([]);
+    expect(deployTarget(target(rows))).toBe("prod / shop / web, api");
+    expect(deployProblems(target([]), stages)[0].message).toMatch(/Add the deployments/);
+    const blank = [{ ...rows[0], deploymentName: "" }, rows[1]];
+    expect(deployProblems(target(blank), stages)[0].message).toBe("Deployment 1: pick the deployment.");
+    const unknown = [rows[0], { ...rows[1], stage: "Lint" }];
+    expect(deployProblems(target(unknown), stages)[0].message).toMatch(/no “Build an image” stage called “Lint”/);
+    const twice = [rows[0], { ...rows[1], deploymentName: "web" }];
+    expect(deployProblems(target(twice), stages)[0].message).toMatch(/both change “web”/);
+    const containers = [{ ...rows[0], containerName: "app" }, { ...rows[1], deploymentName: "web", containerName: "nginx" }];
+    expect(deployProblems(target(containers), stages)).toEqual([]);
   });
 });

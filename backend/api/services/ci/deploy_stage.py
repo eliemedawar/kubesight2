@@ -34,6 +34,12 @@ none deployed if one is missing. The rollout is every
 Deployment of the release; a failure rolls back to the previous revision (or
 uninstalls a release the stage installed).
 
+A picked target can also name several deployments of one namespace (a
+frontend and a backend built by the same pipeline): each takes the image its
+own stage pushed, every image is confirmed first, the changed Deployments are
+applied as one change (one approval), every one must roll out, and a failure
+puts each previous image back. None is ever created.
+
 Everything is persisted on the stage row's ``deploy_state``, so a backend
 restart resumes a rollout watch rather than forgetting it.
 """
@@ -199,8 +205,15 @@ def summarize(stage: CiBuildStage) -> str:
     state = _state(stage)
     target = state.get("target") or {}
     where = "/".join(
-        str(target.get(key) or "?")
-        for key in ("clusterId", "namespace", "releaseName" if target.get("releaseName") else "deploymentName")
+        [str(target.get("clusterId") or "?"), str(target.get("namespace") or "?")]
+        + [
+            str(
+                target.get("releaseName")
+                or target.get("deploymentName")
+                or ", ".join(target.get("deployments") or [])
+                or "?"
+            )
+        ]
     )
     message = state.get("message") or stage.error or ""
     image = state.get("image") or ""
@@ -359,7 +372,7 @@ def _advance_resolve(
         return
 
     image = state.get("image")
-    if not image and deploy_config.helm_images(config):
+    if not image and deploy_config.image_rows(config):
         rows, problem = _resolve_images(build, config)
         if problem:
             _fail(stage, problem)
@@ -440,6 +453,13 @@ def _advance_resolve(
         (data, error, status), created = outcome
         _after_apply(build, stage, config, user, image, data, error, status, created, real)
         return
+    if deploy_config.deployment_rows(config):
+        manifest = _several_change(build, stage, config, user, real)
+        if manifest is None:
+            return
+        data, error, status = _apply(user, config, manifest, note, real)
+        _after_apply(build, stage, config, user, image, data, error, status, [], real)
+        return
 
     live, problem = _read_deployment(config, real)
     if problem:
@@ -502,6 +522,57 @@ def _advance_resolve(
     # 5. Apply — through the approval gate.
     data, error, status = _apply(user, config, manifest, note, real)
     _after_apply(build, stage, config, user, image, data, error, status, created, real)
+
+
+def _several_change(build: CiBuild, stage: CiBuildStage, config: Dict[str, Any], user, real: bool) -> Optional[str]:
+    """The manifest that moves each deployment of a several-deployments target
+    onto its image: every live Deployment with only those containers' images
+    changed, applied together. None when the stage was closed here — a
+    deployment missing (none is created) or nothing to change.
+    """
+    rows = _state(stage).get("images") or []
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(row["deploymentName"], []).append(row)
+
+    targets: List[Dict[str, Any]] = []
+    documents: List[str] = []
+    for name, group in groups.items():
+        live, problem = _read_deployment({**config, "deploymentName": name, "containerName": group[0]["containerName"]}, real)
+        if problem:
+            _fail(stage, f"{problem} Nothing was deployed.")
+            return None
+        if live is None:
+            _fail(
+                stage,
+                f"Deployment '{name}' does not exist in {config['namespace']}. A stage that deploys to several "
+                "deployments never creates one — create it first. Nothing was deployed.",
+            )
+            return None
+        swaps: Dict[str, str] = {}
+        for row in group:
+            container, why = deploy_config.pick_container(live, row["containerName"])
+            if container is None:
+                _fail(stage, f"{name}: {why} Nothing was deployed.")
+                return None
+            previous = str(container.get("image") or "")
+            targets.append(
+                {"deploymentName": name, "containerName": container.get("name"), "previousImage": previous, "image": row["image"]}
+            )
+            if previous == row["image"]:
+                _log(stage, f"{name}/{container.get('name')} already runs {row['image']}.")
+            else:
+                _log(stage, f"{name} — changing {container.get('name')}: {previous} → {row['image']}")
+                swaps[str(container.get("name"))] = row["image"]
+        if swaps:
+            documents.append(deploy_config.swap_images(live, swaps))
+
+    _save(stage, {"targets": targets, "previousImage": None, "created": False})
+    if not documents:
+        _finish(stage, "success", "Every deployment already runs its image; nothing was changed.", outcome="unchanged")
+        _audit("ci_deploy_unchanged", build, stage, user, config, _state(stage).get("image") or "")
+        return None
+    return "---\n".join(documents)
 
 
 def _after_apply(build, stage, config, user, image, data, error, status, created, real) -> None:
@@ -731,7 +802,10 @@ def _advance_rollout(build: CiBuild, stage: CiBuildStage, config: Dict[str, Any]
         _succeed(build, stage, config, "[mock] 1/1 ready")
         return
     if deploy_config.is_helm(config):
-        _advance_helm_rollout(build, stage, config)
+        _advance_many_rollout(build, stage, config, _release_deployments, "the release runs no Deployments")
+        return
+    if deploy_config.deployment_rows(config):
+        _advance_many_rollout(build, stage, config, _target_deployments, "no deployments to watch")
         return
 
     from ..deployment_service import rollout_health
@@ -776,17 +850,18 @@ def _advance_rollout(build: CiBuild, stage: CiBuildStage, config: Dict[str, Any]
         _heartbeat(stage, f"Still rolling out: {detail}")
 
 
-def _advance_helm_rollout(build: CiBuild, stage: CiBuildStage, config: Dict[str, Any]) -> None:
-    """Every Deployment of the release must finish rolling out."""
+def _advance_many_rollout(build: CiBuild, stage: CiBuildStage, config: Dict[str, Any], read, nothing: str) -> None:
+    """Every Deployment ``read(config)`` returns — a Helm release's, or the
+    deployments a several-deployments stage changed — must finish rolling out."""
     state = _state(stage)
     try:
-        documents = _release_deployments(config)
+        documents = read(config)
     except (K8sCommandError, ValueError) as exc:
         documents = None
-        detail = f"could not read the release's deployments — retrying ({exc})"
+        detail = f"could not read the deployments — retrying ({exc})"
     if documents is not None:
         if not documents:
-            _succeed(build, stage, config, "the release runs no Deployments")
+            _succeed(build, stage, config, nothing)
             return
         waiting = [
             f"{(doc.get('metadata') or {}).get('name')}: {why}"
@@ -827,6 +902,22 @@ def _release_deployments(config: Dict[str, Any]) -> List[Dict[str, Any]]:
             continue
         documents.append(doc)
     return documents
+
+
+def _target_deployments(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The live Deployments a several-deployments stage changed, each read
+    on its own."""
+    from ..deployment_service import _run_kubectl_for_cluster
+
+    names = list(dict.fromkeys(row["deploymentName"] for row in deploy_config.deployment_rows(config)))
+    return [
+        json.loads(
+            _run_kubectl_for_cluster(
+                config["clusterId"], ["get", "deployment", name, "-n", config["namespace"], "-o", "json"]
+            )
+        )
+        for name in names
+    ]
 
 
 def _deployment_waiting(doc: Dict[str, Any]) -> str:
@@ -932,12 +1023,20 @@ def _succeed(build: CiBuild, stage: CiBuildStage, config: Dict[str, Any], detail
     # Healthy on the new image: it passed this environment of the ladder.
     from .. import promotion_service
 
-    promotion_service.record_rollout(
-        config["clusterId"], config["namespace"], _refs(state),
-        kind="HelmRelease" if deploy_config.is_helm(config) else "Deployment",
-        name=_workload(config), source="ci_deploy",
-        actor=getattr(user, "username", None),
-    )
+    if state.get("targets"):
+        for item in state["targets"]:
+            promotion_service.record_rollout(
+                config["clusterId"], config["namespace"], [item["image"]],
+                kind="Deployment", name=item["deploymentName"], source="ci_deploy",
+                actor=getattr(user, "username", None),
+            )
+    else:
+        promotion_service.record_rollout(
+            config["clusterId"], config["namespace"], _refs(state),
+            kind="HelmRelease" if deploy_config.is_helm(config) else "Deployment",
+            name=_workload(config), source="ci_deploy",
+            actor=getattr(user, "username", None),
+        )
     _finish(stage, "success", f"{image} is running on {_workload(config)} ({detail}).", outcome="deployed")
 
 
@@ -980,6 +1079,26 @@ def _rollback_and_fail(
     try:
         if deploy_config.is_helm(config):
             note = _rollback_helm(config, state)
+        elif state.get("targets"):
+            restored = []
+            for item in state["targets"]:
+                if not item.get("previousImage") or item["previousImage"] == item.get("image"):
+                    continue
+                if real:
+                    _run_kubectl_for_cluster(
+                        config["clusterId"],
+                        [
+                            "set", "image", f"deployment/{item['deploymentName']}",
+                            f"{item['containerName']}={item['previousImage']}",
+                            "-n", config["namespace"],
+                        ],
+                    )
+                restored.append(f"{item['deploymentName']}/{item['containerName']} to {item['previousImage']}")
+            note = (
+                "Rolled back " + "; ".join(restored) + "."
+                if restored
+                else "There was no previous image to go back to."
+            )
         elif state.get("created"):
             removed = []
             for item in state.get("createdResources") or []:
@@ -1113,13 +1232,14 @@ def _resolve_image(
             "This build pushed no image, so there is nothing to deploy. Add a \"Build an image\" "
             "stage before this one (and check it was not skipped), or set a fixed image on this stage."
         )
-    return artifact.uri, ""
+    return _as_pulled(build, artifact.uri), ""
 
 
 def _resolve_images(build: CiBuild, config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
-    """Each image of a several-images Helm target: the one its stage pushed
-    in this build, or its fixed reference — or why one is missing. All or
-    nothing: a release is never upgraded with only some of its images."""
+    """Each image of a several-images Helm target or a several-deployments
+    target: the one its stage pushed in this build, or its fixed reference —
+    or why one is missing. All or nothing: a release is never upgraded, nor
+    some deployments changed, with only some of the images."""
     from . import engine
 
     env = {
@@ -1129,13 +1249,19 @@ def _resolve_images(build: CiBuild, config: Dict[str, Any]) -> Tuple[List[Dict[s
         "KUBESIGHT_COMMIT": build.commit_sha or "",
     }
     rows: List[Dict[str, Any]] = []
-    for number, row in enumerate(deploy_config.helm_images(config), start=1):
-        into = deploy_config.image_value_label(row.get("imageValues") or {})
+    helm = bool(deploy_config.helm_images(config))
+    for number, row in enumerate(deploy_config.image_rows(config), start=1):
+        if helm:
+            into = deploy_config.image_value_label(row.get("imageValues") or {})
+            where = {"imageValues": row["imageValues"]}
+        else:
+            into = row["deploymentName"] + (f" ({row['containerName']})" if row.get("containerName") else "")
+            where = {"deploymentName": row["deploymentName"], "containerName": row.get("containerName") or ""}
         if row.get("from") == "fixed":
             try:
                 image = engine._resolve_stage_image(row.get("image") or "", env, f"image {number}") or ""
             except engine.BuildError as exc:
-                return [], f"Image {number} ({into}): {exc} Nothing was deployed."
+                return [], f"{'Image' if helm else 'Deployment'} {number} ({into}): {exc} Nothing was deployed."
         else:
             artifact = (
                 CiArtifact.query.join(CiBuildStage, CiArtifact.build_stage_id == CiBuildStage.id)
@@ -1148,16 +1274,41 @@ def _resolve_images(build: CiBuild, config: Dict[str, Any]) -> Tuple[List[Dict[s
                 .order_by(CiArtifact.id.desc())
                 .first()
             )
-            image = artifact.uri if artifact is not None else ""
+            image = _as_pulled(build, artifact.uri) if artifact is not None and artifact.uri else ""
             if not image:
                 return [], (
                     f"Stage '{row.get('stage')}' pushed no image in this build, so {into} has nothing "
                     "to deploy. Check that stage ran (it may be turned off or skipped). Nothing was deployed."
                 )
-        rows.append(
-            {"stage": row.get("stage") or "", "image": image, "into": into, "imageValues": row["imageValues"]}
-        )
+        rows.append({"stage": row.get("stage") or "", "image": image, "into": into, **where})
     return rows, ""
+
+
+def _as_pulled(build: CiBuild, image: str) -> str:
+    """A pushed image under the name clusters pull it by.
+
+    A build pushes to the address KubeSight reaches the registry at — its
+    connection's URL, often an IP and a port (10.4.23.182:9443). Clusters pull
+    by the name the connection lists under "Image host(s)" (registry.areeba.com),
+    and that is what charts and manifests already say. Same registry, same
+    image: only the host is written the way the workloads expect. A connection
+    with no image hosts, or an image pushed elsewhere, is left as it is.
+    """
+    from ...models import RegistryConnection
+    from .. import registry_client
+    from ..registry_service import _normalize_hosts
+
+    service = build.service
+    if service is None or not service.registry_connection_id:
+        return image
+    row = db.session.get(RegistryConnection, service.registry_connection_id)
+    if row is None:
+        return image
+    hosts = _normalize_hosts(row.image_hosts)
+    host, slash, rest = image.partition("/")
+    if not hosts or not slash or host.lower() != registry_client.registry_host_of(row.base_url).lower():
+        return image
+    return f"{hosts[0]}/{rest}"
 
 
 def _refs(state: Dict[str, Any]) -> List[str]:
@@ -1362,6 +1513,13 @@ def _target(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "containerName": config.get("containerName") or "",
         "authorizedBy": (config.get("authorizedBy") or {}).get("username") or "",
         **(
+            # Several deployments: each by name, so a ticket for one of them
+            # finds the stage that deployed it.
+            {"deployments": list(dict.fromkeys(row["deploymentName"] for row in deploy_config.deployment_rows(config)))}
+            if deploy_config.deployment_rows(config)
+            else {}
+        ),
+        **(
             {
                 "releaseName": config.get("releaseName") or "",
                 "chartName": (config.get("helm") or {}).get("chartName") or "",
@@ -1376,6 +1534,9 @@ def _workload(config: Dict[str, Any]) -> str:
     """What the stage deploys to, by name: the deployment, or the Helm release."""
     if deploy_config.is_helm(config):
         return config.get("releaseName") or ""
+    rows = deploy_config.deployment_rows(config)
+    if rows:
+        return ", ".join(dict.fromkeys(row["deploymentName"] for row in rows))
     return config.get("deploymentName") or ""
 
 
@@ -1423,7 +1584,7 @@ def _audit(action: str, build: CiBuild, stage: CiBuildStage, user, config, image
             "stage": stage.name,
             "cluster": config.get("clusterId"),
             "namespace": config.get("namespace"),
-            "deployment": config.get("deploymentName"),
+            "deployment": _workload(config) if deploy_config.deployment_rows(config) else config.get("deploymentName"),
             **({"helmRelease": config.get("releaseName")} if deploy_config.is_helm(config) else {}),
             "image": image,
             **extra,

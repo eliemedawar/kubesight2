@@ -908,7 +908,8 @@ def _stamp_deploy_authority(
                 "stage": stage["name"],
                 "cluster": config["clusterId"],
                 "namespace": config["namespace"],
-                "deployment": config["deploymentName"],
+                "deployment": config["deploymentName"]
+                or ", ".join(row["deploymentName"] for row in deploy_config.deployment_rows(config)),
                 **({"helmRelease": config["releaseName"]} if deploy_config.is_helm(config) else {}),
                 "createIfMissing": config["createIfMissing"],
             },
@@ -926,9 +927,9 @@ def _check_deploy_templates(normalized: List[Dict[str, Any]]) -> None:
         config = stage.get("deploy")
         if stage["stage_type"] != "deploy" or not config or stage.get("enabled") is False:
             continue
+        _check_deploy_image_stages(config, stage["name"], normalized)
         if deploy_config.is_helm(config):
             _check_deploy_chart(config, stage["name"])
-            _check_deploy_image_stages(config, stage["name"], normalized)
             continue
         if deploy_config.is_linked(config) or not config.get("createIfMissing"):
             continue
@@ -961,21 +962,23 @@ def _check_deploy_chart(config: Dict[str, Any], stage_name: str) -> None:
 def _check_deploy_image_stages(
     config: Dict[str, Any], stage_name: str, normalized: List[Dict[str, Any]]
 ) -> None:
-    """Each image of a several-images Helm target that comes from a stage must
-    name a "Build an image" stage of this pipeline. The name is written as the
-    stage spells it: a build finds the image by that stage's name."""
+    """Each row of a several-images Helm target or a several-deployments target
+    that takes its image from a stage must name a "Build an image" stage of
+    this pipeline. The name is written as the stage spells it: a build finds
+    the image by that stage's name."""
     image_stages = {
         stage["name"].lower(): stage["name"]
         for stage in normalized
         if stage["stage_type"] == "container_image"
     }
-    for number, row in enumerate(deploy_config.helm_images(config), start=1):
+    what = "image" if deploy_config.helm_images(config) else "deployment"
+    for number, row in enumerate(deploy_config.image_rows(config), start=1):
         if row.get("from") != "stage":
             continue
         name = image_stages.get(str(row.get("stage") or "").lower())
         if name is None:
             raise PipelineError(
-                f"Stage '{stage_name}', image {number}: there is no \"Build an image\" stage called "
+                f"Stage '{stage_name}', {what} {number}: there is no \"Build an image\" stage called "
                 f"'{row.get('stage')}' in this pipeline.",
                 code="invalid_deploy",
             )

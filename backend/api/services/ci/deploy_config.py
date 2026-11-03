@@ -8,7 +8,10 @@ A Deploy stage names ONE target — cluster, namespace, deployment, container �
 and says what to do when the deployment is not there yet. When it is there,
 only that container's image changes. When it is not, the stage's own manifest
 creates it: a Deployment (and optionally its Service), in the target namespace,
-and nothing else — a build is not the place to create Secrets or RBAC.
+and nothing else — a build is not the place to create Secrets or RBAC. A
+pipeline that builds several images (a frontend and a backend) can instead name
+several deployments of one namespace, each with the image stage it takes its
+image from; they must all exist, and change together.
 
 Or it names a Helm release and an Inventory chart: the first build installs
 the chart (nothing has to be filled in), later builds upgrade the release
@@ -57,6 +60,12 @@ HELM_IMAGE_SETS = ("one", "several")
 # Where a row of a ``several`` target takes its image from.
 HELM_IMAGE_SOURCES = ("stage", "fixed")
 MAX_HELM_IMAGES = 12
+# How many deployments a picked (``fixed``) target changes: ``one`` — the
+# deployment saved on the stage; ``several`` — ``deployments``, one row per
+# deployment (and container) in the stage's namespace, each with the image
+# stage its image comes from (or a fixed image), applied as one change.
+DEPLOYMENT_SETS = ("one", "several")
+MAX_DEPLOYMENTS = 12
 _VALUE_PATH_RE = re.compile(r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+){0,15}$")
 # helm's own rule: a DNS label, and short enough for the names charts derive.
 _RELEASE_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
@@ -343,6 +352,29 @@ def normalize(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str
         namespace = validate_namespace(_clean(value.get("namespace"), 63))
     except K8sNameError as exc:
         raise DeployConfigError(f"Stage '{stage_name}': {exc}")
+    deployment_set = _clean(value.get("deploymentSet"), 16).lower() or "one"
+    if deployment_set not in DEPLOYMENT_SETS:
+        raise DeployConfigError(
+            f"Stage '{stage_name}': '{deployment_set}' is not a number of deployments. Use one or several."
+        )
+    if deployment_set == "several":
+        return {
+            "target": "fixed",
+            "clusterId": cluster_id,
+            "namespace": namespace,
+            # The rows say where; nothing on the stage itself is deployed to.
+            "deploymentName": "",
+            "containerName": "",
+            "image": "",
+            "linkToService": value.get("linkToService") is not False,
+            # Each deployment must exist: one stage creating several from one
+            # manifest is not a change a build should make.
+            "createIfMissing": False,
+            "create": _create_form(value.get("create"), stage_name),
+            "manifest": str(value.get("manifest") or "").strip()[:MAX_MANIFEST_CHARS],
+            "deploymentSet": "several",
+            "deployments": _deployment_rows(value.get("deployments"), stage_name),
+        }
     try:
         deployment_name = validate_resource_name(
             _clean(value.get("deploymentName"), 253), "deployment name"
@@ -567,20 +599,7 @@ def _helm_images(value: Any, stage_name: str) -> List[Dict[str, Any]]:
     owner: Dict[str, int] = {}
     for number, raw in enumerate(rows_in, start=1):
         where = f", image {number}"
-        source = _clean(raw.get("from"), 16).lower() or "stage"
-        if source not in HELM_IMAGE_SOURCES:
-            raise DeployConfigError(
-                f"Stage '{stage_name}'{where}: '{source}' is not where an image comes from. "
-                "Use an image stage or a fixed image."
-            )
-        stage = _clean(raw.get("stage"), 120) if source == "stage" else ""
-        image = _clean(raw.get("image"), 512) if source == "fixed" else ""
-        if source == "stage" and not stage:
-            raise DeployConfigError(f"Stage '{stage_name}'{where}: pick the image stage it comes from.")
-        if source == "fixed" and not image:
-            raise DeployConfigError(f"Stage '{stage_name}'{where}: write the image it deploys.")
-        if image and not _IMAGE_RE.match(image):
-            raise DeployConfigError(f"Stage '{stage_name}'{where}: '{image}' is not an image reference.")
+        source, stage, image = _row_source(raw, stage_name, where)
         image_values = _image_values(raw.get("imageValues"), stage_name, where)
         for path in _value_paths(image_values):
             for other, other_row in owner.items():
@@ -593,6 +612,99 @@ def _helm_images(value: Any, stage_name: str) -> List[Dict[str, Any]]:
             owner[path] = number
         rows.append({"from": source, "stage": stage, "image": image, "imageValues": image_values})
     return rows
+
+
+def _row_source(raw: Dict[str, Any], stage_name: str, where: str) -> Tuple[str, str, str]:
+    """Where a row's image comes from: ``(from, stage, image)`` — an image
+    stage of this pipeline (checked by the pipeline validator, which sees every
+    stage) or a fixed reference."""
+    source = _clean(raw.get("from"), 16).lower() or "stage"
+    if source not in HELM_IMAGE_SOURCES:
+        raise DeployConfigError(
+            f"Stage '{stage_name}'{where}: '{source}' is not where an image comes from. "
+            "Use an image stage or a fixed image."
+        )
+    stage = _clean(raw.get("stage"), 120) if source == "stage" else ""
+    image = _clean(raw.get("image"), 512) if source == "fixed" else ""
+    if source == "stage" and not stage:
+        raise DeployConfigError(f"Stage '{stage_name}'{where}: pick the image stage it comes from.")
+    if source == "fixed" and not image:
+        raise DeployConfigError(f"Stage '{stage_name}'{where}: write the image it deploys.")
+    if image and not _IMAGE_RE.match(image):
+        raise DeployConfigError(f"Stage '{stage_name}'{where}: '{image}' is not an image reference.")
+    return source, stage, image
+
+
+def _deployment_rows(value: Any, stage_name: str) -> List[Dict[str, Any]]:
+    """The rows of a target that changes several deployments — a frontend and
+    a backend built by the same pipeline, say. Each names a deployment in the
+    stage's namespace, optionally its container, and where its image comes
+    from. A deployment may appear twice only for two different containers."""
+    rows_in = [row for row in (value if isinstance(value, list) else []) if isinstance(row, dict)]
+    if not rows_in:
+        raise DeployConfigError(
+            f"Stage '{stage_name}' deploys to several deployments but lists none. Add the deployments."
+        )
+    if len(rows_in) > MAX_DEPLOYMENTS:
+        raise DeployConfigError(
+            f"Stage '{stage_name}' deploys to {len(rows_in)} deployments; the limit is {MAX_DEPLOYMENTS}."
+        )
+    rows: List[Dict[str, Any]] = []
+    for number, raw in enumerate(rows_in, start=1):
+        where = f", deployment {number}"
+        try:
+            name = validate_resource_name(_clean(raw.get("deploymentName"), 253), "deployment name")
+        except K8sNameError as exc:
+            raise DeployConfigError(f"Stage '{stage_name}'{where}: {exc}")
+        container = _clean(raw.get("containerName"), 63)
+        if container:
+            try:
+                validate_container_name(container)
+            except K8sNameError as exc:
+                raise DeployConfigError(f"Stage '{stage_name}'{where}: {exc}")
+        source, stage, image = _row_source(raw, stage_name, where)
+        for other_number, other in enumerate(rows, start=1):
+            if other["deploymentName"] != name:
+                continue
+            if not container or not other["containerName"] or container == other["containerName"]:
+                raise DeployConfigError(
+                    f"Stage '{stage_name}': deployments {other_number} and {number} both change "
+                    f"'{name}'. Name a different container on each, or remove one."
+                )
+        rows.append(
+            {"deploymentName": name, "containerName": container, "from": source, "stage": stage, "image": image}
+        )
+    return rows
+
+
+def deployment_rows(config: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The rows of a picked target that changes several deployments; [] for one."""
+    if not isinstance(config, dict) or config.get("target", "fixed") != "fixed":
+        return []
+    if config.get("deploymentSet") != "several":
+        return []
+    return [row for row in config.get("deployments") or [] if isinstance(row, dict)]
+
+
+def image_rows(config: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Every row that names its own image source — several Helm images or
+    several deployments; [] for a stage that deploys one image."""
+    return helm_images(config) or deployment_rows(config)
+
+
+def target_views(config: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The stage's config once per deployment it changes — itself for one,
+    a copy naming each row's deployment and container for several — so code
+    that knows one deployment (inventory links) handles each in turn."""
+    if not isinstance(config, dict):
+        return []
+    rows = deployment_rows(config)
+    if not rows:
+        return [config]
+    return [
+        {**config, "deploymentName": row["deploymentName"], "containerName": row["containerName"]}
+        for row in rows
+    ]
 
 
 def helm_images(config: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -687,6 +799,10 @@ def signature(config: Optional[Dict[str, Any]]) -> str:
         # Which Secret/ConfigMap the template's variables come from is part of
         # what is deployed, so changing an answer needs someone who can deploy.
         material["answers"] = (config.get("create") or {}).get("answers") or {}
+    if deployment_rows(config):
+        # Which deployments, and which image goes to each. Only for several,
+        # so every one-deployment stamp stays valid.
+        material["deployments"] = deployment_rows(config)
     if is_linked(config):
         # Only for linked stages, so every fixed target saved before linked
         # mode existed keeps the signature its authority stamp was taken on.
@@ -747,13 +863,20 @@ def swap_image(deployment: Dict[str, Any], container_name: str, image: str) -> s
     The object comes from ``kubectl get -o json``; the caller's apply path strips
     the server-managed fields. Nothing but ``image`` is touched.
     """
+    return swap_images(deployment, {container_name: image})
+
+
+def swap_images(deployment: Dict[str, Any], images: Dict[str, str]) -> str:
+    """``swap_image`` for several containers of one Deployment: ``images``
+    maps container name to its new image."""
     doc = copy.deepcopy(deployment)
     doc.pop("status", None)
     containers = _containers(doc)
-    target = next((c for c in containers if c.get("name") == container_name), None)
-    if target is None:
-        raise DeployConfigError(f"The deployment has no container named '{container_name}'.")
-    target["image"] = image
+    for container_name, image in images.items():
+        target = next((c for c in containers if c.get("name") == container_name), None)
+        if target is None:
+            raise DeployConfigError(f"The deployment has no container named '{container_name}'.")
+        target["image"] = image
     return yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
 
 

@@ -477,11 +477,13 @@ def record_from_stages(pipeline, normalized: List[Dict[str, Any]], actor) -> Non
             continue
         config = stage.get("deploy")
         stamp = config.get("authorizedBy") if isinstance(config, dict) else None
-        try:
-            with db.session.no_autoflush:
-                _upsert_from_target(service, config, actor, stamp=stamp)
-        except Exception:  # A link is a convenience; it must never fail a save.
-            continue
+        # Once per deployment: a stage may change several.
+        for view in deploy_config.target_views(config):
+            try:
+                with db.session.no_autoflush:
+                    _upsert_from_target(service, view, actor, stamp=stamp)
+            except Exception:  # A link is a convenience; it must never fail a save.
+                continue
 
 
 def record_from_deploy(build, config: Dict[str, Any]) -> None:
@@ -495,7 +497,8 @@ def record_from_deploy(build, config: Dict[str, Any]) -> None:
         service = getattr(build, "service", None)
         stamp = config.get("authorizedBy") if isinstance(config, dict) else None
         with db.session.no_autoflush:
-            _upsert_from_target(service, config, None, stamp=stamp)
+            for view in deploy_config.target_views(config):
+                _upsert_from_target(service, view, None, stamp=stamp)
     except Exception:  # Never let a convenience fail a deploy that succeeded.
         pass
 

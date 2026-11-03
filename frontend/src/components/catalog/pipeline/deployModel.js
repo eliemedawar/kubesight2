@@ -245,6 +245,74 @@ function imageValuesProblem(values) {
   return "";
 }
 
+/** What is wrong with where a row's image comes from (deploy_config._row_source,
+ * plus the stage check the pipeline validator makes), or "". */
+function rowSourceProblem(row, stages) {
+  if ((row.from || "stage") === "stage") {
+    if (!row.stage) return "pick the image stage it comes from.";
+    const wanted = String(row.stage).trim().toLowerCase();
+    if (stages && !stages.some((stage) => stage.stageType === "container_image" && String(stage.name || "").trim().toLowerCase() === wanted)) {
+      return `there is no “Build an image” stage called “${row.stage}”.`;
+    }
+    return "";
+  }
+  if (!String(row.image || "").trim()) return "write the image it deploys.";
+  if (/\s/.test(row.image)) return "an image reference cannot contain spaces.";
+  return "";
+}
+
+// deploy_config.MAX_DEPLOYMENTS
+export const MAX_DEPLOYMENTS = 12;
+
+/** A picked target that changes several deployments (``deployments``). */
+export const setsSeveralDeployments = (deploy) =>
+  !isLinkedDeploy(deploy) && !isHelmDeploy(deploy) && deploy?.deploymentSet === "several";
+
+/** One row of a several-deployments target. */
+export const blankDeploymentRow = (stage = "") => ({ deploymentName: "", containerName: "", from: "stage", stage, image: "" });
+
+/** The rows a several-deployments target starts with: the deployment the
+ * stage named first (if any), then one per image stage, in order. */
+export function startDeploymentRows(deploy, imageStageNames) {
+  const names = imageStageNames?.length ? imageStageNames : [""];
+  return names.slice(0, MAX_DEPLOYMENTS).map((stage, index) => ({
+    ...blankDeploymentRow(stage),
+    ...(index === 0 && deploy?.deploymentName
+      ? { deploymentName: deploy.deploymentName, containerName: deploy.containerName || "" }
+      : {}),
+  }));
+}
+
+/** deploy_config._deployment_rows, plus the stage check. */
+function deploymentRowsProblems(rows, stages) {
+  const problems = [];
+  const add = (message) => problems.push({ field: "deploy", message });
+  if (!rows.length) {
+    add("Add the deployments this stage deploys to.");
+    return problems;
+  }
+  if (rows.length > MAX_DEPLOYMENTS) add(`A stage can deploy to at most ${MAX_DEPLOYMENTS} deployments.`);
+  rows.forEach((row, index) => {
+    const label = `Deployment ${index + 1}`;
+    if (!row.deploymentName) add(`${label}: pick the deployment.`);
+    else if (!DNS_SUBDOMAIN.test(row.deploymentName) || row.deploymentName.length > 253) {
+      add(`${label}: the deployment name must be lowercase letters, digits, '-' and '.'.`);
+    }
+    if (row.containerName && !DNS_LABEL.test(row.containerName)) {
+      add(`${label}: the container name must be lowercase letters, digits and '-'.`);
+    }
+    const source = rowSourceProblem(row, stages);
+    if (source) add(`${label}: ${source}`);
+    rows.slice(0, index).forEach((other, otherIndex) => {
+      if (!row.deploymentName || other.deploymentName !== row.deploymentName) return;
+      if (!row.containerName || !other.containerName || row.containerName === other.containerName) {
+        add(`Deployments ${otherIndex + 1} and ${index + 1} both change “${row.deploymentName}”. Pick a different container on each, or remove one.`);
+      }
+    });
+  });
+  return problems;
+}
+
 /** deploy_config._helm_images, plus the stage check the pipeline validator makes. */
 function helmImagesProblems(rows, stages) {
   const problems = [];
@@ -254,19 +322,11 @@ function helmImagesProblems(rows, stages) {
     return problems;
   }
   if (rows.length > MAX_HELM_IMAGES) add(`A stage can set at most ${MAX_HELM_IMAGES} images.`);
-  const imageStages = new Set(
-    (stages || []).filter((stage) => stage.stageType === "container_image").map((stage) => String(stage.name || "").trim().toLowerCase())
-  );
   const owner = new Map();
   rows.forEach((row, index) => {
     const label = `Image ${index + 1}`;
-    if ((row.from || "stage") === "stage") {
-      if (!row.stage) add(`${label}: pick the image stage it comes from.`);
-      else if (stages && !imageStages.has(String(row.stage).trim().toLowerCase())) {
-        add(`${label}: there is no “Build an image” stage called “${row.stage}”.`);
-      }
-    } else if (!String(row.image || "").trim()) add(`${label}: write the image it deploys.`);
-    else if (/\s/.test(row.image)) add(`${label}: an image reference cannot contain spaces.`);
+    const source = rowSourceProblem(row, stages);
+    if (source) add(`${label}: ${source}`);
     const problem = imageValuesProblem(row.imageValues);
     if (problem) {
       add(`${label}: ${problem}`);
@@ -336,6 +396,10 @@ export function deployTarget(deploy) {
     const chart = deploy.helm?.chartName || deploy.helm?.chartTemplateId;
     return `${[deploy.clusterId || "?", deploy.namespace || "?", deploy.releaseName || "?"].join(" / ")} (Helm${chart ? ` · ${chart}` : ""})`;
   }
+  if (setsSeveralDeployments(deploy)) {
+    const names = (deploy.deployments || []).map((row) => row.deploymentName).filter(Boolean);
+    return `${[deploy.clusterId || "?", deploy.namespace || "?"].join(" / ")} / ${names.length ? [...new Set(names)].join(", ") : "?"}`;
+  }
   if (!deploy?.clusterId && !deploy?.deploymentName) return "";
   return [deploy.clusterId || "?", deploy.namespace || "?", deploy.deploymentName || "?"].join(" / ");
 }
@@ -389,6 +453,10 @@ export function deployProblems(deploy, stages) {
   if (!deploy.namespace) add("Pick a namespace.");
   else if (!DNS_LABEL.test(deploy.namespace) || deploy.namespace.length > 63) {
     add("The namespace must be lowercase letters, digits and '-'.");
+  }
+  if (setsSeveralDeployments(deploy)) {
+    problems.push(...deploymentRowsProblems(deploy.deployments || [], stages));
+    return problems;
   }
   if (!deploy.deploymentName) add("Pick a deployment, or name the one to create.");
   else if (!DNS_SUBDOMAIN.test(deploy.deploymentName) || deploy.deploymentName.length > 253) {
