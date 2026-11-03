@@ -377,7 +377,10 @@ export default function ServiceDetailPage({
             canView={can.viewMergeChecks}
             onDirtyChange={setMergeChecksDirty}
             onGoToTab={setTab}
-            onOpenBuild={(id) => openBuild(id)}
+            onOpenBuild={openBuild}
+            canCancel={can.cancel}
+            canRetry={can.retry}
+            refreshToken={refreshToken}
           />
         )}
         {tab === "dockerfile" && (

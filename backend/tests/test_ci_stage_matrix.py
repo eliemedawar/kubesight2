@@ -510,3 +510,37 @@ def test_viewer_can_read_the_matrix(app, client, admin_token, viewer_token, serv
 
 def test_unauthenticated_request_is_rejected(client, service_id):
     assert client.get(f"/api/ci/services/{service_id}/stage-matrix").status_code == 401
+
+
+def test_merge_check_runs_are_split_from_the_build_history(app, client, admin_token, service_id):
+    """The Builds tab shows builds, the Merge Checks tab shows the merge-check
+    runs: mixed, the two pipelines' stages sat side by side and the grid was
+    twice as wide as either."""
+    from api.models_ci import CiPipeline
+
+    with app.app_context():
+        merge = CiPipeline(service_id=service_id, name="Merge checks", purpose="merge_check")
+        db.session.add(merge)
+        db.session.commit()
+        build_id = make_build(service_id, 1, "success", [("Build image", "success", 30)])
+        check_id = make_build(service_id, 2, "success", [("Hadolint", "success", 3)])
+        db.session.get(CiBuild, check_id).pipeline_id = merge.id
+        db.session.commit()
+
+    builds = fetch(client, admin_token, service_id, purpose="build")
+    assert [row["id"] for row in builds["rows"]] == [build_id]
+    assert [column["name"] for column in builds["columns"]] == ["Build image"]
+
+    checks = fetch(client, admin_token, service_id, purpose="merge_check")
+    assert [row["id"] for row in checks["rows"]] == [check_id]
+    assert [column["name"] for column in checks["columns"]] == ["Hadolint"]
+
+    # No purpose = everything, as before (the global Builds page).
+    assert {row["id"] for row in fetch(client, admin_token, service_id)["rows"]} == {build_id, check_id}
+
+    listed = client.get(
+        f"/api/ci/services/{service_id}/builds",
+        query_string={"purpose": "build"},
+        headers=auth_headers(admin_token),
+    ).get_json()["data"]
+    assert [item["id"] for item in listed["items"]] == [build_id]

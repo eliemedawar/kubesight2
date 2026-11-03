@@ -3977,3 +3977,101 @@ label.sg-mc-check {
 .sg-ci-transfer-stages[open] > summary {
   margin-bottom: 0.4rem;
 }
+
+/* ── Stage matrix: fit the page, never scroll sideways ──────────────
+   With content-sized columns every stage name sat on one line (min 7.2rem a
+   column), so a pipeline with 15+ stages could only be read by scrolling or
+   zooming the browser out. Fixed layout gives the build column its width and
+   splits the rest equally; names wrap to three lines, the full name is the
+   header's title. Phones keep the scroll — squeezing 15 columns into 390px
+   would make every cell unreadable.
+   `.sg-mx` prefix: `.ops-page table { table-layout: auto }` (0,1,1) wraps the
+   service page and beat a bare `.sg-mx-table`; the grid's own `th` reset is
+   (0,1,1) too, hence `th.` on the paddings. */
+.sg-mx .sg-mx-table {
+  table-layout: fixed;
+  min-width: 0;
+}
+
+.sg-mx-colgut {
+  width: 13rem;
+}
+
+.sg-mx-table th.sg-mx-gut {
+  min-width: 0;
+  width: auto;
+  padding: 0.45rem 0.65rem;
+  overflow: hidden;
+}
+
+.sg-mx-table th.sg-mx-col {
+  min-width: 0;
+  padding: 0.5rem 0.45rem 0.45rem;
+  overflow: hidden;
+}
+
+.sg-mx-table .sg-mx-col-name {
+  white-space: normal;
+  overflow-wrap: break-word;
+  hyphens: auto;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  line-height: 1.2;
+}
+
+.sg-mx-col-avg,
+.sg-mx-dur,
+.sg-mx-note {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sg-mx-cell {
+  min-width: 0;
+  padding: 0.45rem 0.25rem 0.5rem;
+}
+
+/* Many stages: tighter type so a duration and its glyph still fit a column. */
+.sg-mx-table.is-dense .sg-mx-colgut {
+  width: 11.5rem;
+}
+
+.sg-mx-table.is-dense .sg-mx-col-name {
+  font-size: 0.68rem;
+}
+
+.sg-mx-table.is-dense .sg-mx-col-avg {
+  font-size: 0.6rem;
+}
+
+.sg-mx-table.is-dense .sg-mx-dur {
+  font-size: 0.68rem;
+}
+
+.sg-mx-table.is-dense .sg-mx-cell {
+  min-height: 3rem;
+  padding: 0.5rem 0.15rem 0.45rem;
+}
+
+.sg-mx-table.is-dense .sg-mx-glyph {
+  top: 0.2rem;
+  right: 0.2rem;
+}
+
+.sg-mx-table.is-dense .sg-mx-gut-sub {
+  font-size: 0.64rem;
+}
+
+@media (max-width: 720px) {
+  .sg-mx .sg-mx-table {
+    table-layout: auto;
+    min-width: 46rem;
+  }
+
+  .sg-mx-table th.sg-mx-col {
+    min-width: 6rem;
+  }
+}

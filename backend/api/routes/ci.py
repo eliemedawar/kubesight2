@@ -772,6 +772,8 @@ def list_service_builds(service_id: int):
         status=request.args.get("status"),
         limit=_int_arg("limit", 50),
         offset=_int_arg("offset", 0),
+        # "build" for the Builds tab, "merge_check" for the Merge Checks tab.
+        purpose=request.args.get("purpose"),
     )
     return success_response(
         {
@@ -791,6 +793,7 @@ def get_stage_matrix(service_id: int):
         service_id,
         limit=_int_arg("limit", stage_matrix_service.DEFAULT_BUILDS),
         status=request.args.get("status"),
+        purpose=request.args.get("purpose"),
     )
     # Same provenance the Builds table shows, so the row gutter can name who or
     # what asked for a build and where it landed.

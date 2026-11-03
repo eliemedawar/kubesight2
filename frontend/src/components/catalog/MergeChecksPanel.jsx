@@ -21,6 +21,7 @@ import ConnectionView from "./mergeChecks/ConnectionView.jsx";
 import GateStatus from "./mergeChecks/GateStatus.jsx";
 import GateView from "./mergeChecks/GateView.jsx";
 import HistoryView from "./mergeChecks/HistoryView.jsx";
+import BuildsPanel from "./BuildsPanel.jsx";
 import {
   activeTools,
   dirtyKeys,
@@ -33,7 +34,7 @@ import {
 import { setVisibleInterval } from "../../lib/visibleInterval";
 import { confirmDialog } from "../../lib/dialogs.js";
 
-const SECTIONS = ["checks", "gate", "connection", "history"];
+const SECTIONS = ["checks", "gate", "connection", "history", "builds"];
 
 /**
  * Merge Checks tab: the gate between a pull request and a merge.
@@ -52,7 +53,17 @@ const SECTIONS = ["checks", "gate", "connection", "history"];
  * they are used; everything else collects in the save bar. A partial save
  * never throws away an edit still in progress (rebaseForm).
  */
-export default function MergeChecksPanel({ service, canEdit, canView = true, onDirtyChange, onGoToTab, onOpenBuild }) {
+export default function MergeChecksPanel({
+  service,
+  canEdit,
+  canView = true,
+  onDirtyChange,
+  onGoToTab,
+  onOpenBuild,
+  canCancel,
+  canRetry,
+  refreshToken,
+}) {
   const { route, getRoute, navigate } = useRouter();
   const [config, setConfig] = useState(null);
   const [form, setForm] = useState(null);
@@ -425,6 +436,9 @@ export default function MergeChecksPanel({ service, canEdit, canView = true, onD
     { key: "gate", icon: "gauge", label: "Quality gate" },
     { key: "connection", icon: "link", label: "Connection" },
     { key: "history", icon: "history", label: "History", count: runs.length, alert: blocked > 0 },
+    // The merge-check pipeline's own runs, stage by stage — kept off the
+    // Builds tab so its grid holds one pipeline, not both side by side.
+    { key: "builds", icon: "stages", label: "Builds" },
   ];
   const tabDirty = {
     checks: changed.some((key) => key === "tools" || key === "toolsMode") || unsavedScripts.length > 0,
@@ -604,6 +618,16 @@ export default function MergeChecksPanel({ service, canEdit, canView = true, onD
               busyCheckId={busyCheckId}
               onRedeliver={redeliver}
               onOpenBuild={(id) => onOpenBuild?.(String(id))}
+            />
+          )}
+          {section === "builds" && (
+            <BuildsPanel
+              service={service}
+              purpose="merge_check"
+              canCancel={canCancel}
+              canRetry={canRetry}
+              refreshToken={refreshToken}
+              onOpenBuild={onOpenBuild}
             />
           )}
         </div>

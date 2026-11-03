@@ -45,7 +45,8 @@ const VIEWS = [
   ["stages", "Stages"],
 ];
 
-const viewKey = (serviceId) => `ks.ci.buildsview.${serviceId}`;
+const viewKey = (serviceId, purpose) =>
+  purpose === "merge_check" ? `ks.ci.buildsview.${serviceId}.mc` : `ks.ci.buildsview.${serviceId}`;
 
 /**
  * Which view this service opens on.
@@ -54,9 +55,9 @@ const viewKey = (serviceId) => `ks.ci.buildsview.${serviceId}`;
  * compare; before that it is one row of durations, which the table says better.
  * A choice the user makes is remembered per service and wins from then on.
  */
-function initialView(service) {
+function initialView(service, purpose) {
   try {
-    const saved = window.localStorage.getItem(viewKey(service.id));
+    const saved = window.localStorage.getItem(viewKey(service.id, purpose));
     if (saved === "table" || saved === "stages") return saved;
   } catch {
     // Private mode or blocked storage: fall through to the default.
@@ -82,8 +83,11 @@ export default function BuildsPanel({
   // (?build=) so a link or Back reproduces it. Without it the panel keeps its
   // own drawer, as before.
   onOpenBuild,
+  // "build" here on the Builds tab; the Merge Checks tab mounts the same panel
+  // with "merge_check", so each tab lists only its own pipeline's runs.
+  purpose = "build",
 }) {
-  const [view, setView] = useState(() => initialView(service));
+  const [view, setView] = useState(() => initialView(service, purpose));
   const [builds, setBuilds] = useState([]);
   const [queueDepth, setQueueDepth] = useState(0);
   const [status, setStatus] = useState("all");
@@ -103,6 +107,7 @@ export default function BuildsPanel({
     try {
       const data = await listCiServiceBuilds(service.id, {
         status: status === "all" ? undefined : status,
+        purpose,
         limit: PAGE_SIZE,
       });
       setBuilds(data.items || []);
@@ -156,7 +161,7 @@ export default function BuildsPanel({
   const chooseView = (next) => {
     setView(next);
     try {
-      window.localStorage.setItem(viewKey(service.id), next);
+      window.localStorage.setItem(viewKey(service.id, purpose), next);
     } catch {
       // Not remembering the choice is survivable; failing to switch is not.
     }
@@ -238,6 +243,7 @@ export default function BuildsPanel({
         <StageMatrix
           service={service}
           status={status}
+          purpose={purpose}
           refreshToken={refreshToken}
           onOpenStage={(buildId, stageId) => setOpenBuild({ buildId, stageId })}
         />
@@ -260,12 +266,16 @@ export default function BuildsPanel({
         <EmptyState
           message={
             status === "all"
-              ? "No builds yet."
+              ? purpose === "merge_check"
+                ? "No merge checks have run yet."
+                : "No builds yet."
               : `No builds match “${(STATUS_FILTERS.find(([value]) => value === status) || [status, status])[1]}”.`
           }
           hint={
             status === "all"
-              ? "Run a build to see it here with its stages and logs."
+              ? purpose === "merge_check"
+                ? "Each pull request Bitbucket sends runs one, listed here with its stages and logs."
+                : "Run a build to see it here with its stages and logs."
               : "Choose All to see every build."
           }
         />

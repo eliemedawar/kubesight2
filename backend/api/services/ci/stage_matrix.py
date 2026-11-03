@@ -238,12 +238,16 @@ def _cell(
 
 
 def stage_matrix(
-    service_id: int, *, limit: int = DEFAULT_BUILDS, status: Optional[str] = None
+    service_id: int,
+    *,
+    limit: int = DEFAULT_BUILDS,
+    status: Optional[str] = None,
+    purpose: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Columns, rows and per-stage statistics for one service's recent builds."""
     limit = max(1, min(int(limit or DEFAULT_BUILDS), MAX_BUILDS))
     builds, total = engine_service.list_builds(
-        service_id=service_id, status=status, limit=limit, offset=0
+        service_id=service_id, status=status, limit=limit, offset=0, purpose=purpose
     )
     # list_builds pages by id, which is the same order in practice; the grid
     # sorts by number anyway, because "newest" here means the newest build, and

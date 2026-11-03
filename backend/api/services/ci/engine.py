@@ -50,7 +50,14 @@ from sqlalchemy.orm import selectinload
 
 from ...audit import log_audit
 from ...db import db
-from ...models_ci import SERVER_STAGE_TYPES, TRIGGER_TYPES, CiBuild, CiBuildStage, CiService
+from ...models_ci import (
+    SERVER_STAGE_TYPES,
+    TRIGGER_TYPES,
+    CiBuild,
+    CiBuildStage,
+    CiPipeline,
+    CiService,
+)
 from . import agents as agents_service
 from . import artifacts as artifacts_service
 from . import build_inputs
@@ -2303,6 +2310,7 @@ def list_builds(
     *,
     with_total: bool = True,
     with_service: bool = False,
+    purpose: Optional[str] = None,
 ) -> Tuple[List[CiBuild], Optional[int]]:
     """A page of builds, newest first, with what ``build_summary`` reads
     loaded in a fixed number of statements: the stages in one SELECT ... IN,
@@ -2311,6 +2319,10 @@ def list_builds(
 
     ``with_total=False`` skips the COUNT for callers that only want a page
     (the total comes back as None).
+
+    ``purpose`` splits a service's history the way its tabs do: "merge_check"
+    is the runs of its merge-check pipeline (the Merge Checks tab), "build"
+    everything else — including builds whose pipeline was since deleted.
     """
     from ...models import user_display_loader
 
@@ -2328,6 +2340,14 @@ def list_builds(
         )
     elif status and status != "all":
         query = query.filter(CiBuild.status == status)
+    if purpose in ("build", "merge_check"):
+        merge_pipelines = db.select(CiPipeline.id).where(CiPipeline.purpose == "merge_check")
+        if purpose == "merge_check":
+            query = query.filter(CiBuild.pipeline_id.in_(merge_pipelines))
+        else:
+            query = query.filter(
+                db.or_(CiBuild.pipeline_id.is_(None), CiBuild.pipeline_id.not_in(merge_pipelines))
+            )
     total = query.order_by(None).count() if with_total else None
     options = [selectinload(CiBuild.stages), user_display_loader(CiBuild.requested_by)]
     if with_service:

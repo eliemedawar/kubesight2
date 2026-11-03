@@ -28,6 +28,10 @@ const REFRESH_MS = 1500;
 /** Twelve rows fit a screen; the table view is the tool for deeper history. */
 const PAGE_SIZE = 12;
 
+/** Past this many stages the grid tightens (smaller type and padding) so the
+ * columns still fit the page width. */
+const DENSE_COLUMNS = 8;
+
 /**
  * Which of the five skip-ish situations a cell is in.
  *
@@ -93,6 +97,9 @@ function StateIcon({ state }) {
 export default function StageMatrix({
   service,
   status = "all",
+  // "build" (Builds tab) or "merge_check" (Merge Checks tab): one pipeline's
+  // stages per grid, not both side by side.
+  purpose,
   refreshToken,
   onOpenStage,
 }) {
@@ -117,6 +124,7 @@ export default function StageMatrix({
     try {
       const payload = await getCiStageMatrix(service.id, {
         status: status === "all" ? undefined : status,
+        purpose,
         limit: PAGE_SIZE,
       });
       setData(payload);
@@ -324,11 +332,24 @@ export default function StageMatrix({
       </p>
 
       <div className="sg-mx-scroll">
-        <table className="sg-mx-table" ref={tableRef} onKeyDown={onKeyDown}>
+        <table
+          className={`sg-mx-table${columns.length > DENSE_COLUMNS ? " is-dense" : ""}`}
+          ref={tableRef}
+          onKeyDown={onKeyDown}
+        >
           <caption className="sg-mx-sr">
             {service.name} builds, newest first. Each cell gives one stage&apos;s status and
             duration. Use the arrow keys to move between cells.
           </caption>
+          {/* Fixed layout: the build column has its width, the stages share
+              the rest equally, so any number of stages fits the page without a
+              sideways scroll. Long names wrap (full name on hover). */}
+          <colgroup>
+            <col className="sg-mx-colgut" />
+            {columns.map((column) => (
+              <col key={column.key} />
+            ))}
+          </colgroup>
           <thead>
             {/* Parallel groups: one band over the columns of stages that ran
                 at the same time. Columns stay one per stage. */}
