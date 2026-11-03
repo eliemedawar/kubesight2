@@ -35,6 +35,7 @@ from ..services.ci import code_scan_report as code_scan_report_service
 from ..services.ci import engine as engine_service
 from ..services.ci import jenkinsfile as jenkinsfile_service
 from ..services.ci import logs as logs_service
+from ..services.ci import pipeline_transfer as pipeline_transfer_service
 from ..services.ci import pipelines as pipelines_service
 from ..services.ci import portability as portability_service
 from ..services.ci import queue as queue_service
@@ -60,6 +61,7 @@ ci_bp = Blueprint("ci", __name__, url_prefix="/api/ci")
 
 # Errors these services raise deliberately, with user-facing messages.
 _USER_ERRORS = (
+    pipeline_transfer_service.TransferError,
     shared_pipelines_service.SharedPipelineError,
     cache_service.CacheError,
     catalog_service.CatalogError,
@@ -540,6 +542,83 @@ def update_pipeline(pipeline_id: int):
     row = pipelines_service.get_pipeline(pipeline_id)
     try:
         data = pipelines_service.update_pipeline(row, _payload(), actor=_actor())
+    except _USER_ERRORS as exc:
+        return error_response(str(exc), 400)
+    return success_response(data)
+
+
+def _cluster_names() -> dict:
+    """Cluster id → name, as the cluster list shows them. Best-effort."""
+    try:
+        from .clusters import _list_clusters_payload
+
+        payload = _list_clusters_payload()
+        items = payload.get("items") if isinstance(payload, dict) else []
+    except Exception:  # noqa: BLE001 — names only label the export
+        items = []
+    return {str(item.get("id")): str(item.get("name") or item.get("id")) for item in items or [] if item.get("id")}
+
+
+@ci_bp.route("/pipelines/<int:pipeline_id>/export", methods=["GET"])
+@require_permission("ci_pipelines:view")
+def export_pipeline(pipeline_id: int):
+    """The pipeline as a file another KubeSight can import (UAT → prod).
+    Secret values and authority stamps are never in it."""
+    row = pipelines_service.get_pipeline(pipeline_id)
+    filename, content = pipeline_transfer_service.export_pipeline(
+        row, cluster_names=_cluster_names(), actor=_actor()
+    )
+    return success_response({"filename": filename, "content": content})
+
+
+@ci_bp.route("/pipelines/<int:pipeline_id>/import/preview", methods=["POST"])
+@require_permission("ci_pipelines:edit")
+def preview_pipeline_import(pipeline_id: int):
+    """What importing a file onto this pipeline would do. Changes nothing."""
+    row = pipelines_service.get_pipeline(pipeline_id)
+    try:
+        data = pipeline_transfer_service.preview(row, str(_payload().get("content") or ""))
+    except _USER_ERRORS as exc:
+        return error_response(str(exc), 400)
+    return success_response(data)
+
+
+@ci_bp.route("/pipelines/<int:pipeline_id>/import", methods=["POST"])
+@require_permission("ci_pipelines:edit")
+def import_pipeline(pipeline_id: int):
+    """Replace this pipeline with an exported one, mapping its deploy clusters
+    and creating the service secrets it needs (values typed here, or empty)."""
+    from ..access_engine import user_has_permission
+
+    row = pipelines_service.get_pipeline(pipeline_id)
+    payload = _payload()
+    content = str(payload.get("content") or "")
+    try:
+        missing = [
+            item["name"]
+            for item in pipeline_transfer_service.preview(row, content)["secrets"]
+            if item["missing"]
+        ]
+    except _USER_ERRORS as exc:
+        return error_response(str(exc), 400)
+    user = get_current_user()
+    if missing and user is not None and not user_has_permission(user, "ci_secrets:manage"):
+        return error_response(
+            f"This pipeline needs secrets this service does not have ({', '.join(missing)}), and "
+            "you cannot create secrets. Ask someone who can to add them, or to import it.",
+            403,
+        )
+    cluster_map = payload.get("clusterMap") if isinstance(payload.get("clusterMap"), dict) else {}
+    secret_values = payload.get("secretValues") if isinstance(payload.get("secretValues"), dict) else {}
+    try:
+        data = pipeline_transfer_service.apply(
+            row,
+            content,
+            cluster_map={str(k): str(v) for k, v in cluster_map.items()},
+            known_clusters=_cluster_names().keys(),
+            secret_values={str(k): str(v or "") for k, v in secret_values.items()},
+            actor=_actor(),
+        )
     except _USER_ERRORS as exc:
         return error_response(str(exc), 400)
     return success_response(data)

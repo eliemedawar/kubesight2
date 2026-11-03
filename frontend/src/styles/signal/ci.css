@@ -3894,3 +3894,77 @@ label.sg-mc-check {
   background: var(--info-soft);
   color: var(--info);
 }
+
+/* Import a pipeline file (UAT → prod): one column, the file on top. */
+.sg-ci-transfer {
+  max-width: 46rem;
+  width: min(46rem, 94vw);
+}
+
+.sg-ci-transfer-pick {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.sg-ci-transfer .sg-ci-import-review {
+  max-height: min(60vh, 34rem);
+  overflow-y: auto;
+}
+
+.sg-ci-transfer-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.sg-ci-transfer-rows li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.sg-ci-transfer-rows code {
+  overflow-wrap: anywhere;
+}
+
+.sg-ci-transfer-rows .is-ready {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--ok);
+  font-size: var(--font-size-sm, 0.85rem);
+}
+
+.sg-ci-transfer-note {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+}
+
+.sg-ci-transfer .sg-ci-import-group > .muted {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+}
+
+@media (max-width: 640px) {
+  .sg-ci-transfer-rows li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.sg-ci-transfer-stages > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.sg-ci-transfer-stages[open] > summary {
+  margin-bottom: 0.4rem;
+}

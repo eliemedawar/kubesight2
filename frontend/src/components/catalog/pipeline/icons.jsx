@@ -158,6 +158,12 @@ const PATHS = {
       <circle cx="18.5" cy="12" r="1.2" fill="currentColor" stroke="none" />
     </>
   ),
+  download: (
+    <>
+      <path d="M12 3.5V15M7.5 10.5 12 15l4.5-4.5" />
+      <path d="M4 14.5v3.5a2.5 2.5 0 0 0 2.5 2.5h11a2.5 2.5 0 0 0 2.5-2.5v-3.5" />
+    </>
+  ),
   upload: (
     <>
       <path d="M12 15V3.5M7.5 8 12 3.5 16.5 8" />

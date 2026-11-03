@@ -135,6 +135,21 @@ export const readCiSourceFile = (serviceId, path, revision = "") =>
 // a translation is reviewed before it replaces a pipeline that works. Passing
 // serviceId is what lets the backend check credential bindings against the
 // secrets that service actually has.
+// One pipeline as a file another KubeSight can import (UAT → prod): { filename, content }.
+export const exportCiPipeline = (pipelineId) =>
+  request(`/api/ci/pipelines/${encodeURIComponent(pipelineId)}/export`);
+
+// What importing a pipeline file onto this pipeline would do. Changes nothing.
+export const previewCiPipelineImport = (pipelineId, content) =>
+  request(`/api/ci/pipelines/${encodeURIComponent(pipelineId)}/import/preview`, {
+    method: "POST",
+    body: { content },
+  });
+
+// Saves immediately: { content, clusterMap: {fileId: id here}, secretValues: {NAME: value} }.
+export const importCiPipeline = (pipelineId, payload) =>
+  request(`/api/ci/pipelines/${encodeURIComponent(pipelineId)}/import`, { method: "POST", body: payload });
+
 export const importCiJenkinsfile = (content, serviceId) =>
   request("/api/ci/pipelines/import/jenkinsfile", {
     method: "POST",

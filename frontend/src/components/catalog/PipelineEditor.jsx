@@ -2,11 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "../../styles/signal/pipelineWorkspace.css";
 import BuildParameters from "./BuildParameters.jsx";
 import JenkinsfileImportModal from "./JenkinsfileImportModal.jsx";
+import PipelineFileImportModal from "./PipelineFileImportModal.jsx";
 import "../../styles/signal/sharedPipelines.css";
 import {
   applyCiPipelineTemplate,
   createCiPipeline,
   detachSharedPipeline,
+  exportCiPipeline,
   lintCiPipeline,
   listCiPipelines,
   listCiSecrets,
@@ -134,6 +136,11 @@ export default function PipelineEditor({
   // pipeline on the Pipelines page).
   const [picking, setPicking] = useState(false);
   const [copyingFrom, setCopyingFrom] = useState(false);
+  // Moving a pipeline between installations (UAT → prod) as a file.
+  const [importingFile, setImportingFile] = useState(false);
+  // Secrets an import created without a value: a build needs them set first,
+  // so this stays on screen until dismissed rather than fading like a toast.
+  const [emptySecrets, setEmptySecrets] = useState([]);
   const menuRef = useRef(null);
   const rootRef = useRef(null);
 
@@ -780,6 +787,58 @@ export default function PipelineEditor({
     }
   };
 
+  /** Download this pipeline as a file another KubeSight can import. */
+  const exportFile = async () => {
+    setMenuOpen(false);
+    setError("");
+    try {
+      const { filename, content } = await exportCiPipeline(pipeline.id);
+      const url = URL.createObjectURL(new Blob([content], { type: "application/yaml" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setNotice(
+        dirty
+          ? `Exported ${filename} — the saved pipeline, not the unsaved changes here.`
+          : `Exported ${filename}. Import it from the Pipeline tab of the service on the other KubeSight.`
+      );
+    } catch (err) {
+      setError(err.message || "Could not export the pipeline.");
+    }
+  };
+
+  const openFileImport = async () => {
+    setMenuOpen(false);
+    if (
+      dirty &&
+      !(await confirmDialog({
+        title: "Discard unsaved changes?",
+        message: "Importing a pipeline file replaces this pipeline and saves at once. Your unsaved changes here are lost.",
+        confirmLabel: "Discard and import",
+        tone: "danger",
+      }))
+    )
+      return;
+    setImportingFile(true);
+  };
+
+  const fileImported = (result) => {
+    setImportingFile(false);
+    adopt({ ...result.pipeline, isGeneratedDefault: false });
+    setImportNotes(null);
+    setEmptySecrets((result.secretsCreated || []).filter((item) => item.empty).map((item) => item.name));
+    setNotice(
+      result.sharedPipeline
+        ? `Imported — ${service.name} now builds with the shared pipeline “${result.sharedPipeline}”.`
+        : "Imported and saved."
+    );
+    onChanged?.();
+  };
+
   const copiedDraft = (draft, from) => {
     setCopyingFrom(false);
     applyDraft({ stages: draft.stages || [], parameters: draft.parameters || [], notes: [], blocking: [] });
@@ -788,6 +847,28 @@ export default function PipelineEditor({
   };
 
   if (loading) return <LoadingState label="Loading pipeline…" />;
+
+  // First in both menus: moving this pipeline to another KubeSight and back.
+  const transferItems = pipeline?.id ? (
+    <>
+      <button type="button" role="menuitem" className="btn-ghost" onClick={exportFile}>
+        <PlIcon name="download" />
+        <span>
+          <strong>Export to a file</strong>
+          <small>Stages, build inputs and post actions · secret values are never included</small>
+        </span>
+      </button>
+      {canEdit && (
+        <button type="button" role="menuitem" className="btn-ghost" onClick={openFileImport}>
+          <PlIcon name="upload" />
+          <span>
+            <strong>Import from a file</strong>
+            <small>A pipeline exported from another KubeSight (UAT → prod) · saves immediately</small>
+          </span>
+        </button>
+      )}
+    </>
+  ) : null;
 
   const current = selectedIndex !== null ? stages[selectedIndex] : null;
   const offCount = stages.filter((stage) => stage.enabled === false).length;
@@ -809,6 +890,14 @@ export default function PipelineEditor({
       )}
       {copyingFrom && (
         <CopyFromServiceModal pipeline={service} onClose={() => setCopyingFrom(false)} onDraft={copiedDraft} />
+      )}
+      {importingFile && (
+        <PipelineFileImportModal
+          pipeline={pipeline}
+          service={service}
+          onImported={fileImported}
+          onClose={() => setImportingFile(false)}
+        />
       )}
       {importing && (
         <JenkinsfileImportModal
@@ -901,7 +990,7 @@ export default function PipelineEditor({
               {inputProblems > 0 && <span className="pl-dot is-error" aria-label="needs fixing" />}
             </button>
           </div>
-          {canEdit && (
+          {(canEdit || pipeline?.id) && (
             <div className="pl-menu" ref={menuRef}>
               <button
                 type="button"
@@ -916,6 +1005,8 @@ export default function PipelineEditor({
               </button>
               {menuOpen && linked && (
                 <div className="pl-menu-list" role="menu">
+                  {transferItems}
+                  {canEdit && (<>
                   <button
                     type="button"
                     role="menuitem"
@@ -950,10 +1041,13 @@ export default function PipelineEditor({
                       </small>
                     </span>
                   </button>
+                  </>)}
                 </div>
               )}
               {menuOpen && !linked && (
                 <div className="pl-menu-list" role="menu">
+                  {transferItems}
+                  {canEdit && (<>
                   {!isHome && (
                     <button
                       type="button"
@@ -1010,12 +1104,34 @@ export default function PipelineEditor({
                       <small>{applicationTypeLabel(service.applicationType)} template · saves immediately</small>
                     </span>
                   </button>
+                  </>)}
                 </div>
               )}
             </div>
           )}
         </div>
       </header>
+
+      {emptySecrets.length > 0 && (
+        <div className="pl-banner" role="status">
+          <PlIcon name="alert" />
+          <p>
+            The import created {emptySecrets.map((name, index) => (
+              <span key={name}>
+                {index ? ", " : ""}
+                <code>{name}</code>
+              </span>
+            ))}{" "}
+            without a value. Set {emptySecrets.length === 1 ? "it" : "them"} before the next build.{" "}
+            <button type="button" className="btn-ghost pl-link" onClick={() => goToTab("settings")}>
+              Open Settings → Secrets
+            </button>
+          </p>
+          <button type="button" className="btn-ghost pl-banner-close" aria-label="Dismiss" onClick={() => setEmptySecrets([])}>
+            <PlIcon name="x" />
+          </button>
+        </div>
+      )}
 
       {error && (
         <div className="pl-banner is-error" role="alert">
