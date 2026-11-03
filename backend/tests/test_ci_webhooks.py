@@ -503,6 +503,56 @@ def test_push_webhook_is_registered_in_bitbucket(client, admin_token, service_id
     assert after["exists"] is True and after["inSync"] is True
 
 
+def test_gateway_url_is_what_bitbucket_calls(client, admin_token, service_id, monkeypatch):
+    """A gateway (Tyk) in front: Bitbucket is registered with its address,
+    even when KubeSight's own is internal, and a webhook already registered at
+    the direct address is moved there rather than doubled."""
+    from api.services.ci.source import bitbucket_status
+
+    hooks, writes = [], []
+
+    def save_webhook(**kwargs):
+        writes.append(kwargs)
+        saved = {"uuid": kwargs["uid"] or f"{{h{len(hooks) + 1}}}", "url": kwargs["url"],
+                 "events": kwargs["events"], "active": True, "secretSet": True}
+        hooks[:] = [item for item in hooks if item["uuid"] != saved["uuid"]] + [saved]
+        return {"uuid": saved["uuid"]}
+
+    monkeypatch.setattr(bitbucket_status, "list_webhooks", lambda **kwargs: [dict(item) for item in hooks])
+    monkeypatch.setattr(bitbucket_status, "save_webhook", save_webhook)
+    monkeypatch.setenv("PUBLIC_BASE_URL", "http://localhost:5055")
+
+    hook = _made(client, admin_token, service_id, name="Build on push", kind="bitbucket_push")
+    base = f"/api/ci/services/{service_id}/webhooks/{hook['id']}"
+    # Registered by hand earlier, straight at KubeSight.
+    hooks.append({"uuid": "{old}", "url": "https://kubesight.internal" + hook["path"],
+                  "events": ["repo:push"], "active": True, "secretSet": True})
+
+    bad = client.put(base, json={"externalUrl": "tyk.example.com/hook"}, headers=auth_headers(admin_token))
+    assert bad.status_code == 400 and "http" in bad.get_json()["error"]
+
+    gateway = "https://tyk.example.com/kubesight/build-push"
+    saved = client.put(base, json={"externalUrl": gateway}, headers=auth_headers(admin_token)).get_json()["data"]
+    assert saved["externalUrl"] == gateway and saved["callUrl"] == gateway
+    assert saved["urlProblem"] is None
+
+    stale = client.get(f"{base}/source-status", headers=auth_headers(admin_token)).get_json()["data"]
+    assert stale["exists"] is True and stale["urlMatches"] is False and stale["inSync"] is False
+
+    response = client.post(f"{base}/setup", headers=auth_headers(admin_token))
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()["data"]["webhook"]["action"] == "updated"
+    [write] = writes
+    assert write["url"] == gateway and write["uid"] == "{old}"
+    assert [item["url"] for item in hooks] == [gateway]
+
+    after = client.get(f"{base}/source-status", headers=auth_headers(admin_token)).get_json()["data"]
+    assert after["inSync"] is True
+
+    cleared = client.put(base, json={"externalUrl": ""}, headers=auth_headers(admin_token)).get_json()["data"]
+    assert cleared["externalUrl"] is None and cleared["callUrl"] == cleared["url"]
+
+
 def test_setup_refuses_a_loopback_address(client, admin_token, service_id, monkeypatch):
     monkeypatch.setenv("PUBLIC_BASE_URL", "http://localhost:5055")
     hook = _made(client, admin_token, service_id, name="Build on push", kind="bitbucket_push")

@@ -250,13 +250,16 @@ class BitbucketSourceProvider:
             raise SourceError(str(exc), retryable=exc.retryable) from exc
 
     def find_webhook(
-        self, ref: RepositoryRef, credential, *, url: str
+        self, ref: RepositoryRef, credential, *, url: str, key: str = ""
     ) -> Optional[Dict[str, Any]]:
         """The repository webhook that already points at ``url``, if any.
 
         Matched on the URL without its query string, so a webhook set up by hand
         with the ``?secret=`` fallback is recognised and corrected rather than
-        left beside a second one that fires the same checks twice.
+        left beside a second one that fires the same checks twice. Failing that,
+        a webhook whose URL contains ``key`` (a trigger's unguessable id) is the
+        same one at an older address — registered before a gateway was put in
+        front, say — and is returned so it is moved, not duplicated.
         """
         token, credential_type, principal = self._credential_parts(credential)
         try:
@@ -272,6 +275,10 @@ class BitbucketSourceProvider:
         for hook in hooks:
             if _without_query(hook["url"]) == wanted:
                 return hook
+        if key:
+            for hook in hooks:
+                if key in (hook.get("url") or ""):
+                    return hook
         return None
 
     def ensure_webhook(
@@ -283,8 +290,10 @@ class BitbucketSourceProvider:
         secret: str,
         events: List[str],
         description: str,
+        key: str = "",
     ) -> Dict[str, Any]:
-        """Create the webhook, or update the one already pointing at ``url``."""
+        """Create the webhook, or update the one already pointing at ``url``
+        (or carrying ``key`` — see :meth:`find_webhook`)."""
         if credential is not None and credential.read_only:
             raise SourceError(
                 f"Credential profile '{credential.name}' is marked read-only. "
@@ -292,7 +301,7 @@ class BitbucketSourceProvider:
                 "write access.",
                 retryable=False,
             )
-        existing = self.find_webhook(ref, credential, url=url)
+        existing = self.find_webhook(ref, credential, url=url, key=key)
         token, credential_type, principal = self._credential_parts(credential)
         try:
             saved = bitbucket_status.save_webhook(

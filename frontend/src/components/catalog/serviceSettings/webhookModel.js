@@ -268,7 +268,7 @@ const shellQuote = (text) => `'${String(text).replace(/'/g, `'\\''`)}'`;
 /** A curl command that calls the webhook. The secret is a variable unless revealed. */
 export const curlExample = (hook, { secret = "", body = {} } = {}) => {
   const lines = [
-    `curl -fsS -X POST ${shellQuote(hook.url)}`,
+    `curl -fsS -X POST ${shellQuote(hook.callUrl || hook.url)}`,
     `  -H ${secret ? shellQuote(`X-KubeSight-Secret: ${secret}`) : `"X-KubeSight-Secret: $KUBESIGHT_WEBHOOK_SECRET"`}`,
   ];
   if (body && Object.keys(body).length) {

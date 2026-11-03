@@ -82,6 +82,26 @@
   font-size: var(--font-size-xs);
 }
 
+/* The URL row while its gateway address is being edited: field + hint in the
+   value column, buttons level with the field. */
+.st-root .wh-kv-edit {
+  align-items: start;
+}
+
+.st-root .wh-kv-edit > .wh-k,
+.st-root .wh-kv-edit > button {
+  margin-top: 0.45rem;
+}
+
+.st-root .wh-v-edit {
+  min-width: 0;
+  gap: 0.3rem;
+}
+
+.st-root .wh-kv-note {
+  margin: -0.25rem 0 0 4.5rem;
+}
+
 .st-root .wh-fresh {
   display: flex;
   align-items: center;
@@ -329,6 +349,10 @@
 
   .st-root .wh-kv .wh-k {
     grid-column: 1 / -1;
+  }
+
+  .st-root .wh-kv-note {
+    margin-left: 0;
   }
 
   .st-root .wh-mapping {

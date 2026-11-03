@@ -452,13 +452,7 @@ function WebhookDetails({ hook, service, repository, pipelines, defaultBranch, c
     <div className="wh-details">
       <section className="wh-block" aria-label="Connection">
         <h5 className="pl-block-title">Connection</h5>
-        <div className="wh-kv">
-          <span className="wh-k">URL</span>
-          <code className="wh-v">{hook.url}</code>
-          <button type="button" className="btn-ghost st-action" onClick={() => copy(hook.url, "URL")}>
-            <PlIcon name="copy" /> Copy
-          </button>
-        </div>
+        <CallUrl hook={hook} service={service} canEdit={canEdit} onCopy={copy} onChanged={onChanged} onError={onError} onNotice={onNotice} />
         {hook.urlProblem && (
           <p className="pl-note">
             <PlIcon name="alert" />
@@ -564,6 +558,99 @@ function WebhookDetails({ hook, service, repository, pipelines, defaultBranch, c
   );
 }
 
+/**
+ * The address senders are given. Normally KubeSight's own; with a gateway
+ * (Tyk) in front it is the gateway's, which forwards to KubeSight's — and that
+ * is the URL Set up in Bitbucket registers.
+ */
+function CallUrl({ hook, service, canEdit, onCopy, onChanged, onError, onNotice }) {
+  const isPush = hook.kind === "bitbucket_push";
+  const callUrl = hook.callUrl || hook.url;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const start = () => {
+    setDraft(hook.externalUrl || "");
+    setEditing(true);
+  };
+
+  const save = async (value) => {
+    setBusy(true);
+    try {
+      await updateCiWebhook(service.id, hook.id, { externalUrl: value.trim() });
+      setEditing(false);
+      const after = isPush ? " Press Resync in Bitbucket so Bitbucket calls the new address." : "";
+      onNotice((value.trim() ? "Gateway URL saved." : "Back to KubeSight's own URL.") + after);
+      onChanged();
+    } catch (err) {
+      onError(err.message || "Could not save the gateway URL.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (editing) {
+    return (
+      <div className="wh-kv wh-kv-edit">
+        <span className="wh-k">URL</span>
+        <div className="pl-field wh-v-edit">
+          <input
+            type="url"
+            className="is-mono"
+            value={draft}
+            placeholder={hook.url}
+            aria-label="Gateway URL"
+            autoFocus
+            disabled={busy}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") save(draft);
+              if (event.key === "Escape") {
+                event.stopPropagation();
+                setEditing(false);
+              }
+            }}
+          />
+          <p className="pl-field-hint">
+            The address {isPush ? "Bitbucket" : "senders"} should call when a gateway such as Tyk sits in front of KubeSight.
+            The gateway must forward the request, body and headers unchanged, to <code>{hook.url}</code>. Leave it empty to
+            use KubeSight's own URL.
+          </p>
+        </div>
+        <button type="button" className="btn-outline btn-compact" onClick={() => save(draft)} disabled={busy}>
+          {busy ? "Saving…" : "Save"}
+        </button>
+        <button type="button" className="btn-ghost st-action" onClick={() => setEditing(false)} disabled={busy}>
+          Cancel
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="wh-kv">
+        <span className="wh-k">URL</span>
+        <code className="wh-v">{callUrl}</code>
+        <button type="button" className="btn-ghost st-action" onClick={() => onCopy(callUrl, "URL")}>
+          <PlIcon name="copy" /> Copy
+        </button>
+        {canEdit && (
+          <button type="button" className="btn-ghost st-action" onClick={start}>
+            <PlIcon name="variable" /> Edit
+          </button>
+        )}
+      </div>
+      {hook.externalUrl && (
+        <p className="pl-field-hint wh-kv-note">
+          Through a gateway. It forwards to KubeSight at <code>{hook.url}</code>.
+        </p>
+      )}
+    </>
+  );
+}
+
 function BitbucketSetup({ hook, service, canEdit, onChanged, onError, onNotice }) {
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -600,6 +687,8 @@ function BitbucketSetup({ hook, service, canEdit, onChanged, onError, onNotice }
         ? { tone: "warn", text: status.reason || "Could not check Bitbucket." }
         : !status.exists
           ? { tone: "warn", text: `Not registered on ${status.repository} yet — Bitbucket will not call it.` }
+          : status.urlMatches === false
+            ? { tone: "warn", text: `Registered on ${status.repository} at ${status.registeredUrl}, not this URL. Resync it.` }
           : status.inSync
             ? { tone: "ok", text: `Registered on ${status.repository} for repo:push, signed with this secret.` }
             : {

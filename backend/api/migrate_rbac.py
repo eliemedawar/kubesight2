@@ -1052,6 +1052,10 @@ def _migrate_ci_columns() -> None:
         # before parsing existed, which reads as "no reports collected" — true.
         _add_column_if_missing("ci_builds", "test_summary", "JSON")
         _retype_json_column("ci_builds", "test_summary")
+    if "ci_webhook_triggers" in existing:
+        # A gateway address in front of the webhook URL. NULL is "senders call
+        # KubeSight directly", which every webhook did before the column.
+        _add_column_if_missing("ci_webhook_triggers", "external_url", "VARCHAR(500)")
 
 
 def _migrate_merge_check_columns() -> None:

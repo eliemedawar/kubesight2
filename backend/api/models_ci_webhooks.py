@@ -62,6 +62,10 @@ class CiWebhookTrigger(db.Model):
     # service without handing them the ability to start builds.
     public_id = db.Column(db.String(48), nullable=False, unique=True, index=True)
     secret_encrypted = db.Column(db.Text, nullable=True)
+    # The address the sender is given when it does not call KubeSight directly
+    # — an API gateway (Tyk) in front that forwards to the URL above. NULL is
+    # "KubeSight's own address". This is what Bitbucket is registered with.
+    external_url = db.Column(db.String(500), nullable=True)
 
     # NULL is "the service's default build pipeline, whichever that is when the
     # call arrives". Not a foreign key, for the reason CiSchedule gives.

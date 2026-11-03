@@ -38,6 +38,7 @@ import re
 import secrets as secrets_module
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from ...audit import log_audit
 from ...db import db
@@ -51,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 MAX_TRIGGERS_PER_SERVICE = 20
 MAX_NAME_CHARS = 120
+MAX_EXTERNAL_URL_CHARS = 500
 MAX_FILTERS = 20
 MAX_MAPPINGS = 25
 MAX_ALLOWED_INPUTS = 25
@@ -153,6 +155,30 @@ def inbound_url(row: CiWebhookTrigger) -> str:
     return f"{_base_url()}{inbound_path(row)}"
 
 
+def call_url(row: CiWebhookTrigger) -> str:
+    """The address a sender is given: the gateway's when one is set, else
+    KubeSight's own."""
+    return row.external_url or inbound_url(row)
+
+
+def _reach_problem(row: CiWebhookTrigger) -> str:
+    # A gateway address is the reachable one by definition — KubeSight's own
+    # may well be internal behind it.
+    return "" if row.external_url else _base_problem(_base_url())
+
+
+def _clean_external_url(value: Any) -> Optional[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if len(raw) > MAX_EXTERNAL_URL_CHARS:
+        raise WebhookError(f"A gateway URL is at most {MAX_EXTERNAL_URL_CHARS} characters.")
+    parsed = urlsplit(raw)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or any(ch.isspace() for ch in raw):
+        raise WebhookError("The gateway URL must be a full http:// or https:// address, e.g. https://tyk.example.com/kubesight/hook.")
+    return raw
+
+
 def _pipeline_problem(row: CiWebhookTrigger) -> Optional[str]:
     if not row.pipeline_id:
         return None
@@ -184,9 +210,12 @@ def trigger_to_dict(row: CiWebhookTrigger) -> Dict[str, Any]:
         "kind": row.kind,
         "url": f"{base}{inbound_path(row)}",
         "path": inbound_path(row),
+        # The gateway in front, if any, and what senders are actually given.
+        "externalUrl": row.external_url,
+        "callUrl": call_url(row),
         # Whether a sender outside this installation could reach the URL at
         # all — a loopback address is shown, but flagged.
-        "urlProblem": _base_problem(base) or None,
+        "urlProblem": (None if row.external_url else _base_problem(base)) or None,
         "secretSet": bool(row.secret_encrypted),
         "pipelineId": row.pipeline_id,
         "pipelineName": pipeline.name if pipeline else None,
@@ -423,6 +452,9 @@ def _apply(row: CiWebhookTrigger, service: CiService, payload: Dict[str, Any], *
                 )
             row.pipeline_id = pipeline.id
 
+    if creating or "externalUrl" in payload:
+        row.external_url = _clean_external_url(payload.get("externalUrl"))
+
     if creating or "refType" in payload:
         ref_type = _clean(payload.get("refType"), 8).lower() or "branch"
         if ref_type not in ("branch", "tag"):
@@ -514,6 +546,7 @@ def _audit_details(row: CiWebhookTrigger, service: CiService) -> Dict[str, Any]:
         "service": service.slug,
         "webhook": row.name,
         "kind": row.kind,
+        "externalUrl": row.external_url,
         "pipelineId": row.pipeline_id,
         "branch": row.branch,
         "refType": row.ref_type,
@@ -1225,13 +1258,13 @@ def configure_in_source(row: CiWebhookTrigger, *, actor=None) -> Dict[str, Any]:
         raise WebhookError("Only a push webhook is registered in Bitbucket. Give a generic one's URL to its sender.")
     if not service.source_ready():
         raise WebhookError("Connect a repository and credential on the Source tab first — the webhook is created with that credential.")
-    problem = _base_problem(_base_url())
+    problem = _reach_problem(row)
     if problem:
-        raise WebhookError(problem)
+        raise WebhookError(problem + " Or set a gateway URL on the webhook if a gateway forwards to KubeSight.")
     secret = decrypt_secret(row.secret_encrypted or "")
     if not secret:
         secret = rotate_secret(row, actor=actor)
-    url = inbound_url(row)
+    url = call_url(row)
     source_port, handler, ref = _source(service)
     writer = getattr(handler, "ensure_webhook", None)
     if writer is None:
@@ -1244,6 +1277,10 @@ def configure_in_source(row: CiWebhookTrigger, *, actor=None) -> Dict[str, Any]:
             secret=secret,
             events=list(PUSH_EVENTS),
             description=f"KubeSight build: {row.name}"[:255],
+            # Finds this trigger's webhook at an older address too (before or
+            # after a gateway URL was set) and moves it instead of adding a
+            # second one that builds every push twice.
+            key=row.public_id,
         )
     except source_port.SourceError as exc:
         message = str(exc)
@@ -1255,7 +1292,13 @@ def configure_in_source(row: CiWebhookTrigger, *, actor=None) -> Dict[str, Any]:
         actor=actor,
         target_type="ci_webhook_trigger",
         target_id=str(row.id),
-        details={"service": service.slug, "webhook": row.name, "repository": ref.full_name, "action": webhook["action"]},
+        details={
+            "service": service.slug,
+            "webhook": row.name,
+            "repository": ref.full_name,
+            "action": webhook["action"],
+            "url": url,
+        },
     )
     return {"webhook": {**webhook, "repository": ref.full_name}, "trigger": trigger_to_dict(row)}
 
@@ -1268,29 +1311,34 @@ def webhook_status(row: CiWebhookTrigger) -> Dict[str, Any]:
         return {"known": False, "exists": False, "reason": "Only push webhooks are registered in Bitbucket."}
     if not service.source_ready():
         return {"known": False, "exists": False, "reason": "Connect a repository first."}
-    problem = _base_problem(_base_url())
+    problem = _reach_problem(row)
     if problem:
         return {"known": False, "exists": False, "reason": problem}
-    url = inbound_url(row)
+    url = call_url(row)
     try:
         _port, handler, ref = _source(service)
         finder = getattr(handler, "find_webhook", None)
         if finder is None:
             return {"known": False, "exists": False, "reason": f"KubeSight cannot read webhooks on {service.repository_provider}."}
-        hook = finder(ref, service.credential_profile, url=url)
+        hook = finder(ref, service.credential_profile, url=url, key=row.public_id)
     except Exception as exc:  # noqa: BLE001 - "we could not look" is an answer
         return {"known": False, "exists": False, "reason": str(exc)}
     if hook is None:
         return {"known": True, "exists": False, "url": url, "repository": ref.full_name}
     missing = sorted(set(PUSH_EVENTS) - set(hook.get("events") or []))
+    registered = hook.get("url") or ""
+    # Found by its id at another address: Bitbucket still calls the old one.
+    url_matches = registered.split("?", 1)[0] == url.split("?", 1)[0]
     return {
         "known": True,
         "exists": True,
         "url": url,
+        "registeredUrl": registered,
+        "urlMatches": url_matches,
         "repository": ref.full_name,
         "active": hook.get("active"),
         "secretSet": hook.get("secretSet"),
         "events": hook.get("events"),
         "missingEvents": missing,
-        "inSync": bool(hook.get("active")) and bool(hook.get("secretSet")) and not missing,
+        "inSync": bool(hook.get("active")) and bool(hook.get("secretSet")) and not missing and url_matches,
     }
