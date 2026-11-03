@@ -144,9 +144,9 @@ class TestValues:
         data = response.get_json()["data"]
         assert "replicaCount: 2" in data["valuesYaml"]
         assert "pg-uat" in data["valuesYaml"]
-        # Import blanked the password, and it is required.
+        # Import blanked the password; nothing is required, so nothing is listed.
         assert "default-pass" not in data["valuesYaml"]
-        assert any(i["path"] == "database.password" for i in data["requiredInputs"])
+        assert "requiredInputs" not in data
 
     def test_unknown_values_file_is_refused(self, client, admin_token, chart):
         response = client.get(
@@ -164,12 +164,13 @@ class TestValues:
             with pytest.raises(charts.ChartTemplateError, match="not valid YAML"):
                 charts.build_values_yaml(chart["slug"], {}, "", "", "a: [1, 2\n")
 
-    def test_overlay_fills_required_inputs_and_wins(self, app, chart):
+    def test_overlay_fills_blanked_inputs_and_wins(self, app, chart):
         from api.services import helm_chart_template_service as charts
 
         with app.app_context():
-            with pytest.raises(charts.ChartTemplateError, match="required"):
-                charts.build_values_yaml(chart["slug"], {}, "", chart["uat"], "")
+            # Nothing is required: the blanked password installs empty.
+            empty = charts.build_values_yaml(chart["slug"], {}, "", chart["uat"], "")
+            assert "password: ''" in empty
             text = charts.build_values_yaml(
                 chart["slug"], {}, "", chart["uat"],
                 f"replicaCount: 5\ndatabase:\n  password: {PASSWORD}\n",
@@ -249,17 +250,14 @@ class TestWizardBuild:
         assert response.status_code == 400
         assert "no saved value" in response.get_json()["error"]
 
-    def test_missing_password_fails_preflight(
+    def test_an_empty_password_does_not_fail_preflight(
         self, client, admin_token, ssh_profile, fake, chart, helm,
     ):
         build = create_build(client, admin_token, ssh_profile, make_build_payload(
             nodes=SINGLE_CP_NODES, apps=[_app(chart, valuesYaml="replicaCount: 2\n")],
         ))
         verdict = _start(client, admin_token, build["id"])
-        assert verdict["status"] == "fail"
-        check = next(c for c in verdict["buildChecks"] if c["id"].startswith("app_"))
-        assert check["status"] == "fail" and "required" in check["detail"]
-        assert not helm["install"]
+        assert verdict["status"] != "fail", verdict
 
     def test_chart_that_does_not_render_fails_preflight(
         self, client, admin_token, ssh_profile, fake, chart, helm, monkeypatch,

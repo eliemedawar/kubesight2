@@ -18,7 +18,6 @@ import {
   moveItem,
   newAppItem,
   releaseNameFor,
-  unfilledRequired,
 } from "../../utils/clusterApps.js";
 import { confirmDialog } from "../../lib/dialogs.js";
 import YamlFileButton from "../common/YamlFileButton.jsx";
@@ -48,14 +47,12 @@ function useValuesFiles(charts) {
 function AppCard({
   item, index, count, charts, filesFor, ensureFiles, onChange, onMove, onRemove, notify, single,
 }) {
-  const [required, setRequired] = useState([]);
   const [loading, setLoading] = useState(false);
   const chart = charts.find((entry) => entry.id === item.chartSlug);
   const versions = chart?.versions?.length
     ? chart.versions.map((entry) => entry.version)
     : chart ? [chart.version] : [];
   const valuesFiles = filesFor(item.chartSlug, item.chartVersion);
-  const missing = unfilledRequired(item.valuesYaml, required);
   const masked = item.valuesYaml.includes(VALUES_MASK);
 
   useEffect(() => {
@@ -71,7 +68,6 @@ function AppCard({
     getAppStartingValues(item.chartSlug, item.chartVersion, item.valuesFile)
       .then((data) => {
         if (cancelled) return;
-        setRequired(data.requiredInputs || []);
         if (!item.valuesEdited) onChange({ valuesYaml: data.valuesYaml || "" });
       })
       .catch((error) => { if (!cancelled) notify(error.message || String(error), true); })
@@ -239,15 +235,6 @@ function AppCard({
           chart&apos;s value.
         </span>
       </div>
-      {missing.length ? (
-        <p className="sg-cb-app-missing">
-          <b>Still to fill in:</b>{" "}
-          {missing.map((input) => (
-            <span className="sg-cb-mono" key={input.path}>{input.path}</span>
-          ))}
-          <span className="muted"> — the stored chart never keeps these.</span>
-        </p>
-      ) : null}
     </div>
   );
 }

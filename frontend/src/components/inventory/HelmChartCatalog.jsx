@@ -181,13 +181,7 @@ export default function HelmChartCatalog({
                   {template.valuesFileCount === 1 ? "" : "s"}
                 </span>
               ) : null}
-              {template.requiredVariableCount ? (
-                <span className="helm-chart-card__required">
-                  {template.requiredVariableCount} required
-                </span>
-              ) : (
-                <span className="helm-chart-card__ready">Ready with defaults</span>
-              )}
+              <span className="helm-chart-card__ready">Ready with defaults</span>
             </div>
             <details className="helm-chart-card__contents">
               <summary>
@@ -216,8 +210,7 @@ export default function HelmChartCatalog({
                           {version.templateCount} template
                           {version.templateCount === 1 ? "" : "s"} ·{" "}
                           {version.valuesFileCount} env file
-                          {version.valuesFileCount === 1 ? "" : "s"} ·{" "}
-                          {version.requiredVariableCount} required
+                          {version.valuesFileCount === 1 ? "" : "s"}
                         </span>
                         <span className="muted">
                           {version.sourceRef || helmSourceLabel(version)}

@@ -23,6 +23,14 @@ it goes through the same doors as any other deploy in KubeSight:
    timed-out rollout puts the previous image back (or removes what the stage
    created) before the stage is failed.
 
+A Helm target (``deploy_config.is_helm``) goes through the same doors with a
+release instead of one deployment: step 4 installs the Inventory chart when the
+release is not there (chart values, nothing to fill in) or upgrades it keeping
+the values it runs with, the build's image set on the values the stage names —
+both through ``helm_service.install_or_upgrade_release``. The rollout is every
+Deployment of the release; a failure rolls back to the previous revision (or
+uninstalls a release the stage installed).
+
 Everything is persisted on the stage row's ``deploy_state``, so a backend
 restart resumes a rollout watch rather than forgetting it.
 """
@@ -34,6 +42,8 @@ import logging
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+import yaml
 
 from ...audit import log_audit
 from ...db import db
@@ -100,7 +110,10 @@ def start(build: CiBuild, stage: CiBuildStage, definition: Dict[str, Any]) -> No
         label = f" ({config['environment']})" if config.get("environment") else ""
         _log(stage, f"Deploying to the service's linked deployment{label}")
 
-    where = f"{config['clusterId']} / {config['namespace']} / {config['deploymentName']}"
+    where = f"{config['clusterId']} / {config['namespace']} / {_workload(config)}"
+    if deploy_config.is_helm(config):
+        chart = (config.get("helm") or {}).get("chartName") or config["helm"]["chartTemplateId"]
+        where = f"Helm release {where} (chart {chart})"
     _log(stage, f"Deploying to {where}")
     _advance_resolve(build, stage, config, definition)
 
@@ -183,7 +196,8 @@ def summarize(stage: CiBuildStage) -> str:
     state = _state(stage)
     target = state.get("target") or {}
     where = "/".join(
-        str(target.get(key) or "?") for key in ("clusterId", "namespace", "deploymentName")
+        str(target.get(key) or "?")
+        for key in ("clusterId", "namespace", "releaseName" if target.get("releaseName") else "deploymentName")
     )
     message = state.get("message") or stage.error or ""
     image = state.get("image") or ""
@@ -192,13 +206,14 @@ def summarize(stage: CiBuildStage) -> str:
     return f"Deploy stage '{stage.name}' ({where}): {message}".strip()
 
 
-def describe_target(user, cluster_id: str, namespace: str) -> Dict[str, Any]:
+def describe_target(user, cluster_id: str, namespace: str, *, helm: bool = False) -> Dict[str, Any]:
     """What the stage editor needs to point a Deploy stage somewhere.
 
     The deployments in a namespace with their containers (so the right one can
     be picked), whether the cluster queues changes for approval, whether its
     registries can confirm images at all, and whether the person looking could
-    authorize this target — saving it requires that.
+    authorize this target — saving it requires that. With ``helm``, also the
+    namespace's Helm releases, for a stage that deploys a chart.
     """
     from ...access_engine import can_access_namespace, user_has_permission
     from ..deployment_request_service import cluster_required_approvals
@@ -212,6 +227,10 @@ def describe_target(user, cluster_id: str, namespace: str) -> Dict[str, Any]:
         user is not None
         and user_has_permission(user, "apps:deploy")
         and (not namespace or can_access_namespace(user, cluster_id, namespace))
+        and (
+            not helm
+            or (user_has_permission(user, "helm:install") and user_has_permission(user, "helm:upgrade"))
+        )
     )
     try:
         required = int(cluster_required_approvals(cluster_id))
@@ -289,7 +308,36 @@ def describe_target(user, cluster_id: str, namespace: str) -> Dict[str, Any]:
                 }
             )
     data["deployments"] = sorted((i for i in items if i["name"]), key=lambda i: i["name"])
+    if helm:
+        data["helmReleases"], data["helmError"] = _namespace_releases(cluster_id, namespace)
     return data
+
+
+def _namespace_releases(cluster_id: str, namespace: str) -> Tuple[List[Dict[str, Any]], str]:
+    """The namespace's Helm releases, for the stage editor — or why not."""
+    from .. import helm_service
+
+    try:
+        helm_service.ensure_helm_installed()
+        access = helm_service._resolve_access(cluster_id)
+        items = json.loads(helm_service.run_helm(access, ["list", "-n", namespace, "-a", "-o", "json"]) or "[]")
+    except helm_service.HelmCommandError as exc:
+        return [], f"Could not list Helm releases: {exc}"
+    except ValueError:
+        return [], "Helm returned an unreadable release list."
+    return sorted(
+        (
+            {
+                "name": item.get("name") or "",
+                "chart": item.get("chart") or "",
+                "revision": item.get("revision") or "",
+                "status": item.get("status") or "",
+            }
+            for item in items or []
+            if item.get("name")
+        ),
+        key=lambda item: item["name"],
+    ), ""
 
 
 # ---------------------------------------------------------------------------
@@ -368,12 +416,20 @@ def _advance_resolve(
         return
 
     # 4. The change.
+    note = _change_note(build, stage, config, image)
+    if deploy_config.is_helm(config):
+        outcome = _helm_change(stage, config, user, image, note)
+        if outcome is None:
+            return
+        (data, error, status), created = outcome
+        _after_apply(build, stage, config, user, image, data, error, status, created, real)
+        return
+
     live, problem = _read_deployment(config, real)
     if problem:
         _fail(stage, problem)
         return
 
-    note = _change_note(build, stage, config, image)
     if live is not None:
         container, why = deploy_config.pick_container(live, config.get("containerName") or "")
         if container is None:
@@ -429,6 +485,11 @@ def _advance_resolve(
 
     # 5. Apply — through the approval gate.
     data, error, status = _apply(user, config, manifest, note, real)
+    _after_apply(build, stage, config, user, image, data, error, status, created, real)
+
+
+def _after_apply(build, stage, config, user, image, data, error, status, created, real) -> None:
+    """The apply's answer: refused, queued for approval, or applied."""
     if error:
         _fail(stage, f"The change was refused: {error}")
         return
@@ -445,9 +506,109 @@ def _advance_resolve(
         _audit("ci_deploy_queued_for_approval", build, stage, user, config, image, bundleId=bundle_id)
         return
 
-    _log(stage, "Applied." + (" [mock]" if not real else ""))
+    _log(stage, "Applied." + (" [mock]" if not real and not deploy_config.is_helm(config) else ""))
     _audit("ci_deploy_applied", build, stage, user, config, image, created=bool(created))
     _begin_rollout(stage)
+
+
+def _helm_change(stage: CiBuildStage, config: Dict[str, Any], user, image: str, note: str):
+    """Install or upgrade the release with the build's image.
+
+    Returns ``((data, error, status), created)`` from the Helm path, or None
+    when the stage was failed here.
+    """
+    from .. import helm_service
+
+    helm = config["helm"]
+    release = config["releaseName"]
+    try:
+        image_values = deploy_config.helm_image_values(config, image)
+    except deploy_config.DeployConfigError as exc:
+        _fail(stage, f"{exc} Nothing was deployed.")
+        return None
+    current, problem = _helm_release(config)
+    if problem:
+        _fail(stage, f"{problem} Nothing was deployed.")
+        return None
+    status = str((current or {}).get("status") or "").lower()
+    if status.startswith("pending"):
+        _fail(
+            stage,
+            f"Helm release '{release}' is {status} — another install, upgrade or rollback has not "
+            "finished. Nothing was deployed.",
+        )
+        return None
+    is_upgrade = current is not None and status != "uninstalled"
+    payload: Dict[str, Any] = {
+        "chartSource": "template",
+        "chartTemplateId": helm["chartTemplateId"],
+        "chartVersion": helm.get("chartVersion") or "",
+        "clusterId": config["clusterId"],
+        "namespace": config["namespace"],
+        "releaseName": release,
+        "values": {},
+        # Only the image: everything else is the chart's (first install) or the
+        # release's own values (upgrade). Never a credential.
+        "valuesYaml": yaml.safe_dump(image_values, sort_keys=False, default_flow_style=False),
+    }
+    if is_upgrade:
+        # The values the release runs with are read on the server when the
+        # upgrade runs — also when an approved change runs later.
+        payload.update({"isUpgrade": True, "keepCurrentValues": True})
+        revision = int(current.get("revision") or 0) or None
+        _log(
+            stage,
+            f"Upgrading Helm release '{release}' (revision {revision or '?'}) keeping its values; "
+            f"setting {_image_value_label(config)} to {image}.",
+        )
+    else:
+        payload.update({"isInstall": True, "valuesFile": helm.get("valuesFile") or ""})
+        revision = None
+        _log(
+            stage,
+            f"Helm release '{release}' is not installed — installing the chart with "
+            + (f"{helm['valuesFile']}" if helm.get("valuesFile") else "its own values")
+            + f"; {_image_value_label(config)} set to {image}.",
+        )
+    _save(
+        stage,
+        {"created": not is_upgrade, "helmRevision": revision, "previousImage": None, "containerName": ""},
+    )
+    created = [] if is_upgrade else [{"kind": "HelmRelease", "name": release}]
+    result = helm_service.install_or_upgrade_release(
+        user,
+        payload,
+        helm_service.expected_confirmation(release, config["namespace"], is_upgrade),
+        change_note=note,
+    )
+    return result, created
+
+
+def _image_value_label(config: Dict[str, Any]) -> str:
+    settings = (config.get("helm") or {}).get("imageValues") or {}
+    if settings.get("mode") == "full":
+        return settings.get("path") or "the image value"
+    return f"{settings.get('repository')} / {settings.get('tag')}"
+
+
+def _helm_release(config: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
+    """The release as ``helm list`` shows it, None when it is not installed —
+    or why it could not be read."""
+    from .. import helm_service
+
+    release = config["releaseName"]
+    try:
+        helm_service.ensure_helm_installed()
+        access = helm_service._resolve_access(config["clusterId"])
+        output = helm_service.run_helm(
+            access, ["list", "-n", config["namespace"], "-a", "-o", "json", "-f", f"^{release}$"]
+        )
+        items = json.loads(output or "[]")
+    except helm_service.HelmCommandError as exc:
+        return None, f"Could not read Helm release '{release}': {exc}"
+    except ValueError:
+        return None, f"Helm returned an unreadable list for release '{release}'."
+    return next((item for item in items or [] if item.get("name") == release), None), ""
 
 
 # ---------------------------------------------------------------------------
@@ -544,6 +705,9 @@ def _advance_rollout(build: CiBuild, stage: CiBuildStage, config: Dict[str, Any]
     if not should_use_real_k8s(config["clusterId"]):
         _succeed(build, stage, config, "[mock] 1/1 ready")
         return
+    if deploy_config.is_helm(config):
+        _advance_helm_rollout(build, stage, config)
+        return
 
     from ..deployment_service import rollout_health
 
@@ -587,41 +751,126 @@ def _advance_rollout(build: CiBuild, stage: CiBuildStage, config: Dict[str, Any]
         _heartbeat(stage, f"Still rolling out: {detail}")
 
 
-def _pod_problem(stage: CiBuildStage, config: Dict[str, Any]) -> str:
-    """A failure on a pod running the NEW image that will not fix itself."""
+def _advance_helm_rollout(build: CiBuild, stage: CiBuildStage, config: Dict[str, Any]) -> None:
+    """Every Deployment of the release must finish rolling out."""
+    state = _state(stage)
+    try:
+        documents = _release_deployments(config)
+    except (K8sCommandError, ValueError) as exc:
+        documents = None
+        detail = f"could not read the release's deployments — retrying ({exc})"
+    if documents is not None:
+        if not documents:
+            _succeed(build, stage, config, "the release runs no Deployments")
+            return
+        waiting = [
+            f"{(doc.get('metadata') or {}).get('name')}: {why}"
+            for doc in documents
+            for why in [_deployment_waiting(doc)]
+            if why
+        ]
+        if not waiting:
+            _succeed(build, stage, config, f"{len(documents)} deployment{'s' if len(documents) != 1 else ''} ready")
+            return
+        detail = "; ".join(waiting[:3]) + (f" (+{len(waiting) - 3} more)" if len(waiting) > 3 else "")
+
+    problem = _pod_problem(stage, config, documents or [])
+    if problem:
+        _rollback_and_fail(build, stage, config, f"The new pods are failing: {problem}", status="failed")
+        return
+    if detail != state.get("lastDetail"):
+        _save(stage, {"lastDetail": detail, "heartbeatAt": time.time()})
+        _log(stage, detail)
+    else:
+        _heartbeat(stage, f"Still rolling out: {detail}")
+
+
+def _release_deployments(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The live Deployments Helm manages for the release (its ownership
+    annotations), read in one call."""
+    from ..deployment_service import _run_kubectl_for_cluster
+
+    raw = _run_kubectl_for_cluster(
+        config["clusterId"], ["get", "deployments", "-n", config["namespace"], "-o", "json"]
+    )
+    documents = []
+    for doc in json.loads(raw).get("items") or []:
+        annotations = (doc.get("metadata") or {}).get("annotations") or {}
+        if annotations.get("meta.helm.sh/release-name") != config["releaseName"]:
+            continue
+        if annotations.get("meta.helm.sh/release-namespace") not in (None, config["namespace"]):
+            continue
+        documents.append(doc)
+    return documents
+
+
+def _deployment_waiting(doc: Dict[str, Any]) -> str:
+    """What one Deployment is still waiting for, or "" when it has rolled out —
+    the condition deployment_service.rollout_health callers apply."""
+    status = doc.get("status") or {}
+    if int(status.get("observedGeneration") or 0) < int((doc.get("metadata") or {}).get("generation") or 0):
+        return "waiting for the controller to pick up the change"
+    desired = int((doc.get("spec") or {}).get("replicas") or 0)
+    updated = int(status.get("updatedReplicas") or 0)
+    total = int(status.get("replicas") or 0)
+    available = int(status.get("availableReplicas") or 0)
+    if desired == 0 or (updated >= desired and total <= updated and available >= updated):
+        return ""
+    if updated < desired:
+        return f"{updated}/{desired} pods updated"
+    if total > updated:
+        return f"waiting for {total - updated} old pod(s) to stop"
+    return f"{available}/{updated} new pods available"
+
+
+def _pod_problem(
+    stage: CiBuildStage, config: Dict[str, Any], deployments: Optional[List[Dict[str, Any]]] = None
+) -> str:
+    """A failure on a pod running the NEW image that will not fix itself.
+
+    ``deployments``: the live Deployments to look under (a Helm release's);
+    otherwise the stage's one deployment is read.
+    """
     from ..deployment_service import _run_kubectl_for_cluster
 
     state = _state(stage)
     image = state.get("image") or ""
     container_name = state.get("containerName") or ""
     try:
-        raw = _run_kubectl_for_cluster(
-            config["clusterId"],
-            ["get", "deployment", config["deploymentName"], "-n", config["namespace"], "-o", "json"],
-        )
-        selector = ((json.loads(raw).get("spec") or {}).get("selector") or {}).get("matchLabels") or {}
-        if not selector:
-            return ""
-        label = ",".join(f"{key}={value}" for key, value in sorted(selector.items()))
-        raw = _run_kubectl_for_cluster(
-            config["clusterId"], ["get", "pods", "-n", config["namespace"], "-l", label, "-o", "json"]
-        )
-        pods = json.loads(raw).get("items") or []
+        if deployments is None:
+            raw = _run_kubectl_for_cluster(
+                config["clusterId"],
+                ["get", "deployment", config["deploymentName"], "-n", config["namespace"], "-o", "json"],
+            )
+            deployments = [json.loads(raw)]
+        pods: List[Dict[str, Any]] = []
+        for doc in deployments:
+            selector = ((doc.get("spec") or {}).get("selector") or {}).get("matchLabels") or {}
+            if not selector:
+                continue
+            label = ",".join(f"{key}={value}" for key, value in sorted(selector.items()))
+            raw = _run_kubectl_for_cluster(
+                config["clusterId"], ["get", "pods", "-n", config["namespace"], "-l", label, "-o", "json"]
+            )
+            pods.extend(json.loads(raw).get("items") or [])
     except (K8sCommandError, ValueError):
         return ""
 
     pull_error = ""
     for pod in pods:
         name = (pod.get("metadata") or {}).get("name") or "pod"
-        spec_images = {
-            c.get("name"): c.get("image") for c in ((pod.get("spec") or {}).get("containers") or [])
+        # Only containers on the new image: an old pod that was already
+        # unhealthy says nothing about this rollout. A Helm target names no
+        # container, so every container given the image counts.
+        watched = {
+            c.get("name")
+            for c in ((pod.get("spec") or {}).get("containers") or [])
+            if c.get("image") == image and (not container_name or c.get("name") == container_name)
         }
-        # Only pods on the new image: an old pod that was already unhealthy
-        # says nothing about this rollout.
-        if spec_images.get(container_name) != image:
+        if not watched:
             continue
         for status in (pod.get("status") or {}).get("containerStatuses") or []:
-            if status.get("name") != container_name:
+            if status.get("name") not in watched:
                 continue
             waiting = (status.get("state") or {}).get("waiting") or {}
             reason = waiting.get("reason") or ""
@@ -660,10 +909,11 @@ def _succeed(build: CiBuild, stage: CiBuildStage, config: Dict[str, Any], detail
 
     promotion_service.record_rollout(
         config["clusterId"], config["namespace"], [image],
-        kind="Deployment", name=config["deploymentName"], source="ci_deploy",
+        kind="HelmRelease" if deploy_config.is_helm(config) else "Deployment",
+        name=_workload(config), source="ci_deploy",
         actor=getattr(user, "username", None),
     )
-    _finish(stage, "success", f"{image} is running on {config['deploymentName']} ({detail}).", outcome="deployed")
+    _finish(stage, "success", f"{image} is running on {_workload(config)} ({detail}).", outcome="deployed")
 
 
 def _on_timeout(build: CiBuild, stage: CiBuildStage, config: Dict[str, Any], timeout: int) -> None:
@@ -695,6 +945,7 @@ def _rollback_and_fail(
 ) -> None:
     """Put back what was running before, then fail the stage with both facts."""
     from ..deployment_service import _run_kubectl_for_cluster
+    from ..helm_service import HelmCommandError
 
     state = _state(stage)
     real = should_use_real_k8s(config["clusterId"])
@@ -702,7 +953,9 @@ def _rollback_and_fail(
     _log(stage, reason)
 
     try:
-        if state.get("created"):
+        if deploy_config.is_helm(config):
+            note = _rollback_helm(config, state)
+        elif state.get("created"):
             removed = []
             for item in state.get("createdResources") or []:
                 if real:
@@ -730,7 +983,7 @@ def _rollback_and_fail(
         else:
             note = "There was no previous image to go back to."
         outcome = "rolled_back"
-    except K8sCommandError as exc:
+    except (K8sCommandError, HelmCommandError) as exc:
         note = f"The automatic rollback FAILED: {exc}. The deployment needs attention now."
         outcome = "rollback_failed"
 
@@ -741,6 +994,26 @@ def _rollback_and_fail(
         build, stage, user, config, state.get("image") or "", reason=reason, result=note,
     )
     _finish(stage, status, f"{reason} {note}", outcome=outcome)
+
+
+def _rollback_helm(config: Dict[str, Any], state: Dict[str, Any]) -> str:
+    """Put the release back: its previous revision, or uninstall it when this
+    stage installed it. Done with the stage's authority, like ``set image``
+    for a deployment — a failed rollout is not left waiting for an approval."""
+    from .. import helm_service
+
+    release = config["releaseName"]
+    access = helm_service._resolve_access(config["clusterId"])
+    if state.get("created"):
+        helm_service.run_helm(access, ["uninstall", release, "--namespace", config["namespace"]])
+        return f"Uninstalled the release {release} this stage installed."
+    revision = state.get("helmRevision")
+    if not revision:
+        return "There was no previous revision to go back to."
+    helm_service.run_helm(access, ["rollback", release, str(revision), "--namespace", config["namespace"]])
+    helm_service.invalidate_helm_release_cache(config["clusterId"])
+    return f"Rolled {release} back to revision {revision}."
+
 
 
 # ---------------------------------------------------------------------------
@@ -772,6 +1045,13 @@ def _authorizing_user(config: Dict[str, Any]):
         return None, (
             f"The target was authorized by {who}, who can no longer deploy to "
             f"{config['clusterId']}/{config['namespace']}. Someone who can must save the stage again."
+        )
+    if deploy_config.is_helm(config) and not (
+        user_has_permission(user, "helm:install") and user_has_permission(user, "helm:upgrade")
+    ):
+        return None, (
+            f"The target was authorized by {who}, who can no longer install or upgrade Helm "
+            "releases. Someone who can must save the stage again."
         )
     return user, ""
 
@@ -1004,7 +1284,22 @@ def _target(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "deploymentName": config.get("deploymentName") or "",
         "containerName": config.get("containerName") or "",
         "authorizedBy": (config.get("authorizedBy") or {}).get("username") or "",
+        **(
+            {
+                "releaseName": config.get("releaseName") or "",
+                "chartName": (config.get("helm") or {}).get("chartName") or "",
+            }
+            if deploy_config.is_helm(config)
+            else {}
+        ),
     }
+
+
+def _workload(config: Dict[str, Any]) -> str:
+    """What the stage deploys to, by name: the deployment, or the Helm release."""
+    if deploy_config.is_helm(config):
+        return config.get("releaseName") or ""
+    return config.get("deploymentName") or ""
 
 
 def _log(stage: CiBuildStage, message: str) -> None:
@@ -1034,7 +1329,8 @@ def _change_note(build: CiBuild, stage: CiBuildStage, config: Dict[str, Any], im
     service = build.service.slug if build.service else "service"
     return (
         f"CI build #{build.number} of {service} (stage '{stage.name}'): deploy {image} "
-        f"to {config['deploymentName']} in {config['namespace']}"
+        f"to {'Helm release ' if deploy_config.is_helm(config) else ''}{_workload(config)} "
+        f"in {config['namespace']}"
     )
 
 
@@ -1051,6 +1347,7 @@ def _audit(action: str, build: CiBuild, stage: CiBuildStage, user, config, image
             "cluster": config.get("clusterId"),
             "namespace": config.get("namespace"),
             "deployment": config.get("deploymentName"),
+            **({"helmRelease": config.get("releaseName")} if deploy_config.is_helm(config) else {}),
             "image": image,
             **extra,
         },

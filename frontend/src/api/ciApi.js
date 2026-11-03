@@ -116,8 +116,11 @@ export const listCiPipelineTemplates = () => request("/api/ci/pipeline-templates
 
 // What a Deploy stage can point at: a namespace's deployments and containers,
 // the cluster's approval rule, and whether the caller could authorize it.
-export const getCiDeployTarget = (clusterId, namespace = "") =>
-  request("/api/ci/deploy-targets", { query: { clusterId, namespace: namespace || undefined } });
+// ``helm``: also the namespace's Helm releases, for a stage that deploys a chart.
+export const getCiDeployTarget = (clusterId, namespace = "", { helm = false } = {}) =>
+  request("/api/ci/deploy-targets", {
+    query: { clusterId, namespace: namespace || undefined, helm: helm ? "1" : undefined },
+  });
 
 // One file out of the service's repository, read without opening Bitbucket. A
 // missing file arrives as a 400 with a readable message.

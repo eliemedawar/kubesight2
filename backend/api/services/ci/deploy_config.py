@@ -9,6 +9,11 @@ and says what to do when the deployment is not there yet. When it is there,
 only that container's image changes. When it is not, the stage's own manifest
 creates it: a Deployment (and optionally its Service), in the target namespace,
 and nothing else — a build is not the place to create Secrets or RBAC.
+
+Or it names a Helm release and an Inventory chart: the first build installs
+the chart (nothing has to be filled in), later builds upgrade the release
+keeping the values it runs with. Either way the build's image goes into the
+chart value(s) the stage names.
 """
 
 from __future__ import annotations
@@ -37,8 +42,16 @@ SERVICE_TYPES = ("ClusterIP", "NodePort")
 # saved on the stage. ``linked``: the deployment linked to the service being
 # built (services/ci/deployment_links.py), resolved when the build starts — how
 # one shared pipeline deploys each service that uses it to that service's own
-# deployment.
-TARGET_MODES = ("fixed", "linked")
+# deployment. ``helm``: a release of an Inventory chart (see _normalize_helm).
+TARGET_MODES = ("fixed", "linked", "helm")
+# Where a Helm target puts the build's image: ``split`` — a repository value and
+# a tag value (image.repository / image.tag, the common chart layout);
+# ``full`` — one value holding the whole reference.
+HELM_IMAGE_MODES = ("split", "full")
+_VALUE_PATH_RE = re.compile(r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+){0,15}$")
+# helm's own rule: a DNS label, and short enough for the names charts derive.
+_RELEASE_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+MAX_RELEASE_CHARS = 53
 # Where a missing deployment comes from: the stage's own form/manifest, or an
 # inventory template.
 CREATE_SOURCES = ("form", "template")
@@ -307,10 +320,12 @@ def normalize(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str
     mode = _clean(value.get("target"), 16).lower() or "fixed"
     if mode not in TARGET_MODES:
         raise DeployConfigError(
-            f"Stage '{stage_name}': '{mode}' is not a deploy target. Use fixed or linked."
+            f"Stage '{stage_name}': '{mode}' is not a deploy target. Use fixed, linked or helm."
         )
     if mode == "linked":
         return _normalize_linked(value, stage_name)
+    if mode == "helm":
+        return _normalize_helm(value, stage_name)
 
     cluster_id = _clean(value.get("clusterId"), 128)
     if not cluster_id:
@@ -416,8 +431,129 @@ def _normalize_linked(value: Dict[str, Any], stage_name: str) -> Dict[str, Any]:
     }
 
 
+def _value_path(value: Any, what: str, stage_name: str) -> str:
+    path = _clean(value, 200)
+    if not path:
+        raise DeployConfigError(f"Stage '{stage_name}': name the chart value for the {what}.")
+    if not _VALUE_PATH_RE.match(path):
+        raise DeployConfigError(
+            f"Stage '{stage_name}': '{path}' is not a chart value path (for example image.repository)."
+        )
+    return path
+
+
+def _normalize_helm(value: Dict[str, Any], stage_name: str) -> Dict[str, Any]:
+    """A stage that installs or upgrades a release of an Inventory Helm chart.
+
+    The release is installed with the chart's values the first time — nothing
+    has to be filled in — and upgraded keeping the values it runs with after
+    that. Each build changes only the image value(s) named here.
+    """
+    cluster_id = _clean(value.get("clusterId"), 128)
+    if not cluster_id:
+        raise DeployConfigError(f"Stage '{stage_name}' needs a cluster to deploy to.")
+    try:
+        namespace = validate_namespace(_clean(value.get("namespace"), 63))
+    except K8sNameError as exc:
+        raise DeployConfigError(f"Stage '{stage_name}': {exc}")
+    release = _clean(value.get("releaseName"), 64).lower()
+    if not release:
+        raise DeployConfigError(f"Stage '{stage_name}': name the Helm release it deploys.")
+    if len(release) > MAX_RELEASE_CHARS or not _RELEASE_RE.match(release):
+        raise DeployConfigError(
+            f"Stage '{stage_name}': '{release}' is not a release name (lowercase letters, digits "
+            f"and '-', at most {MAX_RELEASE_CHARS} characters)."
+        )
+    helm_in = value.get("helm") if isinstance(value.get("helm"), dict) else {}
+    chart_id = _clean(helm_in.get("chartTemplateId"), 120)
+    if not chart_id:
+        raise DeployConfigError(f"Stage '{stage_name}': pick the Inventory chart to deploy.")
+    image_in = helm_in.get("imageValues") if isinstance(helm_in.get("imageValues"), dict) else {}
+    image_mode = _clean(image_in.get("mode"), 16).lower() or "split"
+    if image_mode not in HELM_IMAGE_MODES:
+        raise DeployConfigError(
+            f"Stage '{stage_name}': '{image_mode}' is not a way to set the image. Use split or full."
+        )
+    if image_mode == "split":
+        image_values = {
+            "mode": "split",
+            "repository": _value_path(image_in.get("repository"), "image repository", stage_name),
+            "tag": _value_path(image_in.get("tag"), "image tag", stage_name),
+        }
+        if image_values["repository"] == image_values["tag"]:
+            raise DeployConfigError(
+                f"Stage '{stage_name}': the repository and the tag must be different chart values."
+            )
+    else:
+        image_values = {"mode": "full", "path": _value_path(image_in.get("path"), "image", stage_name)}
+    return {
+        "target": "helm",
+        "clusterId": cluster_id,
+        "namespace": namespace,
+        "releaseName": release,
+        "deploymentName": "",
+        "containerName": "",
+        "image": _image(value, stage_name),
+        "linkToService": False,
+        "createIfMissing": False,
+        "create": _create_form({}, stage_name),
+        "manifest": "",
+        "helm": {
+            "chartTemplateId": chart_id,
+            # Shown in the editor; the pipeline validator writes the real name.
+            "chartName": _clean(helm_in.get("chartName"), 160),
+            # Empty: whichever version is the chart's current one when the build runs.
+            "chartVersion": _clean(helm_in.get("chartVersion"), 64),
+            # A values-*.yaml stored on the chart, for the first install only.
+            "valuesFile": _clean(helm_in.get("valuesFile"), 500),
+            "imageValues": image_values,
+        },
+    }
+
+
 def is_linked(config: Optional[Dict[str, Any]]) -> bool:
     return isinstance(config, dict) and config.get("target") == "linked"
+
+
+def is_helm(config: Optional[Dict[str, Any]]) -> bool:
+    return isinstance(config, dict) and config.get("target") == "helm"
+
+
+def split_image(image: str) -> Tuple[str, str]:
+    """(repository, tag) of an image reference; one without a tag is
+    ``latest``. Raises DeployConfigError for one pinned by digest, which a
+    repository + tag pair cannot express."""
+    if "@" in image:
+        raise DeployConfigError(
+            f"{image} is pinned by digest, which a repository and a tag value cannot carry. "
+            "Set the image as one full value on the stage instead."
+        )
+    name, _, last = image.rpartition("/")
+    if ":" in last:
+        repository, tag = last.rsplit(":", 1)
+        return (f"{name}/{repository}" if name else repository), tag
+    return image, "latest"
+
+
+def helm_image_values(config: Dict[str, Any], image: str) -> Dict[str, Any]:
+    """The values that put ``image`` into a Helm target's chart."""
+    settings = ((config.get("helm") or {}).get("imageValues")) or {}
+    values: Dict[str, Any] = {}
+
+    def put(path: str, value: str) -> None:
+        cursor = values
+        parts = path.split(".")
+        for part in parts[:-1]:
+            cursor = cursor.setdefault(part, {})
+        cursor[parts[-1]] = value
+
+    if settings.get("mode") == "full":
+        put(settings["path"], image)
+    else:
+        repository, tag = split_image(image)
+        put(settings["repository"], repository)
+        put(settings["tag"], tag)
+    return values
 
 
 def signature(config: Optional[Dict[str, Any]]) -> str:
@@ -452,6 +588,14 @@ def signature(config: Optional[Dict[str, Any]]) -> str:
         # mode existed keeps the signature its authority stamp was taken on.
         material["target"] = "linked"
         material["environment"] = config.get("environment") or ""
+    if is_helm(config):
+        helm = config.get("helm") or {}
+        material["target"] = "helm"
+        material["releaseName"] = config.get("releaseName") or ""
+        material["helm"] = {
+            key: helm.get(key) or ""
+            for key in ("chartTemplateId", "chartVersion", "valuesFile", "imageValues")
+        }
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode("utf-8")).hexdigest()
 
 

@@ -885,6 +885,15 @@ def _stamp_deploy_authority(
                 "target — ask someone who can deploy to that namespace to set it.",
                 code="deploy_not_authorized",
             )
+        if deploy_config.is_helm(config) and not (
+            user_has_permission(actor, "helm:install") and user_has_permission(actor, "helm:upgrade")
+        ):
+            # The stage installs the release the first time and upgrades it after.
+            raise PipelineError(
+                f"Stage '{stage['name']}' installs and upgrades a Helm release, and you cannot "
+                "install or upgrade Helm releases. Ask someone who can to set this target.",
+                code="deploy_not_authorized",
+            )
         config["authorizedBy"] = {
             "userId": actor.id,
             "username": actor.username,
@@ -900,6 +909,7 @@ def _stamp_deploy_authority(
                 "cluster": config["clusterId"],
                 "namespace": config["namespace"],
                 "deployment": config["deploymentName"],
+                **({"helmRelease": config["releaseName"]} if deploy_config.is_helm(config) else {}),
                 "createIfMissing": config["createIfMissing"],
             },
             commit=False,
@@ -916,6 +926,9 @@ def _check_deploy_templates(normalized: List[Dict[str, Any]]) -> None:
         config = stage.get("deploy")
         if stage["stage_type"] != "deploy" or not config or stage.get("enabled") is False:
             continue
+        if deploy_config.is_helm(config):
+            _check_deploy_chart(config, stage["name"])
+            continue
         if deploy_config.is_linked(config) or not config.get("createIfMissing"):
             continue
         if not deploy_templates.uses_template(config):
@@ -927,6 +940,21 @@ def _check_deploy_templates(normalized: List[Dict[str, Any]]) -> None:
         config["create"]["templateName"] = deploy_templates.template_label(
             config["create"]["templateId"]
         )
+
+
+def _check_deploy_chart(config: Dict[str, Any], stage_name: str) -> None:
+    """A Helm target must name an Inventory chart (and version / values file)
+    that exists; its stored name is written over whatever the editor sent."""
+    from .. import helm_chart_template_service as charts
+
+    helm = config["helm"]
+    try:
+        resolved = charts.resolve_chart(
+            helm["chartTemplateId"], helm.get("chartVersion") or "", helm.get("valuesFile") or ""
+        )
+    except charts.ChartTemplateError as exc:
+        raise PipelineError(f"Stage '{stage_name}': {exc}", code="invalid_deploy")
+    helm["chartName"] = resolved["name"]
 
 
 def _stamp_linked_deploy(pipeline: CiPipeline, stage: Dict[str, Any], config: Dict[str, Any], actor) -> None:

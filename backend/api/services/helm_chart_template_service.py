@@ -106,7 +106,6 @@ def _definition_counts(definition: Dict[str, Any]) -> Dict[str, Any]:
         "templateCount": len(chart.get("templates") or []),
         "valuesFileCount": len(chart.get("valuesFiles") or []),
         "variableCount": len(variables),
-        "requiredVariableCount": sum(1 for item in variables if item.get("required")),
         "resourceCount": int(definition.get("resourceCount") or 0),
     }
 
@@ -224,7 +223,12 @@ def _detail(row: HelmChartTemplate, version: str = "") -> Dict[str, Any]:
         "chart": chart,
         **_definition_counts(definition),
         "warnings": definition.get("warnings") or [],
-        "variables": definition.get("variables") or [],
+        # No chart value is required — charts stored before that rule still
+        # carry the flag, so it is dropped on the way out.
+        "variables": [
+            {key: value for key, value in item.items() if key != "required"}
+            for item in definition.get("variables") or []
+        ],
         "defaultValues": definition.get("values") or {},
     }
 
@@ -386,8 +390,8 @@ def _capped_variables(variables: Sequence[Dict[str, Any]]) -> List[Dict[str, Any
     """Trim optional values to the cap, never the sensitive ones.
 
     Every sensitive value is referenced by name from a rendered template
-    (``{{ required ... .Values.x }}``), so dropping one here would leave a chart
-    that can never be deployed.
+    (``{{ .Values.x }}``), so dropping one here would leave a template that
+    reads a value the chart no longer declares.
     """
     kept: List[Dict[str, Any]] = []
     optional = 0
@@ -809,7 +813,6 @@ class _VariableBuilder:
         label: str,
         default: Any,
         category: str,
-        required: bool = False,
         sensitive: bool = False,
         transform: str = "",
     ) -> None:
@@ -838,7 +841,6 @@ class _VariableBuilder:
                 "label": label,
                 "type": _value_type(default),
                 "default": safe_default,
-                "required": bool(required or sensitive),
                 "sensitive": bool(sensitive),
                 "category": category,
                 "_sentinel": sentinel,
@@ -852,9 +854,8 @@ class _VariableBuilder:
         """Expose one safe object field for every key carried by a large Secret.
 
         The object stored in values.yaml contains only the Secret's field/key
-        names and blank strings.  Each template leaf still has its own Helm
-        ``required`` check, so grouping the form input does not weaken deploy
-        validation or retain any live credential material.
+        names and blank strings, so grouping the form input never retains any
+        live credential material.
         """
         blank_sections: Dict[str, Dict[str, str]] = {}
         for section in ("data", "stringData"):
@@ -899,12 +900,11 @@ class _VariableBuilder:
                 "label": f"{identity} values",
                 "type": "object",
                 "default": deepcopy(safe_default),
-                "required": True,
                 "sensitive": True,
                 "category": "Secrets",
                 "description": (
-                    "Enter a YAML or JSON mapping with a non-empty value for every listed "
-                    "Secret key."
+                    "A YAML or JSON mapping with a value for each listed Secret key. "
+                    "Keys left empty are created empty."
                 ),
                 "_secret_replacements": replacements,
             }
@@ -1008,7 +1008,6 @@ def _known_variables(
                 label=env_name,
                 default=env.get("value") or "",
                 category="Environment",
-                required=sensitive,
                 sensitive=sensitive,
             )
             added.add(base_path + ("env", env_index, "value"))
@@ -1097,7 +1096,6 @@ def _known_variables(
                     label=f"{identity} {key}",
                     default="",
                     category="Secrets",
-                    required=True,
                     sensitive=True,
                     transform="b64enc" if field == "data" else "",
                 )
@@ -1125,10 +1123,8 @@ def _render_manifest_template(doc: Dict[str, Any], variables: Sequence[Dict[str,
                 indexes = " ".join(
                     json.dumps(str(key)) for key in replacement.get("keys") or []
                 )
-                value_ref = f'(index .Values.{item["path"]} {indexes})'
-                key_label = "/".join(str(key) for key in replacement.get("keys") or [])
-                label = f'{item["label"]} {key_label}'
-                expression = f'required "{label} is required" {value_ref}'
+                # Blank when not given: an empty key, never a failed install.
+                expression = f'default "" (index .Values.{item["path"]} {indexes})'
                 if replacement.get("transform") == "b64enc":
                     expression = f"{expression} | b64enc"
                 dumped = dumped.replace(sentinel, "{{ " + expression + " | quote }}")
@@ -1136,11 +1132,10 @@ def _render_manifest_template(doc: Dict[str, Any], variables: Sequence[Dict[str,
         sentinel = item.get("_sentinel")
         if not sentinel or sentinel not in dumped:
             continue
-        value_ref = f".Values.{item['path']}"
-        if item.get("required"):
-            expression = f'required "{item["label"]} is required" {value_ref}'
-        else:
-            expression = value_ref
+        expression = f".Values.{item['path']}"
+        if item.get("sensitive"):
+            # A password left empty installs as "", never as a failed render.
+            expression = f'default "" {expression}'
         if item.get("_transform") == "b64enc":
             expression = f"{expression} | b64enc"
         if item.get("type") == "string":
@@ -1224,12 +1219,12 @@ def _convert_manifest_files(
     if compact_secrets:
         warnings.append(
             f"This chart contains {secret_key_count} Secret keys. They were compacted into "
-            "one required YAML/JSON object per Secret so the chart remains deployable without "
+            "one YAML/JSON object per Secret so the chart remains deployable without "
             "storing any live Secret values."
         )
 
     # Secrets get first claim on the value budget. A live Secret value can only
-    # be stored safely by becoming a required field, so a chart that runs out of
+    # be stored safely by becoming a blank field, so a chart that runs out of
     # budget before reaching one has to abort (see _VariableBuilder.add) — while
     # every other resource simply stops being parameterised and keeps its
     # literal value. Sorting is stable, so nothing else changes order.
@@ -1269,7 +1264,6 @@ def _convert_manifest_files(
                     label=f"{kind}/{resource_name} {path_label}",
                     default=default,
                     category="Variant values",
-                    required=sensitive,
                     sensitive=sensitive,
                 )
 
@@ -1280,7 +1274,7 @@ def _convert_manifest_files(
     if builder.optional_count >= MAX_VARIABLES:
         warnings.append(
             f"This chart hit the {MAX_VARIABLES}-value limit for optional fields. Every secret "
-            "is still exposed as a required field; the values past the limit kept the literals "
+            "is still exposed as a field; the values past the limit kept the literals "
             "they had. Import fewer resources at a time for a fully configurable chart."
         )
     chart_yaml = {
@@ -1347,15 +1341,6 @@ def _schema_for_path(schema: Dict[str, Any], path: Sequence[str]) -> Dict[str, A
     return cursor if isinstance(cursor, dict) else {}
 
 
-def _path_required(schema: Dict[str, Any], path: Sequence[str]) -> bool:
-    cursor = schema if isinstance(schema, dict) else {}
-    for part in path:
-        if part in (cursor.get("required") or []):
-            return True
-        cursor = (cursor.get("properties") or {}).get(part) or {}
-    return False
-
-
 def _is_sensitive_value(schema: Dict[str, Any], path: Sequence[str]) -> bool:
     node = _schema_for_path(schema, path)
     return bool(
@@ -1374,7 +1359,7 @@ def _scrub_chart_values(
     warnings: List[str] = []
     flattened = list(_flatten_values(values))
     # Sensitive leaves are processed first so a very large values.yaml can
-    # never crowd credentials out of the safe, required-input surface.
+    # never crowd credentials out of the safe, blanked-input surface.
     flattened.sort(
         key=lambda item: not _is_sensitive_value(schema, item[0])
     )
@@ -1394,7 +1379,6 @@ def _scrub_chart_values(
                 continue
             optional_count += 1
         schema_node = _schema_for_path(schema, path)
-        required = sensitive or _path_required(schema, path)
         safe_default = "" if sensitive else default
         if sensitive:
             _set_nested(cleaned, path, "")
@@ -1408,7 +1392,6 @@ def _scrub_chart_values(
                 "description": schema_node.get("description") or "",
                 "type": value_type,
                 "default": safe_default,
-                "required": bool(required),
                 "sensitive": bool(sensitive),
                 "category": path[0].replace("_", " ").title(),
             }
@@ -1515,13 +1498,11 @@ def _scrub_static_secret_templates(
                         "description": "Literal Secret value removed during import.",
                         "type": "string",
                         "default": "",
-                        "required": True,
                         "sensitive": True,
                         "category": "Secrets",
                     }
                 )
-                value_ref = f'.Values.kubesightSecrets.{variable_key}'
-                expression = f'required "{key} is required" {value_ref}'
+                expression = f'default "" .Values.kubesightSecrets.{variable_key}'
                 if section == "data":
                     expression += " | b64enc"
                 expression += " | quote"
@@ -1542,7 +1523,7 @@ def _scrub_static_secret_templates(
                         lines[continuation] = ""
                 changed = True
                 warnings.append(
-                    f"Literal Secret value '{key}' in {path} was removed and made required."
+                    f"Literal Secret value '{key}' in {path} was removed; enter it when deploying."
                 )
             documents[doc_index] = "\n".join(lines) + (
                 "\n" if document.endswith("\n") else ""
@@ -2262,9 +2243,35 @@ def import_archive_chart(
         return None, f"Unable to read the archive: {exc}", 400
 
 
+# The ``required`` check KubeSight itself wrote into the templates of charts it
+# imported before chart values became optional: always on a value it blanked
+# (variables.* or kubesightSecrets.*). A chart's own ``required`` calls name
+# other values and are left alone — they are its author's rule.
+_KUBESIGHT_REQUIRED_RE = re.compile(
+    r'required "(?:[^"\\]|\\.)*" (?=\(index \.Values\.variables\.|\.Values\.variables\.|\.Values\.kubesightSecrets\.)'
+)
+
+
+def _optional_templates(files: Dict[str, bytes]) -> Dict[str, bytes]:
+    """Stored templates with KubeSight's own ``required`` checks turned into
+    ``default ""``, so an older chart installs with a value left empty too."""
+    result = dict(files)
+    for path, content in files.items():
+        if not path.startswith("templates/") or b"required" not in content:
+            continue
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        rewritten = _KUBESIGHT_REQUIRED_RE.sub('default "" ', text)
+        if rewritten != text:
+            result[path] = rewritten.encode("utf-8")
+    return result
+
+
 def chart_archive_base64(slug: str, version: str = "") -> str:
     row = _get_row(slug)
-    files = _decode_files(_definition_for(row, version))
+    files = _optional_templates(_decode_files(_definition_for(row, version)))
     root = _slugify(row.name)
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w:gz") as archive:
@@ -2341,17 +2348,6 @@ def starting_values(slug: str, version: str = "", values_file: str = "") -> Dict
     return values
 
 
-def required_inputs(slug: str, version: str = "") -> List[Dict[str, Any]]:
-    """The chart's required inputs (mostly the passwords import blanked)."""
-    definition = _definition_for(_get_row(slug), version)
-    return [
-        {"path": str(item.get("path") or ""), "label": item.get("label") or item.get("path"),
-         "sensitive": bool(item.get("sensitive"))}
-        for item in definition.get("variables") or []
-        if item.get("required") and item.get("path")
-    ]
-
-
 def parse_values_overlay(overlay_yaml: str) -> Dict[str, Any]:
     """A person's own values.yaml: a mapping, or empty."""
     if not str(overlay_yaml or "").strip():
@@ -2381,9 +2377,8 @@ def build_values_yaml(
     ``values-*.yaml``, then — for an upgrade that keeps them — the release's
     current values (``current_values``, passwords included, read on the
     server), then the person's own values.yaml (``overlay_yaml``), then form
-    answers. Required inputs (the passwords import blanked) are checked against
-    the result, so a values.yaml or the running release that fills them is
-    enough."""
+    answers. No value is required: one left empty (a password import blanked,
+    say) is installed empty."""
     row = _get_row(slug)
     definition = _definition_for(row, version)
     values = deepcopy(definition.get("values") or {})
@@ -2415,18 +2410,9 @@ def build_values_yaml(
             # Base defaults are already in ``values`` and a selected environment
             # file has already been merged over them. Reapplying each variable's
             # base default here would erase the selected environment.
-            raw = _get_nested(values, path.split("."), variable.get("default"))
-            if variable.get("required") and (raw is None or str(raw).strip() == ""):
-                raise ChartTemplateError(f"{variable.get('label') or path} is required.")
             continue
-        if variable.get("required") and (raw is None or str(raw).strip() == ""):
-            raise ChartTemplateError(f"{variable.get('label') or path} is required.")
-        if (
-            not variable.get("required")
-            and (raw is None or str(raw).strip() == "")
-            and variable.get("default") in (None, "")
-        ):
-            # Preserve an intentionally empty/null optional chart default. This
+        if (raw is None or str(raw).strip() == "") and variable.get("default") in (None, ""):
+            # Preserve an intentionally empty/null chart default. This
             # matters for schema-typed optional numbers and objects, where
             # coercing an untouched empty form field would otherwise fail.
             continue
@@ -2500,26 +2486,20 @@ def inspect_values_import(
     values_yaml: str,
     version: str = "",
     values_file: str = "",
-    current_values: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """What an imported values.yaml does to a chart's deploy form.
 
     The deploy applies the whole file over the chart defaults and the chosen
     ``values-*.yaml``; this returns the form fields it fills (secrets
     included, with the merged value the field must show), the values it sets
-    that have no field, keys the chart never declares (likely typos), and the
-    required values still empty. Nothing is stored.
-
-    For an upgrade that keeps the release's values, ``current_values`` sit
-    under the file: they count for the required check but are never echoed
-    back in ``fields``.
+    that have no field, and keys the chart never declares (likely typos).
+    Nothing is stored.
     """
     resolved = resolve_chart(slug, version, values_file)
     definition = _definition_for(_get_row(slug), resolved["version"])
     overlay = _imported_values(values_yaml)
     base = starting_values(slug, resolved["version"], resolved["valuesFile"])
     merged = _merge_values(base, overlay)
-    with_current = _merge_values(_merge_values(base, current_values or {}), overlay)
     leaves = [".".join(path) for path, _ in _flatten_values(overlay) if path]
     variables = [item for item in definition.get("variables") or [] if item.get("path")]
 
@@ -2545,12 +2525,6 @@ def inspect_values_import(
         for leaf in leaves
         if leaf not in unknown and not any(_covers(path, leaf) for path in field_paths)
     ]
-    missing_required = [
-        {"path": str(item["path"]), "label": item.get("label") or item["path"]}
-        for item in variables
-        if item.get("required")
-        and str(_get_nested(with_current, str(item["path"]).split("."), "") or "").strip() == ""
-    ]
     secrets = _import_secret_paths(definition, leaves)
     cap = MAX_IMPORT_REPORT_PATHS
     return {
@@ -2564,7 +2538,6 @@ def inspect_values_import(
         "withoutField": without_field[:cap],
         "unknownCount": len(unknown),
         "unknown": unknown[:cap],
-        "missingRequired": missing_required,
     }
 
 
@@ -2593,7 +2566,6 @@ def upgrade_starting_point(
     shown = merged if show_values else base
     fields: Dict[str, Any] = {}
     kept_secrets: List[str] = []
-    missing_required: List[Dict[str, Any]] = []
     for variable in definition.get("variables") or []:
         path = str(variable.get("path") or "")
         if not path:
@@ -2607,15 +2579,12 @@ def upgrade_starting_point(
                 kept_secrets.append(path)
         else:
             fields[path] = _get_nested(shown, parts, variable.get("default"))
-        if variable.get("required") and empty:
-            missing_required.append({"path": path, "label": variable.get("label") or path})
     return {
         "chartTemplateId": slug,
         "version": resolved["version"],
         "valuesFile": resolved["valuesFile"],
         "fields": fields,
         "keptSecrets": kept_secrets,
-        "missingRequired": missing_required,
         "valuesShown": bool(show_values),
     }
 

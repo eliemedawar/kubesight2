@@ -7585,11 +7585,6 @@ kbd {
   font-size: var(--font-size-xs);
 }
 
-.helm-chart-card__meta .helm-chart-card__required {
-  color: var(--warn);
-  background: var(--warn-soft);
-}
-
 .helm-chart-card__meta .helm-chart-card__ready {
   color: var(--ok);
   background: var(--ok-soft);
@@ -8013,10 +8008,6 @@ kbd {
 
 .helm-variable-section h4 {
   margin: 0;
-}
-
-.helm-variable-required strong {
-  color: var(--danger);
 }
 
 .helm-optional-values {

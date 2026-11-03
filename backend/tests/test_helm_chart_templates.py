@@ -115,8 +115,10 @@ def test_static_secret_literals_in_existing_charts_are_replaced():
     warnings = _scrub_static_secret_templates(files, values, variables)
     rendered = files["templates/secret.yaml"].decode("utf-8")
     assert "literal-must-disappear" not in rendered
-    assert "{{ required" in rendered
-    assert variables[0]["required"] is True
+    # Optional: left empty it renders as "", never as a failed install.
+    assert '{{ default "" .Values.kubesightSecrets.' in rendered
+    assert "required" not in rendered
+    assert "required" not in variables[0]
     assert variables[0]["sensitive"] is True
     assert warnings
 
@@ -143,7 +145,7 @@ def test_yaml_import_creates_reusable_chart_and_scrubs_secrets(client, admin_tok
     assert imported["sourceType"] == "yaml"
     assert imported["resourceCount"] == 3
     assert imported["variableCount"] >= 8
-    assert imported["requiredVariableCount"] >= 2
+    assert "requiredVariableCount" not in imported
     assert imported["warnings"]
 
     detail_response = client.get(
@@ -159,7 +161,7 @@ def test_yaml_import_creates_reusable_chart_and_scrubs_secrets(client, admin_tok
 
     sensitive = [item for item in detail["variables"] if item["sensitive"]]
     assert sensitive
-    assert all(item["required"] and item["default"] == "" for item in sensitive)
+    assert all(not item.get("required") and item["default"] == "" for item in sensitive)
 
     answers = {item["path"]: "replacement-secret" for item in sensitive}
     with app.app_context():
@@ -175,7 +177,8 @@ def test_yaml_import_creates_reusable_chart_and_scrubs_secrets(client, admin_tok
             if member.isfile()
         )
     assert "{{ .Values.variables." in contents
-    assert "required \"" in contents
+    assert "required \"" not in contents
+    assert 'default "" .Values.variables.' in contents
     assert "database-password-must-not-persist" not in contents
 
 
@@ -343,7 +346,7 @@ def test_sensitive_values_are_never_dropped_by_the_optional_value_cap(client, ad
     ).get_json()["data"]
     sensitive = [item for item in detail["variables"] if item["sensitive"]]
     assert [item["label"] for item in sensitive] == ["DB_PASSWORD"]
-    assert sensitive[0]["required"] and sensitive[0]["default"] == ""
+    assert not sensitive[0].get("required") and sensitive[0]["default"] == ""
 
     with app.app_context():
         archive = base64.b64decode(chart_archive_base64(imported["id"]))
@@ -355,8 +358,8 @@ def test_sensitive_values_are_never_dropped_by_the_optional_value_cap(client, ad
         )
     assert "late-secret-must-not-persist" not in chart
     # The credential is templated, and its variable survived into the stored
-    # definition — a required reference with no variable is an undeployable chart.
-    assert f"required \"DB_PASSWORD is required\" .Values.{sensitive[0]['path']}" in chart
+    # definition — a reference with no variable reads a value the chart lacks.
+    assert f'default "" .Values.{sensitive[0]["path"]}' in chart
 
 
 def test_template_catalog_permissions(client, admin_token, viewer_token):
@@ -421,7 +424,7 @@ def test_git_existing_chart_is_imported_and_token_is_not_persisted(
         headers=auth_headers(admin_token),
     ).get_json()["data"]
     password = next(item for item in detail["variables"] if item["path"] == "credentials.password")
-    assert password["required"] is True
+    assert not password.get("required")
     assert password["default"] == ""
     assert "should-be-removed" not in json.dumps(detail)
 
@@ -753,7 +756,7 @@ def test_credential_references_are_not_treated_as_secrets(client, admin_token, a
     for path in ("imagePullSecrets", "tmoptions.nonSecret", "secrets.existingSecretName"):
         assert path in variables, path
         assert variables[path]["sensitive"] is False, path
-        assert variables[path]["required"] is False, path
+        assert not variables[path].get("required"), path
     assert variables["imagePullSecrets"]["default"] == [{"name": "registry-credentials"}]
     assert variables["imagePullSecrets"]["type"] == "array"
     assert variables["secrets.existingSecretName"]["default"] == "txm-secrets"
@@ -761,7 +764,7 @@ def test_credential_references_are_not_treated_as_secrets(client, admin_token, a
 
     for path in ("database.password", "extra.clientSecret"):
         assert variables[path]["sensitive"] is True, path
-        assert variables[path]["required"] is True, path
+        assert not variables[path].get("required"), path
         assert variables[path]["default"] == "", path
     assert "must-not-persist" not in json.dumps(data)
 
@@ -879,7 +882,7 @@ def test_zip_archive_with_chart_is_imported_and_secrets_are_scrubbed(client, adm
     password = next(
         item for item in detail["variables"] if item["path"] == "credentials.password"
     )
-    assert password["required"] is True
+    assert not password.get("required")
     assert "should-be-removed" not in json.dumps(detail)
 
 
@@ -1319,7 +1322,7 @@ def test_saved_chart_uses_existing_helm_preview_pipeline(client, admin_token):
     values = {
         item["path"]: "safe-replacement"
         for item in detail["variables"]
-        if item["required"]
+        if item["sensitive"]
     }
     rendered = (
         "apiVersion: v1\nkind: ConfigMap\nmetadata:\n"

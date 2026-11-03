@@ -10,7 +10,9 @@ export default function DeployStageSummary({ stage }) {
   if (!state) return null;
   const outcome = deployOutcome(state);
   const target = state.target || {};
-  const where = [target.clusterId, target.namespace, target.deploymentName].filter(Boolean).join(" / ");
+  const where = [target.clusterId, target.namespace, target.releaseName || target.deploymentName]
+    .filter(Boolean)
+    .join(" / ");
   return (
     <section className={`sg-ci-deploy is-${outcome?.tone || "info"}`} aria-label="Deploy result">
       <header>
@@ -31,7 +33,21 @@ export default function DeployStageSummary({ stage }) {
               ) : (
                 <code>{state.image}</code>
               )}
-              {state.created ? <span className="chip">created</span> : null}
+              {state.created && !target.releaseName ? <span className="chip">created</span> : null}
+            </dd>
+          </>
+        )}
+        {target.releaseName && (
+          <>
+            <dt>Helm release</dt>
+            <dd>
+              <code>{target.releaseName}</code>
+              {target.chartName ? <> · chart {target.chartName}</> : null}
+              {state.created ? (
+                <span className="chip">installed</span>
+              ) : state.helmRevision ? (
+                <> · upgraded from revision {state.helmRevision}</>
+              ) : null}
             </dd>
           </>
         )}

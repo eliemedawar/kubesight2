@@ -767,6 +767,7 @@ def install_or_upgrade_release(
     *,
     run_helm_fn: Optional[RunHelmFn] = None,
     approval_context: Optional[str] = None,
+    change_note: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
     """Install or upgrade a release, under the cluster's approval rule.
 
@@ -776,6 +777,7 @@ def install_or_upgrade_release(
     ``pendingApproval``). The executor calls back in here with
     ``approval_context`` so the same namespace, chart and image checks run
     again at execution time; the typed confirmation is not asked again then.
+    ``change_note`` says what a queued change is for (a CI build's Deploy stage).
     """
     original = _queue_payload(payload)
     try:
@@ -878,7 +880,7 @@ def install_or_upgrade_release(
                     values_yaml,
                 ),
             },
-            what=f"helm {verb} {release_name} in {namespace}",
+            what=change_note or f"helm {verb} {release_name} in {namespace}",
         )
         if queued is not None:
             return queued

@@ -1,7 +1,6 @@
 from flask import Blueprint, request
 
 from ..auth_utils import get_current_user
-from ..access_engine import can_access_namespace, user_has_permission
 from ..decorators import (
     require_any_permission,
     require_cluster_access,
@@ -11,9 +10,7 @@ from ..decorators import (
 from ..response import error_response, success_response
 from ..services.helm_service import (
     add_repository,
-    HelmCommandError,
     check_helm_available,
-    current_release_values,
     dry_run_release,
     expected_confirmation,
     get_release_detail,
@@ -221,35 +218,14 @@ def helm_chart_template_delete_version(slug: str, version: str):
 @helm_bp.route("/chart-templates/<slug>/values-import", methods=["POST"])
 @require_permission("helm:view")
 def helm_chart_template_values_import(slug: str):
-    """Check a person's values.yaml against a chart before deploying it. Nothing is stored.
-
-    For an upgrade that keeps the release's values (``keepCurrentValues``), the
-    required check counts what the release already holds.
-    """
+    """Check a person's values.yaml against a chart before deploying it. Nothing is stored."""
     body = _body()
-    current = None
-    if body.get("keepCurrentValues"):
-        user = get_current_user()
-        cluster_id = str(body.get("clusterId") or "")
-        namespace = str(body.get("namespace") or "")
-        if user and not (
-            user_has_permission(user, "helm:upgrade")
-            and can_access_namespace(user, cluster_id, namespace)
-        ):
-            return error_response("Forbidden", 403)
-        try:
-            current = current_release_values(
-                cluster_id, namespace, str(body.get("releaseName") or "").strip().lower()
-            )
-        except HelmCommandError as exc:
-            return error_response(str(exc), 400)
     try:
         report = inspect_values_import(
             slug,
             str(body.get("valuesYaml") or ""),
             str(body.get("version") or ""),
             str(body.get("valuesFile") or ""),
-            current,
         )
     except ChartTemplateError as exc:
         return error_response(str(exc), 400)

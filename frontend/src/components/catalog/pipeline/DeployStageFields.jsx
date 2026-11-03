@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { getCiDeployTarget, listCiDeploymentLinks } from "../../../api/ciApi.js";
 import { listClusters, listNamespacesByCluster } from "../../../api/clustersApi.js";
+import { getHelmChartTemplate, listHelmChartTemplates } from "../../../api/helmApi.js";
 import SearchableSelect from "../../common/SearchableSelect.jsx";
 import { formatRelative } from "../ciShared.jsx";
 import { CommandEditor, EnvRows, Field, Segmented, Switch } from "./controls.jsx";
 import {
   blankDeploy,
+  blankHelm,
   generateManifest,
+  guessImageValues,
+  isHelmDeploy,
   isLinkedDeploy,
   patchDeploy,
   pickLinkedDeployment,
@@ -30,6 +34,9 @@ export default function DeployStageFields({ ids, service: ciService, stage, stag
   const set = (patch) => onChange({ deploy: patchDeploy(deploy, patch) });
   const setCreate = (patch) => set({ create: patch });
   const linkedMode = isLinkedDeploy(deploy);
+  const helmMode = isHelmDeploy(deploy);
+  // A Helm target is edited as a whole: no manifest to keep in step.
+  const setHelm = (patch) => onChange({ deploy: { ...deploy, ...patch } });
   // A pipeline from the Pipelines page has no deployment of its own: each
   // service that builds with it has its own.
   const isHome = ciService?.kind === "pipeline";
@@ -67,12 +74,12 @@ export default function DeployStageFields({ ids, service: ciService, stage, stag
     };
   }, [deploy.clusterId]);
 
-  const targetKey = `${deploy.clusterId}|${deploy.namespace}`;
+  const targetKey = `${deploy.clusterId}|${deploy.namespace}|${helmMode ? "helm" : ""}`;
   useEffect(() => {
     if (!deploy.clusterId) return undefined;
     let cancelled = false;
     setTarget((prev) => ({ ...prev, key: targetKey, loading: true, error: "" }));
-    getCiDeployTarget(deploy.clusterId, deploy.namespace)
+    getCiDeployTarget(deploy.clusterId, deploy.namespace, { helm: helmMode })
       .then((data) => !cancelled && setTarget({ key: targetKey, data, loading: false, error: data?.error || "" }))
       .catch((err) => !cancelled && setTarget({ key: targetKey, data: null, loading: false, error: err.message || "Could not read the cluster." }));
     return () => {
@@ -121,16 +128,145 @@ export default function DeployStageFields({ ids, service: ciService, stage, stag
     >
       <Segmented
         label="Deploy target"
-        value={linkedMode ? "linked" : "fixed"}
+        value={helmMode ? "helm" : linkedMode ? "linked" : "fixed"}
         options={[
           { value: "fixed", label: "A deployment I pick" },
           { value: "linked", label: "The service's linked deployment" },
+          { value: "helm", label: "A Helm chart" },
         ]}
         disabled={!editable}
         onChange={(mode) => onChange({ deploy: setDeployTargetMode(deploy, mode) })}
       />
     </Field>
   );
+
+  const clusterField = (onPick) => (
+    <Field label="Cluster">
+      <SearchableSelect
+        id={`${ids}-cluster`}
+        aria-label="Cluster"
+        value={deploy.clusterId}
+        disabled={!editable}
+        placeholder="Pick a cluster…"
+        searchPlaceholder="Search clusters…"
+        options={[
+          ...(deploy.clusterId && !clusters.some((item) => item.id === deploy.clusterId)
+            ? [{ value: deploy.clusterId, label: deploy.clusterId }]
+            : []),
+          ...clusters.map((item) => ({ value: item.id, label: item.name || item.id })),
+        ]}
+        onChange={(event) => event.target.value !== deploy.clusterId && onPick(event.target.value)}
+      />
+    </Field>
+  );
+
+  const namespaceField = (onPick) => (
+    <Field
+      label="Namespace"
+      error={namespaces.clusterId === deploy.clusterId ? namespaces.error : ""}
+      hint={deploy.clusterId ? "Must already exist — a build never creates a namespace." : "Pick a cluster first."}
+    >
+      <SearchableSelect
+        id={`${ids}-namespace`}
+        aria-label="Namespace"
+        value={deploy.namespace}
+        disabled={!editable || !deploy.clusterId}
+        placeholder="Pick a namespace…"
+        searchPlaceholder="Search namespaces…"
+        options={[
+          ...(deploy.namespace && !namespaceItems.includes(deploy.namespace)
+            ? [{ value: deploy.namespace, label: deploy.namespace }]
+            : []),
+          ...namespaceItems.map((name) => ({ value: name, label: name })),
+        ]}
+        onChange={(event) => event.target.value !== deploy.namespace && onPick(event.target.value)}
+      />
+    </Field>
+  );
+
+  const registryGuard = (
+    <Guard
+      icon="shield"
+      tone={info && !info.linkedRegistries ? "warn" : undefined}
+      title="The image must be in the cluster's registry"
+      text={
+        info && !info.linkedRegistries
+          ? `No registry is linked to ${clusterName}, so no image can be confirmed and every deploy will stop here. Link the registry this service pushes to with the cluster under Registries.`
+          : `Checked before anything is applied${info ? ` against ${info.linkedRegistries} linked registr${info.linkedRegistries === 1 ? "y" : "ies"}` : ""}. Missing or unconfirmable means nothing is deployed.`
+      }
+    />
+  );
+
+  const approvalGuard = (
+    <Guard
+      icon="lock"
+      tone={info?.requiredApprovals ? "info" : undefined}
+      title={info?.requiredApprovals ? `${clusterName} needs ${info.requiredApprovals} approval${info.requiredApprovals === 1 ? "" : "s"}` : "Approval"}
+      text={
+        info?.requiredApprovals
+          ? `The change is sent as a change bundle and this stage waits for it — up to its ${timeoutLabel(stage.timeoutSeconds)} limit (change it under “If it fails or hangs”). Declined or expired means nothing is deployed.`
+          : info
+            ? "This cluster applies changes without approval."
+            : "If the cluster needs approval, the change is queued and the stage waits for it."
+      }
+    />
+  );
+
+  if (helmMode) {
+    const releases = info?.helmReleases || [];
+    return (
+      <div className="pl-deploy">
+        {modeSwitch}
+        <div className="pl-grid pl-deploy-target">
+          {clusterField((clusterId) => setHelm({ clusterId, namespace: "", releaseName: "" }))}
+          {namespaceField((namespace) => setHelm({ namespace, releaseName: "" }))}
+          <Field
+            label="Helm release"
+            hint="Pick one installed in the namespace, or type a new name — the first build installs it."
+          >
+            <SearchableSelect
+              id={`${ids}-release`}
+              aria-label="Helm release"
+              value={deploy.releaseName || ""}
+              disabled={!editable || !deploy.namespace}
+              placeholder={deploy.namespace ? "Pick or name a release…" : "Pick a namespace first"}
+              searchPlaceholder="Search, or type a new name…"
+              allowCustom
+              customOptionLabel={(name) => `Install as “${name.toLowerCase()}”`}
+              options={releases.map((item) => ({
+                value: item.name,
+                label: (
+                  <span className="pl-deploy-option">
+                    <span>{item.name}</span>
+                    <small>{item.chart} · rev {item.revision}</small>
+                  </span>
+                ),
+              }))}
+              onChange={(event) => setHelm({ releaseName: String(event.target.value || "").trim().toLowerCase() })}
+            />
+          </Field>
+        </div>
+
+        <HelmChartFields ids={ids} deploy={deploy} editable={editable} onChange={setHelm} />
+
+        <HelmReleaseStatus deploy={deploy} info={info} target={target} targetKey={targetKey} clusterName={clusterName} />
+
+        <ImageChoice deploy={deploy} editable={editable} set={setHelm} imageStageBefore={imageStageBefore} fixedImage={fixedImage} />
+
+        <ul className="pl-deploy-guards" aria-label="What this stage checks">
+          {registryGuard}
+          {approvalGuard}
+          <Guard
+            icon="undo"
+            title="Watched, and rolled back if it fails"
+            text={`Passes only when every Deployment of the release has rolled out. Crash loops, image pull errors or not ready within ${timeoutLabel(stage.timeoutSeconds)} roll the release back to its previous revision — or uninstall it, if this stage installed it.`}
+          />
+        </ul>
+
+        <Authority deploy={deploy} info={info} editable={editable} helm />
+      </div>
+    );
+  }
 
   if (linkedMode) {
     return (
@@ -201,50 +337,8 @@ export default function DeployStageFields({ ids, service: ciService, stage, stag
       {modeSwitch}
       {/* ── Where ─────────────────────────────────────────────────────── */}
       <div className="pl-grid pl-deploy-target">
-        <Field label="Cluster">
-          <SearchableSelect
-            id={`${ids}-cluster`}
-            aria-label="Cluster"
-            value={deploy.clusterId}
-            disabled={!editable}
-            placeholder="Pick a cluster…"
-            searchPlaceholder="Search clusters…"
-            options={[
-              ...(deploy.clusterId && !clusters.some((item) => item.id === deploy.clusterId)
-                ? [{ value: deploy.clusterId, label: deploy.clusterId }]
-                : []),
-              ...clusters.map((item) => ({ value: item.id, label: item.name || item.id })),
-            ]}
-            onChange={(event) =>
-              event.target.value !== deploy.clusterId &&
-              set({ clusterId: event.target.value, namespace: "", deploymentName: "", containerName: "" })
-            }
-          />
-        </Field>
-        <Field
-          label="Namespace"
-          error={namespaces.clusterId === deploy.clusterId ? namespaces.error : ""}
-          hint={deploy.clusterId ? "Must already exist — a build never creates a namespace." : "Pick a cluster first."}
-        >
-          <SearchableSelect
-            id={`${ids}-namespace`}
-            aria-label="Namespace"
-            value={deploy.namespace}
-            disabled={!editable || !deploy.clusterId}
-            placeholder="Pick a namespace…"
-            searchPlaceholder="Search namespaces…"
-            options={[
-              ...(deploy.namespace && !namespaceItems.includes(deploy.namespace)
-                ? [{ value: deploy.namespace, label: deploy.namespace }]
-                : []),
-              ...namespaceItems.map((name) => ({ value: name, label: name })),
-            ]}
-            onChange={(event) =>
-              event.target.value !== deploy.namespace &&
-              set({ namespace: event.target.value, deploymentName: "", containerName: "" })
-            }
-          />
-        </Field>
+        {clusterField((clusterId) => set({ clusterId, namespace: "", deploymentName: "", containerName: "" }))}
+        {namespaceField((namespace) => set({ namespace, deploymentName: "", containerName: "" }))}
         <Field
           label="Deployment"
           hint="Pick one that exists, or type a new name in the search to create it."
@@ -345,28 +439,8 @@ export default function DeployStageFields({ ids, service: ciService, stage, stag
 
       {/* ── What stops a bad deploy ───────────────────────────────────── */}
       <ul className="pl-deploy-guards" aria-label="What this stage checks">
-        <Guard
-          icon="shield"
-          tone={info && !info.linkedRegistries ? "warn" : undefined}
-          title="The image must be in the cluster's registry"
-          text={
-            info && !info.linkedRegistries
-              ? `No registry is linked to ${clusterName}, so no image can be confirmed and every deploy will stop here. Link the registry this service pushes to with the cluster under Registries.`
-              : `Checked before anything is applied${info ? ` against ${info.linkedRegistries} linked registr${info.linkedRegistries === 1 ? "y" : "ies"}` : ""}. Missing or unconfirmable means nothing is deployed.`
-          }
-        />
-        <Guard
-          icon="lock"
-          tone={info?.requiredApprovals ? "info" : undefined}
-          title={info?.requiredApprovals ? `${clusterName} needs ${info.requiredApprovals} approval${info.requiredApprovals === 1 ? "" : "s"}` : "Approval"}
-          text={
-            info?.requiredApprovals
-              ? `The change is sent as a change bundle and this stage waits for it — up to its ${timeoutLabel(stage.timeoutSeconds)} limit (change it under “If it fails or hangs”). Declined or expired means nothing is deployed.`
-              : info
-                ? "This cluster applies changes without approval."
-                : "If the cluster needs approval, the change is queued and the stage waits for it."
-          }
-        />
+        {registryGuard}
+        {approvalGuard}
         <Guard
           icon="undo"
           title="Watched, and rolled back if it fails"
@@ -590,6 +664,239 @@ function ImageChoice({ deploy, editable, set, imageStageBefore, fixedImage }) {
   );
 }
 
+/** The chart a Helm target deploys, its version, the values file for the
+ * first install, and the chart value(s) the build's image goes into. */
+function HelmChartFields({ ids, deploy, editable, onChange }) {
+  const helm = { ...blankHelm(), ...(deploy.helm || {}) };
+  const image = helm.imageValues || blankHelm().imageValues;
+  const [charts, setCharts] = useState(null);
+  const [detail, setDetail] = useState({ key: "", data: null });
+  const setChart = (patch) => onChange({ helm: { ...helm, ...patch } });
+
+  useEffect(() => {
+    let cancelled = false;
+    listHelmChartTemplates()
+      .then((result) => !cancelled && setCharts(Array.isArray(result) ? result : []))
+      .catch(() => !cancelled && setCharts([]));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // The chosen version's values files.
+  const detailKey = `${helm.chartTemplateId}@${helm.chartVersion}`;
+  useEffect(() => {
+    if (!helm.chartTemplateId) return undefined;
+    let cancelled = false;
+    getHelmChartTemplate(helm.chartTemplateId, helm.chartVersion)
+      .then((data) => !cancelled && setDetail({ key: detailKey, data }))
+      .catch(() => !cancelled && setDetail({ key: detailKey, data: null }));
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detailKey]);
+
+  const chart = (charts || []).find((item) => item.id === helm.chartTemplateId) || null;
+  const versions = chart?.versions?.length ? chart.versions.map((item) => item.version) : chart ? [chart.version] : [];
+  const valuesFiles = detail.key === detailKey ? detail.data?.chart?.valuesFiles || [] : [];
+
+  // Picking a chart guesses where its image goes from its default values, and
+  // names the release after it when none is named yet.
+  const pickChart = async (id) => {
+    const picked = (charts || []).find((item) => item.id === id);
+    if (!picked || id === helm.chartTemplateId) return;
+    let imageValues = helm.imageValues;
+    try {
+      imageValues = guessImageValues((await getHelmChartTemplate(id)).defaultValues);
+    } catch {
+      // Keep what was there; the fields below can still be edited.
+    }
+    onChange({
+      helm: { ...helm, chartTemplateId: id, chartName: picked.name, chartVersion: "", valuesFile: "", imageValues },
+      ...(deploy.releaseName
+        ? {}
+        : { releaseName: String(picked.name || "").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 53) }),
+    });
+  };
+
+  return (
+    <>
+      <div className="pl-grid pl-deploy-target">
+        <Field label="Inventory chart" hint="From Inventory → Helm charts.">
+          <SearchableSelect
+            id={`${ids}-chart`}
+            aria-label="Inventory chart"
+            value={helm.chartTemplateId}
+            disabled={!editable || charts === null}
+            placeholder={charts === null ? "Loading charts…" : charts.length ? "Pick a chart…" : "No charts in the inventory"}
+            searchPlaceholder="Search charts…"
+            options={[
+              ...(helm.chartTemplateId && !chart ? [{ value: helm.chartTemplateId, label: helm.chartName || helm.chartTemplateId }] : []),
+              ...(charts || []).map((item) => ({
+                value: item.id,
+                label: (
+                  <span className="pl-deploy-option">
+                    <span>{item.name}</span>
+                    <small>v{item.version}</small>
+                  </span>
+                ),
+              })),
+            ]}
+            onChange={(event) => pickChart(event.target.value)}
+          />
+        </Field>
+        <Field label="Version" hint="The current one follows the chart: a newer version set current in the inventory is used by the next build.">
+          <SearchableSelect
+            id={`${ids}-chart-version`}
+            aria-label="Chart version"
+            value={helm.chartVersion || ""}
+            disabled={!editable || !helm.chartTemplateId}
+            options={[
+              { value: "", label: chart ? `The current version (now v${chart.version})` : "The current version" },
+              ...versions.map((version) => ({ value: version, label: `v${version}` })),
+            ]}
+            onChange={(event) => setChart({ chartVersion: event.target.value, valuesFile: "" })}
+          />
+        </Field>
+        <Field
+          label="Values for the first install"
+          optional
+          hint="Used only when the release is installed. Nothing has to be filled in, and upgrades keep the values the release runs with."
+        >
+          <SearchableSelect
+            id={`${ids}-values-file`}
+            aria-label="Values for the first install"
+            value={helm.valuesFile || ""}
+            disabled={!editable || !helm.chartTemplateId}
+            options={[
+              { value: "", label: "The chart's own values" },
+              ...(helm.valuesFile && !valuesFiles.some((item) => item.path === helm.valuesFile)
+                ? [{ value: helm.valuesFile, label: helm.valuesFile }]
+                : []),
+              ...valuesFiles.map((item) => ({ value: item.path, label: item.path })),
+            ]}
+            onChange={(event) => setChart({ valuesFile: event.target.value })}
+          />
+        </Field>
+      </div>
+      <Field label="The image goes into" hint="The chart values each build sets to the image it deploys. Nothing else changes.">
+        <Segmented
+          label="The image goes into"
+          value={image.mode === "full" ? "full" : "split"}
+          options={[
+            { value: "split", label: "A repository and a tag value" },
+            { value: "full", label: "One value" },
+          ]}
+          disabled={!editable}
+          onChange={(mode) =>
+            setChart({
+              imageValues:
+                mode === "full"
+                  ? { mode: "full", path: image.path || "image" }
+                  : { mode: "split", repository: image.repository || "image.repository", tag: image.tag || "image.tag" },
+            })
+          }
+        />
+      </Field>
+      <div className="pl-grid pl-deploy-target">
+        {image.mode === "full" ? (
+          <TextField
+            id={`${ids}-image-path`}
+            label="Image value"
+            value={image.path}
+            disabled={!editable}
+            placeholder="image"
+            onChange={(path) => setChart({ imageValues: { ...image, path } })}
+          />
+        ) : (
+          <>
+            <TextField
+              id={`${ids}-image-repository`}
+              label="Repository value"
+              value={image.repository}
+              disabled={!editable}
+              placeholder="image.repository"
+              onChange={(repository) => setChart({ imageValues: { ...image, repository } })}
+            />
+            <TextField
+              id={`${ids}-image-tag`}
+              label="Tag value"
+              value={image.tag}
+              disabled={!editable}
+              placeholder="image.tag"
+              onChange={(tag) => setChart({ imageValues: { ...image, tag } })}
+            />
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+/** Whether the release is there: installed (each build upgrades it) or not
+ * yet (the first build installs it). */
+function HelmReleaseStatus({ deploy, info, target, targetKey, clusterName }) {
+  if (!deploy.clusterId || !deploy.namespace) return null;
+  if (target.key !== targetKey || target.loading) {
+    return (
+      <p className="pl-deploy-status is-loading">
+        <span className="sg-ci-pulse" aria-hidden="true" /> Reading {clusterName}…
+      </p>
+    );
+  }
+  if (target.error || info?.helmError) {
+    return (
+      <div className="pl-note is-warn">
+        <PlIcon name="alert" />
+        <p>
+          <strong>Could not read the namespace&apos;s Helm releases.</strong> {target.error || info.helmError} The
+          stage can still be saved; a build checks again when it runs.
+        </p>
+      </div>
+    );
+  }
+  if (info?.namespaceExists === false) {
+    return (
+      <div className="pl-note is-warn">
+        <PlIcon name="alert" />
+        <p>
+          <strong>
+            <code>{deploy.namespace}</code> does not exist on {clusterName}.
+          </strong>{" "}
+          Builds stop here until it is created — a build never creates a namespace.
+        </p>
+      </div>
+    );
+  }
+  if (!deploy.releaseName) return null;
+  const release = (info?.helmReleases || []).find((item) => item.name === deploy.releaseName);
+  const chart = deploy.helm?.chartName || "the chart";
+  if (release) {
+    return (
+      <div className="pl-deploy-status is-exists">
+        <PlIcon name="check" />
+        <p>
+          <strong>Installed</strong> · revision {release.revision} · <code>{release.chart}</code> · {release.status}
+          <small>
+            Each build upgrades it to {chart}, keeping the values it runs with — only the image values change.
+          </small>
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="pl-deploy-status is-new">
+      <PlIcon name="plus" />
+      <p>
+        <strong>Not installed in {deploy.namespace} yet</strong> — the first build installs {chart} with{" "}
+        {deploy.helm?.valuesFile ? <code>{deploy.helm.valuesFile}</code> : "its own values"}. Nothing has to be
+        filled in.
+      </p>
+    </div>
+  );
+}
+
 /** Which link a build would use right now — the same pick the backend makes. */
 function LinkedPreview({ isHome, links, environment }) {
   if (isHome) {
@@ -748,7 +1055,7 @@ function TargetStatus({ deploy, info, target, targetKey, existing, clusterName }
   );
 }
 
-function Authority({ deploy, info, editable }) {
+function Authority({ deploy, info, editable, helm = false }) {
   const stamp = deploy.authorizedBy;
   const cannot = info && !info.canDeploy;
   return (
@@ -770,13 +1077,16 @@ function Authority({ deploy, info, editable }) {
             <strong>Saving makes you the person this stage deploys as</strong>
             <small>
               Builds are often started by a webhook or a ticket, so the stage uses the rights of
-              whoever saved its target. That needs permission to deploy to this namespace.
+              whoever saved its target. That needs permission to deploy to this namespace
+              {helm ? " and to install and upgrade Helm releases" : ""}.
             </small>
           </>
         )}
         {cannot && editable && (
           <small className="is-warn">
-            You cannot deploy to this namespace, so a change to this target will be refused on save.
+            {helm
+              ? "You cannot deploy Helm releases to this namespace, so a change to this target will be refused on save."
+              : "You cannot deploy to this namespace, so a change to this target will be refused on save."}
           </small>
         )}
       </p>

@@ -89,19 +89,16 @@ function changedValues(values, start) {
 
 function VariableField({ variable, value, fromFile, keptSecret, onChange }) {
   const id = `helm-variable-${variable.key}`;
-  // A password the release already holds is kept unless typed over.
-  const required = Boolean(variable.required) && !keptSecret;
+  // No value is required: an empty one is installed empty.
   const common = {
     id,
     value,
-    required,
     onChange: (event) => onChange(event.target.value),
   };
   return (
-    <label htmlFor={id} className={required ? "helm-variable-required" : ""}>
+    <label htmlFor={id}>
       <span>
         {variable.label || variable.path}
-        {required ? <strong aria-label="required"> *</strong> : null}
         {fromFile ? <em className="helm-variable-from-file">from file</em> : null}
       </span>
       {variable.type === "boolean" ? (
@@ -162,7 +159,7 @@ export default function HelmChartDeployModal({
   const [detail, setDetail] = useState(null);
   // The stored chart: the one clicked, or for an upgrade the one picked.
   const [chartId, setChartId] = useState(template?.id || "");
-  // An upgrade's starting point: { form, keptSecrets, missingRequired, valuesShown }.
+  // An upgrade's starting point: { form, keptSecrets, valuesShown }.
   const [upgradeStart, setUpgradeStart] = useState(null);
   const [version, setVersion] = useState("");
   const [clusterId, setClusterId] = useState(resolvedCluster);
@@ -214,7 +211,6 @@ export default function HelmChartDeployModal({
       valuesYaml: text,
       version: chartDetail.version,
       valuesFile: environmentFile,
-      ...(releaseTarget ? { ...releaseTarget, keepCurrentValues: true } : {}),
     });
     setImported({ text, name, report });
     setValues({ ...base, ...importedFieldValues(chartDetail, report) });
@@ -292,14 +288,14 @@ export default function HelmChartDeployModal({
   }, [open, resolvedCluster]);
 
   const keptSecrets = useMemo(() => new Set(upgradeStart?.keptSecrets || []), [upgradeStart]);
-  // Kept passwords stay in this list though no longer required, so replacing
-  // one is as easy to find as typing it was.
-  const requiredVariables = useMemo(
-    () => (detail?.variables || []).filter((variable) => variable.required),
+  // Passwords come first and open: the stored chart never keeps them, so they
+  // are the values worth a look. None is required — left empty, it is empty.
+  const secretVariables = useMemo(
+    () => (detail?.variables || []).filter((variable) => variable.sensitive),
     [detail],
   );
-  const optionalVariables = useMemo(
-    () => (detail?.variables || []).filter((variable) => !variable.required),
+  const otherVariables = useMemo(
+    () => (detail?.variables || []).filter((variable) => !variable.sensitive),
     [detail],
   );
 
@@ -563,7 +559,6 @@ export default function HelmChartDeployModal({
                 templateId={detail.id}
                 version={detail.version}
                 imported={imported}
-                values={values}
                 busy={busy}
                 canSave={canManage}
                 layeredOver={release ? "the release's current values" : ""}
@@ -586,11 +581,15 @@ export default function HelmChartDeployModal({
               />
             ) : null}
 
-            {requiredVariables.length ? (
+            {secretVariables.length ? (
               <section className="helm-variable-section">
-                <h4>{keptSecrets.size ? "Passwords and required values" : "Required values"}</h4>
+                <h4>Passwords</h4>
+                <p className="form-help">
+                  Optional. {keptSecrets.size ? "Left empty, the release keeps the one it has; a" : "A"}{" "}
+                  password left empty is installed empty.
+                </p>
                 <div className="helm-variable-grid">
-                  {requiredVariables.map((variable) => (
+                  {secretVariables.map((variable) => (
                     <VariableField
                       key={variable.path}
                       variable={variable}
@@ -606,17 +605,17 @@ export default function HelmChartDeployModal({
               </section>
             ) : (
               <p className="helm-ready-message">
-                This chart has safe defaults and does not require any additional values.
+                Nothing has to be filled in — the chart deploys with the values it has.
               </p>
             )}
 
-            {optionalVariables.length ? (
+            {otherVariables.length ? (
               <details className="helm-optional-values">
                 <summary>
-                  Review optional values <span>({optionalVariables.length})</span>
+                  Review values <span>({otherVariables.length})</span>
                 </summary>
                 <div className="helm-variable-grid">
-                  {optionalVariables.map((variable) => (
+                  {otherVariables.map((variable) => (
                     <VariableField
                       key={variable.path}
                       variable={variable}

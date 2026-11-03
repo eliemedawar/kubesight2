@@ -558,6 +558,7 @@ def describe_deploy_target():
             get_current_user(),
             request.args.get("clusterId") or "",
             request.args.get("namespace") or "",
+            helm=request.args.get("helm") == "1",
         )
     except ValueError as exc:
         return error_response(str(exc), 400)

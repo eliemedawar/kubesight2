@@ -1759,14 +1759,12 @@ def app_starting_values(slug: str, version: str = "", values_file: str = "") -> 
 
     try:
         values = charts.starting_values(slug, version, values_file)
-        required = charts.required_inputs(slug, version)
         chart = charts.resolve_chart(slug, version, values_file)
     except charts.ChartTemplateError as exc:
         raise ValueError(str(exc)) from exc
     return {
         **chart,
         "valuesYaml": build_apps._dump(values),
-        "requiredInputs": required,
     }
 
 

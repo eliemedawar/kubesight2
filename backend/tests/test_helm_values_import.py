@@ -84,14 +84,13 @@ def test_import_fills_fields_including_secrets_and_reports_the_rest(client, admi
     # applied at deploy time), once: not also as values without a field.
     assert set(report["unknown"]) == {"extraEnv", "ingress.apiToken"}
     assert report["withoutField"] == []
-    assert report["missingRequired"] == []
 
 
-def test_import_lists_required_values_the_file_leaves_empty(client, admin_token):
+def test_import_requires_nothing_the_file_leaves_empty(client, admin_token):
     slug = _slug(client, admin_token)
     report = _inspect(client, admin_token, slug, "replicaCount: 4\n").get_json()["data"]
     assert report["fields"] == {"replicaCount": 4}
-    assert [item["path"] for item in report["missingRequired"]] == ["database.password"]
+    assert "missingRequired" not in report
 
 
 def test_import_merges_over_the_chosen_environment_file(client, admin_token):

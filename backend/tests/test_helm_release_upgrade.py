@@ -65,7 +65,7 @@ def test_upgrade_start_shows_current_values_and_keeps_secrets_server_side(client
     assert data["fields"]["image.repository"] == "registry.example.internal/payments"
     assert data["fields"]["database.password"] == ""
     assert data["keptSecrets"] == ["database.password"]
-    assert data["missingRequired"] == []
+    assert "missingRequired" not in data
     assert "live-password" not in response.get_data(as_text=True)
 
 
@@ -127,17 +127,14 @@ def test_upgrade_refuses_when_current_values_cannot_be_read(client, admin_token)
     assert "could not be read" in response.get_json()["error"]
 
 
-def test_values_import_counts_secrets_the_release_already_has(client, admin_token):
+def test_values_import_for_an_upgrade_reports_only_the_file(client, admin_token):
     slug = _slug(client, admin_token)
-    fake = FakeHelm()
-    installed, runner = _helm(fake)
-    with installed, runner:
-        report = client.post(
-            f"/api/helm/chart-templates/{slug}/values-import",
-            headers=auth_headers(admin_token),
-            json={"valuesYaml": "replicaCount: 7\n", "keepCurrentValues": True, **TARGET},
-        ).get_json()["data"]
-    assert report["missingRequired"] == []
+    report = client.post(
+        f"/api/helm/chart-templates/{slug}/values-import",
+        headers=auth_headers(admin_token),
+        json={"valuesYaml": "replicaCount: 7\n", "keepCurrentValues": True, **TARGET},
+    ).get_json()["data"]
+    assert "missingRequired" not in report
     assert report["fields"] == {"replicaCount": 7}
 
 

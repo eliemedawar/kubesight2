@@ -115,21 +115,6 @@ export function moveItem(items, index, delta) {
   return next;
 }
 
-/** Required inputs whose key does not appear with a value in the text.
- *  A hint only — there is no YAML parser here, and preflight is the check. */
-export function unfilledRequired(valuesYaml, required = []) {
-  const text = String(valuesYaml || "");
-  return (required || []).filter((input) => {
-    const key = String(input.path || "").split(".").pop();
-    if (!key) return false;
-    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const line = new RegExp(`^\\s*${escaped}\\s*:\\s*(\\S.*)?$`, "m").exec(text);
-    if (!line) return true;
-    const value = (line[1] || "").trim();
-    return value === "" || value === '""' || value === "''" || value === "~" || value === "null";
-  });
-}
-
 /** One line per chart for summaries: "web → shop (web 1.2.0)". */
 export function appSummary(app, chartName) {
   const name = chartName || app.chartName || app.chartSlug;

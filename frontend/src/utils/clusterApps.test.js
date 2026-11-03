@@ -6,7 +6,6 @@ import {
   moveItem,
   newAppItem,
   releaseNameFor,
-  unfilledRequired,
 } from "./clusterApps.js";
 
 describe("releaseNameFor", () => {
@@ -73,15 +72,3 @@ describe("moveItem", () => {
   });
 });
 
-describe("unfilledRequired", () => {
-  const required = [{ path: "database.password" }, { path: "api.token" }];
-
-  it("lists required keys that are absent or blank", () => {
-    const text = 'database:\n  password: ""\napi:\n  token: abc\n';
-    expect(unfilledRequired(text, required).map((r) => r.path)).toEqual(["database.password"]);
-  });
-
-  it("counts a masked stored value as filled", () => {
-    expect(unfilledRequired("database:\n  password: <hidden>\napi:\n  token: x\n", required)).toEqual([]);
-  });
-});

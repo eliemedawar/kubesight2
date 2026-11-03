@@ -15,6 +15,9 @@ const DNS_SUBDOMAIN = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/;
 const QUANTITY = /^[0-9]+(\.[0-9]+)?(m|Ki|Mi|Gi|Ti|k|M|G|T)?$/;
 // deploy_config._ENVIRONMENT_RE
 const ENVIRONMENT = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/;
+// deploy_config._VALUE_PATH_RE / _RELEASE_RE
+const VALUE_PATH = /^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+){0,15}$/;
+const MAX_RELEASE = 53;
 
 export const SERVICE_TYPES = [
   { value: "ClusterIP", label: "Inside the cluster" },
@@ -150,11 +153,46 @@ export function patchDeploy(deploy, patch) {
  * when a build starts) rather than a target saved on the stage. */
 export const isLinkedDeploy = (deploy) => deploy?.target === "linked";
 
-/** Switch a stage between a picked target and the service's linked one. The
- * picked target is kept while linked, so switching back loses nothing. */
+/** The stage installs, then upgrades, a release of an Inventory Helm chart. */
+export const isHelmDeploy = (deploy) => deploy?.target === "helm";
+
+export const blankHelm = () => ({
+  chartTemplateId: "",
+  chartName: "",
+  // Empty: the chart's current version when the build runs.
+  chartVersion: "",
+  // A values-*.yaml stored on the chart, used for the first install only.
+  valuesFile: "",
+  imageValues: { mode: "split", repository: "image.repository", tag: "image.tag" },
+});
+
+/**
+ * Where a chart most likely takes its image, from its default values: the
+ * common image.repository + image.tag pair, or one ``image`` string.
+ */
+export function guessImageValues(defaultValues) {
+  const image = defaultValues?.image;
+  if (typeof image === "string") return { mode: "full", path: "image" };
+  if (image && typeof image === "object" && "repository" in image) {
+    return { mode: "split", repository: "image.repository", tag: "image.tag" };
+  }
+  return blankHelm().imageValues;
+}
+
+/** Switch a stage between a picked target, the service's linked one and a
+ * Helm chart. What the other modes had is kept, so switching back loses nothing. */
 export function setDeployTargetMode(deploy, mode) {
   const base = deploy || blankDeploy();
   if (mode === "linked") return { ...base, target: "linked", createIfMissing: false };
+  if (mode === "helm") {
+    return {
+      ...base,
+      target: "helm",
+      createIfMissing: false,
+      releaseName: base.releaseName || "",
+      helm: { ...blankHelm(), ...(base.helm || {}) },
+    };
+  }
   const { target: _target, ...rest } = base;
   return { ...rest, target: "fixed" };
 }
@@ -188,6 +226,11 @@ export function deployTarget(deploy) {
   if (isLinkedDeploy(deploy)) {
     return `the service's linked deployment${deploy.environment ? ` (${deploy.environment})` : ""}`;
   }
+  if (isHelmDeploy(deploy)) {
+    if (!deploy.clusterId && !deploy.releaseName) return "";
+    const chart = deploy.helm?.chartName || deploy.helm?.chartTemplateId;
+    return `${[deploy.clusterId || "?", deploy.namespace || "?", deploy.releaseName || "?"].join(" / ")} (Helm${chart ? ` · ${chart}` : ""})`;
+  }
   if (!deploy?.clusterId && !deploy?.deploymentName) return "";
   return [deploy.clusterId || "?", deploy.namespace || "?", deploy.deploymentName || "?"].join(" / ");
 }
@@ -214,6 +257,26 @@ export function deployProblems(deploy) {
     }
     if (deploy.containerName && !DNS_LABEL.test(deploy.containerName)) {
       add("The container name must be lowercase letters, digits and '-'.");
+    }
+    if (deploy.image && /\s/.test(deploy.image)) add("An image reference cannot contain spaces.");
+    return problems;
+  }
+  if (isHelmDeploy(deploy)) {
+    if (!deploy.clusterId) add("Pick a cluster to deploy to.");
+    if (!deploy.namespace) add("Pick a namespace.");
+    const release = deploy.releaseName || "";
+    if (!release) add("Name the Helm release, or pick one that is installed.");
+    else if (!DNS_LABEL.test(release) || release.length > MAX_RELEASE) {
+      add(`The release name must be lowercase letters, digits and '-', at most ${MAX_RELEASE} characters.`);
+    }
+    const helm = deploy.helm || {};
+    if (!helm.chartTemplateId) add("Pick the Inventory chart to deploy.");
+    const image = helm.imageValues || {};
+    const paths = image.mode === "full" ? [image.path] : [image.repository, image.tag];
+    if (paths.some((path) => !VALUE_PATH.test(String(path || "")))) {
+      add("Name the chart value(s) the image goes into, like image.repository and image.tag.");
+    } else if (image.mode !== "full" && image.repository === image.tag) {
+      add("The repository and the tag must be different chart values.");
     }
     if (deploy.image && /\s/.test(deploy.image)) add("An image reference cannot contain spaces.");
     return problems;

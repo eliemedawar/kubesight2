@@ -47,7 +47,6 @@ export default function HelmValuesImport({
   templateId,
   version,
   imported,
-  values = {},
   busy,
   canSave,
   // What the file sits on, when it is not the chart's defaults (an upgrade).
@@ -160,10 +159,6 @@ export default function HelmValuesImport({
 
   const { report } = imported;
   const filled = Object.keys(report.fields || {}).length;
-  // Required values the file left empty, minus the ones typed in since.
-  const stillEmpty = (report.missingRequired || []).filter(
-    (item) => String(values[item.path] ?? "").trim() === "",
-  );
   return (
     <section className="helm-values-import is-applied" aria-live="polite">
       <div className="helm-values-import-head">
@@ -205,14 +200,6 @@ export default function HelmValuesImport({
             <PathList paths={report.unknown} total={report.unknownCount} />
           </li>
         ) : null}
-        {stillEmpty.length ? (
-          <li className="is-error">
-            Not in the file, fill {stillEmpty.length === 1 ? "it" : "them"} in below:{" "}
-            {stillEmpty.map((item) => item.label).join(", ")}
-          </li>
-        ) : (
-          <li className="is-ok">Every required value is filled.</li>
-        )}
       </ul>
 
       {canSave ? (

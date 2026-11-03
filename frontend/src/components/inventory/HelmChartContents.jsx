@@ -125,9 +125,6 @@ export default function HelmChartContents({ template, compact = false }) {
             {" "}
             · {template?.variableCount || 0} configurable value
             {template?.variableCount === 1 ? "" : "s"}
-            {template?.requiredVariableCount
-              ? ` · ${template.requiredVariableCount} required before deploy`
-              : ""}
           </>
         )}
       </p>

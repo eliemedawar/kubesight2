@@ -5,6 +5,8 @@ import {
   deployOutcome,
   deployProblems,
   deployTarget,
+  guessImageValues,
+  isHelmDeploy,
   isLinkedDeploy,
   pickLinkedDeployment,
   setDeployTargetMode,
@@ -177,5 +179,51 @@ describe("creating from an inventory template", () => {
       "Pick the inventory template to create the deployment from.",
     ]);
     expect(deployProblems({ ...deploy, create: { ...deploy.create, templateId: "acquiring-ui" } })).toEqual([]);
+  });
+});
+
+describe("a Helm target", () => {
+  const helmTarget = (extra = {}) => ({
+    ...setDeployTargetMode({ ...blankDeploy(), clusterId: "prod", namespace: "payments" }, "helm"),
+    releaseName: "payments",
+    ...extra,
+  });
+
+  it("switches in and back out without losing the picked deployment", () => {
+    const fixed = { ...blankDeploy(), clusterId: "prod", namespace: "payments", deploymentName: "api" };
+    const helm = setDeployTargetMode(fixed, "helm");
+    expect(isHelmDeploy(helm)).toBe(true);
+    expect(helm.createIfMissing).toBe(false);
+    expect(helm.helm.imageValues).toEqual({ mode: "split", repository: "image.repository", tag: "image.tag" });
+    const back = setDeployTargetMode(helm, "fixed");
+    expect(back.target).toBe("fixed");
+    expect(back.deploymentName).toBe("api");
+  });
+
+  it("needs a release, a chart and where the image goes", () => {
+    expect(deployProblems(helmTarget({ releaseName: "" })).map((p) => p.message)).toEqual([
+      "Name the Helm release, or pick one that is installed.",
+      "Pick the Inventory chart to deploy.",
+    ]);
+    const ready = helmTarget({ helm: { ...helmTarget().helm, chartTemplateId: "payments" } });
+    expect(deployProblems(ready)).toEqual([]);
+    expect(deployProblems({ ...ready, releaseName: "Bad_Name" })[0].message).toMatch(/release name/);
+    const same = { ...ready, helm: { ...ready.helm, imageValues: { mode: "split", repository: "a.b", tag: "a.b" } } };
+    expect(deployProblems(same)[0].message).toMatch(/different chart values/);
+    const bad = { ...ready, helm: { ...ready.helm, imageValues: { mode: "full", path: "image..x" } } };
+    expect(deployProblems(bad)[0].message).toMatch(/chart value/);
+  });
+
+  it("reads as the release and its chart", () => {
+    const deploy = helmTarget({ helm: { ...helmTarget().helm, chartTemplateId: "payments", chartName: "Payments" } });
+    expect(deployTarget(deploy)).toBe("prod / payments / payments (Helm · Payments)");
+  });
+
+  it("guesses where a chart takes its image", () => {
+    expect(guessImageValues({ image: { repository: "r", tag: "1" } })).toEqual({
+      mode: "split", repository: "image.repository", tag: "image.tag",
+    });
+    expect(guessImageValues({ image: "r/app:1" })).toEqual({ mode: "full", path: "image" });
+    expect(guessImageValues({}).mode).toBe("split");
   });
 });
