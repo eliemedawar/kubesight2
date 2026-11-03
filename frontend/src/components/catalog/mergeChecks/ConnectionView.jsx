@@ -1,6 +1,4 @@
 import { useState } from "react";
-// The URL row is the build webhooks' one (.wh-kv), so it is styled the same.
-import "../../../styles/signal/webhooks.css";
 import { ChipsInput, Field, SettingRow, Switch } from "../pipeline/controls.jsx";
 import { PlIcon } from "../pipeline/icons.jsx";
 import { EVENTS } from "./mergeCheckModel.js";
@@ -27,9 +25,9 @@ function CallUrl({ config, webhook, canEdit, onCopy, onSave }) {
 
   if (editing) {
     return (
-      <div className="wh-kv wh-kv-edit">
-        <span className="wh-k">URL</span>
-        <div className="pl-field wh-v-edit">
+      <div className="mc-url mc-url-edit">
+        <span className="mc-url-k">URL</span>
+        <div className="pl-field mc-url-field">
           <input
             type="url"
             className="is-mono"
@@ -56,7 +54,7 @@ function CallUrl({ config, webhook, canEdit, onCopy, onSave }) {
         <button type="button" className="btn-outline btn-compact" onClick={() => save(draft)} disabled={busy}>
           {busy ? "Saving…" : "Save"}
         </button>
-        <button type="button" className="btn-ghost st-action" onClick={() => setEditing(false)} disabled={busy}>
+        <button type="button" className="btn-ghost mc-url-action" onClick={() => setEditing(false)} disabled={busy}>
           Cancel
         </button>
       </div>
@@ -65,16 +63,16 @@ function CallUrl({ config, webhook, canEdit, onCopy, onSave }) {
 
   return (
     <>
-      <div className="wh-kv">
-        <span className="wh-k">URL</span>
-        <code className="wh-v">{callUrl}</code>
-        <button type="button" className="btn-ghost st-action" onClick={() => onCopy(callUrl, "URL")}>
+      <div className="mc-url">
+        <span className="mc-url-k">URL</span>
+        <code className="mc-url-v">{callUrl}</code>
+        <button type="button" className="btn-ghost mc-url-action" onClick={() => onCopy(callUrl, "URL")}>
           <PlIcon name="copy" /> Copy
         </button>
         {canEdit && onSave && (
           <button
             type="button"
-            className="btn-ghost st-action"
+            className="btn-ghost mc-url-action"
             onClick={() => {
               setDraft(config.externalUrl || "");
               setEditing(true);
@@ -85,7 +83,7 @@ function CallUrl({ config, webhook, canEdit, onCopy, onSave }) {
         )}
       </div>
       {config.externalUrl ? (
-        <p className="pl-field-hint wh-kv-note">
+        <p className="pl-field-hint mc-url-note">
           Through a gateway. It forwards to KubeSight at <code>{own}</code>.
         </p>
       ) : null}

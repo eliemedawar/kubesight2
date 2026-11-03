@@ -1042,3 +1042,87 @@
     grid-template-columns: 2.4rem minmax(0, 1fr);
   }
 }
+
+/* "Bitbucket calls": label, the URL (wraps anywhere), Copy / Edit — the same
+   row as a build webhook's URL, which is scoped to the Settings tab. */
+.mc-root .mc-url {
+  display: grid;
+  grid-template-columns: 3rem minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.mc-root .mc-url-k {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.mc-root .mc-url-v {
+  min-width: 0;
+  padding: 0.3rem 0.5rem;
+  overflow-wrap: anywhere;
+  color: var(--text-strong);
+  background: var(--bg-inset);
+  border-radius: var(--radius-sm, 4px);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.mc-root .mc-url-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-height: 2rem;
+  padding: 0.2rem 0.55rem;
+  color: var(--text-subtle);
+  border-radius: var(--radius-control);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.mc-root .mc-url-action:hover {
+  color: var(--text-strong);
+  background: var(--bg-interactive);
+}
+
+.mc-root .mc-url-action svg {
+  width: 0.85rem;
+  height: 0.85rem;
+  flex: none;
+}
+
+.mc-root .mc-url-edit {
+  align-items: start;
+}
+
+.mc-root .mc-url-edit > .mc-url-k,
+.mc-root .mc-url-edit > button {
+  margin-top: 0.45rem;
+}
+
+.mc-root .mc-url-field {
+  min-width: 0;
+  gap: 0.3rem;
+}
+
+.mc-root .mc-url-note {
+  margin: 0.4rem 0 0 3.5rem;
+}
+
+@media (max-width: 720px) {
+  .mc-root .mc-url {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .mc-root .mc-url .mc-url-k {
+    grid-column: 1 / -1;
+  }
+
+  .mc-root .mc-url-note {
+    margin-left: 0;
+  }
+}
