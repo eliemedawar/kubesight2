@@ -3205,6 +3205,38 @@
   margin-top: calc(var(--space-2) * -1);
 }
 
+/* A Helm chart that runs several images: one card per image. */
+.pl-root .pl-helm-images {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.pl-root .pl-helm-image {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: 0.75rem 0.85rem 0.85rem;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.pl-root .pl-helm-image > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: 2rem;
+}
+
+.pl-root .pl-helm-image > header strong {
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+}
+
 .pl-root .pl-deploy-guards {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

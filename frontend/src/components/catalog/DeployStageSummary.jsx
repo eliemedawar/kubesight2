@@ -20,7 +20,21 @@ export default function DeployStageSummary({ stage }) {
         {where && <code className="sg-ci-deploy-where">{where}</code>}
       </header>
       <dl>
-        {state.image && (
+        {state.images?.length ? (
+          <>
+            <dt>Images</dt>
+            <dd>
+              <ul className="sg-ci-deploy-images">
+                {state.images.map((row) => (
+                  <li key={row.into}>
+                    <code>{row.image}</code> <span aria-hidden="true">→</span>
+                    <span className="sg-sr"> into </span> <code>{row.into}</code>
+                  </li>
+                ))}
+              </ul>
+            </dd>
+          </>
+        ) : state.image && (
           <>
             <dt>Image</dt>
             <dd>

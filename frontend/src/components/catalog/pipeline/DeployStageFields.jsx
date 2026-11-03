@@ -9,8 +9,12 @@ import {
   blankDeploy,
   blankHelm,
   generateManifest,
+  blankHelmImage,
+  guessImageRows,
   guessImageValues,
   isHelmDeploy,
+  MAX_HELM_IMAGES,
+  setsSeveralImages,
   isLinkedDeploy,
   patchDeploy,
   pickLinkedDeployment,
@@ -108,6 +112,10 @@ export default function DeployStageFields({ ids, service: ciService, stage, stag
   );
   const containers = existing?.containers || [];
   const imageStageBefore = stages.slice(0, index).some((other) => other.stageType === "container_image" && other.enabled !== false);
+  const imageStages = stages
+    .slice(0, index)
+    .filter((other) => other.stageType === "container_image" && String(other.name || "").trim())
+    .map((other) => ({ name: String(other.name).trim(), enabled: other.enabled !== false }));
   const fixedImage = Boolean(deploy.image) || deploy.imageMode === "fixed";
   const form = deploy.create || {};
   const fromTemplate = (form.source || "form") === "template";
@@ -247,11 +255,13 @@ export default function DeployStageFields({ ids, service: ciService, stage, stag
           </Field>
         </div>
 
-        <HelmChartFields ids={ids} deploy={deploy} editable={editable} onChange={setHelm} />
+        <HelmChartFields ids={ids} deploy={deploy} editable={editable} onChange={setHelm} imageStages={imageStages} />
 
         <HelmReleaseStatus deploy={deploy} info={info} target={target} targetKey={targetKey} clusterName={clusterName} />
 
-        <ImageChoice deploy={deploy} editable={editable} set={setHelm} imageStageBefore={imageStageBefore} fixedImage={fixedImage} />
+        {!setsSeveralImages(deploy.helm) && (
+          <ImageChoice deploy={deploy} editable={editable} set={setHelm} imageStageBefore={imageStageBefore} fixedImage={fixedImage} />
+        )}
 
         <ul className="pl-deploy-guards" aria-label="What this stage checks">
           {registryGuard}
@@ -666,9 +676,10 @@ function ImageChoice({ deploy, editable, set, imageStageBefore, fixedImage }) {
 
 /** The chart a Helm target deploys, its version, the values file for the
  * first install, and the chart value(s) the build's image goes into. */
-function HelmChartFields({ ids, deploy, editable, onChange }) {
+function HelmChartFields({ ids, deploy, editable, onChange, imageStages }) {
   const helm = { ...blankHelm(), ...(deploy.helm || {}) };
   const image = helm.imageValues || blankHelm().imageValues;
+  const several = setsSeveralImages(helm);
   const [charts, setCharts] = useState(null);
   const [detail, setDetail] = useState({ key: "", data: null });
   const setChart = (patch) => onChange({ helm: { ...helm, ...patch } });
@@ -703,21 +714,44 @@ function HelmChartFields({ ids, deploy, editable, onChange }) {
 
   // Picking a chart guesses where its image goes from its default values, and
   // names the release after it when none is named yet.
+  const stageNames = imageStages.map((stage) => stage.name);
   const pickChart = async (id) => {
     const picked = (charts || []).find((item) => item.id === id);
     if (!picked || id === helm.chartTemplateId) return;
     let imageValues = helm.imageValues;
+    let images = helm.images;
     try {
-      imageValues = guessImageValues((await getHelmChartTemplate(id)).defaultValues);
+      const { defaultValues } = await getHelmChartTemplate(id);
+      imageValues = guessImageValues(defaultValues);
+      if (several) images = guessImageRows(defaultValues, stageNames);
     } catch {
       // Keep what was there; the fields below can still be edited.
     }
     onChange({
-      helm: { ...helm, chartTemplateId: id, chartName: picked.name, chartVersion: "", valuesFile: "", imageValues },
+      helm: { ...helm, chartTemplateId: id, chartName: picked.name, chartVersion: "", valuesFile: "", imageValues, images },
       ...(deploy.releaseName
         ? {}
         : { releaseName: String(picked.name || "").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 53) }),
     });
+  };
+
+  // Several images start from what the chart's values hold — one row per
+  // image found, paired in order with the image stages above. Rows already
+  // written (switching back and forth) are kept.
+  const startSeveral = async () => {
+    if (helm.images?.length) {
+      setChart({ imageSet: "several" });
+      return;
+    }
+    let defaultValues = detail.key === detailKey ? detail.data?.defaultValues : undefined;
+    if (defaultValues === undefined && helm.chartTemplateId) {
+      try {
+        defaultValues = (await getHelmChartTemplate(helm.chartTemplateId, helm.chartVersion)).defaultValues;
+      } catch {
+        defaultValues = null;
+      }
+    }
+    setChart({ imageSet: "several", images: guessImageRows(defaultValues, stageNames) });
   };
 
   return (
@@ -780,9 +814,50 @@ function HelmChartFields({ ids, deploy, editable, onChange }) {
           />
         </Field>
       </div>
-      <Field label="The image goes into" hint="The chart values each build sets to the image it deploys. Nothing else changes.">
+      <Field
+        label="Images"
+        hint={
+          several
+            ? "Each image goes into its own chart values, all set in the same upgrade: one revision, one approval, one rollback."
+            : "The build's image goes into the chart. Pick several for a chart that runs more than one image."
+        }
+      >
         <Segmented
+          label="How many images"
+          value={several ? "several" : "one"}
+          options={[
+            { value: "one", label: "One image" },
+            { value: "several", label: "Several images" },
+          ]}
+          disabled={!editable}
+          onChange={(count) => (count === "several" ? startSeveral() : setChart({ imageSet: undefined }))}
+        />
+      </Field>
+      {several ? (
+        <HelmImageRows ids={ids} rows={helm.images || []} imageStages={imageStages} editable={editable} onChange={(images) => setChart({ images })} />
+      ) : (
+        <ImageValuesFields
+          ids={`${ids}-image`}
           label="The image goes into"
+          hint="The chart values each build sets to the image it deploys. Nothing else changes."
+          value={image}
+          editable={editable}
+          onChange={(imageValues) => setChart({ imageValues })}
+        />
+      )}
+    </>
+  );
+}
+
+/** Where one image goes in the chart: a repository and a tag value, or one
+ * value holding the whole reference. */
+function ImageValuesFields({ ids, label, hint, value, editable, onChange }) {
+  const image = value || {};
+  return (
+    <>
+      <Field label={label} hint={hint}>
+        <Segmented
+          label={label}
           value={image.mode === "full" ? "full" : "split"}
           options={[
             { value: "split", label: "A repository and a tag value" },
@@ -790,47 +865,147 @@ function HelmChartFields({ ids, deploy, editable, onChange }) {
           ]}
           disabled={!editable}
           onChange={(mode) =>
-            setChart({
-              imageValues:
-                mode === "full"
-                  ? { mode: "full", path: image.path || "image" }
-                  : { mode: "split", repository: image.repository || "image.repository", tag: image.tag || "image.tag" },
-            })
+            onChange(
+              mode === "full"
+                ? { mode: "full", path: image.path || "image" }
+                : { mode: "split", repository: image.repository || "image.repository", tag: image.tag || "image.tag" }
+            )
           }
         />
       </Field>
       <div className="pl-grid pl-deploy-target">
         {image.mode === "full" ? (
           <TextField
-            id={`${ids}-image-path`}
+            id={`${ids}-path`}
             label="Image value"
             value={image.path}
             disabled={!editable}
             placeholder="image"
-            onChange={(path) => setChart({ imageValues: { ...image, path } })}
+            onChange={(path) => onChange({ ...image, path })}
           />
         ) : (
           <>
             <TextField
-              id={`${ids}-image-repository`}
+              id={`${ids}-repository`}
               label="Repository value"
               value={image.repository}
               disabled={!editable}
               placeholder="image.repository"
-              onChange={(repository) => setChart({ imageValues: { ...image, repository } })}
+              onChange={(repository) => onChange({ ...image, repository })}
             />
             <TextField
-              id={`${ids}-image-tag`}
+              id={`${ids}-tag`}
               label="Tag value"
               value={image.tag}
               disabled={!editable}
               placeholder="image.tag"
-              onChange={(tag) => setChart({ imageValues: { ...image, tag } })}
+              onChange={(tag) => onChange({ ...image, tag })}
             />
           </>
         )}
       </div>
     </>
+  );
+}
+
+const FIXED_IMAGE = "__fixed__";
+
+/** The images of a chart that runs several: each from an image stage above
+ * (or a fixed reference), each into chart values of its own. */
+function HelmImageRows({ ids, rows, imageStages, editable, onChange }) {
+  const setRow = (index, patch) => onChange(rows.map((row, position) => (position === index ? { ...row, ...patch } : row)));
+  const used = new Set(rows.filter((row) => row.from !== "fixed").map((row) => row.stage));
+  const nextStage = (imageStages.find((stage) => !used.has(stage.name)) || {}).name || "";
+  return (
+    <div className="pl-helm-images">
+      {!imageStages.length && (
+        <div className="pl-note is-warn">
+          <PlIcon name="alert" />
+          <p>
+            <strong>No “Build an image” stage comes before this one.</strong> Add one per image above, or give each
+            image a fixed reference.
+          </p>
+        </div>
+      )}
+      {rows.map((row, index) => {
+        const fixed = row.from === "fixed";
+        const known = imageStages.find((stage) => stage.name === row.stage);
+        return (
+          <section className="pl-helm-image" key={index} aria-label={`Image ${index + 1}`}>
+            <header>
+              <strong>Image {index + 1}</strong>
+              {editable && (
+                <button
+                  type="button"
+                  className="btn-ghost pl-rows-remove"
+                  aria-label={`Remove image ${index + 1}`}
+                  title="Remove"
+                  disabled={rows.length === 1}
+                  onClick={() => onChange(rows.filter((_, position) => position !== index))}
+                >
+                  <PlIcon name="x" />
+                </button>
+              )}
+            </header>
+            <div className="pl-grid pl-deploy-target">
+              <Field
+                label="Comes from"
+                hint={
+                  fixed
+                    ? "Deployed as written. ${VAR} expands from build inputs."
+                    : known && !known.enabled
+                      ? "That stage is turned off, so a build stops here with nothing deployed."
+                      : "The image that stage pushes in the same build."
+                }
+              >
+                <SearchableSelect
+                  id={`${ids}-image-${index}-from`}
+                  aria-label={`Where image ${index + 1} comes from`}
+                  value={fixed ? FIXED_IMAGE : row.stage || ""}
+                  disabled={!editable}
+                  placeholder="Pick an image stage…"
+                  options={[
+                    ...(!fixed && row.stage && !known ? [{ value: row.stage, label: `${row.stage} (not an image stage above)` }] : []),
+                    ...imageStages.map((stage) => ({ value: stage.name, label: stage.enabled ? stage.name : `${stage.name} (off)` })),
+                    { value: FIXED_IMAGE, label: "A fixed image" },
+                  ]}
+                  onChange={(event) =>
+                    setRow(
+                      index,
+                      event.target.value === FIXED_IMAGE
+                        ? { from: "fixed", stage: "" }
+                        : { from: "stage", stage: event.target.value, image: "" }
+                    )
+                  }
+                />
+              </Field>
+              {fixed && (
+                <TextField
+                  id={`${ids}-image-${index}-ref`}
+                  label="Image"
+                  value={row.image}
+                  disabled={!editable}
+                  placeholder="registry.areeba.com/migrations:${KUBESIGHT_BUILD_NUMBER}"
+                  onChange={(image) => setRow(index, { image })}
+                />
+              )}
+            </div>
+            <ImageValuesFields
+              ids={`${ids}-image-${index}`}
+              label="Goes into"
+              value={row.imageValues}
+              editable={editable}
+              onChange={(imageValues) => setRow(index, { imageValues })}
+            />
+          </section>
+        );
+      })}
+      {editable && rows.length < MAX_HELM_IMAGES && (
+        <button type="button" className="btn-ghost pl-rows-add" onClick={() => onChange([...rows, blankHelmImage(nextStage)])}>
+          <PlIcon name="plus" /> Add an image
+        </button>
+      )}
+    </div>
   );
 }
 

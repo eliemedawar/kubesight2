@@ -27,7 +27,10 @@ A Helm target (``deploy_config.is_helm``) goes through the same doors with a
 release instead of one deployment: step 4 installs the Inventory chart when the
 release is not there (chart values, nothing to fill in) or upgrades it keeping
 the values it runs with, the build's image set on the values the stage names —
-both through ``helm_service.install_or_upgrade_release``. The rollout is every
+both through ``helm_service.install_or_upgrade_release``. A chart that runs
+several images takes them all in that one install/upgrade, each image stage's
+image into its own values — every one checked against the registry first, and
+none deployed if one is missing. The rollout is every
 Deployment of the release; a failure rolls back to the previous revision (or
 uninstalls a release the stage installed).
 
@@ -356,31 +359,44 @@ def _advance_resolve(
         return
 
     image = state.get("image")
-    if not image:
+    if not image and deploy_config.helm_images(config):
+        rows, problem = _resolve_images(build, config)
+        if problem:
+            _fail(stage, problem)
+            return
+        # ``image`` is the line people read; ``images`` is what is deployed.
+        image = ", ".join(row["image"] for row in rows)
+        _save(stage, {"image": image, "images": rows})
+        for row in rows:
+            _log(stage, f"Image for {row['into']}: {row['image']}" + (f" (from '{row['stage']}')" if row["stage"] else ""))
+    elif not image:
         image, problem = _resolve_image(build, stage, config, definition)
         if problem:
             _fail(stage, problem)
             return
         _save(stage, {"image": image})
         _log(stage, f"Image: {image}")
+    refs = _refs(_state(stage))
 
-    # 2. Registry — the image must be FOUND in one of the cluster's registries.
-    verdict = _check_registry(image, config["clusterId"], real)
-    if verdict == "retry":
+    # 2. Registry — every image must be FOUND in one of the cluster's registries.
+    verdicts = [(ref, _check_registry(ref, config["clusterId"], real)) for ref in refs]
+    refused = next((verdict for _, verdict in verdicts if verdict and verdict != "retry"), "")
+    unanswered = [ref for ref, verdict in verdicts if verdict == "retry"]
+    if unanswered and not refused:
         first = state.get("registryRetryAt") or time.time()
         if time.time() - float(first) > _REGISTRY_RETRY_SECONDS:
             _fail(
                 stage,
                 f"The registry could not be reached for {_REGISTRY_RETRY_SECONDS // 60:.0f} minutes, "
-                f"so {image} could not be confirmed. Nothing was deployed.",
+                f"so {', '.join(unanswered)} could not be confirmed. Nothing was deployed.",
             )
             return
         if not state.get("registryRetryAt"):
             _log(stage, "The registry did not answer — retrying for up to two minutes.")
         _save(stage, {"phase": "resolving", "registryRetryAt": first})
         return
-    if verdict:
-        _fail(stage, verdict)
+    if refused:
+        _fail(stage, refused)
         return
 
     # 2b. Promotion — an enforcing environment takes only images that passed
@@ -390,7 +406,7 @@ def _advance_resolve(
         from .. import promotion_service
 
         refusal, promotion = promotion_service.gate(
-            config["clusterId"], config["namespace"], [image],
+            config["clusterId"], config["namespace"], refs,
             user=user, path="ci", workload=config.get("deploymentName"),
         )
         if refusal:
@@ -521,8 +537,14 @@ def _helm_change(stage: CiBuildStage, config: Dict[str, Any], user, image: str, 
 
     helm = config["helm"]
     release = config["releaseName"]
+    rows = _state(stage).get("images") or []
     try:
-        image_values = deploy_config.helm_image_values(config, image)
+        if rows:
+            image_values = deploy_config.helm_values_for(
+                [(row["imageValues"], row["image"]) for row in rows]
+            )
+        else:
+            image_values = deploy_config.helm_image_values(config, image)
     except deploy_config.DeployConfigError as exc:
         _fail(stage, f"{exc} Nothing was deployed.")
         return None
@@ -585,6 +607,9 @@ def _helm_change(stage: CiBuildStage, config: Dict[str, Any], user, image: str, 
 
 
 def _image_value_label(config: Dict[str, Any]) -> str:
+    rows = deploy_config.helm_images(config)
+    if rows:
+        return f"the values of {len(rows)} images"
     settings = (config.get("helm") or {}).get("imageValues") or {}
     if settings.get("mode") == "full":
         return settings.get("path") or "the image value"
@@ -834,7 +859,7 @@ def _pod_problem(
     from ..deployment_service import _run_kubectl_for_cluster
 
     state = _state(stage)
-    image = state.get("image") or ""
+    new_images = set(_refs(state))
     container_name = state.get("containerName") or ""
     try:
         if deployments is None:
@@ -861,11 +886,11 @@ def _pod_problem(
         name = (pod.get("metadata") or {}).get("name") or "pod"
         # Only containers on the new image: an old pod that was already
         # unhealthy says nothing about this rollout. A Helm target names no
-        # container, so every container given the image counts.
+        # container, so every container given one of the images counts.
         watched = {
             c.get("name")
             for c in ((pod.get("spec") or {}).get("containers") or [])
-            if c.get("image") == image and (not container_name or c.get("name") == container_name)
+            if c.get("image") in new_images and (not container_name or c.get("name") == container_name)
         }
         if not watched:
             continue
@@ -908,7 +933,7 @@ def _succeed(build: CiBuild, stage: CiBuildStage, config: Dict[str, Any], detail
     from .. import promotion_service
 
     promotion_service.record_rollout(
-        config["clusterId"], config["namespace"], [image],
+        config["clusterId"], config["namespace"], _refs(state),
         kind="HelmRelease" if deploy_config.is_helm(config) else "Deployment",
         name=_workload(config), source="ci_deploy",
         actor=getattr(user, "username", None),
@@ -1089,6 +1114,58 @@ def _resolve_image(
             "stage before this one (and check it was not skipped), or set a fixed image on this stage."
         )
     return artifact.uri, ""
+
+
+def _resolve_images(build: CiBuild, config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
+    """Each image of a several-images Helm target: the one its stage pushed
+    in this build, or its fixed reference — or why one is missing. All or
+    nothing: a release is never upgraded with only some of its images."""
+    from . import engine
+
+    env = {
+        **((build.pipeline_snapshot or {}).get("variables") or {}),
+        "KUBESIGHT_BUILD_NUMBER": str(build.number),
+        "KUBESIGHT_BRANCH": build.branch or "",
+        "KUBESIGHT_COMMIT": build.commit_sha or "",
+    }
+    rows: List[Dict[str, Any]] = []
+    for number, row in enumerate(deploy_config.helm_images(config), start=1):
+        into = deploy_config.image_value_label(row.get("imageValues") or {})
+        if row.get("from") == "fixed":
+            try:
+                image = engine._resolve_stage_image(row.get("image") or "", env, f"image {number}") or ""
+            except engine.BuildError as exc:
+                return [], f"Image {number} ({into}): {exc} Nothing was deployed."
+        else:
+            artifact = (
+                CiArtifact.query.join(CiBuildStage, CiArtifact.build_stage_id == CiBuildStage.id)
+                .filter(
+                    CiArtifact.build_id == build.id,
+                    CiArtifact.artifact_type == "container-image",
+                    CiArtifact.uri.isnot(None),
+                    CiBuildStage.name == row.get("stage"),
+                )
+                .order_by(CiArtifact.id.desc())
+                .first()
+            )
+            image = artifact.uri if artifact is not None else ""
+            if not image:
+                return [], (
+                    f"Stage '{row.get('stage')}' pushed no image in this build, so {into} has nothing "
+                    "to deploy. Check that stage ran (it may be turned off or skipped). Nothing was deployed."
+                )
+        rows.append(
+            {"stage": row.get("stage") or "", "image": image, "into": into, "imageValues": row["imageValues"]}
+        )
+    return rows, ""
+
+
+def _refs(state: Dict[str, Any]) -> List[str]:
+    """The image references a stage deploys: each of several, or its one."""
+    rows = state.get("images") or []
+    if rows:
+        return [row["image"] for row in rows]
+    return [state["image"]] if state.get("image") else []
 
 
 def _check_registry(image: str, cluster_id: str, real: bool) -> str:

@@ -456,7 +456,7 @@ export function stageProblems(stage, index, stages, parameters) {
     problems.push({ field: "commands", message: "Add at least one command to run." });
   }
   if (stage.stageType === "deploy") {
-    problems.push(...deployProblems(stage.deploy));
+    problems.push(...deployProblems(stage.deploy, stages));
   }
   if (stage.stageType === "approval") {
     problems.push(...approvalProblems(stage.approval));

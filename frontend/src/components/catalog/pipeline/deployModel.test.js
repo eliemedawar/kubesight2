@@ -5,6 +5,8 @@ import {
   deployOutcome,
   deployProblems,
   deployTarget,
+  findImageValues,
+  guessImageRows,
   guessImageValues,
   isHelmDeploy,
   isLinkedDeploy,
@@ -225,5 +227,53 @@ describe("a Helm target", () => {
     });
     expect(guessImageValues({ image: "r/app:1" })).toEqual({ mode: "full", path: "image" });
     expect(guessImageValues({}).mode).toBe("split");
+  });
+});
+
+describe("a Helm chart that runs several images", () => {
+  const values = {
+    replicaCount: 2,
+    api: { image: { repository: "reg/api", tag: "1" }, port: 8080 },
+    worker: { image: { repository: "reg/worker", tag: "1" } },
+    migrations: { image: "reg/migrate:1" },
+  };
+  const target = (images) => ({
+    ...setDeployTargetMode({ ...blankDeploy(), clusterId: "prod", namespace: "aml" }, "helm"),
+    releaseName: "aml-platform",
+    helm: { chartTemplateId: "aml", imageValues: { mode: "split", repository: "image.repository", tag: "image.tag" }, imageSet: "several", images },
+  });
+  const stages = [
+    { name: "Build API", stageType: "container_image" },
+    { name: "Build Worker", stageType: "container_image" },
+    { name: "Tests", stageType: "command" },
+  ];
+
+  it("finds every image the chart's values hold", () => {
+    expect(findImageValues(values)).toEqual([
+      { mode: "split", repository: "api.image.repository", tag: "api.image.tag" },
+      { mode: "split", repository: "worker.image.repository", tag: "worker.image.tag" },
+      { mode: "full", path: "migrations.image" },
+    ]);
+  });
+
+  it("pairs them with the image stages in order", () => {
+    const rows = guessImageRows(values, ["Build API", "Build Worker"]);
+    expect(rows.map((row) => row.stage)).toEqual(["Build API", "Build Worker", ""]);
+    expect(rows[1].imageValues.repository).toBe("worker.image.repository");
+    // A chart whose values name no image: one blank row per image stage.
+    expect(guessImageRows({}, ["A", "B"]).map((row) => row.stage)).toEqual(["A", "B"]);
+  });
+
+  it("needs a source and values of its own for every image", () => {
+    const rows = guessImageRows(values, ["Build API", "Build Worker"]);
+    rows[2] = { ...rows[2], from: "fixed", image: "reg/migrate:${KUBESIGHT_BUILD_NUMBER}" };
+    expect(deployProblems(target(rows), stages)).toEqual([]);
+    expect(deployProblems(target([]), stages)[0].message).toMatch(/Add the images/);
+    const tests = rows.map((row, index) => (index === 0 ? { ...row, stage: "Tests" } : row));
+    expect(deployProblems(target(tests), stages)[0].message).toMatch(/no “Build an image” stage called “Tests”/);
+    const clash = rows.map((row, index) => (index === 1 ? { ...row, imageValues: rows[0].imageValues } : row));
+    expect(deployProblems(target(clash), stages)[0].message).toMatch(/Images 1 and 2 both set/);
+    const inside = rows.map((row, index) => (index === 2 ? { ...row, imageValues: { mode: "full", path: "api.image" } } : row));
+    expect(deployProblems(target(inside), stages)[0].message).toMatch(/“api.image.repository” and “api.image”|“api.image” and/);
   });
 });

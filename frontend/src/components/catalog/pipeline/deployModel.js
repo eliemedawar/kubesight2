@@ -179,6 +179,111 @@ export function guessImageValues(defaultValues) {
   return blankHelm().imageValues;
 }
 
+// deploy_config.MAX_HELM_IMAGES
+export const MAX_HELM_IMAGES = 12;
+
+/** The chart sets several images (``helm.images``) rather than one. */
+export const setsSeveralImages = (helm) => helm?.imageSet === "several";
+
+/** One row of a several-images target: where the image comes from, and the
+ * chart values it goes into. */
+export const blankHelmImage = (stage = "") => ({
+  from: "stage",
+  stage,
+  image: "",
+  imageValues: { mode: "split", repository: "", tag: "" },
+});
+
+/**
+ * Every place a chart's default values take an image: each object holding a
+ * ``repository`` (with its ``tag`` beside it), and each string under a key
+ * called ``image``. In the order the chart lists them, at most MAX_HELM_IMAGES.
+ */
+export function findImageValues(defaultValues) {
+  const found = [];
+  const walk = (node, path) => {
+    if (!node || typeof node !== "object" || Array.isArray(node) || found.length >= MAX_HELM_IMAGES) return;
+    if (typeof node.repository === "string" && path.length) {
+      found.push({ mode: "split", repository: [...path, "repository"].join("."), tag: [...path, "tag"].join(".") });
+      return;
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (!/^[A-Za-z0-9_-]+$/.test(key)) continue;
+      if (key === "image" && typeof value === "string") found.push({ mode: "full", path: [...path, key].join(".") });
+      else walk(value, [...path, key]);
+    }
+  };
+  walk(defaultValues, []);
+  return found.slice(0, MAX_HELM_IMAGES);
+}
+
+/**
+ * The rows a several-images target starts with: one per image the chart's
+ * values hold, paired in order with the pipeline's image stages. Rows past the
+ * last image stage start with no stage picked.
+ */
+export function guessImageRows(defaultValues, imageStageNames) {
+  const places = findImageValues(defaultValues);
+  const names = imageStageNames || [];
+  if (!places.length) {
+    return (names.length ? names : [""]).slice(0, MAX_HELM_IMAGES).map((name) => blankHelmImage(name));
+  }
+  return places.map((imageValues, index) => ({ ...blankHelmImage(names[index] || ""), imageValues }));
+}
+
+const imagePaths = (values) =>
+  values?.mode === "full" ? [values.path] : [values?.repository, values?.tag];
+
+/** What a save would refuse about where one image goes. */
+function imageValuesProblem(values) {
+  if (imagePaths(values).some((path) => !VALUE_PATH.test(String(path || "")))) {
+    return "Name the chart value(s) the image goes into, like image.repository and image.tag.";
+  }
+  if (values?.mode !== "full" && values?.repository === values?.tag) {
+    return "The repository and the tag must be different chart values.";
+  }
+  return "";
+}
+
+/** deploy_config._helm_images, plus the stage check the pipeline validator makes. */
+function helmImagesProblems(rows, stages) {
+  const problems = [];
+  const add = (message) => problems.push({ field: "deploy", message });
+  if (!rows.length) {
+    add("Add the images this chart deploys.");
+    return problems;
+  }
+  if (rows.length > MAX_HELM_IMAGES) add(`A stage can set at most ${MAX_HELM_IMAGES} images.`);
+  const imageStages = new Set(
+    (stages || []).filter((stage) => stage.stageType === "container_image").map((stage) => String(stage.name || "").trim().toLowerCase())
+  );
+  const owner = new Map();
+  rows.forEach((row, index) => {
+    const label = `Image ${index + 1}`;
+    if ((row.from || "stage") === "stage") {
+      if (!row.stage) add(`${label}: pick the image stage it comes from.`);
+      else if (stages && !imageStages.has(String(row.stage).trim().toLowerCase())) {
+        add(`${label}: there is no “Build an image” stage called “${row.stage}”.`);
+      }
+    } else if (!String(row.image || "").trim()) add(`${label}: write the image it deploys.`);
+    else if (/\s/.test(row.image)) add(`${label}: an image reference cannot contain spaces.`);
+    const problem = imageValuesProblem(row.imageValues);
+    if (problem) {
+      add(`${label}: ${problem}`);
+      return;
+    }
+    for (const path of imagePaths(row.imageValues)) {
+      for (const [other, otherIndex] of owner) {
+        if (path === other || path.startsWith(`${other}.`) || other.startsWith(`${path}.`)) {
+          add(`Images ${otherIndex + 1} and ${index + 1} both set ${path === other ? `“${path}”` : `“${other}” and “${path}”`}. Each image needs values of its own.`);
+        }
+      }
+      owner.set(path, index);
+    }
+  });
+  return problems;
+}
+
 /** Switch a stage between a picked target, the service's linked one and a
  * Helm chart. What the other modes had is kept, so switching back loses nothing. */
 export function setDeployTargetMode(deploy, mode) {
@@ -244,7 +349,7 @@ export function deploySummary(stage) {
  * What a save would refuse about this stage's target. Mirrors
  * deploy_config.normalize + check_manifest.
  */
-export function deployProblems(deploy) {
+export function deployProblems(deploy, stages) {
   const problems = [];
   const add = (message) => problems.push({ field: "deploy", message });
   if (!deploy) {
@@ -271,13 +376,12 @@ export function deployProblems(deploy) {
     }
     const helm = deploy.helm || {};
     if (!helm.chartTemplateId) add("Pick the Inventory chart to deploy.");
-    const image = helm.imageValues || {};
-    const paths = image.mode === "full" ? [image.path] : [image.repository, image.tag];
-    if (paths.some((path) => !VALUE_PATH.test(String(path || "")))) {
-      add("Name the chart value(s) the image goes into, like image.repository and image.tag.");
-    } else if (image.mode !== "full" && image.repository === image.tag) {
-      add("The repository and the tag must be different chart values.");
+    if (setsSeveralImages(helm)) {
+      problems.push(...helmImagesProblems(helm.images || [], stages));
+      return problems;
     }
+    const problem = imageValuesProblem(helm.imageValues || {});
+    if (problem) add(problem);
     if (deploy.image && /\s/.test(deploy.image)) add("An image reference cannot contain spaces.");
     return problems;
   }

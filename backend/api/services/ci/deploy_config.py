@@ -13,7 +13,8 @@ and nothing else — a build is not the place to create Secrets or RBAC.
 Or it names a Helm release and an Inventory chart: the first build installs
 the chart (nothing has to be filled in), later builds upgrade the release
 keeping the values it runs with. Either way the build's image goes into the
-chart value(s) the stage names.
+chart value(s) the stage names — or, for a chart that runs several images,
+each image stage's image into its own values, all in one install/upgrade.
 """
 
 from __future__ import annotations
@@ -48,6 +49,14 @@ TARGET_MODES = ("fixed", "linked", "helm")
 # a tag value (image.repository / image.tag, the common chart layout);
 # ``full`` — one value holding the whole reference.
 HELM_IMAGE_MODES = ("split", "full")
+# How many images a Helm target sets: ``one`` — the build's image (or the
+# stage's fixed one) into ``imageValues``; ``several`` — ``images``, one row per
+# image, each naming the image stage it comes from (or a fixed image) and its
+# own chart values, all set in the same install/upgrade.
+HELM_IMAGE_SETS = ("one", "several")
+# Where a row of a ``several`` target takes its image from.
+HELM_IMAGE_SOURCES = ("stage", "fixed")
+MAX_HELM_IMAGES = 12
 _VALUE_PATH_RE = re.compile(r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+){0,15}$")
 # helm's own rule: a DNS label, and short enough for the names charts derive.
 _RELEASE_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
@@ -468,24 +477,29 @@ def _normalize_helm(value: Dict[str, Any], stage_name: str) -> Dict[str, Any]:
     chart_id = _clean(helm_in.get("chartTemplateId"), 120)
     if not chart_id:
         raise DeployConfigError(f"Stage '{stage_name}': pick the Inventory chart to deploy.")
-    image_in = helm_in.get("imageValues") if isinstance(helm_in.get("imageValues"), dict) else {}
-    image_mode = _clean(image_in.get("mode"), 16).lower() or "split"
-    if image_mode not in HELM_IMAGE_MODES:
+    image_set = _clean(helm_in.get("imageSet"), 16).lower() or "one"
+    if image_set not in HELM_IMAGE_SETS:
         raise DeployConfigError(
-            f"Stage '{stage_name}': '{image_mode}' is not a way to set the image. Use split or full."
+            f"Stage '{stage_name}': '{image_set}' is not a number of images. Use one or several."
         )
-    if image_mode == "split":
-        image_values = {
-            "mode": "split",
-            "repository": _value_path(image_in.get("repository"), "image repository", stage_name),
-            "tag": _value_path(image_in.get("tag"), "image tag", stage_name),
-        }
-        if image_values["repository"] == image_values["tag"]:
-            raise DeployConfigError(
-                f"Stage '{stage_name}': the repository and the tag must be different chart values."
-            )
-    else:
-        image_values = {"mode": "full", "path": _value_path(image_in.get("path"), "image", stage_name)}
+    image_values = _image_values(helm_in.get("imageValues"), stage_name, "")
+    several = image_set == "several"
+    images = _helm_images(helm_in.get("images"), stage_name) if several else []
+    helm = {
+        "chartTemplateId": chart_id,
+        # Shown in the editor; the pipeline validator writes the real name.
+        "chartName": _clean(helm_in.get("chartName"), 160),
+        # Empty: whichever version is the chart's current one when the build runs.
+        "chartVersion": _clean(helm_in.get("chartVersion"), 64),
+        # A values-*.yaml stored on the chart, for the first install only.
+        "valuesFile": _clean(helm_in.get("valuesFile"), 500),
+        # Kept while several images are set, so switching back loses nothing.
+        "imageValues": image_values,
+    }
+    if several:
+        # Only written when used, so a one-image target reads (and signs) as
+        # it did before several images existed.
+        helm.update({"imageSet": "several", "images": images})
     return {
         "target": "helm",
         "clusterId": cluster_id,
@@ -498,17 +512,100 @@ def _normalize_helm(value: Dict[str, Any], stage_name: str) -> Dict[str, Any]:
         "createIfMissing": False,
         "create": _create_form({}, stage_name),
         "manifest": "",
-        "helm": {
-            "chartTemplateId": chart_id,
-            # Shown in the editor; the pipeline validator writes the real name.
-            "chartName": _clean(helm_in.get("chartName"), 160),
-            # Empty: whichever version is the chart's current one when the build runs.
-            "chartVersion": _clean(helm_in.get("chartVersion"), 64),
-            # A values-*.yaml stored on the chart, for the first install only.
-            "valuesFile": _clean(helm_in.get("valuesFile"), 500),
-            "imageValues": image_values,
-        },
+        "helm": helm,
     }
+
+
+def _image_values(value: Any, stage_name: str, where: str) -> Dict[str, str]:
+    """Where one image goes in the chart: a repository and a tag value, or one
+    value holding the whole reference. ``where`` names a row in messages."""
+    value = value if isinstance(value, dict) else {}
+    mode = _clean(value.get("mode"), 16).lower() or "split"
+    if mode not in HELM_IMAGE_MODES:
+        raise DeployConfigError(
+            f"Stage '{stage_name}'{where}: '{mode}' is not a way to set the image. Use split or full."
+        )
+    if mode == "full":
+        return {"mode": "full", "path": _value_path(value.get("path"), f"image{where}", stage_name)}
+    values = {
+        "mode": "split",
+        "repository": _value_path(value.get("repository"), f"image repository{where}", stage_name),
+        "tag": _value_path(value.get("tag"), f"image tag{where}", stage_name),
+    }
+    if values["repository"] == values["tag"]:
+        raise DeployConfigError(
+            f"Stage '{stage_name}'{where}: the repository and the tag must be different chart values."
+        )
+    return values
+
+
+def _value_paths(image_values: Dict[str, str]) -> List[str]:
+    if image_values.get("mode") == "full":
+        return [image_values["path"]]
+    return [image_values["repository"], image_values["tag"]]
+
+
+def _helm_images(value: Any, stage_name: str) -> List[Dict[str, Any]]:
+    """The rows of a target that sets several images.
+
+    Each names where its image comes from — an image stage of this pipeline
+    (checked by the pipeline validator, which sees every stage) or a fixed
+    reference — and the chart values it goes into. No two rows may write the
+    same value, nor one value inside another (``api.image`` and
+    ``api.image.tag``): one of them would be lost.
+    """
+    rows_in = [row for row in (value if isinstance(value, list) else []) if isinstance(row, dict)]
+    if not rows_in:
+        raise DeployConfigError(
+            f"Stage '{stage_name}' sets several images but lists none. Add the images it deploys."
+        )
+    if len(rows_in) > MAX_HELM_IMAGES:
+        raise DeployConfigError(
+            f"Stage '{stage_name}' sets {len(rows_in)} images; the limit is {MAX_HELM_IMAGES}."
+        )
+    rows: List[Dict[str, Any]] = []
+    owner: Dict[str, int] = {}
+    for number, raw in enumerate(rows_in, start=1):
+        where = f", image {number}"
+        source = _clean(raw.get("from"), 16).lower() or "stage"
+        if source not in HELM_IMAGE_SOURCES:
+            raise DeployConfigError(
+                f"Stage '{stage_name}'{where}: '{source}' is not where an image comes from. "
+                "Use an image stage or a fixed image."
+            )
+        stage = _clean(raw.get("stage"), 120) if source == "stage" else ""
+        image = _clean(raw.get("image"), 512) if source == "fixed" else ""
+        if source == "stage" and not stage:
+            raise DeployConfigError(f"Stage '{stage_name}'{where}: pick the image stage it comes from.")
+        if source == "fixed" and not image:
+            raise DeployConfigError(f"Stage '{stage_name}'{where}: write the image it deploys.")
+        if image and not _IMAGE_RE.match(image):
+            raise DeployConfigError(f"Stage '{stage_name}'{where}: '{image}' is not an image reference.")
+        image_values = _image_values(raw.get("imageValues"), stage_name, where)
+        for path in _value_paths(image_values):
+            for other, other_row in owner.items():
+                if path == other or path.startswith(other + ".") or other.startswith(path + "."):
+                    clash = "the same chart value" if path == other else "overlapping chart values"
+                    raise DeployConfigError(
+                        f"Stage '{stage_name}': image {other_row} and image {number} set {clash} "
+                        f"('{other}' and '{path}'). Each image needs values of its own."
+                    )
+            owner[path] = number
+        rows.append({"from": source, "stage": stage, "image": image, "imageValues": image_values})
+    return rows
+
+
+def helm_images(config: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The rows of a Helm target that sets several images; [] for one image."""
+    helm = (config or {}).get("helm") or {}
+    if helm.get("imageSet") != "several":
+        return []
+    return [row for row in helm.get("images") or [] if isinstance(row, dict)]
+
+
+def image_value_label(image_values: Dict[str, Any]) -> str:
+    """'image.repository / image.tag' — where an image goes, in one line."""
+    return " / ".join(_value_paths(image_values)) if image_values else "the image value"
 
 
 def is_linked(config: Optional[Dict[str, Any]]) -> bool:
@@ -538,6 +635,12 @@ def split_image(image: str) -> Tuple[str, str]:
 def helm_image_values(config: Dict[str, Any], image: str) -> Dict[str, Any]:
     """The values that put ``image`` into a Helm target's chart."""
     settings = ((config.get("helm") or {}).get("imageValues")) or {}
+    return helm_values_for([(settings, image)])
+
+
+def helm_values_for(pairs: List[Tuple[Dict[str, Any], str]]) -> Dict[str, Any]:
+    """The values that put each image into the chart, for ``(imageValues,
+    image)`` pairs — one for a one-image target, one per row for several."""
     values: Dict[str, Any] = {}
 
     def put(path: str, value: str) -> None:
@@ -547,12 +650,13 @@ def helm_image_values(config: Dict[str, Any], image: str) -> Dict[str, Any]:
             cursor = cursor.setdefault(part, {})
         cursor[parts[-1]] = value
 
-    if settings.get("mode") == "full":
-        put(settings["path"], image)
-    else:
-        repository, tag = split_image(image)
-        put(settings["repository"], repository)
-        put(settings["tag"], tag)
+    for settings, image in pairs:
+        if settings.get("mode") == "full":
+            put(settings["path"], image)
+        else:
+            repository, tag = split_image(image)
+            put(settings["repository"], repository)
+            put(settings["tag"], tag)
     return values
 
 
@@ -596,6 +700,10 @@ def signature(config: Optional[Dict[str, Any]]) -> str:
             key: helm.get(key) or ""
             for key in ("chartTemplateId", "chartVersion", "valuesFile", "imageValues")
         }
+        if helm_images(config):
+            # Which images go where — a fixed reference included. Only for
+            # several images, so every one-image stamp stays valid.
+            material["helm"]["images"] = helm_images(config)
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode("utf-8")).hexdigest()
 
 
