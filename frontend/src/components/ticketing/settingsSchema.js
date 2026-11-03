@@ -203,6 +203,7 @@ const ZOHO_SECTIONS = [
     label: "Inbound webhook",
     render: "webhook",
     pill: "secret",
+    wide: true,
     intro:
       "Set up in Zoho Desk registers two webhooks for you: new DevOps Request tickets, and comments + requester replies for Hermes. A hand-made workflow rule can still POST to this URL with the shared secret in the X-Ticketing-Secret header (X-Zoho-Secret is also accepted). Until a secret is saved, every delivery is rejected.",
     done: (config) => Boolean(config?.inboundSecretConfigured),
@@ -431,6 +432,7 @@ const JIRA_SECTIONS = [
     label: "Inbound webhook",
     render: "webhook",
     pill: "secret",
+    wide: true,
     intro:
       "Set up in Jira registers two webhooks for you, filtered to the project: new issues, and comments for Hermes (needs a Jira administrator account). A hand-made webhook or Automation rule can still POST issues to this URL with the shared secret in the X-Ticketing-Secret header. Until a secret is saved, every delivery is rejected.",
     done: (config) => Boolean(config?.inboundSecretConfigured),

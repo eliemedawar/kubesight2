@@ -1184,6 +1184,10 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 .sg-zh-fieldmap .field-hint { line-height: 1.45; }
+/* A long hint in one cell must not stretch its neighbour's label rows apart. */
+.zoho-page .settings-form label { align-content: start; }
+/* Secret input + Generate inside a field: the label's own gap spaces it. */
+.zoho-page .settings-form label .sg-zh-url { margin: 0; }
 @media (max-width: 700px) {
   .zoho-page .sg-zh-fieldmap.settings-form { grid-template-columns: 1fr; }
 }
