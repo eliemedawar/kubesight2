@@ -1,5 +1,7 @@
-"""What the routes call: shape a VMware build, plan it, apply it, grow it,
-destroy it — with the guards that keep those from stepping on each other.
+"""What the routes call: shape a VMware or cloud build, plan it, apply it,
+grow it, destroy it — with the guards that keep those from stepping on each
+other. Where a cloud build differs (no address ranges, a cloud load balancer
+instead of balancer VMs, managed clusters), ``cloud_build`` answers.
 
 Who may do what (the routes add the permission check):
   * a create or grow plan is applied by anyone allowed to execute builds,
@@ -18,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ....db import db
 from ....models import ClusterBuild, ClusterInfraState, ClusterProvisionJob, VSphereConnection
-from . import inventory, ip_pool, jobs, state_store, templates, tofu_runner
+from . import cloud_build, inventory, ip_pool, jobs, state_store, templates, tofu_runner
 
 _NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,48}[a-z0-9])?$")
 _ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
@@ -31,6 +33,12 @@ def _utcnow() -> datetime:
 
 def is_vmware(build: ClusterBuild) -> bool:
     return (build.machine_source or "existing") == "vmware"
+
+
+def is_provisioned(build: ClusterBuild) -> bool:
+    """KubeSight creates this build's machines (or cluster) with OpenTofu:
+    in vCenter, or in Oracle Cloud, AWS or Google Cloud."""
+    return is_vmware(build) or cloud_build.is_cloud(build)
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +299,8 @@ def _plan_machines(build: ClusterBuild) -> List[Dict[str, Any]]:
 
 
 def _sync_nodes(build: ClusterBuild, machines: List[Dict[str, Any]]) -> None:
+    """Nodes for ``machines``. A cloud VM has no address until the cloud gives it
+    one at apply time; its node's address stays empty until then."""
     from ....models import ClusterBuildNode
 
     by_name = {n.vsphere_vm_name: n for n in build.nodes if n.vsphere_vm_name}
@@ -302,7 +312,7 @@ def _sync_nodes(build: ClusterBuild, machines: List[Dict[str, Any]]) -> None:
         node.role = templates.ROLE_TO_NODE_ROLE[machine["role"]]
         node.hostname = machine["name"]
         node.vsphere_vm_name = machine["name"]
-        node.address = machine["ip"]
+        node.address = machine.get("ip") or node.address or ""
         node.address_source = "provisioned"
         node.vsphere_cpu = machine["cpu"]
         node.vsphere_memory_mb = machine["memoryGb"] * 1024
@@ -324,7 +334,7 @@ def _sync_nodes(build: ClusterBuild, machines: List[Dict[str, Any]]) -> None:
 # ---------------------------------------------------------------------------
 
 def _require_vmware(build: ClusterBuild) -> None:
-    if not is_vmware(build):
+    if not is_provisioned(build):
         raise ValueError("This build uses machines that already exist; KubeSight did not create them.")
 
 
@@ -371,19 +381,27 @@ def request_create_plan(build: ClusterBuild, *, actor: str = "", user=None) -> C
     _require_vmware(build)
     if build.status not in ("draft", "preflight_failed", "provision_failed"):
         raise ValueError(f"A plan for new VMs cannot be made while the build is '{build.status}'.")
-    if not build.connection_profile_id:
+    managed = cloud_build.is_managed(build)
+    if not build.connection_profile_id and not managed:
         raise ValueError("Choose the SSH route KubeSight uses to reach the new VMs (Sources row).")
     if not build.provisioning_json:
-        raise ValueError("Choose where in vCenter the VMs go first.")
+        raise ValueError("Choose where the VMs go first.")
     _require_no_open_job(build, supersede_planned=True)
     validate_cluster_name(build.name)
-    apply_shape_to_build(build)
-    machines = _plan_machines(build)
+    if cloud_build.is_cloud(build):
+        cloud_build.apply_shape(build)
+        machines = cloud_build.plan_machines(build)
+    else:
+        apply_shape_to_build(build)
+        machines = _plan_machines(build)
     _sync_nodes(build, machines)
-    if not build.vms_only:
+    if not build.vms_only and not managed:
         build_service._validate_topology(
             build,
-            [{"role": n.role, "hostname": n.hostname, "address": n.address} for n in build.nodes],
+            # A cloud VM's address is the cloud's to pick at apply time; its
+            # name stands in for it here (the endpoint mode is checked the same).
+            [{"role": n.role, "hostname": n.hostname, "address": n.address or n.hostname}
+             for n in build.nodes],
         )
     if build.status == "provision_failed":
         build.status = "draft"
@@ -423,12 +441,19 @@ def request_grow_plan(build: ClusterBuild, payload: Dict[str, Any], *, actor: st
     from .. import service as build_service
 
     _require_vmware(build)
+    if cloud_build.is_managed(build):
+        return _request_node_pool_resize(build, payload, actor=actor, user=user)
     build_service._require_growable(build)
     if build_service.growth_nodes(build):
         raise ValueError("Machines are already queued to join. Finish or remove those first.")
     _require_no_open_job(build, supersede_planned=True)
     spec = build.provisioning_json or {}
     adding = _grow_counts(payload)
+    if cloud_build.is_cloud(build) and adding["loadbalancer"]:
+        raise ValueError(
+            "On a cloud the API load balancer is the cloud's own; there are no "
+            "load-balancer machines to add."
+        )
     build_service.check_tier_growth(
         build,
         {templates.ROLE_TO_NODE_ROLE[role]: n for role, n in adding.items()},
@@ -455,17 +480,45 @@ def request_grow_plan(build: ClusterBuild, payload: Dict[str, Any], *, actor: st
             if (match := re.search(rf"-{short}-(\d+)$", name))
         ]
         start = max(numbers, default=0) + 1
+        if cloud_build.is_cloud(build):
+            new.extend(
+                cloud_build.machine_for(build, role, f"{build.name}-{short}-{start + offset}", sizes)
+                for offset in range(adding[role])
+            )
+            continue
         new.extend({
             "name": f"{build.name}-{short}-{start + offset}",
             "role": role,
             **machine_size(spec, role, sizes),
             "datastoreId": spec["datastoreId"],
         } for offset in range(adding[role]))
-    range_row = ip_pool.get_range(int(spec["networkRangeId"]))
-    addresses = ip_pool.reserve(range_row, build.id, [{"key": m["name"]} for m in new])
-    for machine in new:
-        machine["ip"] = addresses[machine["name"]]
+    if not cloud_build.is_cloud(build):
+        range_row = ip_pool.get_range(int(spec["networkRangeId"]))
+        addresses = ip_pool.reserve(range_row, build.id, [{"key": m["name"]} for m in new])
+        for machine in new:
+            machine["ip"] = addresses[machine["name"]]
     job = _new_job(build, "grow", actor=actor, user=user, config_json={"newMachines": new})
+    db.session.commit()
+    jobs.start_worker(job.id, "plan")
+    db.session.refresh(job)
+    return job
+
+
+def _request_node_pool_resize(build: ClusterBuild, payload: Dict[str, Any], *, actor: str = "",
+                              user=None) -> ClusterProvisionJob:
+    """Day two on a managed cluster: the cloud adds the nodes to its pool."""
+    if build.status != "completed" or not build.result_cluster_id:
+        raise ValueError("Nodes can be added once the cluster is up and registered.")
+    adding = _grow_counts(payload)
+    if adding["controlPlane"] or adding["loadbalancer"]:
+        raise ValueError("The cloud runs this cluster's control plane; only nodes can be added.")
+    _require_no_open_job(build, supersede_planned=True)
+    current = int(((build.provisioning_json or {}).get("counts") or {}).get("worker") or 0)
+    total = current + adding["worker"]
+    if total > templates.MAX_WORKERS:
+        raise ValueError(f"A node pool takes at most {templates.MAX_WORKERS} nodes.")
+    job = _new_job(build, "grow", actor=actor, user=user,
+                   config_json={"nodeCount": total, "addedNodes": adding["worker"]})
     db.session.commit()
     jobs.start_worker(job.id, "plan")
     db.session.refresh(job)
@@ -776,6 +829,11 @@ def install_kubernetes(build: ClusterBuild, payload: Optional[Dict[str, Any]] = 
         raise ValueError("OpenTofu's state lists no VMs for this build.")
     total = len((build.provisioning_json or {}).get("machines") or [])
     counts = templates.counts_for_vms(payload.get("counts"), total)
+    if cloud_build.is_cloud(build) and counts["loadbalancer"]:
+        raise ValueError(
+            "On a cloud the API load balancer is made with the cluster, not from its VMs. "
+            "Choose a shape without load balancers for VMs that already exist."
+        )
     if payload.get("k8sVersion"):
         build.k8s_version = k8s_versions.validate_version(payload["k8sVersion"])
     else:
@@ -787,7 +845,10 @@ def install_kubernetes(build: ClusterBuild, payload: Optional[Dict[str, Any]] = 
 
     machines = _assign_roles(build, counts)
     _sync_nodes(build, machines)
-    apply_shape_to_build(build)
+    if cloud_build.is_cloud(build):
+        cloud_build.apply_shape(build)
+    else:
+        apply_shape_to_build(build)
     if counts["loadbalancer"]:
         vip = build.vip_address or _reserve_vip(build)
         build.vip_address = vip
@@ -835,7 +896,7 @@ class ListContext:
     build at once: the current job of each and its state row (no ciphertext)."""
 
     def __init__(self, builds):
-        ids = [b.id for b in builds if is_vmware(b)]
+        ids = [b.id for b in builds if is_provisioned(b)]
         self.jobs = jobs.current_jobs(ids)
         self.states = state_store.light_rows(ids)
         # States written before vm_count existed, counted (and stored) now.
@@ -855,7 +916,7 @@ class ListContext:
 
 
 def summary_for_list(build: ClusterBuild, ctx: Optional[ListContext] = None) -> Optional[Dict[str, Any]]:
-    if not is_vmware(build):
+    if not is_provisioned(build):
         return None
     if ctx is not None:
         current = ctx.jobs.get(build.id)
@@ -889,7 +950,7 @@ def _log_shown(build: ClusterBuild, job: ClusterProvisionJob) -> bool:
 
 
 def detail(build: ClusterBuild) -> Optional[Dict[str, Any]]:
-    if not is_vmware(build):
+    if not is_provisioned(build):
         return None
     history = jobs.jobs_for(build.id, limit=_HISTORY_LIMIT)
     current = next((j for j in history if j.status in jobs.OPEN_STATUSES), None)

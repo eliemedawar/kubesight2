@@ -130,11 +130,31 @@ def _desired_resources(config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
                                 {"ipv4_address": values.get("ip")}
                             ]}]}],
                         })
+                    elif isinstance(values, dict):
+                        # A cloud VM: what its for_each entry says (role, size,
+                        # machine type) is what the simulator reads back.
+                        after.update({k: v for k, v in values.items() if isinstance(v, (str, int, bool))})
                     out[address] = {"type": rtype, "name": rname, "key": key, "after": after}
             else:
                 after = {k: v for k, v in body.items() if isinstance(v, (str, int, bool))}
                 out[f"{rtype}.{rname}"] = {"type": rtype, "name": rname, "key": None, "after": after}
     return out
+
+
+_CLOUD_PREFIXES = {"aws_": "aws", "google_": "gcp", "oci_": "oci"}
+
+
+def _cloud_of(rtype: str) -> Optional[str]:
+    return next((p for prefix, p in _CLOUD_PREFIXES.items() if (rtype or "").startswith(prefix)), None)
+
+
+def _slow(rtype: str) -> bool:
+    """Resources a demo should watch being made: VMs and managed clusters."""
+    from .state_store import VM_RESOURCE_TYPES
+
+    return rtype in VM_RESOURCE_TYPES or rtype in (
+        "aws_eks_cluster", "google_container_cluster", "oci_containerengine_cluster",
+    )
 
 
 class SimulatedEngine:
@@ -305,7 +325,7 @@ class SimulatedEngine:
                 address = change["address"]
                 if change["actions"] == ["create"]:
                     self._say(on_line, f"{address}: Creating...")
-                    if change["type"] == "vsphere_virtual_machine" and self.delay_s:
+                    if _slow(change["type"]) and self.delay_s:
                         steps = 3
                         for step in range(1, steps + 1):
                             time.sleep(self.delay_s / steps)
@@ -325,7 +345,7 @@ class SimulatedEngine:
                               f"[id={self._fake_id(change)}]")
                 else:
                     self._say(on_line, f"{address}: Destroying...")
-                    if change["type"] == "vsphere_virtual_machine" and self.delay_s:
+                    if _slow(change["type"]) and self.delay_s:
                         time.sleep(self.delay_s / 2)
                     self._remove_instance(state, change)
                     removed += 1
@@ -347,13 +367,31 @@ class SimulatedEngine:
             (r for r in resources if r["type"] == change["type"] and r["name"] == change["name"]),
             None,
         )
+        cloud = _cloud_of(change["type"])
         if resource is None:
+            provider = tofu_config.PROVIDER_ADDRESS
+            if cloud:
+                from . import clouds
+
+                source = clouds.adapter(cloud).TOFU_PROVIDER["source"]
+                provider = f"registry.opentofu.org/{source}"
             resource = {
                 "mode": "managed", "type": change["type"], "name": change["name"],
-                "provider": f'provider["{tofu_config.PROVIDER_ADDRESS}"]', "instances": [],
+                "provider": f'provider["{provider}"]', "instances": [],
             }
             resources.append(resource)
         attributes = {"id": self._fake_id(change), **(change.get("after") or {})}
+        if cloud:
+            from . import clouds
+            from .state_store import VM_RESOURCE_TYPES
+
+            # Every VM in the state so far, so each one gets its own address.
+            seq = sum(
+                len(r.get("instances") or []) for r in resources if r["type"] in VM_RESOURCE_TYPES
+            )
+            attributes.update(clouds.adapter(cloud).simulate_attributes(
+                change["type"], change["name"], change.get("key"), change.get("after") or {}, seq,
+            ) or {})
         if change["type"] == "vsphere_virtual_machine":
             ip = (((change.get("after") or {}).get("clone") or [{}])[0].get("customize") or [{}])[0] \
                 .get("network_interface", [{}])[0].get("ipv4_address")

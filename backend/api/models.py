@@ -2979,6 +2979,7 @@ class JiraIntegration(db.Model):
 from .models_cluster_build import (  # noqa: E402,F401
     AppProfile,
     BuildProfile,
+    CloudAccount,
     ClusterBuild,
     ClusterBuildApp,
     ClusterBuildNode,

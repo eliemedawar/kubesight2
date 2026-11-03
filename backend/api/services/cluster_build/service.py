@@ -19,6 +19,7 @@ from sqlalchemy.orm import selectinload, undefer
 from ...db import db
 from ...models import (
     BuildProfile,
+    CloudAccount,
     ClusterBuild,
     ClusterBuildApp,
     ClusterBuildNode,
@@ -36,6 +37,7 @@ from . import profiles as build_profile_service
 from . import storage as storage_copy
 from . import workloads as workload_copy
 from .profiles import resolve as resolve_profile
+from .provisioning import cloud_build
 from .provisioning import service as provisioning_service
 from .provisioning import state_store as provisioning_state
 from .provisioning import templates as cluster_templates
@@ -45,7 +47,9 @@ _ENDPOINT_MODES = {"managed_haproxy", "external_lb", "manual_endpoint"}
 _TOPOLOGIES = {"single_cp", "stacked_ha"}
 _ROLES = {"control_plane", "worker", "loadbalancer"}
 _EDITABLE_STATUSES = {"draft", "preflight_passed", "preflight_failed", "provision_failed"}
-_MACHINE_SOURCES = {"existing", "vmware"}
+# existing: machines someone already made. vmware / oci / aws / gcp: KubeSight
+# creates them (or, for a managed cloud cluster, the whole cluster) with OpenTofu.
+_MACHINE_SOURCES = {"existing", "vmware", "oci", "aws", "gcp"}
 
 # The versions KubeSight ships when upstream release discovery is unreachable.
 # The live list served to the wizard is discovered per supported minor — see
@@ -154,8 +158,10 @@ def serialize_build(build: ClusterBuild, *, include_detail: bool = False,
         # view carries each one's values.yaml, credentials masked.
         "apps": build_apps.serialize_apps(build, with_values=include_detail),
         "vsphereConnectionId": build.vsphere_connection_id,
-        # existing | vmware — whether KubeSight creates the VMs (OpenTofu).
+        # existing | vmware | oci | aws | gcp — whether (and where) KubeSight
+        # creates the VMs with OpenTofu.
         "machineSource": build.machine_source or "existing",
+        "cloud": _cloud_summary(build),
         # VMware only: the VMs are the whole job; Kubernetes is not installed.
         "vmsOnly": bool(build.vms_only),
         "templateId": build.template_id,
@@ -182,7 +188,7 @@ def serialize_build(build: ClusterBuild, *, include_detail: bool = False,
         # What a running cluster may still take, so the UI offers only that.
         "growthLimits": _growth_limits(build),
         "canDestroy": bool(
-            (build.machine_source or "existing") == "vmware"
+            provisioning_service.is_provisioned(build)
             and build.status not in ("building", "preflighting", "provisioning",
                                      "destroying", "destroyed")
             and (list_ctx.has_resources(build.id) if list_ctx is not None
@@ -572,6 +578,38 @@ def _validate_topology(build: ClusterBuild, nodes: List[Dict[str, Any]]) -> List
     return warnings
 
 
+def _cloud_summary(build: ClusterBuild) -> Optional[Dict[str, Any]]:
+    """Where a cloud build lives, for the pages; None for vCenter and existing
+    machines. Reads the spec only (no cloud call)."""
+    if not cloud_build.is_cloud(build):
+        return None
+    spec = build.provisioning_json or {}
+    try:
+        module = cloud_build.module_for(build)
+    except ValueError:
+        return None
+    account = db.session.get(CloudAccount, build.cloud_account_id) if build.cloud_account_id else None
+    managed = spec.get("kind") == "managed"
+    return {
+        "provider": build.machine_source,
+        "providerLabel": module.LABEL,
+        "managedLabel": module.MANAGED_LABEL,
+        "accountId": build.cloud_account_id,
+        "accountName": account.name if account is not None else None,
+        "region": spec.get("region"),
+        "zone": spec.get("zone"),
+        "kind": spec.get("kind") or "vms",
+        "loadBalancer": cloud_build.load_balanced(build),
+        "networkName": spec.get("networkName"),
+        "subnetName": spec.get("subnetName"),
+        "managed": ({
+            "kubernetesVersion": (spec.get("managed") or {}).get("kubernetesVersion"),
+            "nodeCount": int((spec.get("counts") or {}).get("worker") or 0),
+            "size": (spec.get("sizes") or {}).get("worker"),
+        } if managed else None),
+    }
+
+
 def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
     name = str(payload.get("name", build.name or "")).strip()
     if not name:
@@ -584,15 +622,16 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
         payload.get("machineSource", build.machine_source or "existing") or "existing"
     ).strip()
     if machine_source not in _MACHINE_SOURCES:
-        raise ValueError("machineSource must be 'existing' or 'vmware'.")
+        raise ValueError("machineSource must be 'existing', 'vmware', 'oci', 'aws' or 'gcp'.")
     if (
         build.id
         and machine_source != (build.machine_source or "existing")
         and provisioning_state.has_resources(build.id)
     ):
-        raise ValueError("KubeSight already created VMs for this build; it stays a VMware build.")
+        raise ValueError("KubeSight already created machines for this build; it stays where they are.")
     build.machine_source = machine_source
-    vms_only = bool(payload.get("vmsOnly", build.vms_only)) and machine_source == "vmware"
+    creates = machine_source != "existing"
+    vms_only = bool(payload.get("vmsOnly", build.vms_only)) and creates
     if (
         build.id
         and vms_only != bool(build.vms_only)
@@ -608,16 +647,52 @@ def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:
         if template_id and not cluster_templates.is_known_template_id(template_id):
             raise ValueError("Unknown cluster template.")
         build.template_id = template_id
-    if machine_source == "vmware":
+    if creates:
         provisioning_service.validate_cluster_name(build.name)
+    if cloud_build.is_cloud(build) and not build.name[:1].isalpha():
+        raise ValueError(
+            "On a cloud the name also names the VMs and their hostnames, which must "
+            "start with a letter."
+        )
 
     # Same policy the options endpoint publishes, so every version the wizard
     # offers is accepted here. Minor-scoped rather than list-scoped on purpose:
     # a draft pinned to 1.32.4 must stay editable once 1.32.5 is discovered,
     # and the build keeps its own exact patch either way.
-    build.k8s_version = k8s_versions.validate_version(
-        payload.get("k8sVersion", build.k8s_version or "")
-    )
+    raw_spec = payload.get("provisioning") if isinstance(payload.get("provisioning"), dict) else {}
+    managed = cloud_build.is_cloud(build) and (
+        raw_spec.get("kind") or (build.provisioning_json or {}).get("kind")
+    ) == "managed" and not vms_only
+    if not managed:
+        build.k8s_version = k8s_versions.validate_version(
+            payload.get("k8sVersion", build.k8s_version or "")
+        )
+
+    if cloud_build.is_cloud(build):
+        # The shape comes from the role counts; the API address is the cloud
+        # load balancer's (or the first control plane's) once the apply made it.
+        if "provisioning" in payload or not build.provisioning_json:
+            build.provisioning_json = cloud_build.normalize_spec(build, payload.get("provisioning"))
+            build.cloud_account_id = build.provisioning_json["cloudAccountId"]
+        if cloud_build.is_managed(build):
+            # The cloud's own version string ("1.33", "1.33.1-gke.100"): the
+            # phase machine never reads it, the cluster pages show it. The cloud
+            # also brings the network plugin, so none of the kubeadm cluster
+            # settings (CNI, add-ons, workload copy) apply.
+            build.k8s_version = str(build.provisioning_json["managed"]["kubernetesVersion"])[:32]
+            build.addons_json = []
+            build.workloads_json = None
+            build.vsphere_connection_id = None
+            cloud_build.apply_shape(build)
+            return
+        build.vsphere_connection_id = None
+        cloud_build.apply_shape(build)
+        if "diskCheckPath" in payload:
+            value = str(payload.get("diskCheckPath") or "").strip()
+            path = _validate_disk_check_path(value) if value else ""
+            build.disk_check_path = path if path and path != preflight.DEFAULT_DISK_PATH else None
+        _apply_cluster_settings(build, payload)
+        return
 
     if machine_source == "vmware":
         # The shape comes from the role counts, and the API address from the
@@ -807,7 +882,7 @@ def _apply_cluster_settings(build: ClusterBuild, payload: Dict[str, Any]) -> Non
         ("buildProfileId", "build_profile_id"),
         ("connectionProfileId", "connection_profile_id"),
     ):
-        if key == "vsphereConnectionId" and build.machine_source == "vmware":
+        if key == "vsphereConnectionId" and provisioning_service.is_provisioned(build):
             continue  # follows the provisioning spec
         if key in payload:
             value = payload.get(key)
@@ -943,7 +1018,7 @@ def create_build(
     if workload_copy.selection_of(build):
         workload_copy.authorize_selection(build.workloads_json, user)
     nodes_payload = payload.get("nodes") or []
-    if nodes_payload and build.machine_source != "vmware":
+    if nodes_payload and not provisioning_service.is_provisioned(build):
         _apply_nodes_payload(build, nodes_payload)
         _validate_topology(
             build,
@@ -991,10 +1066,10 @@ def update_build(build_id: int, payload: Dict[str, Any], user=None) -> Dict[str,
     if "workloads" in payload and workload_copy.selection_of(build):
         workload_copy.authorize_selection(build.workloads_json, user)
         build.execution_user_id = None
-    if "nodes" in payload and build.machine_source != "vmware":
+    if "nodes" in payload and not provisioning_service.is_provisioned(build):
         _apply_nodes_payload(build, payload.get("nodes") or [])
     _apply_apps_payload(build, payload, getattr(user, "username", "") or "")
-    if build.nodes and build.machine_source != "vmware":
+    if build.nodes and not provisioning_service.is_provisioned(build):
         _validate_topology(
             build,
             [
@@ -1022,7 +1097,7 @@ def delete_build(build_id: int, *, confirm_name: Optional[str] = None) -> Dict[s
     if provisioning_state.vm_instances(build.id):
         raise ValueError(
             "KubeSight created VMs for this build and they still exist. Destroy "
-            "the cluster first, so nothing is left running in vCenter."
+            "the cluster first, so nothing is left running in vCenter or the cloud."
         )
     if build.status in ("completed", "destroyed") or build.result_cluster_id:
         if (confirm_name or "").strip() != build.name:
@@ -1061,6 +1136,11 @@ def delete_build(build_id: int, *, confirm_name: Optional[str] = None) -> Dict[s
 # ---------------------------------------------------------------------------
 
 def _require_kubernetes_wanted(build: ClusterBuild) -> None:
+    if cloud_build.is_managed(build):
+        raise ValueError(
+            "The cloud installs Kubernetes on this cluster; KubeSight registers it once "
+            "OpenTofu has created it. There is nothing to preflight or build here."
+        )
     if build.vms_only:
         raise ValueError(
             "This build creates VMs only. Use Install Kubernetes on its page "
@@ -1167,8 +1247,8 @@ def run_preflight(build_id: int, user=None) -> Dict[str, Any]:
 
 
 def _require_machines_exist(build: ClusterBuild) -> None:
-    """A VMware build's machines exist only once OpenTofu created them."""
-    if build.machine_source != "vmware":
+    """A VMware or cloud build's machines exist only once OpenTofu created them."""
+    if not provisioning_service.is_provisioned(build):
         return
     names = {
         m["name"] for m in (build.provisioning_json or {}).get("machines") or []

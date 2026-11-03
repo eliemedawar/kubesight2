@@ -732,3 +732,84 @@ What a growth run does differently:
 Verified by `tests/test_cluster_zero_to_hero.py` (build Small → add MetalLB → add balancer + two
 control planes + worker → add Metrics Server, on both machine sources) and by a browser run of the
 same life against a scripted SSH stand-in. Not yet run against real machines.
+
+---
+
+## 16. Oracle Cloud, AWS and Google Cloud (built 2026-11-03)
+
+KubeSight creates machines and clusters in the three public clouds the same way it creates them in
+vCenter: OpenTofu jobs (§14), the same HTTP state backend, the same plan → apply → connect → hand-off,
+the same approvals and the same destroy rules. `machine_source` is now `existing | vmware | oci |
+aws | gcp`.
+
+### Decisions (Elie, 2026-11-03)
+
+| Decision | What it means in the code |
+|---|---|
+| **Both kinds, chosen per build** | `spec.kind`: `vms` (OpenTofu makes the VMs, the phase machine installs Kubernetes over SSH, exactly as on VMware) or `managed` (OpenTofu makes OKE / EKS / GKE; KubeSight registers it). VMs only works on clouds too. |
+| **Stored keys per account** | `cloud_accounts` (`CloudAccount`): non-secret `settings_json`, secrets as one Fernet-encrypted JSON object, optional TLS-inspection CA. A blank secret on the form keeps the stored one. Managed under Sources → Cloud accounts with `vsphere:manage` (relabelled "vSphere connections and cloud accounts"). |
+| **Private addresses only** | No public IP is ever requested. KubeSight reaches VMs and managed APIs over VPN / peering / interconnect or the SSH route's bastion. `spec.allowedCidrs` (required, never 0.0.0.0/0) is who may reach SSH and 6443 — KubeSight's own network. |
+| **All three at once** | One shared layer, one adapter module per cloud. |
+
+### Where things live
+
+- `provisioning/clouds/base.py` — the adapter contract (read its docstring first), HTTP seam
+  (`set_transport`), `cloud_init()`, `smallest_fitting()`, `normalize_cidrs()`, contexts.
+- `provisioning/clouds/{aws,gcp,oci}.py` — signing (hand-written SigV4, Google JWT-bearer with PyJWT,
+  OCI HTTP signatures — no cloud SDK in requirements), inventory, machine types, `render_vms`,
+  `render_managed`, provider environment, reading state back, managed-cluster access, simulator.
+- `provisioning/clouds/accounts.py` + `routes/cloud_accounts.py` — accounts CRUD, test, regions,
+  inventory (cached 120 s), `resolve-sizes`.
+- `provisioning/cloud_build.py` — what the VMware frame asks of a cloud build: spec, shape, machines,
+  SSH key injection, render, read-back (`record_created`), managed onboarding.
+- `jobs.py` `_target(build)` → `_VSphereTarget` / `_CloudTarget`: account, plan checks, render,
+  environment, watcher. Everything else in the job engine is shared.
+
+### How a cloud build differs from VMware
+
+- **Addresses:** the cloud picks each VM's private address; `record_created` reads it from state
+  (`vm_facts`). No ranges, no reservations, no address probes. Nodes have an empty address until apply.
+- **API endpoint:** `counts.loadbalancer > 0` means **the cloud's internal network load balancer**
+  (AWS NLB with IP targets and no client-IP preservation, Google internal passthrough LB, OCI NLB
+  without source preservation) on TCP 6443 in front of the control planes — never load-balancer VMs
+  (a keepalived VIP cannot float on a cloud network). `endpoint_mode` is `external_lb`, or
+  `manual_endpoint` (first control plane) without one. The endpoint is filled in after the apply.
+- **Google hairpin:** a backend calling Google's internal LB is answered by itself, so a control plane
+  that is joining would talk to its own (absent) API server. `executor._hairpin_guard` adds a
+  temporary iptables DNAT on the joining node sending LB:6443 to the primary for the length of the join.
+- **SSH:** the build's SSH credential goes onto the VMs: its public key (derived from the stored private
+  key) or its password, through cloud-init (`users:` with NOPASSWD sudo) — on Google also
+  `ssh-keys` metadata with OS Login off; Google refuses password-only and root credentials.
+- **Names** must start with a letter (cloud hostnames); GKE names ≤ 40 characters.
+- **Install Kubernetes on cloud VMs-only builds** offers only shapes without a load balancer (the
+  cloud LB is created with the cluster, not afterwards). Growth never adds load balancers on a cloud.
+- **Managed clusters:** no nodes, no preflight, no CNI / add-ons / workloads / apps. After the apply the
+  connect phase signs in to the private API with the account (`managed_access`: EKS presigned-STS token,
+  Google OAuth token, OKE signed token), creates `kube-system/kubesight-admin` + cluster-admin binding +
+  token Secret, and registers the cluster with that token. Day two grows the node pool
+  (`grow-plan {workers}` → `config_json.nodeCount`). OKE's node image is chosen by the adapter
+  (`default_node_image`) — nobody is asked for it.
+
+### Deploying it
+
+- `backend/Dockerfile` mirrors hashicorp/aws **6.71.0**, hashicorp/google **8.9.0** and oracle/oci
+  **9.11.0** with `tofu providers mirror` (packed layout, checked against the registry's signed sums)
+  next to the patched vSphere provider; `tofu_config.cli_config` installs all four only from the mirror.
+  Bump the Dockerfile ARGs together with `TOFU_PROVIDER` in each adapter. The image grows by the size
+  of the three provider zips.
+- What each account needs on the cloud side: AWS — EC2/ELB/IAM (managed: EKS + IAM role creation);
+  Google — Compute Admin + Service Account User (managed: Kubernetes Engine Admin); OCI — manage
+  instance-family, virtual-network-family, network-load-balancers (managed: cluster-family) in the
+  compartment. KubeSight must reach the subnets / private endpoints over the private network.
+- Simulation (`KUBESIGHT_PROVISIONING_SIMULATE=1`) covers clouds too: every adapter has simulated
+  regions, inventory and state attributes; managed clusters are not registered in simulation.
+
+### Verified / not verified
+
+Verified: `tests/test_cloud_provisioning.py` (accounts, spec rules, VMs-only, kubeadm behind the cloud
+LB, managed register + grow, destroy — on all three clouds), `tests/test_cloud_{aws,gcp,oci}.py`
+(signing byte-identical to botocore / google-auth / the OCI SDK and CLI, rendering), real `tofu validate`
+and an offline `tofu plan` of every generated configuration against the pinned providers, and a
+browser run in simulation (Sources → account, OCI VMs only, AWS Small behind the NLB, managed GKE).
+**Not verified against a real tenancy / account / project** — no live inventory call, apply, managed
+registration or LB health check has run yet.

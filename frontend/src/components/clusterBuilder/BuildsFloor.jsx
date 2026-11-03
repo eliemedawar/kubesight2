@@ -14,6 +14,7 @@ import { useState } from "react";
 import { parseApiTime } from "../../lib/apiTime";
 import { cancelClusterBuild, deleteClusterBuild, stopProvisionWait } from "../../api/clusterBuildsApi.js";
 import { PROVISION_STATUS_LABELS } from "../../utils/clusterProvisioning.js";
+import { cloudWhere, isManagedBuild, managedLabel, whereCreated } from "../../utils/cloudProvisioning.js";
 import {
   PHASE_LABELS,
   PHASE_NOTES,
@@ -130,15 +131,20 @@ function InFlightStrip({ build, now, onOpen, canExecute, notify, onChanged }) {
           <LiveBadge label={PROVISION_STATUS_LABELS[build.provisionStatus] || "Creating VMs"} />
           <h3>{build.name}</h3>
           <span className="muted sg-cb-mono sg-cb-flight-meta">
-            {build.vmsOnly ? "VMs only" : `v${build.k8sVersion}`} · {vms} VM{vms === 1 ? "" : "s"} · OpenTofu
+            {isManagedBuild(build)
+              ? `${managedLabel(build.cloud.provider)} v${build.k8sVersion} · ${cloudWhere(build.cloud)}`
+              : <>{build.vmsOnly ? "VMs only" : `v${build.k8sVersion}`} · {vms} VM{vms === 1 ? "" : "s"}
+                {build.cloud ? ` · ${cloudWhere(build.cloud)}` : ""}</>} · OpenTofu
           </span>
         </div>
         <div className="sg-cb-flight-now">
           <b>{PROVISION_STATUS_LABELS[build.provisionStatus] || "Creating VMs"}</b>
           <span className="muted">
             {job?.status === "connecting"
-              ? "The VMs exist; KubeSight is logging in to each with the build's SSH route."
-              : "OpenTofu is working in vCenter."}
+              ? (isManagedBuild(build)
+                ? "The cluster exists; KubeSight is registering it."
+                : "The VMs exist; KubeSight is logging in to each with the build's SSH route.")
+              : `OpenTofu is working ${whereCreated(build)}.`}
           </span>
           <span className="sg-cb-flight-acts">
             {canExecute && job?.status === "connecting" ? (
@@ -216,10 +222,11 @@ function LibraryRow({ build, catalog, now, onOpen, canCreate, notify, onChanged 
     // A VMware draft has no machines until its plan is applied — that is the
     // next step, not something missing.
     middle = build.nodeCounts?.controlPlane ? shapeSummary(build)
-      : build.machineSource === "vmware" ? "No VMs yet — open it to make the plan"
-        : "No machines assigned yet";
+      : isManagedBuild(build) ? "Not created yet — open it to make the plan"
+        : build.machineSource && build.machineSource !== "existing" ? "No VMs yet — open it to make the plan"
+          : "No machines assigned yet";
   } else if (build.status === "provision_failed") {
-    middle = "VM creation stopped — open it to see why";
+    middle = isManagedBuild(build) ? "Cluster creation stopped — open it to see why" : "VM creation stopped — open it to see why";
   } else if (build.status === "preflight_passed") {
     middle = "Preflight passed — not launched";
   } else if (build.status === "vms_ready") {
@@ -237,9 +244,12 @@ function LibraryRow({ build, catalog, now, onOpen, canCreate, notify, onChanged 
       <span className="sg-cb-librow-id">
         <span className="nm">{build.name}</span>
         <span className="sub">
-          {build.vmsOnly
+          {isManagedBuild(build)
+            ? `${managedLabel(build.cloud.provider)} v${build.k8sVersion}`
+            : build.vmsOnly
             ? `VMs only · ${(build.nodeShape || []).length} VM${(build.nodeShape || []).length === 1 ? "" : "s"}`
             : <>v{build.k8sVersion} · {build.topologyType === "stacked_ha" ? "HA" : "single CP"}</>}
+          {build.cloud ? <> · {cloudWhere(build.cloud)}</> : null}
           {build.vipAddress ? <> · VIP <span className="sg-cb-mono">{build.vipAddress}</span></> : null}
         </span>
       </span>
@@ -254,7 +264,7 @@ function LibraryRow({ build, catalog, now, onOpen, canCreate, notify, onChanged 
       // Its VMs must go first: open the build, where Destroy VMs is.
       <button className="btn-ghost btn-sm sg-cb-librow-del" type="button"
               title={policy.reason} onClick={() => onOpen(build.id)}>
-        Destroy VMs…
+        {isManagedBuild(build) ? "Destroy cluster…" : "Destroy VMs…"}
       </button>
     ) : canCreate ? (
       <button

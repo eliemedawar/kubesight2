@@ -215,6 +215,8 @@ def _migrate_cluster_build_columns() -> None:
     _add_column_if_missing("cluster_builds", "provision_status", "VARCHAR(24)")
     _add_column_if_missing("cluster_builds", "vms_only", "BOOLEAN DEFAULT false")
     _add_column_if_missing("cluster_builds", "etcd_backups_json", "JSON")
+    # Public clouds (Oracle, AWS, Google) next to vCenter.
+    _add_column_if_missing("cluster_builds", "cloud_account_id", "INTEGER")
     _add_column_if_missing("cluster_infra_states", "vm_count", "INTEGER")
     _add_column_if_missing("build_profiles", "satellite_register_url", "VARCHAR(2048)")
     _add_column_if_missing("build_profiles", "satellite_token_cipher", "TEXT")

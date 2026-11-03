@@ -67,6 +67,37 @@ class VSphereConnection(db.Model):
     )
 
 
+class CloudAccount(db.Model):
+    """Keys KubeSight uses to create machines and clusters in a public cloud.
+
+    ``provider`` is oci | aws | gcp. ``settings_json`` holds what is not secret
+    (tenancy and user OCIDs, access key id, project id, default compartment);
+    ``secrets_cipher`` holds the rest — the private key, secret access key or
+    service-account key file — as one Fernet-encrypted JSON object. The adapter
+    in ``provisioning/clouds/<provider>.py`` defines both sets of fields.
+    """
+
+    __tablename__ = "cloud_accounts"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False, default="", unique=True)
+    provider = db.Column(db.String(16), nullable=False, default="")
+    # The region the wizard opens on; each build picks its own.
+    region = db.Column(db.String(64), nullable=False, default="")
+    settings_json = db.Column(db.JSON, nullable=True)
+    secrets_cipher = db.Column(db.Text, nullable=True)
+    # A corporate TLS-inspection CA the cloud's API answers through, if any.
+    ca_pem = db.Column(db.Text, nullable=True)
+    last_test_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_test_status = db.Column(db.String(16), nullable=True)
+    last_test_message = db.Column(db.Text, nullable=True)
+    created_by = db.Column(db.String(120), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
 class VSphereNetworkRange(db.Model):
     """The addresses KubeSight may hand to VMs it creates on one vCenter network.
 
@@ -364,8 +395,8 @@ class ClusterBuild(db.Model):
         preflight_passed -> building -> completed | failed
         any non-terminal -> cancelled
 
-    When KubeSight creates the VMs (``machine_source == "vmware"``), OpenTofu
-    runs first:
+    When KubeSight creates the VMs (``machine_source`` vmware, oci, aws or
+    gcp), OpenTofu runs first:
         draft -> provisioning -> preflighting -> ...   (as above)
         provisioning -> provision_failed
     A VMs-only build (``vms_only``) stops once every VM answers SSH:
@@ -433,6 +464,10 @@ class ClusterBuild(db.Model):
     vsphere_connection_id = db.Column(
         db.Integer, db.ForeignKey("vsphere_connections.id"), nullable=True
     )
+    # The cloud account a cloud build (machine_source oci | aws | gcp) uses.
+    cloud_account_id = db.Column(
+        db.Integer, db.ForeignKey("cloud_accounts.id"), nullable=True
+    )
     build_profile_id = db.Column(
         db.Integer, db.ForeignKey("build_profiles.id"), nullable=True
     )
@@ -471,8 +506,9 @@ class ClusterBuild(db.Model):
     # The files live on that control plane; only their record is kept here.
     etcd_backups_json = db.Column(db.JSON, nullable=True)
 
-    # existing | vmware. "vmware" means KubeSight creates the machines itself
-    # with OpenTofu before the phase machine below ever runs.
+    # existing | vmware | oci | aws | gcp. Anything but "existing" means
+    # KubeSight creates the machines (or, for a managed cloud cluster, the whole
+    # cluster) itself with OpenTofu before the phase machine below ever runs.
     machine_source = db.Column(db.String(16), nullable=False, default="existing")
     # VMware only: create the VMs and stop once they answer SSH, without
     # installing Kubernetes — for testing the VM side on its own. Cleared when

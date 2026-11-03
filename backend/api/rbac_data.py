@@ -100,7 +100,7 @@ PERMISSIONS = [
         "Download the cluster-admin kubeconfig of a cluster KubeSight built",
     ),
     ("ssh_credentials:manage", "Manage SSH credentials and connection profiles"),
-    ("vsphere:manage", "Manage vSphere connections and browse VM inventory"),
+    ("vsphere:manage", "Manage vSphere connections and cloud accounts, and browse VM inventory"),
     (
         "cluster_templates:manage",
         "Save, rename and delete the cluster templates offered by the Cluster Builder",

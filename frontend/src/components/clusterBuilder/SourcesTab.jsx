@@ -15,6 +15,7 @@ import { Field, StatusPill } from "./common.jsx";
 import HostKeysPanel from "./HostKeysPanel.jsx";
 import { AllowedHosts, NetworkRanges, OpenTofuStatus, ProvisioningAccount } from "./ProvisioningSources.jsx";
 import VmRequestProfiles from "./VmRequestProfiles.jsx";
+import CloudAccounts from "./CloudAccounts.jsx";
 import AppProfiles from "./AppProfiles.jsx";
 import {
   bundleCoverage,
@@ -684,6 +685,32 @@ export default function SourcesTab({
 
       {canManageVSphere ? (
         <Group
+          title="Cloud accounts"
+          description="Keys for Oracle Cloud, AWS and Google Cloud. KubeSight creates VMs there with OpenTofu, or a managed cluster (OKE, EKS, GKE), on private addresses only — it reaches them over your VPN, peering or the SSH route's bastion. Keys are encrypted at rest and never shown again."
+          action={(
+            <button
+              className="btn-outline"
+              type="button"
+              onClick={() => setOpen(open === "cloud" ? null : "cloud")}
+            >
+              {open === "cloud" ? "Close" : "Add a cloud account"}
+            </button>
+          )}
+        >
+          <CloudAccounts
+            accounts={infra.cloudAccounts || []}
+            providers={infra.cloudProviders || []}
+            simulated={Boolean(infra.cloudSimulated)}
+            adding={open === "cloud"}
+            setAdding={(value) => setOpen(value ? "cloud" : null)}
+            notify={notify}
+            reloadInfra={reloadInfra}
+          />
+        </Group>
+      ) : null}
+
+      {canManageVSphere ? (
+        <Group
           title="Addresses for new VMs"
           description="VMs KubeSight creates get static addresses from these ranges, never DHCP. A plan reserves its addresses first, so two builds can never be handed the same one, and skips any that already answer on the network."
         >
@@ -712,7 +739,7 @@ export default function SourcesTab({
       {canManageVSphere ? (
         <Group
           title="OpenTofu"
-          description="Creates and deletes the VMs. It runs inside KubeSight with the vSphere provider baked into the image, and keeps each cluster's state, encrypted and locked, in KubeSight's database."
+          description="Creates and deletes the VMs and cloud resources. It runs inside KubeSight with the vSphere, Oracle Cloud, AWS and Google Cloud providers baked into the image, and keeps each cluster's state, encrypted and locked, in KubeSight's database."
         >
           <OpenTofuStatus notify={notify} canRelease={canManageVSphere} />
         </Group>

@@ -279,7 +279,13 @@ export function minimumDisk(role, template, minimums = DEFAULT_MINIMUMS) {
 // ---------------------------------------------------------------------------
 
 const KIND_ORDER = [
+  // A managed cloud cluster's plan leads with the cluster and its node pool.
+  ["cluster", "Managed cluster"],
+  ["nodepool", "Node pool"],
   ["vm", "Virtual machines"],
+  ["lb", "Load balancer"],
+  ["network", "Network and firewall"],
+  ["iam", "Access roles"],
   ["folder", "Folder"],
   ["rule", "Placement rules"],
   ["other", "Other"],
@@ -336,7 +342,14 @@ export function provisioningActive(build) {
 export function provisionRail(build) {
   const job = build?.provisioning?.job;
   const status = job?.status;
-  const cells = [
+  // A managed cloud cluster: the cloud builds Kubernetes, and the step after
+  // creating it is KubeSight registering it (the job's "connecting" phase).
+  const managed = build?.cloud?.kind === "managed";
+  const cells = managed ? [
+    { key: "plan", label: "Plan" },
+    { key: "create", label: job?.operation === "grow" ? "Grow the node pool" : "Create the cluster" },
+    { key: "ssh", label: "Register in KubeSight" },
+  ] : [
     { key: "plan", label: "Plan" },
     { key: "create", label: job?.operation === "grow" ? "Create workers" : "Create VMs" },
     { key: "ssh", label: "Reach over SSH" },

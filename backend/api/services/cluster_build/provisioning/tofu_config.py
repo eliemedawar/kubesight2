@@ -266,20 +266,38 @@ def render(
 
 
 def planned_vm_names(config: Dict[str, Any]) -> List[str]:
-    node = ((config.get("resource") or {}).get("vsphere_virtual_machine") or {}).get("node") or {}
-    return sorted((node.get("for_each") or {}).keys())
+    """The VMs a configuration declares: vCenter's or a cloud's ``<type>.node``."""
+    from .state_store import VM_RESOURCE_TYPES
+
+    names: set = set()
+    for rtype, blocks in (config.get("resource") or {}).items():
+        if rtype in VM_RESOURCE_TYPES:
+            names.update(((blocks or {}).get("node") or {}).get("for_each") or {})
+    return sorted(names)
+
+
+# The cloud providers baked into the image next to vSphere (backend/Dockerfile;
+# each version is pinned by TOFU_PROVIDER in provisioning/clouds/<provider>.py).
+CLOUD_PROVIDER_ADDRESSES = (
+    "registry.opentofu.org/hashicorp/aws",
+    "registry.opentofu.org/hashicorp/google",
+    "registry.opentofu.org/oracle/oci",
+)
 
 
 def cli_config(mirror_path: str) -> str:
-    """Install the vSphere provider only from the copy baked into the image."""
+    """Install the vSphere and cloud providers only from the copies baked into
+    the image: the cluster may have no route to the registry, and a corporate
+    TLS inspector breaks OpenTofu's own download."""
+    included = ", ".join(f'"{address}"' for address in (PROVIDER_ADDRESS, *CLOUD_PROVIDER_ADDRESSES))
     return (
         "provider_installation {\n"
         "  filesystem_mirror {\n"
         f'    path    = "{mirror_path}"\n'
-        f'    include = ["{PROVIDER_ADDRESS}"]\n'
+        f"    include = [{included}]\n"
         "  }\n"
         "  direct {\n"
-        f'    exclude = ["{PROVIDER_ADDRESS}"]\n'
+        f"    exclude = [{included}]\n"
         "  }\n"
         "}\n"
     )

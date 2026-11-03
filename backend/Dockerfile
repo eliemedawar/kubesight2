@@ -79,6 +79,19 @@ RUN apt-get update \
 COPY --from=vsphere-provider /out/ \
      /opt/kubesight/tofu/providers/registry.opentofu.org/vmware/vsphere/${VSPHERE_PROVIDER_VERSION}/linux_amd64/
 
+# The Oracle Cloud, AWS and Google Cloud providers for cloud builds, unmodified,
+# in the same mirror (packed layout: OpenTofu checks each zip against the
+# registry's signed checksums while mirroring). Keep these in step with
+# TOFU_PROVIDER in api/services/cluster_build/provisioning/clouds/<cloud>.py.
+ARG AWS_PROVIDER_VERSION=6.71.0
+ARG GOOGLE_PROVIDER_VERSION=8.9.0
+ARG OCI_PROVIDER_VERSION=9.11.0
+RUN mkdir -p /tmp/cloud-providers && cd /tmp/cloud-providers \
+    && printf '{"terraform":{"required_providers":{"aws":{"source":"hashicorp/aws","version":"= %s"},"google":{"source":"hashicorp/google","version":"= %s"},"oci":{"source":"oracle/oci","version":"= %s"}}}}\n' \
+       "${AWS_PROVIDER_VERSION}" "${GOOGLE_PROVIDER_VERSION}" "${OCI_PROVIDER_VERSION}" > main.tf.json \
+    && tofu providers mirror -platform=linux_amd64 "${KUBESIGHT_TOFU_PROVIDER_MIRROR}" \
+    && cd / && rm -rf /tmp/cloud-providers
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

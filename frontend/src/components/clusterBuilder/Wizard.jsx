@@ -1,6 +1,8 @@
 /** The new-build wizard: Template → Machines → Add-ons → Workloads → Verify
  *  (or, when KubeSight creates the VMs with OpenTofu, Plan & create; and when
  *  it creates VMs only, without Kubernetes, just Template → Machines → Plan).
+ *  The same holds on Oracle Cloud, AWS and Google Cloud (CloudMachines); a
+ *  managed cluster (OKE / EKS / GKE) skips Add-ons, Workloads and Apps too.
  *
  *  The old step 1 held eleven fields plus the whole add-on catalog in one grid,
  *  mixing what the cluster *is* with the infrastructure plumbing a build
@@ -16,6 +18,7 @@ import AppsPicker from "./AppsPicker.jsx";
 import { ProvisionCard } from "./ProvisionPanels.jsx";
 import { CountsEditor, TemplateGallery } from "./TemplateStep.jsx";
 import VmwareMachines, { useVmwarePlacement } from "./VmwareMachines.jsx";
+import CloudMachines, { useCloudInventory, useCloudRegions, useResolvedSizes } from "./CloudMachines.jsx";
 import { Field } from "./common.jsx";
 import PreflightReport from "./PreflightReport.jsx";
 import { addonSelectionError, ipRangeListError } from "../../utils/addonConfig.js";
@@ -63,6 +66,23 @@ import {
   planPollDelayMs,
 } from "../../utils/clusterProvisioning.js";
 import {
+  EMPTY_CLOUD,
+  cloudFromSpec,
+  cloudMachines,
+  cloudProblem,
+  cloudProvisioningPayload,
+  cloudShapeLabel,
+  cloudTotals,
+  cloudWhere,
+  defaultCloudChoices,
+  isCloud,
+  managedBlueprint,
+  managedLabel,
+  providerLabel,
+  resolveCloud,
+  withCloudBus,
+} from "../../utils/cloudProvisioning.js";
+import {
   createClusterBuild,
   getClusterBuild,
   listVSphereVms,
@@ -76,14 +96,17 @@ import { whenVisible } from "../../lib/visibleInterval";
 
 /** The steps this build walks, as [step, label]. A VMs-only build has no
     cluster to put add-ons, workloads or Helm charts on, so it skips those. */
-function wizardSteps(machineSource, vmsOnly) {
-  if (machineSource === "vmware" && vmsOnly) {
+function wizardSteps(machineSource, vmsOnly, managed = false) {
+  const creates = machineSource === "vmware" || isCloud(machineSource);
+  // A managed cluster has no nodes KubeSight logs in to, so nothing to put
+  // add-ons, workloads or Helm charts on from here either.
+  if (creates && (vmsOnly || managed)) {
     return [[STEP_SHAPE, "Template"], [STEP_MACHINES, "Machines"], [STEP_VERIFY, "Plan & create"]];
   }
   return [
     [STEP_SHAPE, "Template"], [STEP_MACHINES, "Machines"], [STEP_ADDONS, "Add-ons"],
     [STEP_WORKLOADS, "Workloads"], [STEP_APPS, "Apps"],
-    [STEP_VERIFY, machineSource === "vmware" ? "Plan & create" : "Verify & build"],
+    [STEP_VERIFY, creates ? "Plan & create" : "Verify & build"],
   ];
 }
 
@@ -129,6 +152,8 @@ const EMPTY_BASICS = {
   vmsOnly: false,
   vmCount: 2,
   vm: EMPTY_VM_PLACEMENT,
+  // Oracle Cloud / AWS / Google Cloud choices; machineSource names the cloud.
+  cloud: EMPTY_CLOUD,
   topologyType: "single_cp",
   endpointMode: "managed_haproxy",
   vipAddress: "",
@@ -149,12 +174,14 @@ function basicsFromBuild(build) {
   if (!build) return { ...EMPTY_BASICS, workloads: { ...EMPTY_WORKLOADS } };
   const spec = build.provisioning?.spec;
   const vmware = build.machineSource === "vmware";
+  const cloud = isCloud(build.machineSource);
   const nodeCounts = build.nodeCounts || {};
   return {
     ...EMPTY_BASICS,
     templateId: build.templateId || "custom",
-    machineSource: vmware ? "vmware" : "existing",
-    vmsOnly: vmware && Boolean(build.vmsOnly),
+    machineSource: vmware || cloud ? build.machineSource : "existing",
+    vmsOnly: (vmware || cloud) && Boolean(build.vmsOnly),
+    cloud: cloud ? cloudFromSpec(spec) : EMPTY_CLOUD,
     vmCount: spec?.vmCount || EMPTY_BASICS.vmCount,
     counts: spec?.counts || {
       loadbalancer: nodeCounts.loadbalancer || 0,
@@ -244,7 +271,7 @@ function StepRail({ current, onGoBack, steps }) {
 
 /** The plumbing every build consumes, resolved from what is already healthy.
     Visible, one click to change, and out of the decision form. */
-function SourcesBar({ basics, infra, onChange, editing, setEditing }) {
+function SourcesBar({ basics, infra, onChange, editing, setEditing, sshOptional = false }) {
   const vsphere = infra.vsphere.find((row) => String(row.id) === String(basics.vsphereConnectionId));
   const profile = infra.profiles.find((row) => String(row.id) === String(basics.connectionProfileId));
   const buildProfile = infra.buildProfiles.find(
@@ -252,8 +279,8 @@ function SourcesBar({ basics, infra, onChange, editing, setEditing }) {
   );
 
   const chips = [
-    // When KubeSight creates the VMs, the vCenter is chosen with the placement.
-    ...(basics.machineSource === "vmware" ? [] : [{
+    // When KubeSight creates the VMs, the vCenter (or cloud) is chosen with the placement.
+    ...(basics.machineSource !== "existing" ? [] : [{
       key: "vsphere",
       who: "vCenter",
       what: vsphere?.name || "None — manual hosts",
@@ -269,8 +296,8 @@ function SourcesBar({ basics, infra, onChange, editing, setEditing }) {
       who: "SSH",
       what: profile
         ? `${profile.name}${profile.hostKeyPolicy ? ` · ${profile.hostKeyPolicy}` : ""}`
-        : "Required",
-      state: profile ? (profile.lastTestStatus === "failed" ? "warn" : "ok") : "bad",
+        : sshOptional ? "Not needed — the cloud runs the nodes" : "Required",
+      state: profile ? (profile.lastTestStatus === "failed" ? "warn" : "ok") : sshOptional ? "idle" : "bad",
       field: "connectionProfileId",
       options: [
         { value: "", label: "Select a route…" },
@@ -402,8 +429,9 @@ function EndpointFields({ basics, setBasic, primaryAddress }) {
   );
 }
 
-/** ``value`` is "vmware" (KubeSight creates the VMs) or "existing". */
-function SourceChoice({ value, onChange, canVmware }) {
+/** ``value`` is "vmware" (KubeSight creates the VMs), "cloud" (Oracle Cloud,
+    AWS or Google Cloud) or "existing". VMs only offers just the first two. */
+function SourceChoice({ value, onChange, canVmware, canCloud = false, vmsOnly = false }) {
   const needsVcenter = "Needs a vCenter with a provisioning account — an administrator adds one under Sources.";
   return (
     <div className="card sg-cb-card">
@@ -414,15 +442,30 @@ function SourceChoice({ value, onChange, canVmware }) {
           <span className="ct">Create new VMs in VMware <span className="sg-cb-pill is-brand">OpenTofu</span></span>
           <span className="cd">
             {canVmware
-              ? "KubeSight clones a VM template, sets sizes and addresses, then installs Kubernetes on them."
+              ? (vmsOnly
+                ? "KubeSight clones a VM template and sets sizes and addresses."
+                : "KubeSight clones a VM template, sets sizes and addresses, then installs Kubernetes on them.")
               : needsVcenter}
           </span>
         </button>
-        <button type="button" className="sg-cb-choice" aria-pressed={value === "existing"}
-                onClick={() => onChange("existing")}>
-          <span className="ct">Use machines you already have</span>
-          <span className="cd">Pick running VMs from vCenter or add hosts by address. Nothing is created in vCenter.</span>
+        <button type="button" className="sg-cb-choice" aria-pressed={value === "cloud"}
+                disabled={!canCloud} onClick={() => onChange("cloud")}>
+          <span className="ct">Create in a public cloud <span className="sg-cb-pill is-brand">OpenTofu</span></span>
+          <span className="cd">
+            {canCloud
+              ? (vmsOnly
+                ? "Oracle Cloud, AWS or Google Cloud: VMs on private addresses in a subnet you choose."
+                : "Oracle Cloud, AWS or Google Cloud: VMs KubeSight installs Kubernetes on, or a managed OKE, EKS or GKE cluster.")
+              : "Needs a cloud account — an administrator adds one under Sources → Cloud accounts."}
+          </span>
         </button>
+        {vmsOnly ? null : (
+          <button type="button" className="sg-cb-choice" aria-pressed={value === "existing"}
+                  onClick={() => onChange("existing")}>
+            <span className="ct">Use machines you already have</span>
+            <span className="cd">Pick running VMs from vCenter or add hosts by address. Nothing is created in vCenter.</span>
+          </button>
+        )}
       </div>
     </div>
   );
@@ -443,8 +486,8 @@ function GoalChoice({ vmsOnly, onChange, canVmware }) {
           <span className="ct">VMs only <span className="sg-cb-pill is-brand">OpenTofu</span></span>
           <span className="cd">
             {canVmware
-              ? "Just say how many. KubeSight creates them in VMware and stops once each answers SSH. Install Kubernetes on them later — it offers the shapes that fit that many VMs — or destroy them."
-              : "Needs a vCenter with a provisioning account — an administrator adds one under Sources."}
+              ? "Just say how many. KubeSight creates them in VMware or a public cloud and stops once each answers SSH. Install Kubernetes on them later — it offers the shapes that fit that many VMs — or destroy them."
+              : "Needs a vCenter with a provisioning account or a cloud account — an administrator adds one under Sources."}
           </span>
         </button>
       </div>
@@ -507,10 +550,10 @@ function ShapeStep({ options, basics, setBasic }) {
       <Field
         label="Cluster name"
         htmlFor="cb-name"
-        hint={basics.machineSource === "vmware"
+        hint={basics.machineSource !== "existing"
           ? `Also names the VMs: ${basics.name || "name"}-cp-1, ${basics.name || "name"}-wk-1 …`
           : "Becomes the cluster's name in Clusters, Dashboard and Inventory once it is alive."}
-        error={basics.machineSource === "vmware" ? vmwareNameError(basics.name) : ""}
+        error={basics.machineSource !== "existing" ? vmwareNameError(basics.name) : ""}
       >
         <input
           id="cb-name"
@@ -1099,12 +1142,47 @@ export default function Wizard({
   const catalog = options?.clusterTemplates;
   const minimums = catalog?.minimumSizes || DEFAULT_MINIMUMS;
   const vmware = basics.machineSource === "vmware";
+  const cloud = isCloud(basics.machineSource);
+  // KubeSight creates the machines (OpenTofu), in vCenter or a cloud.
+  const creates = vmware || cloud;
   const provisioningConnections = useMemo(
     () => (infra.vsphere || []).filter((row) => row.provisioningConfigured),
     [infra.vsphere]
   );
-  const vmsOnly = vmware && basics.vmsOnly;
-  const steps = wizardSteps(basics.machineSource, basics.vmsOnly);
+  const cloudAccounts = useMemo(() => infra.cloudAccounts || [], [infra.cloudAccounts]);
+  const vmsOnly = creates && basics.vmsOnly;
+  const managed = cloud && !vmsOnly && basics.cloud.kind === "managed";
+  const steps = wizardSteps(basics.machineSource, basics.vmsOnly, managed);
+  const canCreateMachines = provisioningConnections.length > 0 || cloudAccounts.length > 0;
+  const providerOf = (accountId) => cloudAccounts.find((row) => String(row.id) === String(accountId))?.provider;
+  /** Pick a cloud account: the build's machine source follows its provider. */
+  const setCloud = (next) => setBasics((previous) => ({
+    ...previous,
+    cloud: next,
+    machineSource: providerOf(next.accountId) || previous.machineSource,
+  }));
+  /** The Machines step's source choice, as basics. */
+  const chooseSource = (source) => setBasics((previous) => {
+    if (source === "cloud") {
+      const account = cloudAccounts.find((row) => String(row.id) === String(previous.cloud.accountId)) || cloudAccounts[0];
+      if (!account) return previous;
+      return {
+        ...previous,
+        machineSource: account.provider,
+        cloud: previous.cloud.accountId
+          ? previous.cloud
+          : { ...previous.cloud, accountId: String(account.id), region: account.region || "",
+            compartmentId: account.settings?.compartmentOcid || "" },
+      };
+    }
+    return {
+      ...previous,
+      machineSource: source,
+      vm: source === "vmware" && !previous.vm.connectionId && provisioningConnections[0]
+        ? { ...previous.vm, connectionId: String(provisioningConnections[0].id) }
+        : previous.vm,
+    };
+  });
 
   // Hand the page every change, so the draft outlives this component. The
   // page keeps only a dirty draft; a clean one is nothing to lose.
@@ -1132,7 +1210,7 @@ export default function Wizard({
   useEffect(() => {
     if (planReread.current || !restored || !buildId || step !== STEP_VERIFY) return;
     planReread.current = true;
-    if (basics.machineSource !== "vmware") return;
+    if (basics.machineSource === "existing") return;
     getClusterBuild(buildId).then(setPlanBuild).catch(() => {});
   }, [restored, buildId, step, basics.machineSource]);
 
@@ -1181,6 +1259,18 @@ export default function Wizard({
       vm: { ...previous.vm, connectionId: String(provisioningConnections[0].id) },
     }));
   }, [provisioningConnections]);
+  // No vCenter can create VMs but a cloud account can: that becomes the default.
+  useEffect(() => {
+    if (sourceSeeded.current || !infraReady || provisioningConnections.length || !cloudAccounts.length) return;
+    sourceSeeded.current = true;
+    const account = cloudAccounts[0];
+    setBasics((previous) => ({
+      ...previous,
+      machineSource: account.provider,
+      cloud: { ...previous.cloud, accountId: String(account.id), region: account.region || "",
+        compartmentId: account.settings?.compartmentOcid || "" },
+    }));
+  }, [infraReady, provisioningConnections, cloudAccounts]);
 
   // Topology follows the template's role counts. For machines that exist, a
   // shape with no load balancer may still sit behind one the user runs.
@@ -1293,7 +1383,53 @@ export default function Wizard({
     () => previewMachines(basics.name, shapeCounts, shapeSizes, addresses),
     [basics.name, shapeCounts, shapeSizes, addresses]
   );
-  const vmProblem = vmware
+  // --- Cloud placement ------------------------------------------------------
+  const cloudRegions = useCloudRegions(cloud ? basics.cloud.accountId : "");
+  const cloudInventory = useCloudInventory(
+    cloud ? basics.cloud.accountId : "", cloud ? basics.cloud.region : "",
+    basics.machineSource === "oci" ? basics.cloud.compartmentId : "", notify
+  );
+  useEffect(() => {
+    if (!cloud || !cloudInventory.data) return;
+    setBasics((previous) => {
+      const next = defaultCloudChoices(cloudInventory.data, previous.cloud, previous.machineSource);
+      return JSON.stringify(next) === JSON.stringify(previous.cloud) ? previous : { ...previous, cloud: next };
+    });
+  }, [cloud, cloudInventory.data]);
+  const cloudAccount = cloudAccounts.find((row) => String(row.id) === String(basics.cloud.accountId)) || null;
+  const cloudResolved = useMemo(
+    () => resolveCloud(cloudInventory.data, basics.cloud),
+    [cloudInventory.data, basics.cloud]
+  );
+  // Managed: only the node pool is sized, from the worker count and size.
+  const cloudCounts = managed ? { loadbalancer: 0, controlPlane: 0, worker: basics.counts?.worker || 0 } : shapeCounts;
+  const cloudPayload = cloud
+    ? cloudProvisioningPayload({
+      provider: basics.machineSource, cloud: basics.cloud, resolved: cloudResolved,
+      counts: shapeCounts, sizes: basics.sizes, vmsOnly,
+    })
+    : null;
+  const resolvedSizes = useResolvedSizes(
+    cloud ? basics.cloud.accountId : "", cloud ? basics.cloud.region : "", cloudPayload,
+    cloud ? Object.fromEntries(Object.entries(basics.sizes).filter(([role]) => cloudCounts[role])) : null
+  );
+  const cloudMachineList = useMemo(
+    () => (cloud && !managed ? cloudMachines(basics.name, shapeCounts, basics.sizes, resolvedSizes.resolved) : []),
+    [cloud, managed, basics.name, shapeCounts, basics.sizes, resolvedSizes.resolved]
+  );
+  const cloudIssue = cloud
+    ? ((vmsOnly ? vmCountError(basics.vmCount) : managed ? "" : countsError(basics.counts))
+      || vmwareNameError(basics.name)
+      || cloudProblem({
+        provider: basics.machineSource, account: cloudAccount, cloud: basics.cloud,
+        inventory: cloudInventory.loading && !cloudInventory.data ? null : cloudInventory.data,
+        resolved: cloudResolved, vmsOnly,
+      })
+      || sizeErrors(cloudCounts, basics.sizes, minimums).filter((error) => !/^Load balancers/.test(error))[0]
+      || "")
+    : "";
+
+  const vmProblem = cloud ? cloudIssue : vmware
     ? ((vmsOnly ? vmCountError(basics.vmCount) : countsError(basics.counts))
       || vmwareNameError(basics.name)
       || (placementState.loading && !placementState.data ? "Reading vCenter…" : "")
@@ -1344,24 +1480,24 @@ export default function Wizard({
   const shapeReady = Boolean(
     basics.name.trim()
     && basics.k8sVersion
-    && basics.connectionProfileId
+    && (basics.connectionProfileId || managed)
     && !(vmsOnly ? vmCountError(basics.vmCount) : countsError(basics.counts))
-    && !(vmware && vmwareNameError(basics.name))
+    && !(creates && vmwareNameError(basics.name))
   );
-  const machinesReady = vmware
-    ? !vmProblem
+  const machinesReady = creates
+    ? !vmProblem && (managed || Boolean(basics.connectionProfileId))
     : countsOk && !plan.conflictHosts.length && endpointReady;
 
   // Why a Next button is disabled, said next to it rather than left to guess.
   const shapeProblem = !basics.name.trim() ? (vmsOnly ? "Name the VMs." : "Name the cluster.")
-    : vmware && vmwareNameError(basics.name) ? vmwareNameError(basics.name)
+    : creates && vmwareNameError(basics.name) ? vmwareNameError(basics.name)
       : !basics.k8sVersion ? "Choose a Kubernetes version."
         : vmsOnly && vmCountError(basics.vmCount) ? vmCountError(basics.vmCount)
         : !vmsOnly && countsError(basics.counts) ? countsError(basics.counts)
-          : !basics.connectionProfileId
+          : !basics.connectionProfileId && !managed
             ? "Choose the SSH route in the Sources row above. KubeSight logs in to every machine with it."
             : "";
-  const machinesProblem = vmware ? vmProblem
+  const machinesProblem = creates ? vmProblem
     : !countsOk ? `Assign ${shapeLabel(basics.counts)}.`
       : plan.conflictHosts.length ? "Move a machine off the shared ESXi host."
         : !endpointReady
@@ -1410,13 +1546,16 @@ export default function Wizard({
       diskCheckPath: basics.diskCheckPath,
       // A VMs-only build skips those steps; Install Kubernetes later builds a
       // bare cluster, and plugins can be added to it on day two.
-      addons: vmsOnly ? [] : basics.addons,
+      addons: vmsOnly || managed ? [] : basics.addons,
       buildProfileId: basics.buildProfileId || undefined,
       connectionProfileId: basics.connectionProfileId || undefined,
-      workloads: !vmsOnly && basics.workloads.items.length ? basics.workloads : null,
+      workloads: !vmsOnly && !managed && basics.workloads.items.length ? basics.workloads : null,
       // Inventory Helm charts, installed in this order once the cluster is up.
-      apps: vmsOnly ? [] : appsPayload(basics.apps || []),
+      apps: vmsOnly || managed ? [] : appsPayload(basics.apps || []),
     };
+    if (cloud) {
+      return { ...common, provisioning: cloudPayload };
+    }
     if (vmware) {
       return {
         ...common,
@@ -1572,7 +1711,7 @@ export default function Wizard({
     ? storageRows(workloadPlan, basics.workloads.storage)
     : [];
   const workloadStorageErrors = storageErrors(workloadStorageRows);
-  const appsProblem = vmsOnly ? "" : appsError(basics.apps || []);
+  const appsProblem = vmsOnly || managed ? "" : appsError(basics.apps || []);
   // What stops the steps after Machines from being saved, first one first.
   const laterProblem = workloadStorageErrors[0] || appsProblem;
   const appFacts = (basics.apps || []).map((item) => ({
@@ -1668,7 +1807,48 @@ export default function Wizard({
     ...(resolved.datastore ? [{ label: "Datastore", value: resolved.datastore.name }] : []),
   ];
 
+  const cloudSum = cloudTotals(cloudCounts, basics.sizes);
+  const cloudFacts = [
+    vmsOnly
+      ? { label: "Kubernetes", value: "later, or never" }
+      : managed
+        ? { label: "Kubernetes", value: `${managedLabel(basics.machineSource)} ${basics.cloud.kubernetesVersion || ""}`.trim() }
+        : { label: "Template", value: findTemplate(catalog, basics.templateId)?.name || "Custom" },
+    { label: "Where", value: cloudWhere({ provider: basics.machineSource, region: basics.cloud.region,
+      zone: managed ? "" : cloudResolved.subnet?.zone || basics.cloud.zone }) || providerLabel(basics.machineSource) },
+    { label: managed ? "Node pool" : "Machines", value: `${cloudSum.machines} ${managed ? "nodes" : "VMs"} · ${cloudSum.cpu} vCPU · ${cloudSum.memoryGb} GB` },
+    ...(!managed && cloudResolved.image ? [{ label: "Image", value: cloudResolved.image.name }] : []),
+    ...(!managed && !vmsOnly && shapeCounts.loadbalancer ? [{ label: "API", value: "cloud internal load balancer" }] : []),
+  ];
+  /** The drawing of a cloud build: VMs without load-balancer VMs, or a managed cluster. */
+  const cloudPlan = (machines, state, endpoint = "") => (managed
+    ? managedBlueprint({
+      provider: basics.machineSource, count: cloudCounts.worker,
+      machineType: resolvedSizes.resolved.worker?.type || "", state, endpoint,
+    })
+    : withCloudBus(
+      machinesBlueprint({ machines, state, slotState: () => "set" }),
+      { loadBalancer: Boolean(!vmsOnly && shapeCounts.loadbalancer), endpoint }
+    ));
+
   const rightRail = (() => {
+    if (step === STEP_VERIFY && cloud) {
+      return (
+        <Blueprint
+          plan={cloudPlan(planBuild?.provisioning?.spec?.machines || cloudMachineList, "stamped", planBuild?.controlPlaneEndpoint || "")}
+          caption={planning ? "planning" : "planned"}
+          facts={cloudFacts}
+          note={{
+            tone: "plain",
+            text: vmsOnly
+              ? "Creating the VMs takes a few minutes. KubeSight stops once every VM answers SSH — Kubernetes is not installed."
+              : managed
+                ? `${managedLabel(basics.machineSource)} takes 10–20 minutes to come up. KubeSight registers the cluster when its API answers.`
+                : "Creating the VMs takes a few minutes. Kubernetes starts on them right after, as a normal Cluster Builder build.",
+          }}
+        />
+      );
+    }
     if (step === STEP_VERIFY && vmware) {
       const machines = planBuild?.provisioning?.spec?.machines || preview.machines;
       return (
@@ -1710,11 +1890,15 @@ export default function Wizard({
             Save this draft for a reviewer with execute permission to make the plan and create the VMs.
           </span>
         ) : null}
+        {cloud && vmProblem ? <span className="sg-cb-field-hint">{vmProblem}</span> : null}
+        {creates && !managed && !basics.connectionProfileId ? (
+          <span className="sg-cb-field-hint">Choose the SSH route in the Sources row above.</span>
+        ) : null}
         <button
           className="primary sg-cb-bp-cta"
           type="button"
-          disabled={busy || Boolean(vmProblem)
-            || (!vmsOnly && (Boolean(addonError) || Boolean(laterProblem)))}
+          disabled={busy || Boolean(vmProblem) || (!managed && !basics.connectionProfileId)
+            || (!vmsOnly && !managed && (Boolean(addonError) || Boolean(laterProblem)))}
           onClick={canExecute ? makePlan : saveDraft}
         >
           {canExecute ? (busy ? "Saving…" : "Make the plan") : "Save draft for review"}
@@ -1734,7 +1918,7 @@ export default function Wizard({
           Next — machines
         </button>
       </>
-    ) : step === STEP_MACHINES && vmsOnly ? planFooter : step === STEP_MACHINES ? (
+    ) : step === STEP_MACHINES && (vmsOnly || managed) ? planFooter : step === STEP_MACHINES ? (
       <>
         {!machinesReady && machinesProblem && !vmware
           ? <span className="sg-cb-field-hint">{machinesProblem}</span> : null}
@@ -1773,7 +1957,7 @@ export default function Wizard({
           Next — apps
         </button>
       </>
-    ) : vmware ? planFooter : canExecute ? (
+    ) : creates ? planFooter : canExecute ? (
       <>
         {laterProblem ? (
           <span className="sg-cb-field-error">{laterProblem}</span>
@@ -1808,6 +1992,30 @@ export default function Wizard({
         </button>
       </>
     );
+    if (cloud) {
+      return (
+        <Blueprint
+          plan={cloudPlan(cloudMachineList, "outline")}
+          caption={managed ? "managed · outline" : "new VMs · outline"}
+          facts={step === STEP_ADDONS ? addonFacts : step === STEP_WORKLOADS ? workloadFacts
+            : step === STEP_APPS ? appFacts : cloudFacts}
+          note={step === STEP_WORKLOADS
+            ? workloadNote
+            : step === STEP_APPS ? appsNote
+            : step === STEP_MACHINES
+              ? (vmProblem
+                ? { tone: "warn", text: vmProblem }
+                : { tone: "good", text: vmsOnly
+                  ? "Ready to plan. KubeSight creates the VMs and stops once they answer SSH."
+                  : "Ready to plan. Nothing is created until you approve the plan." })
+              : {
+                tone: "plain",
+                text: `${managed ? `${cloudCounts.worker} node${cloudCounts.worker === 1 ? "" : "s"} on ${managedLabel(basics.machineSource)}` : cloudShapeLabel(shapeCounts)}. The cloud picks the private addresses.`,
+              }}
+          footer={footer}
+        />
+      );
+    }
     if (vmware) {
       return (
         <Blueprint
@@ -1878,6 +2086,7 @@ export default function Wizard({
         onChange={setBasic}
         editing={editingSource}
         setEditing={setEditingSource}
+        sshOptional={managed}
       />
 
       <div className="sg-cb-split">
@@ -1885,14 +2094,20 @@ export default function Wizard({
           {step === STEP_SHAPE ? (
             <GoalChoice
               vmsOnly={vmsOnly}
-              canVmware={provisioningConnections.length > 0}
+              canVmware={canCreateMachines}
               onChange={(only) => setBasics((previous) => ({
                 ...previous,
                 vmsOnly: only,
-                machineSource: only ? "vmware" : previous.machineSource,
+                machineSource: !only || previous.machineSource !== "existing" ? previous.machineSource
+                  : provisioningConnections.length ? "vmware"
+                    : cloudAccounts[0]?.provider || previous.machineSource,
                 vm: only && !previous.vm.connectionId && provisioningConnections[0]
                   ? { ...previous.vm, connectionId: String(provisioningConnections[0].id) }
                   : previous.vm,
+                cloud: only && previous.machineSource === "existing" && !provisioningConnections.length
+                  && cloudAccounts[0] && !previous.cloud.accountId
+                  ? { ...previous.cloud, accountId: String(cloudAccounts[0].id), region: cloudAccounts[0].region || "" }
+                  : previous.cloud,
               }))}
             />
           ) : null}
@@ -1931,20 +2146,32 @@ export default function Wizard({
 
           {step === STEP_MACHINES ? (
             <>
-              {vmsOnly ? null : (
-                <SourceChoice
-                  value={basics.machineSource}
-                  canVmware={provisioningConnections.length > 0}
-                  onChange={(source) => setBasics((previous) => ({
-                    ...previous,
-                    machineSource: source,
-                    vm: source === "vmware" && !previous.vm.connectionId && provisioningConnections[0]
-                      ? { ...previous.vm, connectionId: String(provisioningConnections[0].id) }
-                      : previous.vm,
-                  }))}
+              <SourceChoice
+                value={cloud ? "cloud" : basics.machineSource}
+                canVmware={provisioningConnections.length > 0}
+                canCloud={cloudAccounts.length > 0}
+                vmsOnly={vmsOnly}
+                onChange={chooseSource}
+              />
+              {cloud ? (
+                <CloudMachines
+                  accounts={cloudAccounts}
+                  provider={basics.machineSource}
+                  cloud={basics.cloud}
+                  setCloud={setCloud}
+                  inventoryState={cloudInventory}
+                  regions={cloudRegions}
+                  counts={shapeCounts}
+                  setCounts={(counts) => setBasic("counts", counts)}
+                  sizes={basics.sizes}
+                  setSizes={(sizes) => setBasic("sizes", sizes)}
+                  minimums={minimums}
+                  vmsOnly={vmsOnly}
+                  clusterName={basics.name}
+                  resolvedSizes={resolvedSizes}
+                  problem={vmProblem}
                 />
-              )}
-              {vmware ? (
+              ) : vmware ? (
                 <VmwareMachines
                   connections={provisioningConnections}
                   placementState={placementState}
@@ -2051,7 +2278,7 @@ export default function Wizard({
             </div>
           ) : null}
 
-          {step === STEP_VERIFY && vmware && planBuild ? (
+          {step === STEP_VERIFY && creates && planBuild ? (
             <>
               <ProvisionCard
                 build={planBuild}
@@ -2066,13 +2293,15 @@ export default function Wizard({
                   Change something
                 </button>
                 <span className="muted">
-                  Changing anything throws this plan away; making the plan again reserves the same addresses.
+                  {cloud
+                    ? "Changing anything throws this plan away; nothing has been created yet."
+                    : "Changing anything throws this plan away; making the plan again reserves the same addresses."}
                 </span>
               </div>
             </>
           ) : null}
 
-          {step === STEP_VERIFY && !vmware && preflightResult && grouped ? (
+          {step === STEP_VERIFY && !creates && preflightResult && grouped ? (
             <>
               <PreflightReport
                 grouped={grouped}

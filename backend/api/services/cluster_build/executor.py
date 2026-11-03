@@ -1316,6 +1316,31 @@ def _phase_etcd_backup(build: ClusterBuild, primary: ClusterBuildNode) -> None:
     _step_done(step, stream.text())
 
 
+def _hairpin_guard(build: ClusterBuild, primary: ClusterBuildNode) -> str:
+    """Google's internal load balancer answers a backend that calls it from
+    the backend itself (the guest agent routes the balancer's address locally).
+    A control plane that is joining is such a backend with no API server yet,
+    so its join would talk to itself. While it joins, its own calls to the
+    balancer go to the primary control plane instead; the rule goes when the
+    join script ends, whatever the outcome."""
+    if (build.machine_source or "") != "gcp" or build.endpoint_mode != "external_lb":
+        return ""
+    host = (build.control_plane_endpoint or "").rsplit(":", 1)[0]
+    try:
+        ipaddress.ip_address(host)
+        ipaddress.ip_address(primary.address)
+    except ValueError:
+        return ""
+    rule = (f"OUTPUT -d {host}/32 -p tcp --dport 6443 -j DNAT "
+            f"--to-destination {primary.address}:6443")
+    return (
+        "if command -v iptables >/dev/null 2>&1; then\n"
+        f"  iptables -t nat -C {rule} 2>/dev/null || iptables -t nat -I {rule}\n"
+        f"  trap 'iptables -t nat -D {rule} 2>/dev/null || true' EXIT\n"
+        "fi\n"
+    )
+
+
 def _phase_join_cp(build: ClusterBuild, primary: ClusterBuildNode) -> None:
     """SERIAL control-plane joins with an etcd-health gate between each —
     concurrent member additions are a reliable way to lose quorum."""
@@ -1345,7 +1370,7 @@ def _phase_join_cp(build: ClusterBuild, primary: ClusterBuildNode) -> None:
             stream = _StreamTail(step.id)
             result = _run_traced(
                 _target_for(build, node),
-                f"set -e\n{_hosts_script(build)}{join_command}",
+                f"set -e\n{_hosts_script(build)}{_hairpin_guard(build, primary)}{join_command}",
                 timeout_s=900,
                 stream=stream,
             )

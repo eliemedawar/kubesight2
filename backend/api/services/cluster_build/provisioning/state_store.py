@@ -75,11 +75,18 @@ def _count_resources(document: Dict[str, Any]) -> int:
     return count
 
 
+# The resource types that are one VM each, keyed by VM name (``<type>.node``):
+# vCenter's, and each cloud adapter's VM_RESOURCE_TYPE.
+VM_RESOURCE_TYPES = frozenset({
+    "vsphere_virtual_machine", "aws_instance", "google_compute_instance", "oci_core_instance",
+})
+
+
 def _count_vms(document: Dict[str, Any]) -> int:
     """How many VMs ``vm_instances`` would list for this state document."""
     names = set()
     for resource in document.get("resources") or []:
-        if resource.get("mode") != "managed" or resource.get("type") != "vsphere_virtual_machine":
+        if resource.get("mode") != "managed" or resource.get("type") not in VM_RESOURCE_TYPES:
             continue
         for instance in resource.get("instances") or []:
             if instance.get("index_key") is not None:
@@ -219,7 +226,7 @@ def vm_instances(build_id: int) -> Dict[str, Dict[str, Any]]:
     return {
         str(item["key"]): item["attributes"]
         for item in managed_resources(build_id)
-        if item["type"] == "vsphere_virtual_machine" and item["key"] is not None
+        if item["type"] in VM_RESOURCE_TYPES and item["key"] is not None
     }
 
 

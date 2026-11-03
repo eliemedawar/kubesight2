@@ -23,6 +23,7 @@ import {
   provisionRail,
   vmRows,
 } from "../../utils/clusterProvisioning.js";
+import { cloudShapesForVms, isManagedBuild, managedLabel, whereCreated } from "../../utils/cloudProvisioning.js";
 import {
   applyProvisionPlan,
   approveClusterDestroy,
@@ -46,6 +47,13 @@ import { useAuth } from "../../context/AuthContext";
 export function refusalText(error) {
   if (error?.status === 403 && error.serverMessage) return error.serverMessage;
   return error?.message || String(error);
+}
+
+/** What a destroy deletes, for sentences: VMware, cloud VMs or a managed cluster. */
+function destroyedThings(build) {
+  if (isManagedBuild(build)) return `its ${managedLabel(build.cloud.provider)} cluster and node pool`;
+  if (build?.cloud) return "its VMs, load balancer and firewall rules";
+  return "its VMs";
 }
 
 function useTicker(active) {
@@ -152,12 +160,15 @@ export function PlanReview({
   );
 }
 
-function PlanningState({ job, now }) {
+function PlanningState({ job, now, build = null }) {
   const started = parseApiTime(job.startedAt || job.createdAt);
   const phase = job.progress?.phase;
+  const checking = build?.cloud
+    ? `Checking ${build.cloud.providerLabel || build.cloud.provider}: the network, the subnet and the image`
+    : "Checking vCenter, the template and the addresses";
   const label = job.operation === "destroy"
     ? "Planning what to delete"
-    : phase === "checking" ? "Checking vCenter, the template and the addresses" : "OpenTofu is making the plan";
+    : phase === "checking" ? checking : "OpenTofu is making the plan";
   return (
     <div className="card sg-cb-card sg-cb-pv-wait">
       <LiveBadge label="Planning" />
@@ -189,6 +200,8 @@ export function ProvisionProgress({ build, now, compact = false }) {
   useEffect(() => {
     if (running && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [running, job?.logTail]);
+  const managed = isManagedBuild(build);
+  const where = whereCreated(build);
   if (compact) {
     const ready = rows.filter((row) => row.state === "ready").length;
     return (
@@ -219,11 +232,16 @@ export function ProvisionProgress({ build, now, compact = false }) {
     <div className="card sg-cb-card sg-cb-pv-progress">
       <div className="sg-cb-sect">
         <h2>
-          {destroy ? "Deleting the VMs"
+          {managed
+            ? (destroy ? `Deleting the cluster ${where}`
+              : job?.status === "connecting" ? "Registering the cluster in KubeSight"
+                : job?.status === "succeeded" ? "Cluster created"
+                  : job?.operation === "grow" ? `Growing the node pool ${where}` : `Creating the cluster ${where}`)
+            : destroy ? "Deleting the VMs"
             : job?.status === "connecting" ? "Waiting for the new VMs to answer"
               : build.status === "vms_ready" ? "VMs ready"
               : job?.status === "succeeded" ? "VMs created"
-                : job?.operation === "grow" ? "Creating workers in vCenter" : "Creating VMs in vCenter"}
+                : job?.operation === "grow" ? `Creating workers ${where}` : `Creating VMs ${where}`}
         </h2>
         <span className="sg-cb-sect-right">
           {running ? <LiveBadge label={destroy ? "Destroying" : "Running"} /> : null}
@@ -241,6 +259,14 @@ export function ProvisionProgress({ build, now, compact = false }) {
           ))}
         </ol>
       ) : null}
+      {managed && !rows.length ? (
+        <p className="muted sg-cb-pv-lede">
+          {destroy
+            ? "The cloud removes the node pool first, then the control plane. This takes several minutes."
+            : `${managedLabel(build.cloud.provider)} brings up the control plane, then the node pool — usually 10 to 20 minutes. OpenTofu says only "Still creating…" until it is done.`}
+        </p>
+      ) : null}
+      {rows.length ? (
       <div className="table-wrap">
         <table className="sg-cb-pv-vms">
           <thead>
@@ -263,6 +289,7 @@ export function ProvisionProgress({ build, now, compact = false }) {
           </tbody>
         </table>
       </div>
+      ) : null}
       {job?.progress?.handoffNote ? (
         <div className="sg-cb-pv-note is-warn">{job.progress.handoffNote}</div>
       ) : null}
@@ -290,8 +317,8 @@ function DestroyDecision({ build, job, currentUserId, canExecute, busy, act, ref
       lede={stance === "requester"
         ? "Waiting for a second person who can run cluster builds. You asked, so you cannot approve it. The cluster keeps running until someone does."
         : own
-          ? "You asked to delete this cluster's VMs and remove it from KubeSight. As an admin you need no second person: read the plan, then destroy."
-          : `${job.requestedBy || "Someone"} asked to delete this cluster's VMs and remove it from KubeSight. Read the plan, then decide.`}
+          ? `You asked to delete ${destroyedThings(build)} and remove it from KubeSight. As an admin you need no second person: read the plan, then destroy.`
+          : `${job.requestedBy || "Someone"} asked to delete ${destroyedThings(build)} and remove it from KubeSight. Read the plan, then decide.`}
       busy={busy}
     >
       <div className="sg-cb-pv-ask">
@@ -324,8 +351,8 @@ function DestroyDecision({ build, job, currentUserId, canExecute, busy, act, ref
               <button className="btn-danger" type="button" disabled={busy}
                       onClick={async () => {
                         if (!(await confirmDialog({
-                          title: "Destroy VMs",
-                          message: `Destroy ${build.name}? Its VMs are deleted from vCenter and this cannot be undone.`,
+                          title: isManagedBuild(build) ? "Destroy cluster" : "Destroy VMs",
+                          message: `Destroy ${build.name}? ${destroyedThings(build).replace(/^its/, "Its")} are deleted ${whereCreated(build)} and this cannot be undone.`,
                           confirmLabel: "Destroy",
                           tone: "danger",
                         }))) return;
@@ -354,7 +381,11 @@ function DestroyDecision({ build, job, currentUserId, canExecute, busy, act, ref
 /** Install Kubernetes on a VMs-only build: the shapes that fit its VMs. */
 function InstallChooser({ build, catalog, k8sVersions, busy, onInstall, onClose }) {
   const machines = build.provisioning?.spec?.machines || [];
-  const shapes = shapesForVms(machines.length, catalog);
+  // Cloud VMs: no load-balancer shape yet (its API address would be a cloud
+  // load balancer, which these VMs were not planned with).
+  const shapes = build.cloud
+    ? cloudShapesForVms(shapesForVms(machines.length, catalog))
+    : shapesForVms(machines.length, catalog);
   const [key, setKey] = useState(shapes[0]?.key || "");
   const versions = k8sVersions.includes(build.k8sVersion) || !build.k8sVersion
     ? k8sVersions : [build.k8sVersion, ...k8sVersions];
@@ -563,7 +594,7 @@ export function ProvisionCard({
           <b>No VMs yet</b>
           <p className="muted">
             {job ? "The last plan was discarded. " : ""}
-            KubeSight creates this build&apos;s machines in vCenter. Make a plan to see exactly what it will create.
+            KubeSight creates this build&apos;s {isManagedBuild(build) ? "cluster" : "machines"} {whereCreated(build)}. Make a plan to see exactly what it will create.
           </p>
           {refusalNote}
         </div>
@@ -576,7 +607,7 @@ export function ProvisionCard({
     );
   }
 
-  if (job.status === "planning") return <PlanningState job={job} now={now} />;
+  if (job.status === "planning") return <PlanningState job={job} now={now} build={build} />;
 
   if (job.operation === "destroy") {
     if (job.status === "awaiting_approval") {
@@ -617,8 +648,11 @@ export function ProvisionCard({
             <h3>{build.name} was destroyed</h3>
             <p className="muted">
               Asked by {job.requestedBy || "someone"}{job.reason ? ` (“${job.reason}”)` : ""}, approved by{" "}
-              {job.approvedBy || "someone"} {timeAgo(job.approvedAt)}. Its VMs are gone from vCenter, its
-              addresses are free, and the cluster no longer appears in KubeSight. This record stays for audit.
+              {job.approvedBy || "someone"} {timeAgo(job.approvedAt)}.{" "}
+              {build.cloud
+                ? `${destroyedThings(build).replace(/^its/, "Its")} are gone ${whereCreated(build)}`
+                : "Its VMs are gone from vCenter, its addresses are free"}, and the cluster no longer appears in KubeSight.
+              This record stays for audit.
             </p>
           </div>
         </div>
@@ -633,16 +667,19 @@ export function ProvisionCard({
     // The button names VMs; folders and keep-apart rules ride along in the plan.
     const add = (job.summary?.resources || [])
       .filter((r) => r.kind === "vm" && ["create", "replace"].includes(r.action)).length;
+    const managed = isManagedBuild(build);
     return (
       <PlanReview
         job={job}
         title={grow ? `Add ${add} machine${add === 1 ? "" : "s"} to ${build.name}` : `Plan for ${build.name}`}
         lede={grow
           ? "The existing VMs must stay untouched — the plan is refused if it would change one. The new machines join once they answer SSH."
-          : "Applying runs exactly this plan. If anything in vCenter changes first, OpenTofu stops and asks for a new one."}
-        applyLabel={grow
-          ? `Create ${add} VM${add === 1 ? "" : "s"} and join them`
-          : add ? `Create ${add} VM${add === 1 ? "" : "s"}` : "Continue"}
+          : `Applying runs exactly this plan. If anything ${whereCreated(build)} changes first, OpenTofu stops and asks for a new one.`}
+        applyLabel={managed
+          ? (grow ? "Grow the node pool" : "Create the cluster")
+          : grow
+            ? `Create ${add} VM${add === 1 ? "" : "s"} and join them`
+            : add ? `Create ${add} VM${add === 1 ? "" : "s"}` : "Continue"}
         onApply={canExecute ? () => act(() => applyProvisionPlan(build.id, job.id)) : null}
         onDiscard={canCreate ? () => act(() => discardProvisionJob(build.id, job.id)) : null}
         busy={busy}
@@ -668,7 +705,7 @@ export function ProvisionCard({
           <div className="card sg-cb-addonline">
             <span className="sg-cb-config-label">Waiting for SSH</span>
             <span className="muted">
-              Each failed login and its reason is in the log below. Stopping changes nothing in vCenter;
+              Each failed login and its reason is in the log below. Stopping changes nothing {whereCreated(build)};
               the VMs stay and you can try SSH again.
             </span>
             <button className="btn-outline btn-sm" type="button" disabled={busy}
@@ -687,20 +724,24 @@ export function ProvisionCard({
     return (
       <>
         <Failure
-          title={job.status === "connect_failed"
-            ? "The VMs exist but did not answer SSH"
-            : `${created} VM${created === 1 ? "" : "s"} created, then OpenTofu stopped`}
+          title={isManagedBuild(build)
+            ? (job.status === "connect_failed"
+              ? "The cluster exists but KubeSight could not register it"
+              : "OpenTofu stopped before the cluster was ready")
+            : job.status === "connect_failed"
+              ? "The VMs exist but did not answer SSH"
+              : `${created} VM${created === 1 ? "" : "s"} created, then OpenTofu stopped`}
           error={job.error}
         >
           {job.status === "connect_failed" && canExecute ? (
             <button className="primary" type="button" disabled={busy}
                     onClick={() => act(() => retryProvisionConnect(build.id, job.id))}>
-              Try SSH again
+              {isManagedBuild(build) ? "Try registering again" : "Try SSH again"}
             </button>
           ) : !grow ? planAgain : null}
-          {created && canExecute && onRequestDestroy && !grow ? (
+          {(created || isManagedBuild(build)) && canExecute && onRequestDestroy && !grow ? (
             <button className="btn-outline" type="button" onClick={onRequestDestroy}>
-              Remove the created VMs…
+              {isManagedBuild(build) ? "Remove what was created…" : "Remove the created VMs…"}
             </button>
           ) : null}
           <ExportConfig build={build} job={job} notify={notify} />
@@ -770,6 +811,13 @@ const GROW_ROLES = [
 export function ProvisionGrowPanel({ build, canExecute, notify, onChanged, onClose }) {
   const spec = build.provisioning?.spec || {};
   const growth = growthState(build);
+  const cloud = Boolean(build.cloud);
+  const managed = isManagedBuild(build);
+  // A cloud has no balancer VMs to add (the API is behind its load balancer),
+  // and a managed cluster grows only its node pool.
+  const growRoles = GROW_ROLES.filter(([role]) => (
+    managed ? role === "worker" : !(cloud && role === "loadbalancer")
+  ));
   const [counts, setCounts] = useState({ worker: 1, controlPlane: 0, loadbalancer: 0 });
   const [sizes, setSizes] = useState(() => JSON.parse(JSON.stringify(spec.sizes || {})));
   const [busy, setBusy] = useState(false);
@@ -777,8 +825,8 @@ export function ProvisionGrowPanel({ build, canExecute, notify, onChanged, onClo
   // Control planes in steps of two, balancers up to the pair.
   const options = {
     worker: Array.from({ length: 21 }, (_, n) => n),
-    controlPlane: growth.controlPlane.allowed ? [0, 2] : [0],
-    loadbalancer: growth.loadbalancer.allowed
+    controlPlane: growth.controlPlane.allowed && !managed ? [0, 2] : [0],
+    loadbalancer: growth.loadbalancer.allowed && !cloud
       ? Array.from({ length: Math.max(0, 2 - growth.totals.loadbalancer) + 1 }, (_, n) => n)
       : [0],
   };
@@ -812,23 +860,35 @@ export function ProvisionGrowPanel({ build, canExecute, notify, onChanged, onClo
   return (
     <div className="card sg-cb-card sg-cb-pv-panel">
       <div className="sg-cb-sect">
-        <h2>Add machines to {build.name}</h2>
+        <h2>{managed ? `Grow the node pool of ${build.name}` : `Add machines to ${build.name}`}</h2>
         <button className="btn-ghost btn-sm" type="button" onClick={onClose}>Close</button>
       </div>
-      <p className="muted sg-cb-pv-lede">
-        New VMs are cloned from the same template, in <span className="sg-cb-mono">{spec.datastoreName}</span> on{" "}
-        <span className="sg-cb-mono">{spec.networkName}</span>, then join the running cluster. The plan is refused if it
-        would change a VM that already runs. New control planes join two at a time, one after another with an etcd
-        health check between them; a new balancer becomes keepalived&apos;s backup and both balancers are reloaded, not
-        restarted.
-      </p>
+      {managed ? (
+        <p className="muted sg-cb-pv-lede">
+          {managedLabel(build.cloud.provider)} adds the nodes to the pool; nothing else in the cluster changes.
+        </p>
+      ) : cloud ? (
+        <p className="muted sg-cb-pv-lede">
+          New VMs start from the same image in <span className="sg-cb-mono">{spec.subnetName || spec.subnetId}</span>, then
+          join the running cluster. The plan is refused if it would change a VM that already runs. New control planes join
+          two at a time, with an etcd health check between them, and are added behind the cloud load balancer.
+        </p>
+      ) : (
+        <p className="muted sg-cb-pv-lede">
+          New VMs are cloned from the same template, in <span className="sg-cb-mono">{spec.datastoreName}</span> on{" "}
+          <span className="sg-cb-mono">{spec.networkName}</span>, then join the running cluster. The plan is refused if it
+          would change a VM that already runs. New control planes join two at a time, one after another with an etcd
+          health check between them; a new balancer becomes keepalived&apos;s backup and both balancers are reloaded, not
+          restarted.
+        </p>
+      )}
       <div className="table-wrap">
         <table className="sg-cb-sizes">
           <thead>
             <tr><th>Role</th><th>Now</th><th>Add</th><th>vCPU</th><th>Memory GB</th><th>Disk GB</th></tr>
           </thead>
           <tbody>
-            {GROW_ROLES.map(([role, nodeRole]) => (
+            {growRoles.map(([role, nodeRole]) => (
               <tr key={role}>
                 <td><span className={`sg-cb-rolechip is-${role}`}><i />{ROLE_TITLE[role]}</span></td>
                 <td className="sg-cb-mono">{growth.running[nodeRole]}</td>
@@ -857,7 +917,7 @@ export function ProvisionGrowPanel({ build, canExecute, notify, onChanged, onClo
           </tbody>
         </table>
       </div>
-      {counts.controlPlane && growth.totals.loadbalancer + counts.loadbalancer < 2 ? (
+      {!cloud && counts.controlPlane && growth.totals.loadbalancer + counts.loadbalancer < 2 ? (
         <p className="sg-cb-topowarn">
           ⚠ With one load balancer the API address still has a single point of failure. Add the second balancer too.
         </p>
@@ -869,7 +929,7 @@ export function ProvisionGrowPanel({ build, canExecute, notify, onChanged, onClo
       ) : null}
       <div className="sg-cb-actions">
         <button className="primary" type="button" disabled={busy || !canExecute || !total} onClick={submit}>
-          {busy ? "Planning…" : `Preview plan for ${total} VM${total === 1 ? "" : "s"}`}
+          {busy ? "Planning…" : `Preview plan for ${total} ${managed ? "node" : "VM"}${total === 1 ? "" : "s"}`}
         </button>
       </div>
     </div>
@@ -902,12 +962,23 @@ export function DestroyPanel({ build, notify, onChanged, onClose }) {
         <h2>Destroy {build.name}</h2>
         <button className="btn-ghost btn-sm" type="button" onClick={onClose}>Close</button>
       </div>
-      <p className="sg-cb-pv-lede">
-        Deletes the {vmCount} VM{vmCount === 1 ? "" : "s"} OpenTofu created for this cluster, its keep-apart rules and its
-        folder{build.resultClusterId ? ", and removes the cluster from Clusters, Dashboard and Inventory — its kubeconfig stops working" : ""}.
-        This cannot be undone. Only what is in this cluster&apos;s OpenTofu state is touched: the VM template, datastore,
-        network and every other VM stay as they are.
-      </p>
+      {build.cloud ? (
+        <p className="sg-cb-pv-lede">
+          Deletes {isManagedBuild(build)
+            ? `the ${managedLabel(build.cloud.provider)} cluster and its node pool`
+            : `the ${vmCount} VM${vmCount === 1 ? "" : "s"} OpenTofu created for this cluster, its load balancer and its firewall rules`}{" "}
+          {whereCreated(build)}{build.resultClusterId ? ", and removes the cluster from Clusters, Dashboard and Inventory — its kubeconfig stops working" : ""}.
+          This cannot be undone. Only what is in this cluster&apos;s OpenTofu state is touched: the network, subnets,
+          images and everything else in the account stay as they are.
+        </p>
+      ) : (
+        <p className="sg-cb-pv-lede">
+          Deletes the {vmCount} VM{vmCount === 1 ? "" : "s"} OpenTofu created for this cluster, its keep-apart rules and its
+          folder{build.resultClusterId ? ", and removes the cluster from Clusters, Dashboard and Inventory — its kubeconfig stops working" : ""}.
+          This cannot be undone. Only what is in this cluster&apos;s OpenTofu state is touched: the VM template, datastore,
+          network and every other VM stay as they are.
+        </p>
+      )}
       <p className="muted">
         {isAdmin
           ? "You are an admin, so no approval is needed: KubeSight plans the destroy and runs it straight away."
@@ -929,7 +1000,7 @@ export function DestroyPanel({ build, notify, onChanged, onClose }) {
       </div>
       <div className="sg-cb-actions">
         <button className="btn-danger" type="button" disabled={busy || typed !== build.name} onClick={submit}>
-          {busy ? "Planning…" : isAdmin ? "Destroy VMs" : "Plan the destroy and ask for approval"}
+          {busy ? "Planning…" : isAdmin ? (isManagedBuild(build) ? "Destroy cluster" : "Destroy VMs") : "Plan the destroy and ask for approval"}
         </button>
       </div>
     </div>
@@ -962,8 +1033,8 @@ export function SaveTemplatePanel({ build, notify, onClose, onSaved }) {
         <button className="btn-ghost btn-sm" type="button" onClick={onClose}>Close</button>
       </div>
       <p className="muted sg-cb-pv-lede">
-        Keeps the shape ({shapeLabel(counts)}), the machine sizes, networking and add-ons. Not the
-        vCenter placement or the addresses, so the template works on any vCenter.
+        Keeps the shape ({shapeLabel(counts)}), the machine sizes, networking and add-ons. Not where the
+        machines live (vCenter or cloud placement) or the addresses, so the template works anywhere.
       </p>
       <div className="sg-cb-qgrid">
         <div className="sg-cb-field">

@@ -58,6 +58,14 @@ import {
   startClusterBuild,
 } from "../../api/clusterBuildsApi.js";
 import { setVisibleInterval } from "../../lib/visibleInterval";
+import {
+  cloudWhere,
+  isCloud,
+  isManagedBuild,
+  managedBlueprint,
+  managedLabel,
+  withCloudBus,
+} from "../../utils/cloudProvisioning.js";
 import { confirmDialog } from "../../lib/dialogs.js";
 
 const DETAIL_POLL_INTERVAL_MS = 2500;
@@ -137,25 +145,28 @@ function DayTwo({
     }
   };
 
+  // A managed cloud cluster grows its node pool; plugins, workloads and apps
+  // are installed over SSH on nodes KubeSight does not have there.
+  const managed = isManagedBuild(build);
   return (
     <div className="sg-cb-day2">
       <span className="sg-cb-day2-label">Day two</span>
       {canCreate ? (
         <button className="btn-outline btn-sm" type="button" onClick={onGrow}>
-          Add machines
+          {managed ? "Grow node pool" : "Add machines"}
         </button>
       ) : null}
-      {canCreate ? (
+      {canCreate && !managed ? (
         <button className="btn-outline btn-sm" type="button" onClick={onAddAddons}>
           Add plugins
         </button>
       ) : null}
-      {canCreate ? (
+      {canCreate && !managed ? (
         <button className="btn-outline btn-sm" type="button" onClick={onBringWorkloads}>
           Bring workloads over
         </button>
       ) : null}
-      {canCreate && onInstallApps ? (
+      {canCreate && onInstallApps && !managed ? (
         <button className="btn-outline btn-sm" type="button" onClick={onInstallApps}>
           Install apps
         </button>
@@ -194,12 +205,63 @@ function DayTwo({
   );
 }
 
+/** A managed cluster's receipt: the cloud runs the control plane, so there are
+    no machines, CNI or join secrets of KubeSight's to report — only where the
+    API answers, the node pool, and whether KubeSight registered it. */
+function ManagedReceipt({ build, duration, dayTwo }) {
+  const cloud = build.cloud || {};
+  const pool = cloud.managed || {};
+  const size = pool.size || {};
+  const nodes = pool.nodeCount || 0;
+  const registered = Boolean(build.resultClusterId);
+  return (
+    <>
+      <div className="card sg-cb-receipt">
+        <div className="sg-cb-okring" aria-hidden="true">✓</div>
+        <div>
+          <h3>{build.name} is up</h3>
+          <p className="muted">
+            {cloud.managedLabel || "The cloud"} runs the control plane, with {nodes} node{nodes === 1 ? "" : "s"} in
+            the pool.{" "}
+            {registered
+              ? "KubeSight registered it with its own service account; it is in Clusters, Dashboard and Inventory."
+              : "It was not registered in KubeSight (demo mode has no API to reach)."}
+          </p>
+        </div>
+      </div>
+
+      {dayTwo}
+
+      <div className="sg-cb-facts">
+        <div className="sg-cb-fact">
+          <div className="k">API endpoint</div>
+          <div className="v sg-cb-mono">{build.controlPlaneEndpoint || "private, not registered"}</div>
+        </div>
+        {duration ? (
+          <div className="sg-cb-fact"><div className="k">Build time</div><div className="v">{duration}</div></div>
+        ) : null}
+        <div className="sg-cb-fact">
+          <div className="k">Node pool</div>
+          <div className="v">
+            {nodes} × {size.cpu ? `${size.cpu} vCPU · ${size.memoryGb} GB` : "—"}
+          </div>
+        </div>
+        <div className="sg-cb-fact">
+          <div className="k">Kubernetes</div>
+          <div className="v">{cloud.managedLabel} {pool.kubernetesVersion ? `v${String(pool.kubernetesVersion).replace(/^v/, "")}` : ""}</div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 function Receipt({
   build, catalog, duration, addonStep, onOpenAddonLog, workloadStep,
   onOpenWorkloadLog, dayTwo,
 }) {
   const machineCount = (build.nodes || []).length;
   const copied = workloadReceipt(build);
+  if (isManagedBuild(build)) return <ManagedReceipt build={build} duration={duration} dayTwo={dayTwo} />;
   return (
     <>
       <div className="card sg-cb-receipt">
@@ -556,16 +618,34 @@ export default function BuildDetail({
 
   const plan = useMemo(() => {
     if (!build) return null;
-    // Until the phase machine has nodes to report on, a VMware build's drawing
-    // is OpenTofu's: the planned machines, coloured by what is happening to each.
+    // A managed cloud cluster never has nodes of its own here: the cloud's
+    // control plane and the node pool are the whole drawing.
+    if (isManagedBuild(build)) {
+      const spec = build.provisioning?.spec || {};
+      return managedBlueprint({
+        provider: build.cloud.provider,
+        count: spec.counts?.worker || 0,
+        machineType: spec.machineTypes?.worker || "",
+        state: build.status === "completed" ? "built" : build.status === "provisioning" ? "live" : "stamped",
+        nodeState: build.status === "completed" ? "joined" : "set",
+        endpoint: build.controlPlaneEndpoint || "",
+      });
+    }
+    // On a cloud the API bar is the cloud load balancer, not a VIP.
+    const cloudBus = (drawing) => (build.cloud
+      ? withCloudBus(drawing, { loadBalancer: build.cloud.loadBalancer, endpoint: build.controlPlaneEndpoint })
+      : drawing);
+    // Until the phase machine has nodes to report on, a VMware (or cloud)
+    // build's drawing is OpenTofu's: the planned machines, coloured by what is
+    // happening to each.
     const machines = build.provisioning?.spec?.machines || [];
     if (
-      build.machineSource === "vmware"
+      (build.machineSource === "vmware" || isCloud(build.machineSource))
       && machines.length
       && ["draft", "provisioning", "provision_failed", "vms_ready", "destroying"].includes(build.status)
     ) {
       const rows = Object.fromEntries(vmRows(build).map((row) => [row.name, row]));
-      return machinesBlueprint({
+      return cloudBus(machinesBlueprint({
         machines,
         vip: build.vipAddress,
         endpoint: build.controlPlaneEndpoint,
@@ -576,9 +656,9 @@ export default function BuildDetail({
           const state = vmSlotState(rows[machine.name]);
           return state === "joined" ? "ok" : state === "failed" ? "bad" : state === "live" ? "live" : null;
         },
-      });
+      }));
     }
-    return buildBlueprint(build);
+    return cloudBus(buildBlueprint(build));
   }, [build]);
   const progress = useMemo(() => (build ? buildProgress(build) : null), [build]);
   // Preflight that ran outside the wizard — on VMs OpenTofu just created, or
@@ -622,7 +702,9 @@ export default function BuildDetail({
     );
   }
 
-  const isVmware = build.machineSource === "vmware";
+  // KubeSight created the machines (OpenTofu), in vCenter or a public cloud.
+  const isVmware = build.machineSource === "vmware" || isCloud(build.machineSource);
+  const managed = isManagedBuild(build);
   const vmCount = build.provisioning?.state?.vmCount || 0;
   // While OpenTofu works on the VMs, or waits on someone to approve deleting
   // them, nothing else may change the build underneath it.
@@ -712,11 +794,16 @@ export default function BuildDetail({
               : isGrowthRun ? "Adding machines" : "Building"} />
           : <StatusPill status={build.status} />}
         <span className="muted sg-cb-mono sg-cb-detail-meta">
-          {build.vmsOnly
+          {managed
+            ? `${managedLabel(build.cloud.provider)} v${build.k8sVersion} · ${cloudWhere(build.cloud)}`
+              + `${build.controlPlaneEndpoint ? ` · ${build.controlPlaneEndpoint}` : ""}`
+            : build.vmsOnly
             ? `VMs only · ${(build.nodes || []).length} VM${(build.nodes || []).length === 1 ? "" : "s"} · no Kubernetes`
+              + `${build.cloud ? ` · ${cloudWhere(build.cloud)}` : ""}`
             : <>
               v{build.k8sVersion} · {build.topologyType === "stacked_ha" ? "HA" : "single CP"}
               {" "}· {build.controlPlaneEndpoint} · {build.cniPlugin}
+              {build.cloud ? ` · ${cloudWhere(build.cloud)}` : ""}
             </>}
         </span>
         <span className="sg-cb-detail-actions">
@@ -756,7 +843,7 @@ export default function BuildDetail({
               Edit draft
             </button>
           ) : null}
-          {canExecute && ["draft", "preflight_failed"].includes(build.status)
+          {canExecute && !managed && ["draft", "preflight_failed"].includes(build.status)
             && (!isVmware || (vmCount > 0 && !provisionBusy)) ? (
             <button
               className="primary"
@@ -797,7 +884,7 @@ export default function BuildDetail({
           {destroyable && !["completed"].includes(build.status) ? (
             <button className="btn-outline" type="button" disabled={busy}
                     onClick={() => setDestroyOpen(true)}>
-              Destroy VMs…
+              {managed ? "Destroy cluster…" : "Destroy VMs…"}
             </button>
           ) : null}
           {canCreate && deletion.allowed && !(isVmware && vmCount > 0) ? (
@@ -821,9 +908,12 @@ export default function BuildDetail({
       {isVmware && build.provisionStatus ? (
         <p className="muted sg-cb-pv-status">
           <span className="sg-cb-pill is-brand">OpenTofu</span>{" "}
-          {PROVISION_STATUS_LABELS[build.provisionStatus] || build.provisionStatus}
+          {isManagedBuild(build) && build.provisionStatus === "ready"
+            ? "Cluster created"
+            : PROVISION_STATUS_LABELS[build.provisionStatus] || build.provisionStatus}
           {build.provisioning?.state?.exists
-            ? ` · state version ${build.provisioning.state.version} · ${vmCount} VM${vmCount === 1 ? "" : "s"}`
+            ? ` · state version ${build.provisioning.state.version}`
+              + (isManagedBuild(build) ? "" : ` · ${vmCount} VM${vmCount === 1 ? "" : "s"}`)
               + `${build.provisioning.state.locked ? " · locked by a running job" : " · unlocked"}`
             : ""}
         </p>
@@ -855,7 +945,7 @@ export default function BuildDetail({
         />
       ) : null}
 
-      {progress?.timeline?.length && !destroyed && !build.vmsOnly ? (
+      {progress?.timeline?.length && !destroyed && !build.vmsOnly && !isManagedBuild(build) ? (
         <div className="card sg-cb-railcard">
           <PhaseRail
             timeline={progress.timeline}
@@ -914,7 +1004,7 @@ export default function BuildDetail({
             <DayTwo
               build={build}
               canCreate={canCreate}
-              canDownloadKubeconfig={canDownloadKubeconfig}
+              canDownloadKubeconfig={canDownloadKubeconfig && Boolean(build.resultClusterId)}
               onOpenCluster={onOpenCluster}
               onGrow={() => {
                 setBringing(false); setAddingAddons(false); setInstallingApps(false); setGrowing(true);
@@ -1070,53 +1160,66 @@ export default function BuildDetail({
             </div>
           ) : null}
 
-          <details className="sg-cb-machines">
-            <summary>
-              All machines
-              <span className="muted">
-                {(build.nodes || []).length} · addresses, guest OS and placement
-              </span>
-              <span className="sg-cb-chev" aria-hidden="true">›</span>
-            </summary>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Machine</th><th>Role</th><th>Address</th>
-                    <th>Guest OS</th><th>ESXi host</th><th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(build.nodes || []).map((node) => (
-                    <tr key={node.id}>
-                      <td>
-                        {node.hostname || node.vsphereVmName || "—"}
-                        {node.isPrimaryCp ? " ★" : ""}
-                        {node.isLbMaster ? " (VRRP master)" : ""}
-                      </td>
-                      <td>{ROLE_LABELS[node.role]}</td>
-                      <td className="sg-cb-mono">
-                        {node.address}{node.addressSource === "manual" ? " (manual)" : ""}
-                      </td>
-                      <td>{node.osFamily ? `${node.osFamily} ${node.osVersion || ""}` : "—"}</td>
-                      <td>{node.vsphereHost || "—"}</td>
-                      <td><StatusPill status={node.status} /></td>
+          {(build.nodes || []).length ? (
+            <details className="sg-cb-machines">
+              <summary>
+                All machines
+                <span className="muted">
+                  {(build.nodes || []).length} · addresses, guest OS and placement
+                </span>
+                <span className="sg-cb-chev" aria-hidden="true">›</span>
+              </summary>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Machine</th><th>Role</th><th>Address</th>
+                      <th>Guest OS</th><th>{build.cloud ? "Zone" : "ESXi host"}</th><th>Status</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </details>
+                  </thead>
+                  <tbody>
+                    {(build.nodes || []).map((node) => (
+                      <tr key={node.id}>
+                        <td>
+                          {node.hostname || node.vsphereVmName || "—"}
+                          {node.isPrimaryCp ? " ★" : ""}
+                          {node.isLbMaster ? " (VRRP master)" : ""}
+                        </td>
+                        <td>{ROLE_LABELS[node.role]}</td>
+                        <td className="sg-cb-mono">
+                          {node.address}{node.addressSource === "manual" ? " (manual)" : ""}
+                        </td>
+                        <td>{node.osFamily ? `${node.osFamily} ${node.osVersion || ""}` : "—"}</td>
+                        <td>{node.vsphereHost || "—"}</td>
+                        <td><StatusPill status={node.status} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          ) : null}
         </div>
 
         {destroyed ? null : <Blueprint
           plan={plan}
-          facts={build.vmsOnly ? [
+          facts={managed ? [
+            { label: "Cloud", value: cloudWhere(build.cloud) },
+            { label: "Account", value: build.cloud.accountName || "—" },
+            { label: "Network", value: build.provisioning?.spec?.networkName || "—" },
+            { label: "API", value: build.controlPlaneEndpoint || "private endpoint, once created" },
+          ] : build.vmsOnly && build.cloud ? [
+            { label: "Kubernetes", value: "not installed — VMs only" },
+            { label: "Cloud", value: cloudWhere(build.cloud) },
+            { label: "Image", value: build.provisioning?.spec?.image?.name || "—" },
+            { label: "Subnet", value: build.provisioning?.spec?.subnetName || build.provisioning?.spec?.subnetId || "—" },
+          ] : build.vmsOnly ? [
             { label: "Kubernetes", value: "not installed — VMs only" },
             { label: "Clone of", value: build.provisioning?.spec?.template?.name || "—" },
             { label: "Datastore", value: build.provisioning?.spec?.datastoreName || "—" },
             { label: "Network", value: build.provisioning?.spec?.networkName || "—" },
           ] : [
+            ...(build.cloud ? [{ label: "Cloud", value: cloudWhere(build.cloud) }] : []),
             {
               label: "Add-ons",
               value: (build.addons || []).length
@@ -1137,7 +1240,13 @@ export default function BuildDetail({
               value: buildProfile?.k8sImageRegistry || "upstream registries",
             },
           ]}
-          note={isDone
+          note={isDone && managed
+            ? { tone: "good", text: `${managedLabel(build.cloud.provider)} runs the control plane; KubeSight reaches its private API with a service account it created.` }
+            : isDone && build.cloud
+            ? { tone: "good", text: build.cloud.loadBalancer
+              ? "The API answers behind the cloud's internal load balancer."
+              : "The API answers on the first control plane." }
+            : isDone
             ? { tone: "good", text: "Every HA tier spans a distinct ESXi host where vCenter reported one." }
             : point
               ? {

@@ -343,3 +343,18 @@
 .sg-cb-pv-hosts-cluster legend { padding: 0 4px; font-size: 12.5px; font-weight: 700; }
 .sg-cb-pv-host { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 3px 0; font-size: 12.5px; }
 .sg-cb-pv-acct-msg.is-bad { color: var(--danger); }
+
+/* ── Public clouds (Oracle Cloud, AWS, Google Cloud) ─────────────────── */
+/* One neutral badge per cloud: the provider is a fact about the row, not a
+   status, so no status colour and no brand colours. */
+.sg-cb-cloudbadge {
+  display: inline-flex; align-items: center; padding: 1px 7px; margin-right: 2px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-control);
+  font-size: 10.5px; font-weight: 800; letter-spacing: .02em; text-transform: uppercase;
+  color: var(--text-muted); background: var(--bg-panel-strong); vertical-align: 1px;
+}
+.sg-cb-cloud-subnets {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 14px;
+}
+.sg-cb-cloud-subnets .sg-cb-inlinecheck { gap: 8px; flex-wrap: wrap; }
+.sg-cb-secret { -webkit-text-security: disc; }

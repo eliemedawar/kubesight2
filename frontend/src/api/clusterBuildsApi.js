@@ -292,3 +292,38 @@ export const deleteVSphereNetwork = (id, rangeId) =>
 /** The next free addresses in a range — a preview, nothing is reserved. */
 export const previewNetworkAddresses = (rangeId, count) =>
   request(`/api/vsphere-networks/${rangeId}/preview`, { query: { count } });
+
+// --- Cloud accounts (Oracle Cloud, AWS, Google Cloud) ------------------------
+
+/** {accounts, providers, simulated} */
+export const listCloudAccounts = () => request("/api/cloud-accounts");
+
+export const createCloudAccount = (payload) =>
+  request("/api/cloud-accounts", { method: "POST", body: payload });
+
+/** A blank secret keeps the stored one. */
+export const updateCloudAccount = (id, payload) =>
+  request(`/api/cloud-accounts/${id}`, { method: "PUT", body: payload });
+
+export const deleteCloudAccount = (id) =>
+  request(`/api/cloud-accounts/${id}`, { method: "DELETE" });
+
+/** Sign in with the stored keys for real: {ok, message, account}. */
+export const testCloudAccount = (id) =>
+  request(`/api/cloud-accounts/${id}/test`, { method: "POST" });
+
+export const listCloudRegions = (id) => request(`/api/cloud-accounts/${id}/regions`);
+
+/** Zones, networks + subnets, images, machine types, Kubernetes versions (and OCI compartments). */
+export const getCloudInventory = (id, { region, compartmentId, refresh = false } = {}) =>
+  request(`/api/cloud-accounts/${id}/inventory`, {
+    query: {
+      region,
+      ...(compartmentId ? { compartmentId } : {}),
+      ...(refresh ? { refresh: 1 } : {}),
+    },
+  });
+
+/** Which machine type each role's CPU / memory becomes: {sizes: {role: {type, cpu, memoryGb, note}}}. */
+export const resolveCloudSizes = (id, payload) =>
+  request(`/api/cloud-accounts/${id}/resolve-sizes`, { method: "POST", body: payload });

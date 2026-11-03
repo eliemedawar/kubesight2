@@ -28,6 +28,7 @@ import {
   getBuilderOptions,
   listBuildProfiles,
   listClusterBuilds,
+  listCloudAccounts,
   listSshCredentials,
   listSshProfiles,
   listVSphereConnections,
@@ -35,7 +36,11 @@ import {
 import { setVisibleInterval } from "../lib/visibleInterval";
 
 const POLL_INTERVAL_MS = 5000;
-const EMPTY_INFRA = { vsphere: [], credentials: [], profiles: [], buildProfiles: [] };
+const EMPTY_INFRA = {
+  vsphere: [], credentials: [], profiles: [], buildProfiles: [],
+  // Oracle Cloud / AWS / Google Cloud accounts, and what each cloud's form asks.
+  cloudAccounts: [], cloudProviders: [], cloudSimulated: false,
+};
 
 export default function ClusterBuilderPage({
   canCreate = false,
@@ -161,7 +166,7 @@ export default function ClusterBuilderPage({
   }, []);
 
   const reloadInfra = useCallback(async (fallback = null) => {
-    const [vsphere, credentials, profiles, buildProfiles] = await Promise.all([
+    const [vsphere, credentials, profiles, buildProfiles, clouds] = await Promise.all([
       canManageVSphere
         ? listVSphereConnections().catch(() => ({ items: fallback?.vsphere }))
         : Promise.resolve({ items: fallback?.vsphere }),
@@ -172,8 +177,13 @@ export default function ClusterBuilderPage({
         ? listSshProfiles().catch(() => ({ items: fallback?.profiles }))
         : Promise.resolve({ items: fallback?.profiles }),
       listBuildProfiles().catch(() => ({ items: fallback?.buildProfiles })),
+      // Read with cluster_builds:view: the wizard offers these to anyone who builds.
+      listCloudAccounts().catch(() => null),
     ]);
     setInfra((previous) => ({
+      cloudAccounts: clouds?.accounts ?? previous.cloudAccounts ?? [],
+      cloudProviders: clouds?.providers ?? previous.cloudProviders ?? [],
+      cloudSimulated: Boolean(clouds?.simulated ?? previous.cloudSimulated),
       vsphere: vsphere.items ?? previous.vsphere,
       credentials: credentials.items || [],
       profiles: profiles.items ?? previous.profiles,
@@ -334,7 +344,7 @@ export default function ClusterBuilderPage({
     <div className="sg-cb-page">
       <PageTitle
         title="Cluster Builder"
-        subtitle="Start from a template, let KubeSight create the VMs in vCenter or pick machines you have, and it builds the cluster."
+        subtitle="Start from a template, let KubeSight create the VMs in vCenter or a public cloud (or a managed OKE, EKS or GKE cluster), or pick machines you have, and it builds the cluster."
       />
       {error ? <ErrorBanner message={error} onDismiss={() => setError("")} /> : null}
       {notice ? <div className="sg-cb-notice">{notice}</div> : null}

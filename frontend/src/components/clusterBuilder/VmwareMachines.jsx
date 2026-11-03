@@ -130,7 +130,7 @@ function TemplateSizes({ counts, template }) {
   );
 }
 
-function SizesTable({ counts, sizes, setSizes, template, minimums }) {
+export function SizesTable({ counts, sizes, setSizes, template, minimums }) {
   const errors = sizeErrors(counts, sizes, minimums);
   const roles = [...ROLE_KEYS, VM_ROLE].filter((role) => counts[role]);
   return (

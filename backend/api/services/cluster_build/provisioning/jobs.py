@@ -3,11 +3,17 @@
 A job is driven by one worker thread at a time (``_active_jobs`` guards the
 process, a heartbeat on ``updated_at`` guards the fleet). What each phase does:
 
-  plan     vCenter checks → address probes → main.tf.json → init → plan → show
+  plan     vCenter (or cloud) checks → address probes → main.tf.json → init →
+           plan → show
   apply    init → apply the saved plan (streamed, per-VM progress) → record VMs
   connect  wait until every new VM answers SSH, then hand the machines to the
            Cluster Builder phase machine (preflight, then build or grow) — or,
-           for a VMs-only build, stop there with the build ``vms_ready``
+           for a VMs-only build, stop there with the build ``vms_ready``. For a
+           managed cloud cluster (OKE / EKS / GKE) there is nothing to SSH
+           into: connect registers the cluster with KubeSight instead.
+
+Where VMware and the clouds differ, ``_target(build)`` answers: which account
+OpenTofu signs in with, what is checked before planning, and the configuration.
 
 Recovery (``advance_provision_jobs``, ticked by the scheduler): a job whose
 worker died is picked up again. Planning and connecting simply rerun. An
@@ -55,7 +61,10 @@ from ....secret_encryption import decrypt_secret, encrypt_secret
 from ...vsphere_client import VSphereError
 from ..os_adapters.base import SATELLITE_MARKER
 from ..scrub import scrub
-from . import host_placement, inventory, ip_pool, state_store, templates, tofu_config, tofu_runner, vm_watch
+from . import (
+    cloud_build, host_placement, inventory, ip_pool, state_store, templates, tofu_config,
+    tofu_runner, vm_watch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +304,34 @@ _RULE_TITLES = {
 }
 
 
+_CLOUD_PREFIXES = {"aws_": "aws", "google_": "gcp", "oci_": "oci"}
+# The plan's resource kinds the pages group by: vm, lb, network, cluster,
+# nodepool, iam (+ vCenter's folder and rule). Adapters' own words map onto them.
+_KIND_ALIASES = {
+    "loadbalancer": "lb", "load_balancer": "lb", "firewall": "network",
+    "security_group": "network", "securitygroup": "network", "nsg": "network",
+    "placement": "network", "node_pool": "nodepool", "managed_cluster": "cluster",
+}
+
+
+def _cloud_describe(rtype: Optional[str], rname: Optional[str], key, attrs: Dict[str, Any]):
+    """(kind, title, detail) for a cloud resource, from its adapter; None for
+    anything else (vSphere's own are described below)."""
+    from . import clouds
+
+    provider = next((p for prefix, p in _CLOUD_PREFIXES.items() if (rtype or "").startswith(prefix)), None)
+    if provider is None:
+        return None
+    try:
+        described = clouds.adapter(provider).describe_resource(rtype, rname, key, attrs or {})
+    except Exception:  # noqa: BLE001 — a summary line is never worth failing a plan over
+        described = None
+    if described is None:
+        return ("vm", str(key), "") if rtype in state_store.VM_RESOURCE_TYPES else None
+    kind, title, detail = described
+    return (_KIND_ALIASES.get(kind, kind), title, detail)
+
+
 def summarize_plan(document: Dict[str, Any], operation: str) -> Dict[str, Any]:
     resources = []
     counts = {"add": 0, "change": 0, "destroy": 0, "replace": 0}
@@ -320,7 +357,10 @@ def summarize_plan(document: Dict[str, Any], operation: str) -> Dict[str, Any]:
         key = change.get("index")
         body = (change.get("change") or {})
         attrs = body.get("after") or body.get("before") or {}
-        if rtype == "vsphere_virtual_machine":
+        described = _cloud_describe(rtype, change.get("name"), key, attrs)
+        if described is not None:
+            kind, title, detail = described
+        elif rtype == "vsphere_virtual_machine":
             kind, title, detail = "vm", str(key), _vm_detail(attrs)
         elif rtype == "vsphere_folder":
             kind, title, detail = "folder", f"VM folder {attrs.get('path') or ''}".strip(), ""
@@ -366,11 +406,12 @@ def summarize_plan(document: Dict[str, Any], operation: str) -> Dict[str, Any]:
 # Output handling
 # ---------------------------------------------------------------------------
 
+_VM_TYPES = r"(?:vsphere_virtual_machine|aws_instance|google_compute_instance|oci_core_instance)"
 _VM_LINE = re.compile(
-    r'^vsphere_virtual_machine\.node\["(?P<name>[^"]+)"\]: (?P<what>.*)$'
+    _VM_TYPES + r'\.node\["(?P<name>[^"]+)"\]: (?P<what>.*)$'
 )
 _ELAPSED = re.compile(r"\[(?:id=[^,\]]*, )?(?P<t>[0-9hms]+) elapsed\]")
-_WITH_VM = re.compile(r'with vsphere_virtual_machine\.node\["(?P<name>[^"]+)"\]')
+_WITH_VM = re.compile(r'with ' + _VM_TYPES + r'\.node\["(?P<name>[^"]+)"\]')
 
 
 class _Output:
@@ -558,13 +599,12 @@ def _ca_bundle(workdir: str, ca_pem: str) -> Optional[str]:
 
 
 def _environment(job: ClusterProvisionJob, token: str, cfg, workdir: str) -> Dict[str, str]:
+    """OpenTofu's environment: the state backend, the provider mirror, and —
+    with ``cfg`` — the vCenter provisioning account. A cloud build passes no
+    ``cfg``; its provider's variables come from the cloud adapter."""
     from urllib.parse import urlsplit
 
     base = f"{_internal_base_url()}/api/internal/tofu-state/{job.build_id}"
-    parts = urlsplit(cfg.root)
-    server = parts.hostname or ""
-    if parts.port and parts.port != 443:
-        server = f"{server}:{parts.port}"
     env = {
         "PATH": os.environ.get("PATH", ""),
         "HOME": workdir,
@@ -579,13 +619,20 @@ def _environment(job: ClusterProvisionJob, token: str, cfg, workdir: str) -> Dic
         "TF_HTTP_USERNAME": f"job-{job.id}",
         "TF_HTTP_PASSWORD": token,
         "TF_HTTP_RETRY_MAX": "5",
-        "VSPHERE_SERVER": server,
-        "VSPHERE_USER": cfg.username,
-        "VSPHERE_PASSWORD": cfg.password,
-        "VSPHERE_ALLOW_UNVERIFIED_SSL": "true" if cfg.skip_tls_verify else "false",
         "KUBESIGHT_BUILD_ID": str(job.build_id),
         "KUBESIGHT_JOB_ID": str(job.id),
     }
+    if cfg is not None:
+        parts = urlsplit(cfg.root)
+        server = parts.hostname or ""
+        if parts.port and parts.port != 443:
+            server = f"{server}:{parts.port}"
+        env.update({
+            "VSPHERE_SERVER": server,
+            "VSPHERE_USER": cfg.username,
+            "VSPHERE_PASSWORD": cfg.password,
+            "VSPHERE_ALLOW_UNVERIFIED_SSL": "true" if cfg.skip_tls_verify else "false",
+        })
     no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
     env["NO_PROXY"] = ",".join(filter(None, ["127.0.0.1", "localhost", no_proxy]))
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
@@ -599,10 +646,76 @@ def _environment(job: ClusterProvisionJob, token: str, cfg, workdir: str) -> Dic
         with open(cli_path, "w", encoding="utf-8") as handle:
             handle.write(tofu_config.cli_config(tofu_runner.provider_mirror_path()))
         env["TF_CLI_CONFIG_FILE"] = cli_path
-    bundle = _ca_bundle(workdir, cfg.ca_pem)
+    bundle = _ca_bundle(workdir, cfg.ca_pem) if cfg is not None else None
     if bundle:
         env["SSL_CERT_FILE"] = bundle
     return env
+
+
+class _VSphereTarget:
+    """OpenTofu signs in to vCenter with the connection's provisioning account."""
+
+    cloud = False
+
+    def __init__(self, build: ClusterBuild):
+        self.connection = _connection_for(build)
+        self.cfg = _provisioning_config(self.connection)
+        self.hide = [self.cfg.password]
+
+    def checks(self, build: ClusterBuild, job: ClusterProvisionJob) -> List[Dict[str, str]]:
+        checks = _vcenter_checks(build, job, self.connection, self.cfg)
+        if job.operation != "destroy":
+            checks += _probe_addresses(build, job)
+        return checks
+
+    def render(self, build: ClusterBuild, job: ClusterProvisionJob) -> Dict[str, Any]:
+        return _render_config(build, job, self.cfg)
+
+    def environment(self, job: ClusterProvisionJob, token: str, workdir: str) -> Dict[str, str]:
+        return _environment(job, token, self.cfg, workdir)
+
+    def watcher(self, engine, names: List[str], side):
+        if getattr(engine, "mode", "") == "real" and names:
+            return vm_watch.VmWatcher(self.cfg, names, side).start()
+        return None
+
+
+class _CloudTarget:
+    """OpenTofu signs in to Oracle, AWS or Google with the build's cloud account."""
+
+    cloud = True
+
+    def __init__(self, build: ClusterBuild):
+        try:
+            self.module, self.account = cloud_build.account_for(build)
+        except ValueError as exc:
+            raise JobFailed(str(exc)) from exc
+        self.hide = [value for value in self.account.secrets.values() if isinstance(value, str) and value]
+        self.managed = cloud_build.is_managed(build)
+
+    def checks(self, build: ClusterBuild, job: ClusterProvisionJob) -> List[Dict[str, str]]:
+        return cloud_build.plan_checks(build)
+
+    def render(self, build: ClusterBuild, job: ClusterProvisionJob) -> Dict[str, Any]:
+        try:
+            return cloud_build.render(build, job)
+        except ValueError as exc:
+            raise JobFailed(str(exc)) from exc
+
+    def environment(self, job: ClusterProvisionJob, token: str, workdir: str) -> Dict[str, str]:
+        env = _environment(job, token, None, workdir)
+        build = db.session.get(ClusterBuild, job.build_id)
+        extra, hide = cloud_build.environment(build, workdir)
+        env.update(extra)
+        self.hide.extend(item for item in hide if item not in self.hide)
+        return env
+
+    def watcher(self, engine, names, side):
+        return None
+
+
+def _target(build: ClusterBuild):
+    return _CloudTarget(build) if cloud_build.is_cloud(build) else _VSphereTarget(build)
 
 
 def _run_tofu(engine, workdir, args, env, output: _Output, timeout_s: int) -> int:
@@ -1224,18 +1337,15 @@ def _apply_new_addresses(build: ClusterBuild, job: ClusterProvisionJob, addresse
 
 def _do_plan(job: ClusterProvisionJob, engine) -> None:
     build = db.session.get(ClusterBuild, job.build_id)
-    connection = _connection_for(build)
-    cfg = _provisioning_config(connection)
+    target = _target(build)
     progress = dict(job.progress_json or {})
     progress["phase"] = "checking"
     job.progress_json = progress
     db.session.commit()
 
-    checks = _vcenter_checks(build, job, connection, cfg)
-    if job.operation != "destroy":
-        checks += _probe_addresses(build, job)
+    checks = target.checks(build, job)
 
-    config = _render_config(build, job, cfg)
+    config = target.render(build, job)
     job.config_json = {**(job.config_json or {}), "tofu": config}
     progress["phase"] = "planning"
     job.progress_json = progress
@@ -1244,9 +1354,9 @@ def _do_plan(job: ClusterProvisionJob, engine) -> None:
     workdir = _workdir(job)
     try:
         token = _issue_token(job)
-        env = _environment(job, token, cfg, workdir)
+        env = target.environment(job, token, workdir)
         _write_config(workdir, config)
-        output = _Output(job, [cfg.password, token])
+        output = _Output(job, [*target.hide, token])
         if _run_tofu(engine, workdir, ["init", "-input=false", "-no-color"], env, output, _PLAN_TIMEOUT_S):
             raise JobFailed("OpenTofu could not initialise.\n" + output.error_summary())
         plan_args = ["plan", "-input=false", "-no-color", "-lock-timeout=60s", "-out=job.tfplan"]
@@ -1271,9 +1381,8 @@ def _do_plan(job: ClusterProvisionJob, engine) -> None:
     summary = summarize_plan(document, job.operation)
     summary["checks"] = checks
     job.plan_summary_json = summary
-    hide = [cfg.password]
     plain = text
-    for secret in hide:
+    for secret in target.hide:
         plain = plain.replace(secret, "[REDACTED]")
     job.plan_text = scrub(plain)[:_PLAN_TEXT_CHARS]
     job.plan_cipher = encrypt_secret(base64.b64encode(plan_bytes).decode("ascii"))
@@ -1322,8 +1431,7 @@ def _recovery_may_apply(job: ClusterProvisionJob) -> bool:
 def _do_apply(job: ClusterProvisionJob, engine) -> bool:
     """Returns True when OpenTofu applied the plan."""
     build = db.session.get(ClusterBuild, job.build_id)
-    connection = _connection_for(build)
-    cfg = _provisioning_config(connection)
+    target = _target(build)
     config = (job.config_json or {}).get("tofu")
     if not config or not job.plan_cipher:
         raise JobFailed("This job has no saved plan to apply. Make a new plan.")
@@ -1344,7 +1452,7 @@ def _do_apply(job: ClusterProvisionJob, engine) -> bool:
     db.session.commit()
 
     workdir = _workdir(job)
-    output = _Output(job, [cfg.password], track_vms=True)
+    output = _Output(job, list(target.hide), track_vms=True)
     if job.operation == "destroy":
         _unregister_from_satellite(
             build, [name for name, action in planned.items() if action == "delete"], output,
@@ -1352,7 +1460,8 @@ def _do_apply(job: ClusterProvisionJob, engine) -> bool:
     try:
         token = _issue_token(job)
         output.hide.append(token)
-        env = _environment(job, token, cfg, workdir)
+        env = target.environment(job, token, workdir)
+        output.hide.extend(item for item in target.hide if item not in output.hide)
         _write_config(workdir, config)
         with open(os.path.join(workdir, "job.tfplan"), "wb") as handle:
             handle.write(base64.b64decode(decrypt_secret(job.plan_cipher)))
@@ -1361,10 +1470,7 @@ def _do_apply(job: ClusterProvisionJob, engine) -> bool:
         # OpenTofu says only "Still creating..." while the provider waits on a
         # clone, guest customization or the VM's address; vCenter says why.
         watched = [name for name, action in planned.items() if action in ("create", "replace", "delete")]
-        watcher = (
-            vm_watch.VmWatcher(cfg, watched, output.side).start()
-            if getattr(engine, "mode", "") == "real" and watched else None
-        )
+        watcher = target.watcher(engine, watched, output.side)
         try:
             code = _run_tofu(
                 engine, workdir,
@@ -1422,6 +1528,10 @@ def _record_created_vms(build: ClusterBuild, job: ClusterProvisionJob) -> List[C
     """Fill the build's nodes in from what OpenTofu recorded; returns the new ones."""
     from ... import vsphere_service
 
+    if cloud_build.is_cloud(build):
+        if cloud_build.is_managed(build):
+            return []
+        return cloud_build.record_created(build, job)
     instances = state_store.vm_instances(build.id)
     spec = dict(build.provisioning_json or {})
     if job.operation == "grow":
@@ -1609,10 +1719,40 @@ def _network_keyfiles(job: ClusterProvisionJob, targets: List[Tuple[str, Any]]) 
     output.flush()
 
 
+def _onboard_managed(job: ClusterProvisionJob, build: ClusterBuild) -> None:
+    """A managed cluster has no VM to SSH into: sign in to its API with the
+    account's keys and register it with KubeSight."""
+    progress = dict(job.progress_json or {})
+    progress["phase"] = "registering"
+    job.progress_json = progress
+    db.session.commit()
+    target = _target(build)
+    output = _Output(job, list(target.hide))
+    try:
+        public_id = cloud_build.onboard_managed(build, output.on_line)
+    except (cloud_build.CloudError, ValueError, KeyError) as exc:
+        output.on_line(f"Error: {exc}")
+        output.flush()
+        raise JobFailed(
+            f"The {target.module.MANAGED_LABEL} cluster exists, but KubeSight could not register it: "
+            f"{scrub(str(exc))}. Fix that (the API must be reachable over the private network), "
+            "then Try again."
+        ) from exc
+    output.flush()
+    progress = dict(job.progress_json or {})
+    if public_id:
+        progress["clusterId"] = public_id
+    job.progress_json = progress
+    db.session.commit()
+
+
 def _do_connect(job: ClusterProvisionJob) -> None:
     from .. import executor
 
     build = db.session.get(ClusterBuild, job.build_id)
+    if cloud_build.is_managed(build):
+        _onboard_managed(job, build)
+        return
     if job.operation == "grow":
         names = {m["name"] for m in (job.config_json or {}).get("newMachines") or []}
     else:
@@ -1665,10 +1805,19 @@ def _do_connect(job: ClusterProvisionJob) -> None:
         vms[name] = entry
     job.progress_json = {**(job.progress_json or {}), "vms": vms}
     db.session.commit()
-    if waiter is _default_ssh_waiter:  # real VMs only: never the simulator or a test seam
+    if waiter is _default_ssh_waiter and not cloud_build.is_cloud(build):
+        # Real VMware VMs only: never the simulator, a test seam or a cloud VM
+        # (no VMware guest customization wrote ifcfg files there).
         _network_keyfiles(job, [(name, target) for name, target in targets
                                 if results.get(name, (False, ""))[0]])
     if failed:
+        if cloud_build.is_cloud(build):
+            raise JobFailed(
+                f"{', '.join(failed)} did not answer SSH within {_SSH_TIMEOUT_S // 60} minutes. "
+                "The VMs exist; check that KubeSight reaches the subnet (VPN, peering or the "
+                "route's bastion), that the allowed networks include KubeSight's, and that the "
+                "image runs cloud-init. Retry when fixed."
+            )
         raise JobFailed(
             f"{', '.join(failed)} did not answer SSH within {_SSH_TIMEOUT_S // 60} minutes. "
             "The VMs exist; check that the template accepts the build's SSH credential "
@@ -1806,6 +1955,10 @@ def _handoff(job: ClusterProvisionJob) -> None:
     user = db.session.get(User, job.applied_by_user_id) if job.applied_by_user_id else None
     actor = job.applied_by or ""
 
+    if cloud_build.is_managed(build):
+        _managed_done(build, job)
+        return
+
     if job.operation == "grow":
         build.status = "completed"
         db.session.commit()
@@ -1845,6 +1998,33 @@ def _handoff(job: ClusterProvisionJob) -> None:
     note = start_kubernetes(build, job, user=user, actor=actor)
     if note:
         _note(job, note)
+
+
+def _managed_done(build: ClusterBuild, job: ClusterProvisionJob) -> None:
+    """The cloud runs the control plane; once registered, the build is done."""
+    now = _utcnow()
+    if job.operation == "grow":
+        spec = dict(build.provisioning_json or {})
+        counts = dict(spec.get("counts") or {})
+        counts["worker"] = int((job.config_json or {}).get("nodeCount") or counts.get("worker") or 0)
+        spec["counts"] = counts
+        build.provisioning_json = spec
+    else:
+        build.started_at = build.started_at or _as_utc(job.started_at) or now
+        if build.build_seconds is None and build.started_at is not None:
+            build.build_seconds = int((now - _as_utc(build.started_at)).total_seconds())
+    build.status = "completed"
+    build.finished_at = now
+    build.error = None
+    db.session.commit()
+    log_audit(
+        "cluster_build_completed",
+        actor_user_id=job.applied_by_user_id,
+        target_type="cluster_build",
+        target_id=str(build.id),
+        details={"name": build.name, "jobId": job.id, "managed": build.machine_source,
+                 "clusterId": build.result_cluster_id, "operation": job.operation},
+    )
 
 
 def start_kubernetes(build: ClusterBuild, job: ClusterProvisionJob, *, user=None,
