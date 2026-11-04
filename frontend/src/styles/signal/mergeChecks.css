@@ -1167,3 +1167,18 @@
     margin-left: 0;
   }
 }
+
+/* Reports: one PDF per pull request. Rows are History's; these are the
+   one-line summary and the "still running" note above the list. */
+.mc-root .mc-reports-sum {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.mc-root .mc-reports-note {
+  margin: 0 0 0.75rem;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}

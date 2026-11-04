@@ -22,6 +22,7 @@ import ConnectionView from "./mergeChecks/ConnectionView.jsx";
 import GateStatus from "./mergeChecks/GateStatus.jsx";
 import GateView from "./mergeChecks/GateView.jsx";
 import HistoryView from "./mergeChecks/HistoryView.jsx";
+import ReportsView from "./mergeChecks/ReportsView.jsx";
 import BuildsPanel from "./BuildsPanel.jsx";
 import {
   activeTools,
@@ -35,7 +36,7 @@ import {
 import { setVisibleInterval } from "../../lib/visibleInterval";
 import { confirmDialog } from "../../lib/dialogs.js";
 
-const SECTIONS = ["checks", "gate", "connection", "history", "builds"];
+const SECTIONS = ["checks", "gate", "connection", "history", "reports", "builds"];
 
 /**
  * Merge Checks tab: the gate between a pull request and a merge.
@@ -490,6 +491,8 @@ export default function MergeChecksPanel({
     { key: "gate", icon: "gauge", label: "Quality gate" },
     { key: "connection", icon: "link", label: "Connection" },
     { key: "history", icon: "history", label: "History", count: runs.length, alert: blocked > 0 },
+    // One readable PDF per pull request, apart from the build's artifacts.
+    { key: "reports", icon: "file", label: "Reports", count: runs.filter((run) => ["passed", "failed", "error"].includes(run.state)).length },
     // The merge-check pipeline's own runs, stage by stage — kept off the
     // Builds tab so its grid holds one pipeline, not both side by side.
     { key: "builds", icon: "stages", label: "Builds" },
@@ -681,6 +684,7 @@ export default function MergeChecksPanel({
               onOpenBuild={(id) => onOpenBuild?.(String(id))}
             />
           )}
+          {section === "reports" && <ReportsView runs={runs} loading={!runsLoaded} />}
           {section === "builds" && (
             <BuildsPanel
               service={service}

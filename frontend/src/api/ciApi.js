@@ -16,7 +16,7 @@ import { getBaseUrl, request } from "./client";
  * The anchor is synthetic rather than `window.location` so the current page is
  * never navigated away from if the response turns out not to be an attachment.
  */
-const startDownload = (path, ticket) => {
+export const startDownload = (path, ticket) => {
   const url = `${getBaseUrl()}${path}?ticket=${encodeURIComponent(ticket)}`;
   const anchor = document.createElement("a");
   anchor.href = url;

@@ -15,15 +15,19 @@ forever. What happened is in the body, and on the Merge Checks tab.
 
 from __future__ import annotations
 
-from flask import Blueprint, request
+import io
 
-from ..auth_utils import get_current_user
-from ..decorators import require_permission
+from flask import Blueprint, request, send_file
+
+from ..audit import log_audit
+from ..auth_utils import create_download_ticket, get_current_user
+from ..decorators import require_download_access, require_permission
 from ..db import db
 from ..models_ci import CiService
 from ..response import error_response, success_response
 from ..services.ci import merge_checks as merge_checks_service
 from ..services.ci.merge_checks import policy as policy_service
+from ..services.ci.merge_checks import report as report_service
 
 ci_merge_checks_bp = Blueprint("ci_merge_checks", __name__, url_prefix="/api/ci")
 
@@ -274,6 +278,64 @@ def get_run(check_id: int):
     except LookupError as exc:
         return error_response(str(exc), 404)
     return success_response(merge_checks_service.check_payload(row))
+
+
+def _report_resource(check_id: int) -> str:
+    return f"ci-merge-check-report:{check_id}"
+
+
+@ci_merge_checks_bp.route(
+    "/merge-checks/runs/<int:check_id>/report-ticket", methods=["POST"]
+)
+@require_permission("ci_merge_checks:view")
+def create_report_ticket(check_id: int):
+    """A two-minute ticket for the PDF, so the browser can download it itself.
+
+    The checks that make a PDF impossible are made here, where the error reaches
+    the page, rather than on the download — a navigation shows it as raw JSON.
+    """
+    try:
+        row = merge_checks_service.get_check(check_id)
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    if not report_service.available(row):
+        return error_response("This check has not finished yet, so there is no report.", 409)
+    from ..services.ci.code_scan_report import pdf_support_problem
+
+    problem = pdf_support_problem()
+    if problem:
+        return error_response(problem, 501)
+    return success_response(
+        {"ticket": create_download_ticket(get_current_user(), _report_resource(check_id))}
+    )
+
+
+@ci_merge_checks_bp.route("/merge-checks/runs/<int:check_id>/report", methods=["GET"])
+@require_download_access("ci_merge_checks:view", _report_resource)
+def download_report(check_id: int):
+    """One readable PDF of every check on this pull request. Built on request."""
+    from flask import g
+
+    try:
+        row = merge_checks_service.get_check(check_id)
+        pdf = report_service.render_pdf(row)
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    except report_service.MergeCheckReportError as exc:
+        return error_response(str(exc), exc.status)
+    log_audit(
+        "ci_merge_check_report_downloaded",
+        actor=getattr(g, "download_actor", None) or get_current_user(),
+        target_type="ci_merge_check",
+        target_id=str(row.id),
+        details={"serviceId": row.service_id, "pullRequest": row.pull_request_id, "verdict": row.verdict},
+    )
+    return send_file(
+        io.BytesIO(pdf),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=report_service.pdf_filename(row),
+    )
 
 
 @ci_merge_checks_bp.route(

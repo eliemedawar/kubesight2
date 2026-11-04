@@ -1,3 +1,4 @@
+import { startDownload } from "./ciApi";
 import { request } from "./client";
 
 /**
@@ -95,3 +96,13 @@ export const redeliverMergeCheck = (checkId) =>
   request(`/api/ci/merge-checks/runs/${encodeURIComponent(checkId)}/redeliver`, {
     method: "POST",
   });
+
+/**
+ * The readable PDF of one pull request's checks, saved by the browser. Built on
+ * the server when asked for, so it is not one of the build's artifacts.
+ */
+export const downloadMergeCheckReport = async (checkId) => {
+  const path = `/api/ci/merge-checks/runs/${encodeURIComponent(checkId)}/report`;
+  const { ticket } = await request(`${path}-ticket`, { method: "POST" });
+  startDownload(path, ticket);
+};

@@ -675,6 +675,11 @@ for _tool, _spec in LINTERS.items():
     _TOOL_TIMEOUTS[_tool] = int(_spec["timeout"])  # type: ignore[arg-type]
 
 
+def tool_artifacts(tool: str) -> List[Dict[str, str]]:
+    """The report files this tool's stage keeps, for the merge check PDF."""
+    return [dict(spec) for spec in _TOOL_ARTIFACTS.get(tool, [])]
+
+
 def _gradle_deps_commands() -> List[str]:
     """Copy every resolvable runtime classpath into DEPS_DIR, via an init script.
 
