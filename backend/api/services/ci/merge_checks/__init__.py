@@ -32,7 +32,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 import secrets as secrets_module
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ....audit import log_audit
@@ -70,6 +70,11 @@ PIPELINE_NAME = "Merge checks"
 # "all of them": this runs inside the CI engine's pass, and a backlog of two
 # hundred must not hold up the build that somebody is watching.
 SETTLE_BATCH = 20
+
+# How long a queued check may sit without a build before it counts as never
+# started. The webhook request links the build within moments; this only has
+# to outlast a slow request, and catch one that crashed in between.
+START_GRACE = timedelta(minutes=5)
 
 
 class MergeCheckError(ValueError):
@@ -1372,7 +1377,16 @@ def settle() -> int:
 
 def _evaluate_if_finished(check: CiMergeCheck) -> bool:
     """Write the verdict once the check's build has reached a terminal state."""
-    build = db.session.get(CiBuild, check.build_id) if check.build_id else None
+    if not check.build_id:
+        # trigger_build commits the check (still queued, no build yet) and
+        # wakes the engine BEFORE the webhook request links the build. A pass
+        # landing in that gap must leave the check alone: judging it here
+        # wrote "no longer exists" over a check whose build was about to run.
+        if check.state == "queued" and not _start_abandoned(check):
+            return False
+        finalize_error(check, "The build for this check never started.")
+        return True
+    build = db.session.get(CiBuild, check.build_id)
     if build is None:
         finalize_error(check, "The build for this check no longer exists.")
         return True
@@ -1419,6 +1433,16 @@ def _evaluate_if_finished(check: CiMergeCheck) -> bool:
         },
     )
     return True
+
+
+def _start_abandoned(check: CiMergeCheck) -> bool:
+    """A queued check whose webhook request died before it linked a build."""
+    created = check.created_at
+    if created is None:
+        return True
+    if created.tzinfo is None:  # SQLite hands timestamps back naive
+        created = created.replace(tzinfo=timezone.utc)
+    return _now() - created > START_GRACE
 
 
 def finalize_error(check: CiMergeCheck, message: str) -> None:

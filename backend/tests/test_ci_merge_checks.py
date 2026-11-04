@@ -1704,3 +1704,48 @@ def test_the_status_link_is_never_empty(app, monkeypatch):
     assert delivery.status_link(check) == (
         "https://kubesight-uat.areeba.com/#/service-catalog/56/mergechecks?section=history"
     )
+
+
+def test_a_settle_pass_before_the_build_is_linked_leaves_the_check_alone(
+    app, client, admin_token, service_id, monkeypatch
+):
+    # trigger_build commits the queued check and wakes the engine before the
+    # webhook links the build; the engine's pass used to land in that gap and
+    # record "The build for this check no longer exists" (PR #34, build #59).
+    from api.services.ci import engine
+    from api.services.ci.merge_checks import settle
+
+    monkeypatch.setattr(engine, "_wake_engine", lambda: settle())
+    _enable(client, admin_token, service_id)
+    slug = _slug(app, service_id)
+    secret = _secret(client, admin_token, service_id)
+
+    data = _post_hook(client, slug, secret, _pull_request_body()).get_json()["data"]
+
+    with app.app_context():
+        check = db.session.get(CiMergeCheck, data["checkId"])
+        assert check.state == "running"
+        assert check.build_id is not None
+        assert check.error is None and check.verdict is None
+
+
+def test_a_queued_check_that_never_got_a_build_errors_after_the_grace(app, service_id):
+    from datetime import datetime, timedelta, timezone
+
+    from api.services.ci.merge_checks import settle
+
+    with app.app_context():
+        fresh = CiMergeCheck(service_id=service_id, commit_sha="a1", state="queued")
+        stale = CiMergeCheck(
+            service_id=service_id,
+            commit_sha="b2",
+            state="queued",
+            created_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+        )
+        db.session.add_all([fresh, stale])
+        db.session.commit()
+        settle()
+        assert db.session.get(CiMergeCheck, fresh.id).state == "queued"
+        gone = db.session.get(CiMergeCheck, stale.id)
+        assert gone.state == "error"
+        assert gone.error == "The build for this check never started."
