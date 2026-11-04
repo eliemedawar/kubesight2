@@ -211,10 +211,18 @@ export function readiness({ config, webhook, enforcement, enabled }) {
 
   const done = steps.filter((step) => step.state === "ok").length;
   // Stuck, not merely unprotected: Bitbucket waits for a status that will
-  // never be posted, so every pull request into the branch is frozen.
-  const stuck = !enabled && enforcement?.enforced;
+  // never be posted, so every pull request into the branch is frozen. Off is
+  // one way; a webhook that is gone (removed, the block kept) is the other.
+  const noWebhook = Boolean(webhook?.known && !webhook.exists);
+  const stuck = Boolean(enforcement?.enforced && (!enabled || noWebhook));
   const overall = stuck ? "stuck" : done === steps.length ? "protected" : "partial";
-  return { steps, done, total: steps.length, overall };
+  return {
+    steps,
+    done,
+    total: steps.length,
+    overall,
+    stuckBecause: stuck ? (enabled ? "webhook" : "off") : null,
+  };
 }
 
 /** Per-tool findings of one pull request, in the order the tools are listed. */

@@ -55,6 +55,18 @@ export const setupMergeChecksInSource = (serviceId, options = {}) =>
     body: options,
   });
 
+/**
+ * Undo the Bitbucket side: delete this service's webhook and (unless
+ * `removeProtection` is false) the restrictions that make a merge wait for
+ * KubeSight. `allowDirectPush` also lifts a push block that exempts nobody.
+ * KubeSight's secret, pipeline and history stay.
+ */
+export const removeMergeChecksFromSource = (serviceId, options = {}) =>
+  request(`/api/ci/services/${encodeURIComponent(serviceId)}/merge-checks/setup`, {
+    method: "DELETE",
+    body: options,
+  });
+
 /** Whether Bitbucket already has a webhook pointing at this service. Live read. */
 export const getMergeCheckWebhook = (serviceId) =>
   request(`/api/ci/services/${encodeURIComponent(serviceId)}/merge-checks/webhook`);

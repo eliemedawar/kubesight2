@@ -44,6 +44,15 @@ describe("readiness: is a failing pull request really stopped?", () => {
     // Bitbucket waits for a status that is never posted.
     const status = readiness({ config, webhook: hook, enforcement: enforced, enabled: false });
     expect(status.overall).toBe("stuck");
+    expect(status.stuckBecause).toBe("off");
+  });
+
+  it("calls a protected branch with no webhook stuck even with checks on", () => {
+    // Removed from Bitbucket with the branch restriction kept.
+    const gone = { known: true, exists: false, repository: "acme/app" };
+    const status = readiness({ config, webhook: gone, enforcement: enforced, enabled: true });
+    expect(status.overall).toBe("stuck");
+    expect(status.stuckBecause).toBe("webhook");
   });
 
   it("says why the repository cannot take a verdict and where to fix it", () => {

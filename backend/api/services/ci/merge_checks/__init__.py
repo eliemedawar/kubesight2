@@ -666,6 +666,106 @@ def configure_in_source(
     }
 
 
+def remove_from_source(
+    service: CiService,
+    *,
+    actor=None,
+    remove_protection: bool = True,
+    allow_direct_push: bool = False,
+) -> Dict[str, Any]:
+    """Undo :func:`configure_in_source` in the repository.
+
+    Deletes this service's webhook — at its current address and any older one
+    — and, with ``remove_protection``, the restrictions that make a merge wait
+    for KubeSight. Leaving those behind with no webhook would freeze every pull
+    request into the branch, waiting for a verdict that is never sent, so it is
+    the default. ``allow_direct_push`` also lifts a push block that exempts
+    nobody.
+
+    KubeSight's own side stays: the secret, the pipeline, the history and the
+    switch, so setting it up again is one press.
+    """
+    if not service.source_ready():
+        raise MergeCheckError(
+            "Connect a repository and credential on the Source tab first — the "
+            "webhook is removed with that credential."
+        )
+    try:
+        url = _public_webhook_url(service)
+    except MergeCheckError:
+        # No public address any more; the webhook is still found by its path.
+        url = ""
+
+    from .. import source as source_port
+
+    row = get_config(service)
+    try:
+        handler = source_port.get_provider(service.repository_provider)
+        remover = getattr(handler, "remove_webhook", None)
+        if remover is None:
+            raise MergeCheckError(
+                f"KubeSight cannot remove webhooks on {service.repository_provider}. "
+                "Delete it by hand in the repository settings."
+            )
+        ref = handler.parse_repository_url(service.repository_url)
+        webhook = remover(
+            ref, service.credential_profile, url=url, key=webhook_path(service)
+        )
+    except source_port.SourceError as exc:
+        raise MergeCheckError(str(exc)) from exc
+
+    protection: Dict[str, Any] = {"requested": bool(remove_protection)}
+    if remove_protection:
+        branches = protected_branches(service, row)
+        unprotector = getattr(handler, "remove_merge_protection", None)
+        try:
+            if unprotector is None:
+                raise source_port.SourceError(
+                    f"KubeSight cannot change branch restrictions on {service.repository_provider}."
+                )
+            protection.update(
+                ok=True,
+                **unprotector(
+                    ref,
+                    service.credential_profile,
+                    branches=branches,
+                    allow_direct_push=allow_direct_push,
+                ),
+            )
+        except source_port.SourceError as exc:
+            # The webhook is already gone; say what is left rather than hide it.
+            protection.update(ok=False, error=str(exc), branches=[
+                {"branch": branch} for branch in branches
+            ])
+
+    if row is not None:
+        row.last_error = (
+            f"Removing the branch protection failed: {protection['error']}"[:2000]
+            if protection.get("ok") is False
+            else None
+        )
+        db.session.add(row)
+        db.session.commit()
+    log_audit(
+        "ci_merge_checks_removed_from_source",
+        actor=actor,
+        target_type="ci_merge_check_config",
+        target_id=str(row.id) if row is not None else str(service.id),
+        details={
+            "service": service.slug,
+            "repository": ref.full_name,
+            "webhook": webhook["action"],
+            "webhookUrls": webhook.get("urls") or [],
+            "protection": protection,
+        },
+    )
+    return {
+        "webhook": {**webhook, "repository": ref.full_name},
+        "protection": protection,
+        "config": config_payload(service, row),
+    }
+
+
 def webhook_status(service: CiService) -> Dict[str, Any]:
     """Whether the repository already has a webhook pointing at this service.
 
@@ -1467,6 +1567,7 @@ __all__ = [
     "ensure_config",
     "get_check",
     "get_config",
+    "remove_from_source",
     "ingest",
     "inbound_secret",
     "list_checks",

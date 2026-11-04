@@ -100,7 +100,8 @@
 }
 
 .pl-root .btn-outline svg,
-.pl-root .primary svg {
+.pl-root .primary svg,
+.pl-root .btn-danger svg {
   width: 0.9rem;
   height: 0.9rem;
 }

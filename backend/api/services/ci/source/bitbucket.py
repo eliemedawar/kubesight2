@@ -343,6 +343,45 @@ class BitbucketSourceProvider:
             "events": list(events),
         }
 
+    def remove_webhook(
+        self, ref: RepositoryRef, credential, *, url: str = "", key: str = ""
+    ) -> Dict[str, Any]:
+        """Delete every webhook that points at ``url`` or carries ``key``.
+
+        Every one, not the first: a webhook left at an older address (before a
+        gateway was set, say) would keep calling, and "removed" would be untrue.
+        """
+        if credential is not None and credential.read_only:
+            raise SourceError(
+                f"Credential profile '{credential.name}' is marked read-only. "
+                "Deleting a webhook is a write.",
+                retryable=False,
+            )
+        token, credential_type, principal = self._credential_parts(credential)
+        auth = {
+            "repository_ref": ref.full_name,
+            "token": token,
+            "credential_type": credential_type,
+            "principal": principal,
+        }
+        wanted = _without_query(url) if url else ""
+        try:
+            hooks = bitbucket_status.list_webhooks(**auth)
+            matches = [
+                hook for hook in hooks
+                if hook.get("uuid") and (
+                    (wanted and _without_query(hook["url"]) == wanted)
+                    or (key and key in (hook.get("url") or ""))
+                )
+            ]
+            removed = [
+                hook["url"] for hook in matches
+                if bitbucket_status.delete_webhook(uid=hook["uuid"], **auth)
+            ]
+        except bitbucket_status.StatusWriteError as exc:
+            raise SourceError(str(exc), retryable=exc.retryable) from exc
+        return {"action": "removed" if removed else "absent", "urls": removed}
+
     def check_merge_enforcement(
         self, ref: RepositoryRef, credential, *, branches: Optional[List[str]] = None
     ) -> Dict[str, Any]:
@@ -508,3 +547,70 @@ class BitbucketSourceProvider:
             "hardBlock": not hard_error,
             "hardBlockError": hard_error,
         }
+
+    def remove_merge_protection(
+        self,
+        ref: RepositoryRef,
+        credential,
+        *,
+        branches: List[str],
+        allow_direct_push: bool = False,
+    ) -> Dict[str, Any]:
+        """Undo :meth:`ensure_merge_protection` on these branch patterns.
+
+        Removes the ``require_passing_builds_to_merge`` and
+        ``enforce_merge_checks`` restrictions on each pattern, and with
+        ``allow_direct_push`` a ``push`` restriction that exempts nobody — the
+        only kind setup creates. A push restriction naming users or groups was
+        somebody's decision about who may push, and is left alone.
+        """
+        if credential is not None and credential.read_only:
+            raise SourceError(
+                f"Credential profile '{credential.name}' is marked read-only. "
+                "Changing branch restrictions is a write.",
+                retryable=False,
+            )
+        token, credential_type, principal = self._credential_parts(credential)
+        auth = {
+            "repository_ref": ref.full_name,
+            "token": token,
+            "credential_type": credential_type,
+            "principal": principal,
+        }
+        wanted = set(branches)
+
+        def on_branches(kind: str) -> List[Dict[str, Any]]:
+            return [
+                item
+                for item in bitbucket_status.list_branch_restrictions(kind=kind, **auth)
+                if item["matchKind"] == "glob" and item["pattern"] in wanted
+            ]
+
+        results = {branch: {"branch": branch} for branch in branches}
+        try:
+            for kind, field in (
+                (bitbucket_status.BUILD_RESTRICTION_KIND, "passingBuilds"),
+                (bitbucket_status.ENFORCE_CHECKS_KIND, "enforceChecks"),
+            ):
+                for item in on_branches(kind):
+                    bitbucket_status.delete_branch_restriction(
+                        restriction_id=str(item["id"]), **auth
+                    )
+                    results[item["pattern"]][field] = "removed"
+            if allow_direct_push:
+                for item in on_branches(bitbucket_status.PUSH_KIND):
+                    if item.get("users") or item.get("groups"):
+                        results[item["pattern"]]["directPush"] = "kept"
+                        continue
+                    bitbucket_status.delete_branch_restriction(
+                        restriction_id=str(item["id"]), **auth
+                    )
+                    results[item["pattern"]]["directPush"] = "removed"
+        except bitbucket_status.StatusWriteError as exc:
+            raise SourceError(str(exc), retryable=exc.retryable) from exc
+
+        for row in results.values():
+            row.setdefault("passingBuilds", "absent")
+            row.setdefault("enforceChecks", "absent")
+            row.setdefault("directPush", "absent" if allow_direct_push else "skipped")
+        return {"branches": list(results.values())}

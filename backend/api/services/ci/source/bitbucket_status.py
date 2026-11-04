@@ -27,7 +27,8 @@ it is switched on is worse than no gate: it is a false sense of one.
 
 Last, and only when somebody presses "Set up in Bitbucket": the repository's
 WEBHOOK, created or corrected so it points at this service with its secret, and
-the BRANCH RESTRICTIONS that make a merge wait for KubeSight's verdict.
+the BRANCH RESTRICTIONS that make a merge wait for KubeSight's verdict — and,
+on "Remove from Bitbucket", the same two deleted again.
 
 The same protections the read client enforces apply here — HTTPS only, the API
 origin pinned, no redirects followed, a response size cap — because a writer
@@ -506,6 +507,31 @@ def save_webhook(
         raise _webhook_error(exc) from exc
 
 
+def delete_webhook(
+    *,
+    repository_ref: str,
+    uid: str,
+    token: str,
+    credential_type: str,
+    principal: str = "",
+) -> bool:
+    """Delete one webhook. False when it was already gone — the goal either way."""
+    try:
+        _request(
+            _hooks_endpoint(repository_ref, uid),
+            repository_ref,
+            method="DELETE",
+            token=token,
+            credential_type=credential_type,
+            principal=principal,
+        )
+    except StatusWriteError as exc:
+        if exc.status == 404:
+            return False
+        raise _webhook_error(exc) from exc
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Branch restrictions: set up by KubeSight so a merge waits for its verdict
 # ---------------------------------------------------------------------------
@@ -558,6 +584,10 @@ def list_branch_restrictions(
                 "pattern": str(item.get("pattern") or ""),
                 "matchKind": str(item.get("branch_match_kind") or "glob"),
                 "value": item.get("value"),
+                # Who is exempt. A push restriction with nobody in it is the
+                # kind KubeSight makes; one naming people was somebody's choice.
+                "users": len(item.get("users") or []),
+                "groups": len(item.get("groups") or []),
             }
         )
     return found
@@ -597,3 +627,28 @@ def save_branch_restriction(
         )
     except StatusWriteError as exc:
         raise _restriction_error(exc) from exc
+
+
+def delete_branch_restriction(
+    *,
+    repository_ref: str,
+    restriction_id: str,
+    token: str,
+    credential_type: str,
+    principal: str = "",
+) -> bool:
+    """Delete one restriction by id. False when it was already gone."""
+    try:
+        _request(
+            _restrictions_endpoint(repository_ref, str(restriction_id)),
+            repository_ref,
+            method="DELETE",
+            token=token,
+            credential_type=credential_type,
+            principal=principal,
+        )
+    except StatusWriteError as exc:
+        if exc.status == 404:
+            return False
+        raise _restriction_error(exc) from exc
+    return True

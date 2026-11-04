@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { PlIcon } from "../pipeline/icons.jsx";
 
 const STEP_ICON = {
@@ -22,7 +23,7 @@ const STEP_WORD = {
  * Four things have to be true and three of them live in Bitbucket, so the
  * card asks rather than assumes, step by step — a red build status on a branch
  * nobody protected is decoration, and this is where that shows. The one
- * button that fixes steps two and three sits next to them.
+ * button that fixes steps two and three sits next to them, and its undo below.
  */
 export default function GateStatus({
   status,
@@ -36,10 +37,18 @@ export default function GateStatus({
   blockDirectPush,
   onBlockDirectPush,
   onSetup,
+  removable,
+  removeBusy,
+  removeProtection,
+  onRemoveProtection,
+  allowDirectPush,
+  onAllowDirectPush,
+  onRemove,
   onEnable,
   onGoToTab,
 }) {
-  const { steps, done, total, overall } = status;
+  const [removeOpen, setRemoveOpen] = useState(false);
+  const { steps, done, total, overall, stuckBecause } = status;
   const branchText = branches.join(", ");
   const needsSetup = steps.some((step) => step.action === "setup");
 
@@ -54,7 +63,10 @@ export default function GateStatus({
         ? {
             icon: "alert",
             title: `Pull requests into ${branchText} are stuck`,
-            text: "Bitbucket waits for a passing KubeSight check, and none is sent while merge checks are off. Switch them on, or remove the branch restriction.",
+            text:
+              stuckBecause === "webhook"
+                ? "Bitbucket waits for a passing KubeSight check, and with no webhook no pull request reaches KubeSight. Set it up in Bitbucket again, or remove the branch restriction."
+                : "Bitbucket waits for a passing KubeSight check, and none is sent while merge checks are off. Switch them on, or remove the branch restriction.",
           }
         : {
             icon: "shield",
@@ -153,6 +165,68 @@ export default function GateStatus({
             <PlIcon name="link" />
             {setupBusy ? "Setting up…" : steps.find((s) => s.key === "webhook")?.state === "warn" ? "Resync with Bitbucket" : "Set up in Bitbucket"}
           </button>
+        </div>
+      )}
+
+      {canEdit && removable && !removeOpen && (
+        <div className="mc-remove">
+          <p>Done with merge checks here, or moving them? KubeSight can take its part out of Bitbucket again.</p>
+          <button type="button" className="btn-outline btn-compact" onClick={() => setRemoveOpen(true)}>
+            <PlIcon name="trash" /> Remove from Bitbucket…
+          </button>
+        </div>
+      )}
+
+      {canEdit && removeOpen && (
+        <div className="mc-setup-cta mc-remove-open">
+          <div className="mc-setup-copy">
+            <strong>Remove from Bitbucket</strong>
+            <p>
+              Deletes this service&apos;s webhook, so pull requests stop coming here. The checks, the
+              pipeline, the secret and the history stay in KubeSight.
+            </p>
+            <div className="mc-setup-options">
+              <label className="pl-check">
+                <input
+                  type="checkbox"
+                  checked={removeProtection}
+                  onChange={(event) => onRemoveProtection(event.target.checked)}
+                />
+                <span>
+                  <strong>Stop merges into {branchText} waiting for KubeSight</strong>
+                  <small>Leave it and every pull request there waits for a verdict nobody sends.</small>
+                </span>
+              </label>
+              <label className="pl-check">
+                <input
+                  type="checkbox"
+                  checked={allowDirectPush}
+                  disabled={!removeProtection}
+                  onChange={(event) => onAllowDirectPush(event.target.checked)}
+                />
+                <span>
+                  <strong>Allow direct pushes again</strong>
+                  <small>Only a push block that exempts nobody — one naming people is kept.</small>
+                </span>
+              </label>
+            </div>
+          </div>
+          <div className="mc-remove-actions">
+            <button type="button" className="btn-ghost" disabled={removeBusy} onClick={() => setRemoveOpen(false)}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn-danger"
+              disabled={removeBusy}
+              onClick={async () => {
+                if (await onRemove()) setRemoveOpen(false);
+              }}
+            >
+              <PlIcon name="trash" />
+              {removeBusy ? "Removing…" : "Remove from Bitbucket"}
+            </button>
+          </div>
         </div>
       )}
 

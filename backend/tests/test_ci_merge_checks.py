@@ -1072,10 +1072,25 @@ def fake_hooks(monkeypatch):
 
     def list_branch_restrictions(**kwargs):
         return [
-            {"id": r["id"], "pattern": r["pattern"], "matchKind": "glob", "value": r.get("value")}
+            {
+                "id": r["id"], "pattern": r["pattern"], "matchKind": "glob",
+                "value": r.get("value"), "users": r.get("users", 0), "groups": r.get("groups", 0),
+            }
             for r in state["restrictions"]
             if r["kind"] == kwargs["kind"]
         ]
+
+    def delete_webhook(**kwargs):
+        before = len(state["hooks"])
+        state["hooks"] = [h for h in state["hooks"] if h["uuid"] != kwargs["uid"]]
+        return len(state["hooks"]) < before
+
+    def delete_branch_restriction(**kwargs):
+        before = len(state["restrictions"])
+        state["restrictions"] = [
+            r for r in state["restrictions"] if str(r["id"]) != kwargs["restriction_id"]
+        ]
+        return len(state["restrictions"]) < before
 
     def save_branch_restriction(**kwargs):
         if kwargs["kind"] == bitbucket_status.ENFORCE_CHECKS_KIND and not state["premium"]:
@@ -1100,6 +1115,8 @@ def fake_hooks(monkeypatch):
     monkeypatch.setattr(bitbucket_status, "save_webhook", save_webhook)
     monkeypatch.setattr(bitbucket_status, "list_branch_restrictions", list_branch_restrictions)
     monkeypatch.setattr(bitbucket_status, "save_branch_restriction", save_branch_restriction)
+    monkeypatch.setattr(bitbucket_status, "delete_webhook", delete_webhook)
+    monkeypatch.setattr(bitbucket_status, "delete_branch_restriction", delete_branch_restriction)
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://kubesight.example.com")
     return state
 
@@ -1359,6 +1376,91 @@ def test_a_token_that_cannot_protect_branches_keeps_the_webhook_and_says_why(
     assert data["protection"]["ok"] is False
     assert "repository admin" in data["protection"]["error"]
     assert "Branch protection failed" in data["config"]["lastError"]
+
+
+def _remove(client, token, service_id, **options):
+    return client.delete(
+        f"/api/ci/services/{service_id}/merge-checks/setup",
+        json=options,
+        headers=auth_headers(token),
+    )
+
+
+def test_remove_deletes_the_webhook_and_the_merge_block_but_keeps_kubesight_side(
+    client, admin_token, service_id, fake_hooks
+):
+    _setup(client, admin_token, service_id)
+    other = {"id": 900, "kind": "require_passing_builds_to_merge", "pattern": "develop", "value": 1}
+    fake_hooks["restrictions"].append(other)
+    fake_hooks["hooks"].append({
+        "uuid": "{someone-else}", "url": "https://ci.example.com/hook", "description": "",
+        "events": [], "active": True, "secretSet": False,
+    })
+
+    response = _remove(client, admin_token, service_id)
+    assert response.status_code == 200, response.get_json()
+    data = response.get_json()["data"]
+
+    assert data["webhook"]["action"] == "removed"
+    assert [hook["uuid"] for hook in fake_hooks["hooks"]] == ["{someone-else}"]
+    assert data["protection"]["ok"] is True
+    assert data["protection"]["branches"] == [{
+        "branch": "main",
+        "passingBuilds": "removed",
+        "enforceChecks": "removed",
+        "directPush": "skipped",
+    }]
+    # Another branch's restriction is not this service's to remove.
+    assert fake_hooks["restrictions"] == [other]
+    # Setting it up again is one press: the pipeline and secret are still there.
+    assert data["config"]["pipelineId"]
+    assert data["config"]["secretConfigured"] is True
+
+    again = _remove(client, admin_token, service_id).get_json()["data"]
+    assert again["webhook"]["action"] == "absent"
+    assert again["protection"]["branches"][0]["passingBuilds"] == "absent"
+
+
+def test_remove_can_keep_the_merge_block(client, admin_token, service_id, fake_hooks):
+    _setup(client, admin_token, service_id)
+    data = _remove(client, admin_token, service_id, removeProtection=False).get_json()["data"]
+    assert data["protection"] == {"requested": False}
+    assert fake_hooks["hooks"] == []
+    assert _kinds(fake_hooks, "main") == ["enforce_merge_checks", "require_passing_builds_to_merge"]
+
+
+def test_remove_lifts_only_a_push_block_that_exempts_nobody(
+    client, admin_token, service_id, fake_hooks
+):
+    _enable(client, admin_token, service_id, targetBranches=["master", "release/*"])
+    _setup(client, admin_token, service_id, blockDirectPush=True)
+    for r in fake_hooks["restrictions"]:
+        if r["kind"] == "push" and r["pattern"] == "release/*":
+            r["users"] = 2  # somebody chose who may push here
+
+    data = _remove(client, admin_token, service_id, allowDirectPush=True).get_json()["data"]
+    rows = {row["branch"]: row for row in data["protection"]["branches"]}
+    assert rows["master"]["directPush"] == "removed"
+    assert rows["release/*"]["directPush"] == "kept"
+    assert _kinds(fake_hooks, "master") == []
+    assert _kinds(fake_hooks, "release/*") == ["push"]
+
+
+def test_remove_finds_the_webhook_at_an_older_address_and_without_a_public_url(
+    client, admin_token, service_id, fake_hooks, monkeypatch
+):
+    _setup(client, admin_token, service_id)
+    # Registered at the old address, then the address went away.
+    monkeypatch.setenv("PUBLIC_BASE_URL", "http://localhost:5055")
+    data = _remove(client, admin_token, service_id).get_json()["data"]
+    assert data["webhook"]["action"] == "removed"
+    assert fake_hooks["hooks"] == []
+
+
+def test_only_managers_may_remove_the_setup(client, admin_token, viewer_token, service_id, fake_hooks):
+    _setup(client, admin_token, service_id)
+    assert _remove(client, viewer_token, service_id).status_code == 403
+    assert len(fake_hooks["hooks"]) == 1
 
 
 def test_enforcement_only_calls_it_a_hard_block_with_merge_checks_enforced(

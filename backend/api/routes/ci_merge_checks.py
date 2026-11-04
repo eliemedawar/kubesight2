@@ -199,6 +199,29 @@ def setup_in_source(service_id: int):
 
 
 @ci_merge_checks_bp.route(
+    "/services/<int:service_id>/merge-checks/setup", methods=["DELETE"]
+)
+@require_permission("ci_merge_checks:manage")
+def remove_from_source(service_id: int):
+    """Delete the webhook and, unless told not to, the branch restrictions that
+    setup created. KubeSight's own side (secret, pipeline, history) stays."""
+    try:
+        service = _service(service_id)
+        payload = _payload()
+        data = merge_checks_service.remove_from_source(
+            service,
+            actor=get_current_user(),
+            remove_protection=payload.get("removeProtection", True) is not False,
+            allow_direct_push=bool(payload.get("allowDirectPush")),
+        )
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    except _USER_ERRORS as exc:
+        return error_response(str(exc), 400)
+    return success_response(data)
+
+
+@ci_merge_checks_bp.route(
     "/services/<int:service_id>/merge-checks/webhook", methods=["GET"]
 )
 @require_permission("ci_merge_checks:view")

@@ -8,6 +8,7 @@ import {
   listMergeChecks,
   redeliverMergeCheck,
   revealMergeCheckSecret,
+  removeMergeChecksFromSource,
   rotateMergeCheckSecret,
   saveServiceMergeChecks,
   setupMergeChecksInSource,
@@ -89,6 +90,11 @@ export default function MergeChecksPanel({
   // whole team works, so it is a deliberate tick.
   const [protectBranches, setProtectBranches] = useState(true);
   const [blockDirectPush, setBlockDirectPush] = useState(false);
+  // The undo. Lifting the merge block is on: without the webhook nothing ever
+  // reports, so a block left behind freezes every pull request into the branch.
+  const [removing, setRemoving] = useState(false);
+  const [removeProtection, setRemoveProtection] = useState(true);
+  const [allowDirectPush, setAllowDirectPush] = useState(false);
 
   const section = SECTIONS.includes(route.query?.section) ? route.query.section : "checks";
   const setSection = (next) => {
@@ -335,6 +341,54 @@ export default function MergeChecksPanel({
     }
   };
 
+  // The webhook (+ the branch restrictions) deleted again. Resolves true when
+  // the webhook is gone, so the card can close its options.
+  const removeFromSource = async () => {
+    setRemoving(true);
+    setError("");
+    setNotice("");
+    try {
+      const data = await removeMergeChecksFromSource(service.id, {
+        removeProtection,
+        allowDirectPush: removeProtection && allowDirectPush,
+      });
+      const next = toForm(data.config);
+      setConfig(data.config);
+      setForm((current) => rebaseForm(current, saved, next));
+      setSaved(next);
+      let message =
+        data.webhook.action === "removed"
+          ? `Webhook removed from ${data.webhook.repository}.`
+          : `${data.webhook.repository} had no webhook for this service.`;
+      const protection = data.protection || {};
+      if (protection.ok) {
+        const rows = protection.branches || [];
+        const lifted = rows
+          .filter((row) => row.passingBuilds === "removed" || row.enforceChecks === "removed")
+          .map((row) => row.branch);
+        message += lifted.length
+          ? ` Merging into ${lifted.join(", ")} no longer waits for KubeSight.`
+          : " No branch restriction was there to remove.";
+        const kept = rows.filter((row) => row.directPush === "kept").map((row) => row.branch);
+        if (kept.length) {
+          message += ` The push restriction on ${kept.join(", ")} names who may push, so it was left alone.`;
+        }
+      }
+      setNotice(`${message} The pipeline and secret stay here — Set up in Bitbucket puts it back.`);
+      if (protection.ok === false) {
+        setError(`The webhook is removed, but the branch restriction was not: ${protection.error}`);
+      }
+      return true;
+    } catch (err) {
+      setError(err.message || "KubeSight could not remove this from Bitbucket.");
+      return false;
+    } finally {
+      setRemoving(false);
+      loadWebhook();
+      loadEnforcement();
+    }
+  };
+
   const reveal = async () => {
     if (secretBusy) return;
     setSecretBusy(true);
@@ -525,6 +579,13 @@ export default function MergeChecksPanel({
         blockDirectPush={blockDirectPush}
         onBlockDirectPush={setBlockDirectPush}
         onSetup={() => setupInSource()}
+        removable={Boolean(webhook?.exists || enforcement?.covered?.length)}
+        removeBusy={removing}
+        removeProtection={removeProtection}
+        onRemoveProtection={setRemoveProtection}
+        allowDirectPush={allowDirectPush}
+        onAllowDirectPush={setAllowDirectPush}
+        onRemove={removeFromSource}
         onEnable={() => setEnabled(true)}
         onGoToTab={onGoToTab}
       />
