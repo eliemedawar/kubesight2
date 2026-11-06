@@ -40,6 +40,8 @@
   "CI_STAGE_EPHEMERAL_LIMIT" (toString .stage.ephemeralLimit)
   "CI_WORKSPACE_SIZE_LIMIT" (toString .stage.workspaceSizeLimit)
   "CI_EXTRA_EGRESS_PORTS" (toString .extraEgressPorts)
+  "CI_BUILDKIT_CLIENT_IMAGE" .buildkitClientImage
+  "CI_DEFAULT_STAGE_IMAGE" .defaultStageImage
   "CI_ARTIFACT_AUTOCLEAN" (ternary "true" "false" .artifacts.autoclean)
   "CI_ARTIFACT_KEEP_LAST" (toString .artifacts.keepLast)
   "CI_ARTIFACT_RETENTION_DAYS" (toString .artifacts.retentionDays)

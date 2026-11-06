@@ -187,6 +187,11 @@ ci:
   # Dependency repositories on non-standard ports build pods must reach
   # (4443 = Nexus Maven).
   extraEgressPorts: "4443"
+  # Images build pods run that no pipeline names: the buildctl client of an
+  # image stage, and a command stage that sets no image. In full — CRI-O
+  # refuses short names. Point them at a mirror where docker.io is closed.
+  buildkitClientImage: docker.io/moby/buildkit:v0.23.2
+  defaultStageImage: docker.io/library/debian:bookworm-slim
   jobTtlSeconds: 900
   staleBuildMinutes: 120
   artifacts: {autoclean: true, keepLast: 1, retentionDays: 1}

@@ -2216,7 +2216,7 @@ def _build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
                 "image": (
                     image_tools_image()
                     if scanned
-                    else _env("CI_BUILDKIT_CLIENT_IMAGE", "moby/buildkit:v0.23.2")
+                    else _env("CI_BUILDKIT_CLIENT_IMAGE", "docker.io/moby/buildkit:v0.23.2")
                 ),
                 "command": [
                     "/bin/sh",
@@ -2270,7 +2270,7 @@ def _build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
             tool = (execution.scan or {}).get("tool")
             container = {
                 **base,
-                "image": execution.image or _env("CI_DEFAULT_STAGE_IMAGE", "debian:bookworm-slim"),
+                "image": execution.image or _env("CI_DEFAULT_STAGE_IMAGE", "docker.io/library/debian:bookworm-slim"),
                 "command": [
                     "sh",
                     "-c",
@@ -2287,7 +2287,7 @@ def _build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
         else:  # command
             container = {
                 **base,
-                "image": execution.image or _env("CI_DEFAULT_STAGE_IMAGE", "debian:bookworm-slim"),
+                "image": execution.image or _env("CI_DEFAULT_STAGE_IMAGE", "docker.io/library/debian:bookworm-slim"),
                 "command": [
                     "/bin/sh",
                     "-c",
@@ -2696,7 +2696,7 @@ def _post_action_containers(
         containers.append(
             {
                 "name": post_container_name(execution.position),
-                "image": execution.image or _env("CI_DEFAULT_STAGE_IMAGE", "debian:bookworm-slim"),
+                "image": execution.image or _env("CI_DEFAULT_STAGE_IMAGE", "docker.io/library/debian:bookworm-slim"),
                 "imagePullPolicy": _env("CI_IMAGE_PULL_POLICY", "IfNotPresent"),
                 "securityContext": dict(_SECURITY_CONTEXT),
                 "volumeMounts": _mounts(),
