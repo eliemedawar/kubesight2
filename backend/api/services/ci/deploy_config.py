@@ -184,11 +184,14 @@ def _answer_name(value: Any, what: str, kind: str, where: str) -> str:
     return name
 
 
-def _create_form(value: Any, stage_name: str) -> Dict[str, Any]:
+def _create_form(value: Any, stage_name: str, *, in_use: bool = True) -> Dict[str, Any]:
     """The form the manifest was generated from, kept so it can be re-edited.
 
     Only the fields the editor offers survive; the manifest — not this — is what
-    a build applies.
+    a build applies. ``in_use`` is False while nothing is created from it
+    (create-if-missing off, or several deployments): the editor starts a new
+    stage on "template" with none picked, and a choice nobody has to make yet
+    must not stop the save.
     """
     value = value if isinstance(value, dict) else {}
     env_in = value.get("env") if isinstance(value.get("env"), dict) else {}
@@ -212,7 +215,7 @@ def _create_form(value: Any, stage_name: str) -> Dict[str, Any]:
             f"Stage '{stage_name}': '{source}' is not a way to create the deployment."
         )
     template_id = _clean(value.get("templateId"), 120)
-    if source == "template" and not template_id:
+    if in_use and source == "template" and not template_id:
         raise DeployConfigError(
             f"Stage '{stage_name}': pick the inventory template to create the deployment from."
         )
@@ -370,7 +373,7 @@ def normalize(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str
             # Each deployment must exist: one stage creating several from one
             # manifest is not a change a build should make.
             "createIfMissing": False,
-            "create": _create_form(value.get("create"), stage_name),
+            "create": _create_form(value.get("create"), stage_name, in_use=False),
             "manifest": str(value.get("manifest") or "").strip()[:MAX_MANIFEST_CHARS],
             "deploymentSet": "several",
             "deployments": _deployment_rows(value.get("deployments"), stage_name),
@@ -397,7 +400,7 @@ def normalize(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str
 
     create_if_missing = bool(value.get("createIfMissing"))
     manifest = str(value.get("manifest") or "").strip()
-    create = _create_form(value.get("create"), stage_name)
+    create = _create_form(value.get("create"), stage_name, in_use=create_if_missing)
     # A template is rendered and checked by the pipeline validator, which can
     # read the inventory; this module stays free of the database.
     if create_if_missing and create["source"] != "template":

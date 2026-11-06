@@ -122,6 +122,22 @@ def test_several_deployments_each_name_a_deployment_and_an_image_source():
     assert len(deploy_config.deployment_rows(deploy_config.normalize(_several(twice), "deploy", "Deploy"))) == 2
 
 
+def test_an_unused_create_form_does_not_stop_the_save():
+    # The editor starts a stage's create form on "template" with none picked.
+    # Several deployments never create one, so that empty choice is no error;
+    # nor is it for one deployment while create-if-missing is off.
+    unpicked = {"source": "template", "templateId": ""}
+    config = deploy_config.normalize(_several(create=unpicked), "deploy", "Deploy")
+    assert config["create"]["source"] == "template" and config["create"]["templateId"] == ""
+    assert deploy_config.signature(config) == deploy_config.signature(
+        deploy_config.normalize(_several(), "deploy", "Deploy")
+    )
+    off = dict(_deploy(), createIfMissing=False, create=unpicked)
+    assert deploy_config.normalize(off, "deploy", "Deploy")["createIfMissing"] is False
+    with pytest.raises(deploy_config.DeployConfigError, match="pick the inventory template"):
+        deploy_config.normalize(dict(off, createIfMissing=True), "deploy", "Deploy")
+
+
 @pytest.mark.parametrize(
     "rows, message",
     [
