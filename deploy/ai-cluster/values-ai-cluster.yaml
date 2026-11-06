@@ -90,9 +90,13 @@ ci:
   namespace: kubesight-ci
   manageQuota: false
   cache:
-    # Needs ReadWriteMany, which OCI block volumes cannot do. Off until the
-    # platform connects NFS (then ci.cache.nfs or a class, and enabled: true).
-    enabled: false
+    # On NFS (CHG-KS-010): the platform's PersistentVolume kubesight-ci-cache
+    # (deploy/ai-cluster/storage/ci-cache-pv.yaml) is reserved for this claim.
+    # "-" = no storage class, so the claim binds to that volume and nothing
+    # provisions a block volume.
+    enabled: true
+    size: 100Gi
+    storageClass: "-"
 analysis:
   namespace: kubesight-ci
   manageQuota: false

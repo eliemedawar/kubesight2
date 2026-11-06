@@ -67,12 +67,13 @@ The platform's limits are:
 
 A container that sets nothing gets 100m and 128Mi, with a 512Mi limit.
 
-## No dependency cache yet
+## The dependency cache is on NFS
 
 The cache is one volume shared by every build pod, on any node, so it must be
 ReadWriteMany. The platform's storage classes are OCI block volumes, which are
-ReadWriteOnce. The cache stays off until the platform connects NFS. Builds still
-work; they download their dependencies each time.
+ReadWriteOnce, so the cache lives on OCI File Storage over NFS instead
+(CHG-KS-010). The volume is the platform's, because volumes are cluster-wide;
+the claim is ours. Until then builds downloaded their dependencies each time.
 
 The backend has a second mode, one block volume per service
 (`CI_CACHE_STORAGE_CLASS`). It is not used here, for three reasons:

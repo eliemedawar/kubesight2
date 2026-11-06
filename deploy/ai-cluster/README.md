@@ -118,7 +118,7 @@ UAT and manages this cluster too. The namespaced Roles to run Jobs in
 | Secrets | OpenBao → 6 ExternalSecrets in the chart (`hermes-env` from CHG-KS-006) (`externalSecrets.items`); the database login is the platform's Secret `postgres` |
 | Database | `pooler-kubesight.databases.svc:5432`, `verify-full`, CA from `postgres-ca` mounted at `/etc/postgres-ca`; pool cut to 12 + 12 connections (the login allows 40) |
 | Backend and Hermes data | 50 GiB each on `oci-bv-retain` (50 GiB is the smallest volume) |
-| CI dependency cache | **off**: it needs ReadWriteMany, which block volumes cannot do |
+| CI dependency cache | NFS, OCI File Storage `10.43.11.211:/kubesight/ci-cache`: the platform's PersistentVolume `kubesight-ci-cache` ([storage/](storage/)), the chart's claim `kubesight-ci/ci-cache`, 100Gi (CHG-KS-010) |
 | Builds | BuildKit in `kubesight-build`: `docker.io/moby/buildkit:v0.23.2-rootless`, uid 1000, no added capabilities, unconfined seccomp/AppArmor, one-at-a-time updates to stay in the quota |
 | Web access | Envoy Gateway `kubesight-gateway` (class `areeba-fabric`, internal OCI network load balancer `10.43.10.238:443`, TLS from `kv/kubesight/tls`) → `frontend-service:80` (ClusterIP, plain HTTP) → nginx, which proxies `/api` to the backend. Gateway and route: [gateway/](gateway/), applied with kubectl (CHG-KS-004). Until 2026-10-30: an internal OCI load balancer → nginx on 8443 |
 | Hermes's model | OpenAI through a ChatGPT/Codex login (as in UAT), `gpt-5.6-sol`, login in `kv/kubesight/hermes`; egress to `chatgpt.com`, `auth.openai.com` and `models.dev` only |
@@ -134,7 +134,7 @@ UAT and manages this cluster too. The namespaced Roles to run Jobs in
 | Release | **`1.0.0`** (Elie). Built by pushing the tag `1.0.0` to Bitbucket (the tag pipeline tests, then pushes `kubesight-backend:1.0.0` and `kubesight-frontend:1.0.0`). |
 | Can the nodes pull from `registry.areeba.com`, and BuildKit push to it? | Yes (Hussein) |
 | Firewall: Hermes → `api.anthropic.com`, users → the load balancer | Yes (Hussein) |
-| CI cache storage | Later, on NFS; **off** for now (Hussein) |
+| CI cache storage | Later, on NFS; **off** for now (Hussein). 2026-11-06: export `10.43.11.211:/kubesight` given (Elie), CHG-KS-010 |
 | Schema migrations run by the backend at start-up | Accepted (Hussein) |
 | OpenBao backed up | Yes (Hussein) |
 

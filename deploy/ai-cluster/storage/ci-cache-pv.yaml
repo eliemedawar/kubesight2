@@ -1,0 +1,32 @@
+# The CI dependency cache's volume (CHG-KS-010). Cluster-wide, so the
+# platform applies it: kubectl apply -f ci-cache-pv.yaml
+#
+# OCI File Storage, mount target 10.43.11.211, export /kubesight, directory
+# ci-cache inside it.
+# Reserved for the claim the chart makes, kubesight-ci/ci-cache, and kept when
+# the claim goes (Retain). The 100Gi is what the claim asks for; NFS does not
+# enforce it.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: kubesight-ci-cache
+  labels:
+    app.kubernetes.io/part-of: kubesight
+    areeba.com/module: kubesight-ci
+    areeba.com/change: CHG-KS-010
+    kubesight.io/purpose: ci-dependency-cache
+spec:
+  capacity:
+    storage: 100Gi
+  volumeMode: Filesystem
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  # Same NFS version as the bastion's mount of the export (`mount | grep 10.43.11.211`).
+  mountOptions: [nfsvers=3]
+  claimRef:
+    namespace: kubesight-ci
+    name: ci-cache
+  nfs:
+    server: 10.43.11.211
+    path: /kubesight/ci-cache

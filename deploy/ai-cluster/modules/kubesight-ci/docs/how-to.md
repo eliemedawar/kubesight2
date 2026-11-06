@@ -11,30 +11,31 @@ helm upgrade kubesight charts/kubesight -n kubesight -f deploy/ai-cluster/values
 Edit `deploy/ai-cluster/values-ai-cluster.yaml` in Git first, never with `--set`
 alone, so the file stays the truth.
 
-## Turn on the dependency cache, once the platform connects NFS
+## The dependency cache on NFS
 
-The cache (Maven, Gradle, npm and so on) is off. It needs a ReadWriteMany
-volume, and OCI block volumes are ReadWriteOnce only.
+The cache (Maven, Gradle, npm and so on) is on NFS: OCI File Storage,
+`10.43.11.211:/kubesight/ci-cache` (CHG-KS-010). The chart's own NFS mode
+(`ci.cache.nfs`) would create a PersistentVolume, which is cluster-wide, so it
+is not used. Instead:
 
-The chart's NFS mode (`ci.cache.nfs.server` and `path`) **creates a
-PersistentVolume**, which is a cluster-wide object, so don't use it here. Ask
-the platform for one of these:
-
-- **a PersistentVolume they make, plus its claim in `kubesight-ci`.** Then set:
+- the platform applies the volume, `deploy/ai-cluster/storage/ci-cache-pv.yaml`
+  (`kubesight-ci-cache`, reserved for the claim `kubesight-ci/ci-cache`);
+- the chart makes the claim, with no storage class so it binds to that volume:
   ```yaml
   ci:
     cache:
       enabled: true
-      existingClaim: <the claim's name>
+      size: 100Gi
+      storageClass: "-"
   ```
-- **a ReadWriteMany StorageClass.** Then set `ci.cache.enabled: true` and
-  `ci.cache.storageClass: <class>`. The chart makes the claim `ci-cache`
-  (20Gi, ReadWriteMany). It counts against the namespace's 4 claims and 200Gi.
 
-Either way, the export must belong to uid 65532 before the first build
-(`chown 65532:65532 <path> && chmod 2775 <path>`, done by whoever runs the
-NFS server). Then run the `helm upgrade`, start one build, and check its pod
-mounted the claim at `/kubesight-cache`.
+The directory must belong to uid 65532, mode 2775 (`mkdir -p
+/kubesight/ci-cache && chown 65532:65532 /kubesight/ci-cache && chmod 2775
+/kubesight/ci-cache` where the export is mounted as root). Build pods mount the claim at `/kubesight-cache`, one folder per
+service.
+
+To turn it off: `ci.cache.enabled: false` and the same upgrade. The claim,
+the volume and the files stay.
 
 ## Write stage images in full
 

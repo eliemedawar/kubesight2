@@ -12,13 +12,14 @@ and `image.tag=1.0.0`.
 | ServiceAccount | `kubesight-analysis-worker` | `kubesight-ci` | `kubesight-analysis` |
 | Role / RoleBinding | `kubesight-analysis-launcher` (bound to `kubesight/kubesight-backend`) | `kubesight-ci` | `kubesight-analysis` |
 | ExternalSecret | `regcred` (makes the Secret `regcred`) | `kubesight-ci` | `kubesight-ci` |
+| PersistentVolumeClaim | `ci-cache` (ReadWriteMany, 100Gi, binds to the platform's `kubesight-ci-cache`; kept on uninstall) | `kubesight-ci` | `kubesight-ci` |
 | NetworkPolicy | `default-deny`, `allow-dns` | `kubesight-ci` | `kubesight` |
 | NetworkPolicy | `kubesight-backend-callbacks` (lets this namespace in on 5000) | `kubesight` | `kubesight-backend` |
 
 Every one also carries `areeba.com/change=<the install's change ID>` and
 `app.kubernetes.io/part-of=kubesight`. Not created here: the namespace (the
 platform's), a ResourceQuota or LimitRange (`manageQuota: false`), or the
-cache claim (`ci.cache.enabled: false`).
+cache's PersistentVolume `kubesight-ci-cache` (the platform's, CHG-KS-010).
 
 ## Objects the backend creates at run time
 
@@ -56,7 +57,7 @@ These carry **no** `areeba.com/*` labels yet: a known gap in the backend.
 |---|---|
 | `ci.namespace`, `analysis.namespace` | `kubesight-ci` |
 | `ci.manageQuota`, `analysis.manageQuota` | `false` |
-| `ci.cache.enabled` | `false` |
+| `ci.cache.enabled` / `size` / `storageClass` | `true` / `100Gi` / `"-"` (no class: binds to the platform's volume) |
 | `ci.stage.cpuLimit` / `memoryLimit` | `"2"` / `4Gi` |
 | `ci.stage.ephemeralRequest` / `ephemeralLimit` / `workspaceSizeLimit` | `off` |
 | `ci.extraEgressPorts` | `"4443"` |
@@ -87,7 +88,7 @@ These carry **no** `areeba.com/*` labels yet: a known gap in the backend.
 | `APPLICATION_ANALYSIS_CPU_LIMIT` / `_MEMORY_LIMIT` / `_EPHEMERAL_LIMIT` | `2` / `4Gi` / `2Gi` |
 | `APPLICATION_ANALYSIS_DEADLINE_SECONDS` / `_JOB_TTL_SECONDS` | `1800` / `900` |
 
-`CI_CACHE_CLAIM_NAME` and `CI_CACHE_STORAGE_CLASS` are unset: no cache.
+`CI_CACHE_CLAIM_NAME=ci-cache`; `CI_CACHE_STORAGE_CLASS` is unset (one shared cache, not a volume per service).
 
 ## Secrets (names only)
 
@@ -115,7 +116,7 @@ These carry **no** `areeba.com/*` labels yet: a known gap in the backend.
 | Memory requests | 8Gi | 128Mi per container unless set |
 | Memory limits | 16Gi | build stage 4Gi, analysis 4Gi |
 | Pods | 40 | 1 per run |
-| Claims / storage | 4 / 200Gi | none (cache off) |
+| Claims / storage | 4 / 200Gi | the cache claim `ci-cache`, 100Gi, for the whole namespace |
 
 Pod security: enforce `baseline`, which build and analysis pods pass (non-root,
 `RuntimeDefault` seccomp).
