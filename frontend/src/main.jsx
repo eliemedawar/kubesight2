@@ -32,6 +32,7 @@ import "./styles/signal/mcpTools.css";
 import "./styles/signal/approvals.css";
 import "./styles/signal/login.css";
 import "./styles/signal/coachmarks.css";
+import "./styles/signal/assistant.css";
 
 async function bootstrap() {
   await loadRuntimeConfig();

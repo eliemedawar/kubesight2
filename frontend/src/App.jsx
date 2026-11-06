@@ -1951,6 +1951,7 @@ export default function App() {
       userInitials={userInitials}
       onLogout={handleLogout}
       onStartTour={startPageTour}
+      assistantEnabled={isAdmin}
     >
       {pageNode}
     </AppShell>

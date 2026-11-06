@@ -1,0 +1,644 @@
+/*
+ * The Hermes assistant (Ctrl/⌘+G, admins only).
+ *
+ * A non-modal panel docked on the right: the page stays usable beside it.
+ * Violet (--ai) is the AI colour, as on every other Hermes surface.
+ *   .as-panel      the panel
+ *   .as-msg        one turn (user bubble / Hermes reply)
+ *   .as-md         Hermes' Markdown, rendered as elements
+ *   .as-composer   the message box
+ */
+
+.as-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4000;
+  display: flex;
+  flex-direction: column;
+  width: min(30rem, 100vw);
+  border-left: 1px solid var(--border);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+  animation: as-in var(--dur-slow) var(--ease);
+}
+
+@keyframes as-in {
+  from { transform: translateX(16px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .as-panel { animation: none; }
+}
+
+/* ── Header ────────────────────────────────────────────────────────── */
+
+.as-head {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.85rem 0.9rem 0.85rem 1rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.as-mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border: 1px solid var(--ai-border);
+  border-radius: var(--radius-md);
+  background: var(--ai-soft);
+  color: var(--ai);
+}
+
+.as-mark svg {
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
+.as-head-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.as-head-text h3 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: var(--font-size-md);
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.as-head-text p {
+  margin: 0.1rem 0 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.as-head-actions {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.as-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+
+.as-icon-btn:hover,
+.as-icon-btn[aria-pressed="true"] {
+  background: var(--bg-interactive);
+  color: var(--text-strong);
+}
+
+.as-icon-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.as-icon-btn svg {
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
+/* ── Past chats ────────────────────────────────────────────────────── */
+
+.as-history {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-2);
+}
+
+.as-history ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.as-history li {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  border-radius: var(--radius-md);
+}
+
+.as-history li:hover,
+.as-history li.is-current {
+  background: var(--bg-interactive);
+}
+
+.as-history-pick {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.6rem 0.7rem;
+  border: 0;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.as-history-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.as-history-when {
+  flex: none;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.as-history-delete {
+  opacity: 0;
+}
+
+.as-history li:hover .as-history-delete,
+.as-history-delete:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .as-history-delete { opacity: 1; }
+}
+
+.as-muted {
+  margin: var(--space-4);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  text-align: center;
+}
+
+/* ── Conversation ──────────────────────────────────────────────────── */
+
+.as-scroll {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 1rem;
+  overflow-y: auto;
+  padding: 1rem 1rem 0.5rem;
+  overscroll-behavior: contain;
+}
+
+.as-scroll[hidden] {
+  display: none;
+}
+
+.as-empty {
+  margin: auto 0;
+  padding: 1rem 0.25rem;
+}
+
+.as-empty > p {
+  margin: 0 0 0.9rem;
+  color: var(--text-subtle);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+
+.as-suggestions {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.as-suggestion {
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  color: var(--text-main);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--dur-fast), background var(--dur-fast);
+}
+
+.as-suggestion:hover:not(:disabled) {
+  border-color: var(--ai-border);
+  background: var(--ai-soft);
+}
+
+.as-suggestion:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.as-notice {
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius-md);
+  background: var(--warn-soft);
+  color: var(--text-main);
+  font-size: var(--font-size-sm);
+}
+
+.as-notice p {
+  margin: 0.3rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.as-msg {
+  display: flex;
+  min-width: 0;
+}
+
+.as-msg--user {
+  justify-content: flex-end;
+}
+
+.as-bubble {
+  max-width: 85%;
+  padding: 0.55rem 0.8rem;
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-sm) var(--radius-lg);
+  background: var(--bg-interactive);
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.as-msg--hermes {
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.as-msg--hermes > * {
+  min-width: 0;
+}
+
+.as-pending {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.as-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.as-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ai);
+  animation: as-dot 1.2s infinite ease-in-out;
+}
+
+.as-dots i:nth-child(2) { animation-delay: 0.15s; }
+.as-dots i:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes as-dot {
+  0%, 80%, 100% { opacity: 0.25; transform: none; }
+  40% { opacity: 1; transform: translateY(-2px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .as-dots i { animation: none; opacity: 0.7; }
+}
+
+.as-failed {
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  background: var(--danger-soft);
+  color: var(--text-main);
+  font-size: var(--font-size-sm);
+}
+
+.as-failed p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.as-retry {
+  margin-top: 0.5rem;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: var(--bg-panel);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* ── Hermes' Markdown ──────────────────────────────────────────────── */
+
+.as-md {
+  color: var(--text-main);
+  font-size: var(--font-size-sm);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.as-md > :first-child { margin-top: 0; }
+.as-md > :last-child { margin-bottom: 0; }
+
+.as-md p,
+.as-md ul,
+.as-md ol,
+.as-md blockquote {
+  margin: 0 0 0.6rem;
+}
+
+.as-md ul,
+.as-md ol {
+  padding-left: 1.25rem;
+}
+
+.as-md li + li {
+  margin-top: 0.2rem;
+}
+
+.as-md h4,
+.as-md h5 {
+  margin: 0.9rem 0 0.4rem;
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+}
+
+.as-md h4 { font-size: var(--font-size-md); }
+
+.as-md strong { color: var(--text-strong); font-weight: 650; }
+
+.as-md a {
+  color: var(--accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.as-md code {
+  padding: 0.05rem 0.3rem;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.as-md blockquote {
+  padding-left: 0.75rem;
+  border-left: 3px solid var(--border-strong);
+  color: var(--text-subtle);
+}
+
+.as-md hr {
+  margin: 0.8rem 0;
+  border: 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+.as-code {
+  margin: 0 0 0.6rem;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+}
+
+.as-code-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.25rem 0.4rem 0.25rem 0.7rem;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+}
+
+.as-code-copy {
+  padding: 0.15rem 0.5rem;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.as-code-copy:hover {
+  background: var(--bg-interactive);
+  color: var(--text-strong);
+}
+
+.as-code pre {
+  margin: 0;
+  padding: 0.6rem 0.7rem;
+  max-height: 22rem;
+  overflow: auto;
+}
+
+.as-code pre code {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 0.75rem;
+  line-height: 1.55;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.as-table-wrap {
+  margin: 0 0 0.6rem;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.as-table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-xs);
+}
+
+.as-table-wrap th,
+.as-table-wrap td {
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border-soft);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: normal;
+}
+
+.as-table-wrap th {
+  background: var(--bg-panel-strong);
+  color: var(--text-strong);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.as-table-wrap tr:last-child td {
+  border-bottom: 0;
+}
+
+/* ── Composer ──────────────────────────────────────────────────────── */
+
+.as-composer {
+  padding: 0.6rem 0.9rem 0.75rem;
+  border-top: 1px solid var(--border-soft);
+}
+
+.as-error {
+  margin: 0 0 0.5rem;
+  color: var(--danger);
+  font-size: var(--font-size-xs);
+  overflow-wrap: anywhere;
+}
+
+.as-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5rem;
+  padding: 0.35rem 0.35rem 0.35rem 0.75rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  transition: border-color var(--dur-fast), box-shadow var(--dur-fast);
+}
+
+.as-input-row:focus-within {
+  border-color: var(--ai-border);
+  box-shadow: 0 0 0 3px var(--ai-soft);
+}
+
+.as-input {
+  flex: 1;
+  min-width: 0;
+  max-height: 180px;
+  padding: 0.35rem 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--text-strong);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+
+.as-input::placeholder {
+  color: var(--text-muted);
+}
+
+.as-send {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--ai);
+  color: #fff;
+  cursor: pointer;
+  transition: opacity var(--dur-fast);
+}
+
+.as-send:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.as-send:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.as-send svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.as-hint {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.25rem 0.75rem;
+  margin: 0.45rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.6875rem;
+}
+
+.as-hint kbd {
+  padding: 0 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+}
+
+@media (max-width: 640px) {
+  .as-panel { border-left: 0; }
+  .as-hint > span { display: none; }
+}
+
+/* The app-wide field and button rules (index.css, premium.css, ui-polish.css)
+   would draw a second, red-ringed box inside the composer and centre the
+   suggestion text. The composer frame owns focus here. */
+.as-panel .as-input,
+.as-panel .as-input:hover,
+.as-panel .as-input:focus,
+.as-panel .as-input:focus-visible {
+  padding: 0.35rem 0;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+.as-panel .as-suggestion,
+.as-panel .as-history-pick {
+  justify-content: flex-start;
+  text-align: left;
+}
+
+/* A reply still being written: the text so far, then what Hermes is doing. */
+.as-pending-text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

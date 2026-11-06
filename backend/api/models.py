@@ -3067,6 +3067,9 @@ from .models_ticket_agent import (  # noqa: E402,F401
     TicketInterpretation,
 )
 
+# The in-app assistant (Ctrl+G): chat threads with Hermes, one owner each.
+from .models_assistant import AssistantConversation, AssistantMessage  # noqa: E402,F401
+
 # Upgrade Center jobs — persisted so a restart cannot lose an upgrade's record.
 from .models_upgrade import UpgradeJob, UpgradePrecheck  # noqa: E402,F401
 

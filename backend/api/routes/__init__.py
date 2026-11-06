@@ -28,6 +28,7 @@ from .registries import registries_bp
 from .zoho import zoho_bp
 from .ticketing import ticketing_bp
 from .ticket_agent import ticket_agent_bp
+from .assistant import assistant_bp
 from .approvals import approvals_bp
 from .mobile_apps import mobile_apps_bp
 from .infra_connections import infra_bp
@@ -77,6 +78,7 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(zoho_bp)
     app.register_blueprint(ticketing_bp)
     app.register_blueprint(ticket_agent_bp)
+    app.register_blueprint(assistant_bp)
     app.register_blueprint(approvals_bp)
     app.register_blueprint(mobile_apps_bp)
     app.register_blueprint(infra_bp)

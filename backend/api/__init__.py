@@ -448,6 +448,11 @@ def create_app(config_object=None) -> Flask:
         from .services.ci_assist.jobs import start as start_ci_assist
 
         start_ci_assist(app)
+        # The assistant's replies, for the same reason: one Hermes turn is an
+        # agent loop that can outlast any proxy timeout.
+        from .services.assistant.service import start as start_assistant
+
+        start_assistant(app)
         # Pre-populate kubectl-backed caches so the first tab clicks after
         # startup hit warm data instead of paying multi-second cold loads.
         from .cache_warmer import warm_caches_async
