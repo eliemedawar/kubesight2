@@ -67,6 +67,13 @@ secrets:
 
 backend:
   inClusterContextName: ociduai-k8s
+  # Inside the cluster registry.areeba.com resolves to its public address
+  # (139.185.49.213), which does not answer; the nodes use the internal Nexus.
+  # Pinned to it until the platform's DNS gives pods the same answer
+  # (CHG-KS-013).
+  hostAliases:
+    - ip: 10.43.17.16
+      hostnames: [registry.areeba.com]
   # OKE upgrades its own control plane; KubeSight must not run kubeadm here.
   autoUpgrade: false
   config:
@@ -108,6 +115,13 @@ buildkit:
   # Registry ports buildkitd pushes to and pulls from: the chart's list plus
   # 4443, a Nexus Docker connector (CHG-KS-012).
   egressPorts: [443, 8443, 8082, 5000, 9443, 4443]
+  # Inside the cluster registry.areeba.com resolves to its public address
+  # (139.185.49.213), which does not answer; the nodes use the internal Nexus.
+  # Pinned to it until the platform's DNS gives pods the same answer
+  # (CHG-KS-013). BuildKit resolves FROM images itself, so it needs it.
+  hostAliases:
+    - ip: 10.43.17.16
+      hostnames: [registry.areeba.com]
   # The kubesight-build fence: uid 1000, non-root, no added capabilities.
   # null removes the chart default's drop-ALL-add-SETUID/SETGID (Helm merges
   # maps); CRI-O's default capabilities already hold what uid mapping needs.
