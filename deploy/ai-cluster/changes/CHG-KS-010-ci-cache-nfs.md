@@ -122,4 +122,30 @@ kept on purpose, they hold data). To remove them as well:
 10.43.11.211:/kubesight               8.0E     0  8.0E   0% /kubesight
 ```
 
-Upgrade: ____
+2026-11-06, the claim, after the upgrade:
+
+```
+$ kubectl -n kubesight-ci get pvc ci-cache
+NAME       STATUS   VOLUME               CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
+ci-cache   Bound    kubesight-ci-cache   100Gi      RWX                           <unset>                 13s
+```
+
+2026-11-06, step 1: the export **squashes root** (root on the bastion writes as
+65534), so `chown` is refused even as root. The directory's squashed owner
+opened it to everyone instead, for now:
+
+```
+# chown 65532:65532 /kubesight/ci-cache
+chown: changing ownership of '/kubesight/ci-cache': Operation not permitted
+# chmod 2777 /kubesight/ci-cache
+# ls -ldn /kubesight/ci-cache
+drwxrwsrwx 2 65534 10000 0 Nov  6 10:24 /kubesight/ci-cache
+```
+
+**Open:** writable by any user of any host that mounts the export. To close
+it, the platform sets Squash to None for the bastion's address on the
+export for a moment, then `chown 65532:65532 /kubesight/ci-cache && chmod
+2775 /kubesight/ci-cache`, then root squash goes back on (builds run as
+65532, so root squash does not touch them).
+
+First build with the cache: ____
