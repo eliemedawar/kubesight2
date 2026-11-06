@@ -91,7 +91,7 @@ the integration is turned on):
 
 - the clusters KubeSight manages: their API servers, and SSH to nodes for the Cluster Builder and upgrades;
 - Bitbucket Cloud: `api.bitbucket.org` and `bitbucket.org` on 443 (CHG-KS-011; build pods and analysis Jobs already allow 443, so they need only the firewall);
-- Nexus `registry.areeba.com` (`10.43.17.16`), from the backend (443, CHG-KS-012), the CI pods and BuildKit;
+- Nexus `registry.areeba.com` (`10.43.17.16`), from the backend (443 and 9443, CHG-KS-012), the CI pods and BuildKit;
 - Zoho Desk and Jira;
 - SMTP: `smtp.office365.com:587` (CHG-KS-009);
 - vCenter (OpenTofu);

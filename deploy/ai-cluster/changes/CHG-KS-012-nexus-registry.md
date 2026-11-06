@@ -14,8 +14,8 @@
 ## What
 
 A `helm upgrade` with one change in `deploy/ai-cluster/values-ai-cluster.yaml`:
-`networkPolicies.backendEgressCIDRs` gets `10.43.17.16/32` on TCP 443 (Nexus,
-`registry.areeba.com`). The Cilium rule `kubesight-backend-egress` then lets
+`networkPolicies.backendEgressCIDRs` gets `10.43.17.16/32` on TCP 443 and 9443
+(Nexus, `registry.areeba.com`; 9443 is the Docker connector builds push to). The Cilium rule `kubesight-backend-egress` then lets
 the backend call the registry's Docker API (`https://10.43.17.16/v2/…`). By
 address, not name, so it holds whether the registry is entered as the IP or
 as `registry.areeba.com`. No image change; the backend pod does not restart.
@@ -34,6 +34,10 @@ Nothing from the platform: the nodes already pull from `registry.areeba.com`
 registry's host in KubeSight is ever given a port (`10.43.17.16:8443`, say),
 add that port here as well.
 
+Pushing on 9443 needs nothing more on our side: BuildKit, which pushes,
+already allows 443, 8443, 8082, 5000 and 9443 (`buildkit.egressPorts`), and a
+build pod adds its target registry's port to its own per-run rule.
+
 ## Steps
 
 On the bastion: pull in `~/kubesight-ai`, copy `charts/kubesight` and
@@ -45,7 +49,7 @@ TAG=$(kubectl -n kubesight get deploy kubesight-backend -o jsonpath='{.spec.temp
 ARGS="-n kubesight -f deploy/ai-cluster/values-ai-cluster.yaml --set image.tag=$TAG --set-string commonLabels.areeba\.com/change=$CHG"
 
 # Read only
-helm template kubesight charts/kubesight $ARGS | grep -A4 '10.43.17.16'      # toCIDR, port 443
+helm template kubesight charts/kubesight $ARGS | grep -A5 '10.43.17.16'      # toCIDR, ports 443 and 9443
 helm upgrade kubesight charts/kubesight $ARGS --dry-run=server > /dev/null && echo "helm dry run OK"
 
 # After a person's explicit "yes":
@@ -57,7 +61,8 @@ helm upgrade kubesight charts/kubesight $ARGS
 ```bash
 kubectl -n kubesight exec -i deploy/kubesight-backend -- python - <<'EOF'
 import socket
-socket.create_connection(("10.43.17.16", 443), timeout=5).close(); print("reachable")
+for port in (443, 9443):
+    socket.create_connection(("10.43.17.16", port), timeout=5).close(); print(port, "reachable")
 EOF
 ```
 
