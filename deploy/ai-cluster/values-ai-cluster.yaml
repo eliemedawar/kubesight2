@@ -113,8 +113,10 @@ buildkit:
   replicas: 2
   image: docker.io/moby/buildkit:v0.23.2-rootless
   # Registry ports buildkitd pushes to and pulls from: the chart's list plus
-  # 4443, a Nexus Docker connector (CHG-KS-012).
-  egressPorts: [443, 8443, 8082, 5000, 9443, 4443]
+  # 4443, a Nexus Docker connector (CHG-KS-012), and 80: Dockerfile RUN steps
+  # run on BuildKit's network, and apt-get fetches deb.debian.org over plain
+  # HTTP (CHG-KS-014).
+  egressPorts: [443, 8443, 8082, 5000, 9443, 4443, 80]
   # Inside the cluster registry.areeba.com resolves to its public address
   # (139.185.49.213), which does not answer; the nodes use the internal Nexus.
   # Pinned to it until the platform's DNS gives pods the same answer

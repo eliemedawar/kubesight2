@@ -44,7 +44,7 @@ Every object also carries `areeba.com/change=<the install's change ID>` and
 | `buildkit.strategy` | `{type: RollingUpdate, rollingUpdate: {maxSurge: 0, maxUnavailable: 1}}` |
 | `buildkit.resources` | as in the table above |
 | `buildkit.cacheSize` | `10Gi` (default) |
-| `buildkit.egressPorts` | `[443, 8443, 8082, 5000, 9443, 4443]` (4443 added, CHG-KS-012) |
+| `buildkit.egressPorts` | `[443, 8443, 8082, 5000, 9443, 4443, 80]` (4443 added, CHG-KS-012; 80 for apt in Dockerfile RUN steps, CHG-KS-014) |
 | `buildkit.hostAliases` | none |
 
 ## Backend settings that point at it (ConfigMap `kubesight-config` in `kubesight`)
