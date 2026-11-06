@@ -4,7 +4,7 @@
 |---|---|
 | ID | CHG-KS-010 |
 | Modules | kubesight-ci |
-| Status | Proposed |
+| Status | Done 2026-11-06: the cache is in use. Open: the directory is world-writable until the platform lets root change its owner (see Evidence) |
 | Asked by | Elie, 2026-11-06: "10.43.11.211:/kubesight … is the nfs that i will be putting caches" |
 | Depends on | CHG-KS-002; the OCI File Storage export `10.43.11.211:/kubesight`; the platform applying one PersistentVolume |
 | Prepared by | ____ |
@@ -148,4 +148,16 @@ export for a moment, then `chown 65532:65532 /kubesight/ci-cache && chmod
 2775 /kubesight/ci-cache`, then root squash goes back on (builds run as
 65532, so root squash does not touch them).
 
-First build with the cache: ____
+2026-11-06, after the first build of the service `kubesight`, from the bastion:
+
+```
+$ ls -ln /kubesight/ci-cache
+drwxr-sr-x 7 65532 10000 5 Nov  6 13:04 kubesight
+drwxr-sr-x 5 65532 10000 3 Nov  6 13:04 _shared
+$ du -sh /kubesight/ci-cache/*
+47M     /kubesight/ci-cache/kubesight
+16M     /kubesight/ci-cache/_shared
+```
+
+The build pod mounted the claim, and wrote the service's folder and the
+shared one as 65532.
