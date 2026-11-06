@@ -65,7 +65,7 @@ and `image.tag=1.0.0`.
 | out | pods in `kubesight` | any | `allow-dns-and-same-namespace` |
 | out | `databases`, pods `cnpg.io/poolerName=pooler-kubesight` | 5432 | `kubesight-backend-database` (also for pods labelled `app=kubesight-db-client`) |
 | out | the Kubernetes API | — | `kubesight-backend-egress` (Cilium, `toEntities: kube-apiserver`) |
-| out | named outside systems | listed | `kubesight-backend-egress` (`networkPolicies.backendEgressFQDNs` / `backendEgressCIDRs`, empty at install): `smtp.office365.com:587` (CHG-KS-009); `api.bitbucket.org:443`, `bitbucket.org:443` (CHG-KS-011); `10.43.17.16/32` on 443 and 9443, Nexus (CHG-KS-012) |
+| out | named outside systems | listed | `kubesight-backend-egress` (`networkPolicies.backendEgressFQDNs` / `backendEgressCIDRs`, empty at install): `smtp.office365.com:587` (CHG-KS-009); `api.bitbucket.org:443`, `bitbucket.org:443` (CHG-KS-011); `10.43.17.16/32` on 443, 9443 and 4443, Nexus (CHG-KS-012) |
 
 ## Quota use (`kubesight`: 3 CPU / 8Gi requests, 16Gi memory limits, 30 pods, 6 claims / 300Gi)
 

@@ -105,6 +105,9 @@ buildkit:
   namespace: kubesight-build
   replicas: 2
   image: docker.io/moby/buildkit:v0.23.2-rootless
+  # Registry ports buildkitd pushes to and pulls from: the chart's list plus
+  # 4443, a Nexus Docker connector (CHG-KS-012).
+  egressPorts: [443, 8443, 8082, 5000, 9443, 4443]
   # The kubesight-build fence: uid 1000, non-root, no added capabilities.
   # null removes the chart default's drop-ALL-add-SETUID/SETGID (Helm merges
   # maps); CRI-O's default capabilities already hold what uid mapping needs.
@@ -220,6 +223,6 @@ networkPolicies:
     - {name: bitbucket.org}
   backendEgressCIDRs:
     # Nexus registry.areeba.com: the image check before every deploy and the
-    # registry test in Integrations, Docker API on 443, and on 9443, the
-    # Docker connector images are pushed to (CHG-KS-012).
-    - {cidr: 10.43.17.16/32, ports: [443, 9443]}
+    # registry test in Integrations, Docker API on 443, and on 9443 and 4443,
+    # the Docker connectors images are pushed to (CHG-KS-012).
+    - {cidr: 10.43.17.16/32, ports: [443, 9443, 4443]}

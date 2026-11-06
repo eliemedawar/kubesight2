@@ -13,12 +13,20 @@
 
 ## What
 
-A `helm upgrade` with one change in `deploy/ai-cluster/values-ai-cluster.yaml`:
-`networkPolicies.backendEgressCIDRs` gets `10.43.17.16/32` on TCP 443 and 9443
-(Nexus, `registry.areeba.com`; 9443 is the Docker connector builds push to). The Cilium rule `kubesight-backend-egress` then lets
-the backend call the registry's Docker API (`https://10.43.17.16/v2/…`). By
-address, not name, so it holds whether the registry is entered as the IP or
-as `registry.areeba.com`. No image change; the backend pod does not restart.
+A `helm upgrade` with two changes in `deploy/ai-cluster/values-ai-cluster.yaml`:
+
+1. `networkPolicies.backendEgressCIDRs` gets `10.43.17.16/32` (Nexus,
+   `registry.areeba.com`) on TCP 443, 9443 and 4443. The Cilium rule
+   `kubesight-backend-egress` then lets the backend call the registry's
+   Docker API on each (`https://10.43.17.16/v2/…`, or `:9443`, `:4443` when
+   the registry is entered with that port). By address, not name, so it
+   holds whether the registry is entered as the IP or as
+   `registry.areeba.com`.
+2. `buildkit.egressPorts` gets 4443 next to the chart's 443, 8443, 8082, 5000
+   and 9443, so BuildKit can push to and pull from the 4443 connector.
+
+No image change. The backend pod does not restart; the BuildKit pods' rule
+changes in place.
 
 ## Why
 
@@ -34,9 +42,13 @@ Nothing from the platform: the nodes already pull from `registry.areeba.com`
 registry's host in KubeSight is ever given a port (`10.43.17.16:8443`, say),
 add that port here as well.
 
-Pushing on 9443 needs nothing more on our side: BuildKit, which pushes,
-already allows 443, 8443, 8082, 5000 and 9443 (`buildkit.egressPorts`), and a
-build pod adds its target registry's port to its own per-run rule.
+Who reaches Nexus on which port, after this change:
+
+| From | Ports | Rule |
+|---|---|---|
+| backend | 443, 9443, 4443 | `kubesight-backend-egress` (this change) |
+| BuildKit (pushes images) | 443, 8443, 8082, 5000, 9443, 4443 | its NetworkPolicy, `buildkit.egressPorts` (4443 added here) |
+| build pods | 443, 4443 (`ci.extraEgressPorts`), and their push registry's port | their per-run NetworkPolicy |
 
 ## Steps
 
@@ -49,7 +61,8 @@ TAG=$(kubectl -n kubesight get deploy kubesight-backend -o jsonpath='{.spec.temp
 ARGS="-n kubesight -f deploy/ai-cluster/values-ai-cluster.yaml --set image.tag=$TAG --set-string commonLabels.areeba\.com/change=$CHG"
 
 # Read only
-helm template kubesight charts/kubesight $ARGS | grep -A5 '10.43.17.16'      # toCIDR, ports 443 and 9443
+helm template kubesight charts/kubesight $ARGS | grep -A6 '10.43.17.16'      # toCIDR, ports 443, 9443 and 4443
+helm template kubesight charts/kubesight $ARGS --show-only templates/buildkit.yaml | grep 4443   # BuildKit
 helm upgrade kubesight charts/kubesight $ARGS --dry-run=server > /dev/null && echo "helm dry run OK"
 
 # After a person's explicit "yes":
@@ -61,7 +74,7 @@ helm upgrade kubesight charts/kubesight $ARGS
 ```bash
 kubectl -n kubesight exec -i deploy/kubesight-backend -- python - <<'EOF'
 import socket
-for port in (443, 9443):
+for port in (443, 9443, 4443):
     socket.create_connection(("10.43.17.16", port), timeout=5).close(); print(port, "reachable")
 EOF
 ```
