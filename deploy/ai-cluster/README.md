@@ -90,7 +90,7 @@ advisory lock). It holds advisory locks for leader election, so it needs a
 the integration is turned on):
 
 - the clusters KubeSight manages: their API servers, and SSH to nodes for the Cluster Builder and upgrades;
-- Bitbucket;
+- Bitbucket Cloud: `api.bitbucket.org` and `bitbucket.org` on 443 (CHG-KS-011; build pods and analysis Jobs already allow 443, so they need only the firewall);
 - Nexus `registry.areeba.com`, from the backend, the CI pods and BuildKit;
 - Zoho Desk and Jira;
 - SMTP: `smtp.office365.com:587` (CHG-KS-009);

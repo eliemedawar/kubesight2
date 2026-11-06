@@ -214,4 +214,8 @@ networkPolicies:
   backendEgressFQDNs:
     # Alert, sign-in and report emails through Microsoft 365 (CHG-KS-009).
     - {name: smtp.office365.com, ports: [587]}
+    # Bitbucket Cloud: its API (repositories, branches, build statuses, pull
+    # requests) and Git over HTTPS (CHG-KS-011).
+    - {name: api.bitbucket.org}
+    - {name: bitbucket.org}
   backendEgressCIDRs: []
