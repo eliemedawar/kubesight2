@@ -218,4 +218,7 @@ networkPolicies:
     # requests) and Git over HTTPS (CHG-KS-011).
     - {name: api.bitbucket.org}
     - {name: bitbucket.org}
-  backendEgressCIDRs: []
+  backendEgressCIDRs:
+    # Nexus registry.areeba.com: the image check before every deploy and the
+    # registry test in Integrations, Docker API on 443 (CHG-KS-012).
+    - {cidr: 10.43.17.16/32, ports: [443]}
