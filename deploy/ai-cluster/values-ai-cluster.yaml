@@ -207,5 +207,7 @@ networkPolicies:
   # Added one by one as integrations are configured, each with its change
   # record and firewall request (Bitbucket, Nexus, Zoho/Jira, SMTP, the
   # clusters KubeSight manages, ...).
-  backendEgressFQDNs: []
+  backendEgressFQDNs:
+    # Alert, sign-in and report emails through Microsoft 365 (CHG-KS-009).
+    - {name: smtp.office365.com, ports: [587]}
   backendEgressCIDRs: []

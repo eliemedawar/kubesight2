@@ -93,7 +93,7 @@ the integration is turned on):
 - Bitbucket;
 - Nexus `registry.areeba.com`, from the backend, the CI pods and BuildKit;
 - Zoho Desk and Jira;
-- SMTP;
+- SMTP: `smtp.office365.com:587` (CHG-KS-009);
 - vCenter (OpenTofu);
 - Red Hat Satellite;
 - Google Play and App Store Connect;
