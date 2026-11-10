@@ -9,6 +9,9 @@ export default function YamlPreviewPanel({
   onDownload,
   previousYaml = "",
   showCompare = false,
+  title = "Generated Manifest",
+  fileName = "manifest.yaml",
+  rows = 18,
 }) {
   const [compareMode, setCompareMode] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -34,7 +37,7 @@ export default function YamlPreviewPanel({
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "manifest.yaml";
+    a.download = fileName;
     a.click();
     URL.revokeObjectURL(url);
     onDownload?.();
@@ -45,10 +48,10 @@ export default function YamlPreviewPanel({
       className={`wizard-yaml-panel${fullscreen ? " wizard-yaml-panel--fullscreen" : ""}`}
       role={fullscreen ? "dialog" : undefined}
       aria-modal={fullscreen ? "true" : undefined}
-      aria-label={fullscreen ? "Generated manifest fullscreen" : undefined}
+      aria-label={fullscreen ? `${title} fullscreen` : undefined}
     >
       <div className="wizard-yaml-panel__toolbar">
-        <span className="muted">Generated Manifest</span>
+        <span className="muted">{title}</span>
         <div className="wizard-yaml-panel__actions">
           {showCompare && previousYaml ? (
             <button type="button" className="btn-outline btn-sm" onClick={() => setCompareMode((v) => !v)}>
@@ -80,7 +83,7 @@ export default function YamlPreviewPanel({
           readOnly={readOnly}
           onChange={(e) => onChange?.(e.target.value)}
           spellCheck={false}
-          rows={18}
+          rows={rows}
         />
       )}
     </div>

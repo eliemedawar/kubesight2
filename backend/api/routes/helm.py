@@ -92,7 +92,10 @@ def helm_get_release(release_name: str):
     namespace = _namespace()
     if not cluster_id or not namespace:
         return error_response("cluster and namespace query parameters are required", 400)
-    detail = get_release_detail(cluster_id, namespace, release_name, user=get_current_user())
+    all_values = (request.args.get("allValues") or "").lower() in ("1", "true", "yes")
+    detail = get_release_detail(
+        cluster_id, namespace, release_name, user=get_current_user(), all_values=all_values
+    )
     if not detail:
         return error_response("Release not found or Helm unavailable", 404)
     return success_response(detail)

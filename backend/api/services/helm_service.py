@@ -1365,8 +1365,12 @@ def get_release_detail(
     *,
     user: Optional[User] = None,
     run_helm_fn: Optional[RunHelmFn] = None,
+    all_values: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Release status, manifest and values, redacted to what ``user`` may see.
+
+    ``all_values`` asks for ``helm get values --all`` — the chart's defaults
+    merged with what was set at install — instead of only the latter.
 
     ``helm get manifest`` carries every Secret the chart renders and ``helm get
     values`` the chart's credentials, so neither goes out raw by default:
@@ -1398,9 +1402,15 @@ def get_release_detail(
     except HelmCommandError:
         pass
     try:
-        values_raw = runner(access, ["get", "values", release_name, "-n", namespace, "-o", "json"])
+        values_args = ["get", "values", release_name, "-n", namespace, "-o", "json"]
+        if all_values:
+            values_args.append("--all")
+        values_raw = runner(access, values_args)
         values_summary = json.loads(values_raw or "{}")
     except (HelmCommandError, json.JSONDecodeError):
+        values_summary = {}
+    # A release installed with no values of its own prints `null`.
+    if not isinstance(values_summary, dict):
         values_summary = {}
 
     chart_label = status_data.get("chart", {}).get("metadata", {}).get("name") or status_data.get("chart") or ""
@@ -1427,6 +1437,13 @@ def get_release_detail(
         "status": info.get("status") or status_data.get("status") or "unknown",
         "lastDeployed": info.get("last_deployed") or info.get("lastDeployed"),
         "valuesSummary": values_summary,
+        # The same values as a values.yaml, already masked like valuesSummary.
+        "valuesYaml": (
+            yaml.safe_dump(values_summary, sort_keys=False, default_flow_style=False, allow_unicode=True)
+            if values_summary
+            else ""
+        ),
+        "allValues": bool(all_values),
         "valuesHidden": not show_values,
         "secretValuesHidden": not reveal,
         "renderedManifest": rendered,

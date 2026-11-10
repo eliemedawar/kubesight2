@@ -11,6 +11,7 @@ import LoadingState from "../common/LoadingState.jsx";
 import SearchableSelect from "../common/SearchableSelect.jsx";
 import { formatDeployedAt } from "./HelmReleasePanel.jsx";
 import HelmReleaseUpgradeModal from "./HelmReleaseUpgradeModal.jsx";
+import HelmReleaseYamlModal from "./HelmReleaseYamlModal.jsx";
 import NamespaceSelect from "./NamespaceSelect.jsx";
 
 const STATUS_TONE = {
@@ -56,6 +57,7 @@ export default function HelmInstalledReleases({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [upgradeTarget, setUpgradeTarget] = useState(null);
+  const [yamlTarget, setYamlTarget] = useState(null);
   // Release key of a delete in flight, so its button can't fire twice.
   const [deleting, setDeleting] = useState("");
 
@@ -145,6 +147,22 @@ export default function HelmInstalledReleases({
           updated: formatDeployedAt(release.updated) || "-",
           actions: (
             <div className="helm-release-actions">
+              <button
+                type="button"
+                className="btn-outline btn-sm"
+                onClick={() =>
+                  setYamlTarget({
+                    clusterId,
+                    clusterLabel,
+                    namespace: release.namespace,
+                    releaseName: release.name,
+                    chart: release.chart,
+                    revision: release.revision,
+                  })
+                }
+              >
+                View YAML
+              </button>
               {canUpgrade ? (
                 <button
                   type="button"
@@ -239,6 +257,8 @@ export default function HelmInstalledReleases({
           hint={search ? undefined : "Releases installed with Helm on this cluster show up here."}
         />
       ) : null}
+
+      <HelmReleaseYamlModal release={yamlTarget} onClose={() => setYamlTarget(null)} />
 
       <HelmReleaseUpgradeModal
         release={upgradeTarget}

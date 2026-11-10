@@ -95,3 +95,60 @@ def test_health_reports_liveness_only(client):
     assert data["status"] == "ok"
     assert data["database"] == "ok"
     assert "users" not in json.dumps(data)
+
+
+# ---------------------------------------------------------------------------
+# View YAML (Installed Releases): values as a values.yaml, optionally --all
+# ---------------------------------------------------------------------------
+
+def _detail_with(runner, perms, **kw):
+    user = SimpleNamespace(id=1)
+    with patch.object(helm_service, "is_helm_installed", return_value=True), \
+         patch.object(helm_service, "_resolve_access", return_value=None), \
+         patch.object(helm_service, "is_admin", return_value=False), \
+         patch.object(helm_service, "can_access_cluster", return_value=True), \
+         patch.object(helm_service, "can_access_namespace", return_value=True), \
+         patch.object(helm_service, "user_has_permission", side_effect=lambda u, k: k in perms):
+        return get_release_detail("c1", "payments", "api", user=user, run_helm_fn=runner, **kw)
+
+
+def test_values_yaml_is_the_masked_values_in_their_order():
+    import yaml
+
+    detail = _detail({"helm:view", "helm:values:view"})
+    parsed = yaml.safe_load(detail["valuesYaml"])
+    assert parsed == detail["valuesSummary"]
+    assert "hunter2" not in detail["valuesYaml"]
+    assert detail["valuesYaml"].splitlines()[0] == "replicaCount: 2"
+    assert detail["allValues"] is False
+
+
+def test_all_values_asks_helm_for_the_chart_defaults_too():
+    calls = []
+
+    def runner(access, args):
+        calls.append(args)
+        return _runner(access, args)
+
+    detail = _detail_with(runner, {"helm:view", "helm:values:view"}, all_values=True)
+    values_call = next(args for args in calls if args[:2] == ["get", "values"])
+    assert "--all" in values_call
+    assert detail["allValues"] is True
+
+    calls.clear()
+    _detail_with(runner, {"helm:view", "helm:values:view"})
+    assert "--all" not in next(args for args in calls if args[:2] == ["get", "values"])
+
+
+def test_a_release_with_no_values_of_its_own_is_empty_not_null():
+    def runner(access, args):
+        return "null" if args[:2] == ["get", "values"] else _runner(access, args)
+
+    detail = _detail_with(runner, {"helm:view", "helm:values:view"})
+    assert detail["valuesSummary"] == {}
+    assert detail["valuesYaml"] == ""
+
+
+def test_without_values_permission_values_yaml_is_empty():
+    detail = _detail({"helm:view"})
+    assert detail["valuesYaml"] == ""

@@ -14,9 +14,9 @@ export function getHelmUpgradeStart(payload) {
   return request("/api/helm/releases/upgrade-start", { method: "POST", body: payload });
 }
 
-export function getHelmRelease({ clusterId, namespace, releaseName }) {
+export function getHelmRelease({ clusterId, namespace, releaseName, allValues = false }) {
   return request(`/api/helm/releases/${encodeURIComponent(releaseName)}`, {
-    query: { clusterId, namespace },
+    query: { clusterId, namespace, ...(allValues ? { allValues: "1" } : {}) },
   });
 }
 

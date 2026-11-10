@@ -3891,8 +3891,19 @@ button:focus-visible {
   height: 1.6rem;
 }
 
-.resources-page .resources-table .col-name {
-  width: 13%;
+/* Name and Image have no fixed width: they share whatever the fixed-width
+   columns leave, and wrap instead of being cut off so the full deployment /
+   pod name and the full image reference are always readable. */
+.resources-page .resources-table td.col-name,
+.resources-page .resources-table td.col-image {
+  white-space: normal;
+}
+.resources-page .resources-table td.col-name .table-cell-truncate,
+.resources-page .resources-table td.col-image .table-cell-truncate {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
 }
 
 .resources-page .resources-table .col-status {
@@ -3905,14 +3916,8 @@ button:focus-visible {
 
 /* All-namespaces view adds a Namespace column, so trim the wider columns to
    keep the whole table within view (no horizontal scroll, Actions visible). */
-.resources-page .resources-table--allns .col-name {
-  width: 12%;
-}
 .resources-page .resources-table--allns .col-namespace {
   width: 10%;
-}
-.resources-page .resources-table--allns .col-image {
-  width: 13%;
 }
 .resources-page .resources-table--allns .col-node {
   width: 8%;
@@ -3922,16 +3927,20 @@ button:focus-visible {
   width: 8%;
 }
 
-.resources-page .resources-table .col-restarts,
+/* Small numbers only need room for their header. */
 .resources-page .resources-table .col-age,
-.resources-page .resources-table .col-upToDate,
-.resources-page .resources-table .col-desired,
-.resources-page .resources-table .col-available {
-  width: 6%;
-}
-
 .resources-page .resources-table .col-ready {
-  width: 5%;
+  width: 3.75rem;
+}
+.resources-page .resources-table .col-desired {
+  width: 4.25rem;
+}
+.resources-page .resources-table .col-restarts,
+.resources-page .resources-table .col-upToDate {
+  width: 4.75rem;
+}
+.resources-page .resources-table .col-available {
+  width: 5rem;
 }
 
 .resources-page .resources-table .col-cpu,
@@ -3939,15 +3948,13 @@ button:focus-visible {
   width: 9%;
 }
 
-.resources-page .resources-table .col-image {
-  width: 15%;
-}
-
 .resources-page .resources-table .col-node {
   width: 9%;
 }
 
-.resources-page .resources-table .col-updateStatus,
+.resources-page .resources-table .col-updateStatus {
+  width: 7rem;
+}
 .resources-page .resources-table .col-type {
   width: 8%;
 }
@@ -8065,6 +8072,53 @@ kbd {
 .helm-installed-table .col-actions {
   width: 1%;
   white-space: nowrap;
+}
+
+/* View YAML on an installed release. */
+.helm-release-yaml-modal {
+  display: grid;
+  gap: var(--space-3);
+  align-content: start;
+  width: min(64rem, calc(100vw - 2rem));
+  max-height: min(90vh, 60rem);
+  overflow-y: auto;
+}
+
+.helm-release-yaml-sub {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.helm-release-yaml-body {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.helm-release-yaml-pick {
+  display: grid;
+  gap: var(--space-1);
+  max-width: 32rem;
+  font-size: var(--font-size-sm);
+}
+
+.helm-release-yaml-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.helm-release-yaml-check input {
+  width: auto;
+  margin: 0;
+}
+
+.helm-release-yaml-note {
+  margin: 0;
+  font-size: var(--font-size-sm);
 }
 
 /* The release an upgrade starts from. */
