@@ -1346,3 +1346,75 @@ def test_saved_chart_uses_existing_helm_preview_pipeline(client, admin_token):
     assert response.status_code == 200
     data = response.get_json()["data"]
     assert "payments-preview" in data["preview"]
+
+
+def _fake_clone_of(entries: dict):
+    """A _git_clone stand-in that writes ``entries`` (archive-style paths) as the checkout."""
+
+    def fake_clone(payload, destination, askpass_dir):
+        root = Path(destination)
+        for relative, content in entries.items():
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        return payload["repositoryUrl"]
+
+    return fake_clone
+
+
+def test_a_chart_version_can_come_from_git(client, admin_token):
+    first = _import_archive(
+        client, admin_token, _chart_entries("0.1.0"), filename="areeba-txm-0.1.0.tgz"
+    )
+    assert first.status_code == 201, first.get_json()
+    slug = first.get_json()["data"]["id"]
+
+    def add_from_git(version):
+        with patch(
+            "api.services.helm_chart_template_service._git_clone",
+            side_effect=_fake_clone_of(_chart_entries(version, replicas=4)),
+        ):
+            return client.post(
+                f"/api/helm/chart-templates/{slug}/versions",
+                headers=auth_headers(admin_token),
+                json={
+                    "source": "git",
+                    "repositoryUrl": "https://bitbucket.org/areeba/txm-chart.git",
+                    "ref": "release/0.3",
+                    "path": "areeba-txm",
+                    "token": "one-time-token",
+                },
+            )
+
+    added = add_from_git("0.3.0")
+    assert added.status_code == 201, added.get_json()
+    data = added.get_json()["data"]
+    assert data["id"] == slug, "a version, not a new chart"
+    assert data["versionCount"] == 2
+    assert data["version"] == "0.3.0"
+    versions = {item["version"]: item for item in data["versions"]}
+    assert versions["0.3.0"]["isCurrent"] is True
+    assert versions["0.3.0"]["sourceType"] == "git-chart"
+    assert versions["0.3.0"]["sourceRef"] == (
+        "https://bitbucket.org/areeba/txm-chart.git#release/0.3:areeba-txm"
+    )
+    assert "one-time-token" not in json.dumps(data)
+
+    # The same Chart.yaml version from Git is refused like a re-uploaded archive.
+    duplicate = add_from_git("0.3.0")
+    assert duplicate.status_code == 400
+    assert "already exists" in duplicate.get_json()["error"]
+
+
+def test_a_git_version_with_a_bad_url_is_refused(client, admin_token):
+    first = _import_archive(
+        client, admin_token, _chart_entries("0.1.0"), filename="areeba-txm-0.1.0.tgz"
+    )
+    slug = first.get_json()["data"]["id"]
+    response = client.post(
+        f"/api/helm/chart-templates/{slug}/versions",
+        headers=auth_headers(admin_token),
+        json={"source": "git", "repositoryUrl": "http://git.example/x.git"},
+    )
+    assert response.status_code == 400
+    assert "HTTPS" in response.get_json()["error"]

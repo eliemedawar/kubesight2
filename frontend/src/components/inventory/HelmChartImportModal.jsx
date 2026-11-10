@@ -50,6 +50,8 @@ function isBitbucketCloudUrl(url) {
 
 const EMPTY_ARCHIVE = { path: "", importType: "auto" };
 
+const VERSION_SOURCES = ["archive", "git"];
+
 const EMPTY_NAMESPACE = { clusterId: "", namespace: "" };
 
 // Identity of a live object inside the scan result; also the checkbox key.
@@ -178,7 +180,15 @@ export default function HelmChartImportModal({
   if (!open) return null;
 
   const versionMode = Boolean(targetTemplate?.id);
-  const activeMode = versionMode ? "archive" : mode;
+  // A new version comes from an archive or Git: a version is a packaged chart,
+  // which the YAML and namespace sources do not produce.
+  const activeMode = versionMode ? (mode === "git" ? "git" : "archive") : mode;
+  const sourceTabs = [
+    { value: "yaml", label: "Deployment YAMLs" },
+    { value: "archive", label: "Chart Archive" },
+    { value: "git", label: "Git Repository" },
+    { value: "namespace", label: "Cluster Namespace" },
+  ].filter((tab) => !versionMode || VERSION_SOURCES.includes(tab.value));
   const usingSavedCredential = Boolean(
     git.credentialProfileId && git.credentialProfileId !== MANUAL_CREDENTIAL,
   );
@@ -387,6 +397,11 @@ export default function HelmChartImportModal({
             name: resource.name,
           })),
         });
+      } else if (versionMode) {
+        if (!git.repositoryUrl.trim()) {
+          throw new Error("Enter the Git repository URL.");
+        }
+        result = await addHelmChartVersion(targetTemplate.id, { source: "git", ...gitPayload(git) });
       } else {
         result = await importHelmChartFromGit({
           name,
@@ -431,7 +446,7 @@ export default function HelmChartImportModal({
               {imported
                 ? "KubeSight read the chart and stored it for reuse."
                 : versionMode
-                  ? `Upload another packaged chart. Its Chart.yaml version becomes the new version — ${targetTemplate.name} is currently v${targetTemplate.version}.`
+                  ? `Upload another packaged chart or take it from Git. Its Chart.yaml version becomes the new version — ${targetTemplate.name} is currently v${targetTemplate.version}.`
                   : "Save a reusable chart from Kubernetes manifests, a chart archive, Git, or a live namespace."}
             </p>
           </div>
@@ -479,58 +494,27 @@ export default function HelmChartImportModal({
           </div>
         ) : (
           <>
-            {versionMode ? null : (
-              <div className="helm-import-source-tabs" role="tablist" aria-label="Import source">
+            <div
+              className="helm-import-source-tabs"
+              role="tablist"
+              aria-label={versionMode ? "Where the new version comes from" : "Import source"}
+            >
+              {sourceTabs.map((tab) => (
                 <button
+                  key={tab.value}
                   type="button"
                   role="tab"
-                  aria-selected={mode === "yaml"}
-                  className={mode === "yaml" ? "active" : ""}
+                  aria-selected={activeMode === tab.value}
+                  className={activeMode === tab.value ? "active" : ""}
                   onClick={() => {
-                    setMode("yaml");
+                    setMode(tab.value);
                     setError("");
                   }}
                 >
-                  Deployment YAMLs
+                  {tab.label}
                 </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={mode === "archive"}
-                  className={mode === "archive" ? "active" : ""}
-                  onClick={() => {
-                    setMode("archive");
-                    setError("");
-                  }}
-                >
-                  Chart Archive
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={mode === "git"}
-                  className={mode === "git" ? "active" : ""}
-                  onClick={() => {
-                    setMode("git");
-                    setError("");
-                  }}
-                >
-                  Git Repository
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={mode === "namespace"}
-                  className={mode === "namespace" ? "active" : ""}
-                  onClick={() => {
-                    setMode("namespace");
-                    setError("");
-                  }}
-                >
-                  Cluster Namespace
-                </button>
-              </div>
-            )}
+              ))}
+            </div>
 
             <form className="add-app-form" onSubmit={submit}>
               {error ? <p className="banner-message error">{error}</p> : null}
@@ -977,6 +961,9 @@ export default function HelmChartImportModal({
                     {usingSavedCredential
                       ? "The saved credential is used on the server only; its secret never reaches your browser."
                       : "Credentials are sent only for repository requests, never saved in KubeSight, and cleared when the import completes or this dialog closes."}
+                    {versionMode
+                      ? ` The chart's Chart.yaml version on that branch or tag must be one ${targetTemplate.name} does not have yet. The new version becomes the one deployed by default; earlier versions stay available.`
+                      : ""}
                   </p>
                 </>
               )}

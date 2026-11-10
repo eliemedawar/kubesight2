@@ -603,12 +603,14 @@ def _persist_version(
 def add_chart_version(
     slug: str, payload: Dict[str, Any], actor_user_id: Optional[int] = None
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
-    """Add another archive as a new version of an existing chart."""
+    """Add a new version of an existing chart, from an uploaded archive or,
+    with ``source: "git"``, from a Git repository (same fields as a Git import)."""
     row = HelmChartTemplate.query.filter_by(slug=slug).first()
     if not row:
         return None, "Helm chart template not found.", 404
+    from_git = _clean_text(payload.get("source"), 20).lower() == "git"
     try:
-        prepared = _prepare_archive_import(payload)
+        prepared = _prepare_git_import(payload) if from_git else _prepare_archive_import(payload)
         make_current = payload.get("makeCurrent")
         data = _persist_version(
             row,
@@ -622,7 +624,8 @@ def add_chart_version(
         return None, str(exc), 400
     except (OSError, UnicodeError) as exc:
         db.session.rollback()
-        return None, f"Unable to read the archive: {exc}", 400
+        what = "the Git repository" if from_git else "the archive"
+        return None, f"Unable to read {what}: {exc}", 400
 
 
 def set_current_chart_version(
@@ -1994,51 +1997,59 @@ def _collect_yaml_source_files(selected: Path) -> List[Tuple[str, str]]:
     return source_files
 
 
+def _prepare_git_import(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Clone a repository into the keyword arguments ``_persist`` expects.
+
+    Shared by a new import and by Add Version, so a version taken from Git is
+    read exactly like a chart imported from Git.
+    """
+    with _private_import_directory() as temp_dir:
+        repo_root = Path(temp_dir) / "repository"
+        url = _git_clone(payload, str(repo_root), temp_dir)
+        selected = _resolve_subpath(
+            repo_root, payload.get("path") or "", label="cloned repository"
+        )
+        import_type = _clean_text(payload.get("importType"), 20).lower() or "auto"
+        chart_root = _discover_chart_root(
+            selected, import_type, path_hint="Repository path"
+        )
+        ref = _clean_text(payload.get("ref") or payload.get("branch"), 200)
+        repo_path = _clean_text(payload.get("path"), 500)
+        source_ref = f"{url}{f'#{ref}' if ref else ''}{f':{repo_path}' if repo_path else ''}"
+        if chart_root and import_type != "yaml":
+            return _prepare_existing_chart(
+                chart_root,
+                payload=payload,
+                source_type="git-chart",
+                source_ref=source_ref,
+            )
+
+        source_files = _collect_yaml_source_files(selected)
+        name, files, values, variables, warnings, count = _convert_manifest_files(
+            source_files, requested_name=_clean_text(payload.get("name"), 120)
+        )
+        return {
+            "name": name,
+            "description": _clean_text(payload.get("description"), 500)
+            or "Converted from Kubernetes YAML in Git",
+            "version": "0.1.0",
+            "app_version": "1.0.0",
+            "source_type": "git-yaml",
+            "source_ref": source_ref,
+            "files": files,
+            "values": values,
+            "variables": variables,
+            "warnings": warnings,
+            "resource_count": count,
+        }
+
+
 def import_git_chart(
     payload: Dict[str, Any], actor_user_id: Optional[int] = None
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
     try:
-        with _private_import_directory() as temp_dir:
-            repo_root = Path(temp_dir) / "repository"
-            url = _git_clone(payload, str(repo_root), temp_dir)
-            selected = _resolve_subpath(
-                repo_root, payload.get("path") or "", label="cloned repository"
-            )
-            import_type = _clean_text(payload.get("importType"), 20).lower() or "auto"
-            chart_root = _discover_chart_root(
-                selected, import_type, path_hint="Repository path"
-            )
-            ref = _clean_text(payload.get("ref") or payload.get("branch"), 200)
-            repo_path = _clean_text(payload.get("path"), 500)
-            source_ref = f"{url}{f'#{ref}' if ref else ''}{f':{repo_path}' if repo_path else ''}"
-            if chart_root and import_type != "yaml":
-                prepared = _prepare_existing_chart(
-                    chart_root,
-                    payload=payload,
-                    source_type="git-chart",
-                    source_ref=source_ref,
-                )
-                return _persist(**prepared, actor_user_id=actor_user_id), None, 201
-
-            source_files = _collect_yaml_source_files(selected)
-            name, files, values, variables, warnings, count = _convert_manifest_files(
-                source_files, requested_name=_clean_text(payload.get("name"), 120)
-            )
-            return _persist(
-                name=name,
-                description=_clean_text(payload.get("description"), 500)
-                or "Converted from Kubernetes YAML in Git",
-                version="0.1.0",
-                app_version="1.0.0",
-                source_type="git-yaml",
-                source_ref=source_ref,
-                files=files,
-                values=values,
-                variables=variables,
-                warnings=warnings,
-                resource_count=count,
-                actor_user_id=actor_user_id,
-            ), None, 201
+        prepared = _prepare_git_import(payload)
+        return _persist(**prepared, actor_user_id=actor_user_id), None, 201
     except ChartTemplateError as exc:
         return None, str(exc), 400
     except (OSError, UnicodeError) as exc:
