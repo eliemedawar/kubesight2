@@ -377,6 +377,45 @@ export function EnvRows({ value, onChange, disabled, keyPlaceholder, valuePlaceh
   );
 }
 
+// A pasted `docker build ... --build-arg A=1 --build-arg B=2 -t x .` keeps
+// only its build arguments; anything else is read as KEY=value lines.
+const parseBuildArgLines = (text) => {
+  const source = String(text).replace(/\\\r?\n/g, " ");
+  if (!/--build-arg\b/.test(source)) return parseEnvLines(text);
+  const rows = source
+    .split(/--build-arg(?:=|\s+)/)
+    .slice(1)
+    .map((chunk) => {
+      // The argument runs until the next option (` -t`, ` --file`) or the end.
+      let arg = chunk.split(/\s+--?[A-Za-z]/)[0].trim().replace(/\s+\.$/, "").trim();
+      if (/^(["']).*\1$/.test(arg)) arg = arg.slice(1, -1);
+      const index = arg.indexOf("=");
+      return index > 0
+        ? { key: arg.slice(0, index).trim(), value: arg.slice(index + 1).replace(/^(["'])(.*)\1$/, "$2") }
+        : { key: arg, value: "" };
+    })
+    .filter((row) => row.key);
+  return rows.length ? rows : null;
+};
+
+export function BuildArgRows({ value, onChange, disabled }) {
+  const [rows, update] = useRows(value, envToRows, rowsToEnv);
+  return (
+    <RowsTable
+      columns={[
+        { key: "key", label: "Argument", placeholder: "MODEL_REVISION", mono: true, width: "minmax(0, 0.8fr)" },
+        { key: "value", label: "Value", placeholder: "${MODEL_REVISION}", mono: true, width: "minmax(0, 1.2fr)" },
+      ]}
+      rows={rows}
+      setRows={(next) => update(next, onChange)}
+      disabled={disabled}
+      addLabel="Add build argument"
+      emptyText="No build arguments. Paste a docker build command or NAME=value lines into a name field to add several at once."
+      onPasteLines={parseBuildArgLines}
+    />
+  );
+}
+
 const aliasesToRows = (aliases) =>
   (aliases || []).map((entry) => ({ ip: entry.ip || "", hosts: (entry.hostnames || []).join(", ") }));
 // Parsed leniently here — the backend is the validator, so a half-typed row

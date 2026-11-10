@@ -352,3 +352,96 @@ def test_host_grammar():
     assert build_inputs.registry_host_problem("[::1]:5000") is None
     assert build_inputs.registry_host_problem("nexus;id") is not None
     assert build_inputs.registry_host_problem("user:pw@nexus") is not None
+
+
+# ---------------------------------------------------------------------------
+# Build arguments (--build-arg)
+# ---------------------------------------------------------------------------
+
+_HEX = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _buildctl_line(script):
+    return next(l for l in script.splitlines() if l.startswith("buildctl "))
+
+
+def test_build_args_parse_in_order_and_skip_comments():
+    pairs, problem = build_inputs.parse_build_args(
+        f"# pinned model\nMODEL_REVISION={_HEX}\n\nMODEL_SHA256=${{MODEL_SHA}}\nEMPTY=\nEQ=a=b\n"
+    )
+    assert problem is None
+    assert pairs == [
+        ("MODEL_REVISION", _HEX),
+        ("MODEL_SHA256", "${MODEL_SHA}"),
+        ("EMPTY", ""),
+        ("EQ", "a=b"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["NOVALUE", "1BAD=x", "BAD NAME=x", "A=1\nA=2", "A=x\x00y", "A=" + "x" * 1001,
+     "\n".join(f"A{i}=x" for i in range(51))],
+)
+def test_build_args_grammar_rejects(text):
+    assert build_inputs.build_args_problem(text) is not None
+
+
+@pytest.mark.parametrize("scanned", [False, True])
+def test_build_args_reach_the_buildctl_line_as_single_words(_buildkit, scanned):
+    scan = {"enabled": True, "threshold": "critical", "onFail": "block"} if scanned else None
+    hostile = "it's $(id); `id` a b"
+    script = k8s.image_stage_script(
+        _execution(
+            _registry(buildArgs=f"MODEL_REVISION={_HEX}\nNOTE={hostile}\nVER=v${{APP_VERSION}}-x"),
+            image_scan=scan,
+        ),
+        "/m.json",
+    )
+    line = _buildctl_line(script)
+    assert f"--opt build-arg:MODEL_REVISION={_HEX} " in line
+    assert f"--opt build-arg:VER=v\"${{APP_VERSION}}\"-x " in line
+    # What the shell hands buildctl: the hostile value verbatim, in one word.
+    words = shlex.split(line)
+    assert f"build-arg:NOTE={hostile}" in words
+    assert "Build arguments: MODEL_REVISION, NOTE, VER" in script
+    assert 'if [ -z "${APP_VERSION+x}" ]' in script
+
+
+def test_build_args_work_with_an_inline_dockerfile(_buildkit):
+    script = k8s.image_stage_script(
+        _execution(_registry(dockerfileContent="FROM alpine\n", buildArgs="A=1")), "/m.json"
+    )
+    assert "--opt build-arg:A=1 " in _buildctl_line(script)
+
+
+def test_no_build_args_leaves_the_script_unchanged(_buildkit):
+    plain = k8s.image_stage_script(_execution(_registry()), "/m.json")
+    empty = k8s.image_stage_script(_execution(_registry(buildArgs="")), "/m.json")
+    assert plain == empty
+    assert "build-arg" not in plain
+
+
+def test_runner_refuses_bad_build_args(_buildkit):
+    with pytest.raises(RunnerError):
+        k8s.image_stage_script(_execution(_registry(buildArgs="1BAD=x")), "/m.json")
+
+
+def test_pipeline_save_checks_build_args(client, admin_token, service_id):
+    url = f"/api/ci/pipelines/{_pipeline_id(client, admin_token, service_id)}"
+
+    def save(build_args):
+        return client.put(
+            url,
+            json={
+                "stages": [
+                    {"name": "Checkout", "stageType": "checkout", "runnerLabels": ["mock"]},
+                    {"name": "Image", "stageType": "container_image", "env": {"BUILD_ARGS": build_args}},
+                ]
+            },
+            headers=auth_headers(admin_token),
+        )
+
+    assert save("A=1\nA=2").status_code == 400
+    ok = save(f"MODEL_REVISION={_HEX}\nMODEL_SHA256=${{MODEL_SHA}}")
+    assert ok.status_code == 200, ok.get_json()

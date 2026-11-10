@@ -1944,6 +1944,11 @@ def _registry_for(
             # Which builder set: "data" (large /data disk, the default) or
             # "var" (node scratch). The runner tries that set first.
             "buildkitDisk": "var" if str(env.get("BUILDKIT_DISK") or "").strip().lower() == "var" else "data",
+            # --build-arg NAME=value lines, off the stage's OWN env: a build
+            # input of the same name must not swap the list (a value that has
+            # to vary per build says ${INPUT} instead). The runner parses and
+            # re-checks it.
+            "buildArgs": str((definition.get("env") or {}).get("BUILD_ARGS") or ""),
             "username": row.username or "",
             "password": decrypt_secret(row.password_encrypted or ""),
             "verifyTls": bool(row.verify_tls),

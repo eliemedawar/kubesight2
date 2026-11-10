@@ -12,6 +12,7 @@ import {
 import {
   AliasRows,
   ArtifactRows,
+  BuildArgRows,
   ChipsInput,
   CommandEditor,
   EnvRows,
@@ -29,6 +30,8 @@ import { groupAt, PARALLEL_STAGE_TYPES } from "./parallelModel.js";
 import { PlIcon } from "./icons.jsx";
 import {
   BUILD_DISKS,
+  buildArgs,
+  buildArgsText,
   buildDisk,
   codeScanArmed,
   conditionSummary,
@@ -541,6 +544,36 @@ export default function StageSheet({
             Inputs &amp; outputs
           </h4>
           <div className="pl-settings">
+            {stage.stageType === "container_image" && (
+              <SettingRow
+                icon="inputs"
+                title="Build arguments"
+                hint="Passed to the Dockerfile as --build-arg"
+                value={countLabel(Object.keys(buildArgs(stage)).length, "argument", "None")}
+                isSet={Object.keys(buildArgs(stage)).length > 0}
+                tone={problemFor("buildArgs") ? "error" : undefined}
+                defaultOpen={Boolean(problemFor("buildArgs"))}
+              >
+                <BuildArgRows
+                  value={buildArgs(stage)}
+                  disabled={!editable}
+                  onChange={(next) => {
+                    const env = { ...(stage.env || {}) };
+                    const text = buildArgsText(next);
+                    if (text) env[IMAGE_ENV_KEYS.buildArgs] = text;
+                    else delete env[IMAGE_ENV_KEYS.buildArgs];
+                    onChange({ env });
+                  }}
+                />
+                <p className="pl-field-hint">
+                  Each one reaches a matching <code>ARG</code> in the Dockerfile, like{" "}
+                  <code>docker build --build-arg NAME=value</code>. <code>{"${VAR}"}</code> takes a
+                  build input, a stage variable or a value an earlier stage wrote to{" "}
+                  <code>$KUBESIGHT_ENV</code>. Build arguments stay readable in the image&apos;s
+                  history — never pass a secret this way.
+                </p>
+              </SettingRow>
+            )}
             {has("env") && (
               <SettingRow
                 icon="variable"

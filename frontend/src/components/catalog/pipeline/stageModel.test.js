@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   blankStage,
+  buildArgs,
+  buildArgsText,
   changeKindPatch,
   describeDiff,
   fieldsLostOnKindChange,
@@ -209,6 +211,29 @@ describe("image build inputs live in env but are edited as fields", () => {
       IMAGE_TAG: "v1",
       DOCKERFILE_PATH: "Dockerfile.ci",
     });
+  });
+});
+
+describe("build arguments", () => {
+  const image = (text) => ({ ...blankStage("container_image"), name: "Image", env: { BUILD_ARGS: text } });
+
+  it("round-trips NAME=value lines and stays out of the generic variables", () => {
+    const stage = image("# pinned\nMODEL_REVISION=abc\nMODEL_SHA256=${SHA}\nEQ=a=b");
+    expect(buildArgs(stage)).toEqual({ MODEL_REVISION: "abc", MODEL_SHA256: "${SHA}", EQ: "a=b" });
+    expect(buildArgsText(buildArgs(stage))).toBe("MODEL_REVISION=abc\nMODEL_SHA256=${SHA}\nEQ=a=b");
+    expect(plainEnv(stage)).toEqual({});
+    expect(mergePlainEnv(stage, { X: "1" }).BUILD_ARGS).toBe(stage.env.BUILD_ARGS);
+  });
+
+  it("keeps a value on one line", () => {
+    expect(buildArgsText({ A: "one\ntwo" })).toBe("A=one two");
+  });
+
+  it("flags a name the save would refuse", () => {
+    const stage = image("1BAD=x");
+    expect(stageProblems(stage, 0, [stage], []).map((p) => p.field)).toEqual(["buildArgs"]);
+    const fine = image("GOOD=x");
+    expect(stageProblems(fine, 0, [fine], [])).toEqual([]);
   });
 });
 

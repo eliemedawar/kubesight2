@@ -315,7 +315,54 @@ export const IMAGE_ENV_KEYS = {
   tag: "IMAGE_TAG",
   dockerfile: "DOCKERFILE_PATH",
   disk: "BUILDKIT_DISK",
+  // `--build-arg NAME=value`, one per line in a single value. Keep the format
+  // in step with build_inputs.parse_build_args.
+  buildArgs: "BUILD_ARGS",
 };
+
+const BUILD_ARG_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const MAX_BUILD_ARGS = 50;
+const MAX_BUILD_ARG_VALUE_CHARS = 1000;
+
+/** An image stage's build arguments as `{NAME: value}`, in the stored order. */
+export function buildArgs(stage) {
+  const out = {};
+  for (const raw of String(stage.env?.[IMAGE_ENV_KEYS.buildArgs] || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const index = line.indexOf("=");
+    const name = (index < 0 ? line : line.slice(0, index)).trim();
+    if (name && !(name in out)) out[name] = index < 0 ? "" : line.slice(index + 1);
+  }
+  return out;
+}
+
+/** `{NAME: value}` back into the stored text; empty when there are none. A
+ * value is one line — a pasted newline would split it into two arguments. */
+export const buildArgsText = (args) =>
+  Object.entries(args || {})
+    .map(([name, value]) => `${name}=${String(value ?? "").replace(/[\r\n]+/g, " ")}`)
+    .join("\n");
+
+/** What a save would refuse about the build arguments. Mirrors parse_build_args. */
+function buildArgProblems(stage) {
+  const args = Object.entries(buildArgs(stage));
+  const bad = args.find(([name]) => !BUILD_ARG_NAME_RE.test(name));
+  if (bad) {
+    return [{
+      field: "buildArgs",
+      message: `“${bad[0]}” is not a valid build argument name: letters, digits and underscores, not starting with a digit.`,
+    }];
+  }
+  const long = args.find(([, value]) => value.length > MAX_BUILD_ARG_VALUE_CHARS);
+  if (long) {
+    return [{ field: "buildArgs", message: `Build argument “${long[0]}” is longer than ${MAX_BUILD_ARG_VALUE_CHARS} characters.` }];
+  }
+  if (args.length > MAX_BUILD_ARGS) {
+    return [{ field: "buildArgs", message: `An image stage may pass at most ${MAX_BUILD_ARGS} build arguments.` }];
+  }
+  return [];
+}
 
 /** Which builders an image stage uses, by where they keep their cache. Absent
  * means "data"; only "var" is ever stored. Keep in step with the backend's
@@ -463,6 +510,9 @@ export function stageProblems(stage, index, stages, parameters) {
   }
   if (stage.stageType === "store_upload") {
     problems.push(...storeUploadProblems(stage.storeUpload));
+  }
+  if (stage.stageType === "container_image") {
+    problems.push(...buildArgProblems(stage));
   }
   problems.push(...groupProblems(stage, index, stages));
   const misplaced = orderProblem(stage, index, stages);

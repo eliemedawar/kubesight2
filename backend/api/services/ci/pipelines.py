@@ -488,6 +488,9 @@ def _check_stage_build_inputs(
         problem = build_inputs.dockerfile_path_problem(dockerfile)
         if problem:
             raise PipelineError(f"Stage '{stage_name}': {problem}", code="path_escape")
+    problem = build_inputs.build_args_problem(env.get(build_inputs.BUILD_ARGS_KEY) or "")
+    if problem:
+        raise PipelineError(f"Stage '{stage_name}': {problem}")
     problem = build_inputs.working_directory_problem(working_directory)
     if problem:
         raise PipelineError(f"Stage '{stage_name}': {problem}", code="path_escape")

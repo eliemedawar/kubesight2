@@ -1234,6 +1234,7 @@ def _checked_registry(registry: Dict[str, Any]) -> Dict[str, Any]:
             registry.get("tag") or "", allow_template=bool(registry.get("tagIsTemplate"))
         ),
         build_inputs.dockerfile_path_problem(registry.get("dockerfile") or "Dockerfile"),
+        build_inputs.build_args_problem(registry.get("buildArgs") or ""),
     ]
     for problem in problems:
         if problem:
@@ -1288,6 +1289,55 @@ def _buildctl_add_hosts(execution: StageExecution) -> str:
             if name:
                 pairs.append(f"{name}={ip}")
     return f"--opt {_q('add-hosts=' + ','.join(pairs))} " if pairs else ""
+
+
+def _build_arg_word(name: str, value: str) -> str:
+    """``build-arg:NAME=value`` as one shell word, ``${VAR}`` left to expand.
+
+    Literal runs are single-quoted and each ``${VAR}`` is emitted as
+    ``"${VAR}"``, so the only thing the pod's shell does to a value is fill in
+    the variables it names: quotes, ``$(...)``, backticks and spaces in the rest
+    arrive in the Dockerfile ARG exactly as typed.
+    """
+    parts = []
+    literal = f"build-arg:{name}="
+    position = 0
+    for match in build_inputs.BUILD_ARG_REF_RE.finditer(value):
+        literal += value[position:match.start()]
+        if literal:
+            parts.append(_q(literal))
+            literal = ""
+        parts.append('"${' + match.group(1) + '}"')
+        position = match.end()
+    literal += value[position:]
+    if literal:
+        parts.append(_q(literal))
+    return "".join(parts)
+
+
+def _buildctl_build_args(registry: Dict[str, Any]) -> Tuple[str, str]:
+    """``(prelude, flags)`` for the stage's ``--build-arg`` list.
+
+    The prelude names the arguments in the log (names only: a value can be a
+    digest nobody minds, or something somebody does) and warns about any
+    ``${VAR}`` the build has not set, which would otherwise reach the Dockerfile
+    as an empty string with nothing to say so.
+    """
+    pairs, problem = build_inputs.parse_build_args(registry.get("buildArgs") or "")
+    if problem:
+        raise RunnerError(problem)
+    if not pairs:
+        return "", ""
+    lines = [f"echo '[kubesight] Build arguments: {', '.join(name for name, _ in pairs)}'\n"]
+    for name, value in pairs:
+        for variable in dict.fromkeys(build_inputs.BUILD_ARG_REF_RE.findall(value)):
+            lines.append(
+                f'if [ -z "${{{variable}+x}}" ]; then '
+                f"echo '[kubesight] Build argument {name} uses ${{{variable}}}, which this "
+                "build does not set; it is passed as empty.' >&2; fi\n"
+            )
+    flags = "".join(f"--opt {_build_arg_word(name, value)} " for name, value in pairs)
+    return "".join(lines), flags
 
 
 _ON = ("1", "true", "yes", "on")
@@ -1453,6 +1503,10 @@ def _buildctl_args(
             # Only the shared Service is left, and it fronts the data builders.
             prelude += f'echo "[kubesight] No /{disk} builders are deployed; this image builds on the /data builders." >&2\n'
         addr_word = _q(buildkit_addr())
+    # Emitted whatever with_prelude says: it belongs to THIS buildctl line, and
+    # neither the tag nor the cache prelude has anything to do with it.
+    args_prelude, build_arg_flags = _buildctl_build_args(registry)
+    prelude += args_prelude
     output_word = output or _buildctl_output(registry)
     context = "/workspace/source"
     if execution.working_directory:
@@ -1469,6 +1523,7 @@ def _buildctl_args(
             f"--local {_q(f'context={context}')} "
             f"--local dockerfile={INLINE_DOCKERFILE_DIR} "
             f"--opt filename=Dockerfile "
+            f"{build_arg_flags}"
             f"{_buildctl_add_hosts(execution)}"
             f"{cache_flags}"
             f"--output {output_word} "
@@ -1480,6 +1535,7 @@ def _buildctl_args(
         f"--local {_q(f'context={context}')} "
         f"--local {_q(f'dockerfile={context}/{dockerfile_dir}')} "
         f"--opt {_q(f'filename={os.path.basename(dockerfile)}')} "
+        f"{build_arg_flags}"
         f"{_buildctl_add_hosts(execution)}"
         f"{cache_flags}"
         f"--output {output_word} "

@@ -15,7 +15,7 @@ fine; callers raise their own error type with it.
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import List, Optional, Tuple
 
 # Repository-relative: no leading '/', no '..' segment, a plain filename alphabet.
 DOCKERFILE_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,255}$")
@@ -136,6 +136,70 @@ def env_name_problem(name) -> Optional[str]:
     if upper in _DENIED_ENV_NAMES or upper.startswith(_DENIED_ENV_PREFIXES):
         return f"'{text}' is managed by the build environment and cannot be set."
     return None
+
+
+# ---------------------------------------------------------------------------
+# Build arguments — ``docker build --build-arg NAME=value``
+#
+# Stored on the image stage as ONE env value, ``BUILD_ARGS``, one ``NAME=value``
+# per line, so it travels with everything else the stage carries (snapshots,
+# pipeline export/import, shared pipelines) without a column of its own. Only
+# the stage's own definition is read: a build input called BUILD_ARGS does not
+# replace the list. A value that must differ per build says ``${INPUT}``.
+# ---------------------------------------------------------------------------
+
+BUILD_ARGS_KEY = "BUILD_ARGS"
+MAX_BUILD_ARGS = 50
+MAX_BUILD_ARG_VALUE_CHARS = 1000
+# What a Dockerfile ARG is usually called; also what is safe to echo in a log line.
+BUILD_ARG_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+# The only expansion a value gets: ``${NAME}``, filled by the build pod's shell
+# from the build inputs, the stage's variables, KUBESIGHT_* and whatever an
+# earlier stage wrote to $KUBESIGHT_ENV. Everything else is passed literally.
+BUILD_ARG_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def parse_build_args(value) -> Tuple[List[Tuple[str, str]], Optional[str]]:
+    """``(pairs, problem)`` for a stored BUILD_ARGS text.
+
+    Blank lines and ``#`` comments are skipped. A problem leaves ``pairs``
+    empty: a build must never go ahead with some of its arguments quietly
+    dropped.
+    """
+    text = _text(value).replace("\r\n", "\n")
+    pairs: List[Tuple[str, str]] = []
+    seen = set()
+    for raw in text.split("\n"):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, sep, arg_value = line.partition("=")
+        name = name.strip()
+        if not sep:
+            return [], f"Build argument '{name[:64]}' needs a value: write NAME=value."
+        if not BUILD_ARG_NAME_RE.match(name):
+            return [], (
+                f"'{name[:64]}' is not a valid build argument name: use letters, "
+                "digits and '_', not starting with a digit."
+            )
+        if name in seen:
+            return [], f"Build argument '{name}' is set twice."
+        if any(ch in arg_value for ch in "\x00\r"):
+            return [], f"Build argument '{name}' contains control characters."
+        if len(arg_value) > MAX_BUILD_ARG_VALUE_CHARS:
+            return [], (
+                f"Build argument '{name}' is longer than "
+                f"{MAX_BUILD_ARG_VALUE_CHARS} characters."
+            )
+        seen.add(name)
+        pairs.append((name, arg_value))
+    if len(pairs) > MAX_BUILD_ARGS:
+        return [], f"An image stage may pass at most {MAX_BUILD_ARGS} build arguments."
+    return pairs, None
+
+
+def build_args_problem(value) -> Optional[str]:
+    return parse_build_args(value)[1]
 
 
 # The reserved variables whose values reach generated shell, with their checks.
