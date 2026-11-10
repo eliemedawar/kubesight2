@@ -1,0 +1,8 @@
+# OpenTofu installs providers only from the image's own mirror (K3): the
+# provisioner cannot reach any registry when it runs.
+provider_installation {
+  filesystem_mirror {
+    path    = "/opt/tofu/providers"
+    include = ["registry.opentofu.org/oracle/oci"]
+  }
+}

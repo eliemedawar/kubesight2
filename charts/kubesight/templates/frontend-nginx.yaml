@@ -44,6 +44,14 @@ data:
 
         {{ $headers }}
 
+        {{- if .Values.oke.workloadIdentity.enabled }}
+        # Not for people: the OpenTofu state backend and the OKE provisioner
+        # Jobs' calls. Those reach backend-service directly inside the cluster.
+        location /api/internal/ {
+            return 404;
+        }
+        {{- end }}
+
         location /api {
             proxy_pass {{ $backend }};
             proxy_http_version 1.1;

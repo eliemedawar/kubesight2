@@ -152,6 +152,32 @@ def normalize_spec(build: ClusterBuild, raw: Any) -> Dict[str, Any]:
         raise ValueError("kind must be 'vms' or 'managed'.")
     if build.vms_only:
         kind = "vms"
+    wi_account = None
+    if provider == "oci":
+        from .clouds import oci_wi
+
+        if kind == "vms" and not oci_wi.vms_allowed():
+            # K18: Oracle Cloud makes OKE clusters only on this install.
+            raise ValueError("On this install Oracle Cloud makes OKE clusters only, never VMs.")
+        view = accounts.view(row)
+        if oci_wi.is_account(view):
+            wi_account = view
+            fixed = view.settings
+            for key, value in (("compartmentId", fixed["compartmentOcid"]),
+                               ("networkId", fixed["vcnOcid"]), ("subnetId", fixed["workerSubnetOcid"])):
+                asked = str(raw.get(key) or "").strip()
+                if asked and asked != value:
+                    # K12: never another compartment (nor another network).
+                    raise ValueError(
+                        "Clusters may only go into the account's compartment, VCN and subnets."
+                    )
+            raw = {**raw, "compartmentId": fixed["compartmentOcid"], "networkId": fixed["vcnOcid"],
+                   "subnetId": fixed["workerSubnetOcid"], "zone": fixed["availabilityDomain"],
+                   "allowedCidrs": [fixed["sourceCidr"]],
+                   "shape": str(raw.get("shape") or "").strip() or oci_wi.SHAPE}
+        elif oci_wi.enabled():
+            raise ValueError("API keys for Oracle Cloud are switched off on this KubeSight. "
+                             "Use an OKE workload identity account.")
     region = _text(raw, "region", 64) or previous.get("region") or row.region
     if not region:
         raise ValueError("Choose a region.")
@@ -214,6 +240,10 @@ def normalize_spec(build: ClusterBuild, raw: Any) -> Dict[str, Any]:
             spec["sizes"] = templates.normalize_sizes(raw.get("sizes") or previous.get("sizes"), counts)
 
     spec.update(clouds.adapter(provider).normalize_placement(raw, kind, previous))
+    if wi_account is not None:
+        from .clouds import oci_wi
+
+        spec = oci_wi.normalize_spec(wi_account, spec, raw, previous, vms_only=bool(build.vms_only))
     if provider == "gcp":
         # Every Google resource names its project; it is the account's.
         spec["projectId"] = (row.settings_json or {}).get("projectId")
@@ -408,7 +438,7 @@ def render(build: ClusterBuild, job) -> Dict[str, Any]:
             pick = (module.simulated_default_node_image(spec) if accounts.simulated()
                     else module.default_node_image(account, spec))
             spec = {**spec, "nodeImageId": pick}
-        config = module.render_managed(ManagedContext(
+        context = ManagedContext(
             cluster_name=build.name, build_id=build.id, region=spec["region"], spec=spec,
             kubernetes_version=spec["managed"]["kubernetesVersion"],
             node_pool={
@@ -420,7 +450,17 @@ def render(build: ClusterBuild, job) -> Dict[str, Any]:
                 ),
             },
             ssh=ssh, allowed_cidrs=list(spec.get("allowedCidrs") or []), labels=labels,
-        ))
+        )
+        from .clouds import oci_wi
+
+        if module.PROVIDER == "oci" and oci_wi.is_account(account):
+            if context.node_pool["machineType"]["type"] != oci_wi.SHAPE:
+                raise ValueError(f"Only {oci_wi.SHAPE} nodes are allowed here.")
+            network = (oci_wi.simulated_network(account) if accounts.simulated()
+                       else oci_wi.read_network(account, spec["region"], module._get_json))
+            config = oci_wi.render_managed(context, network, account.settings)
+        else:
+            config = module.render_managed(context)
     else:
         config = module.render_vms(VmContext(
             cluster_name=build.name, build_id=build.id, region=spec["region"], spec=spec,

@@ -27,6 +27,7 @@ import { cloudShapesForVms, isManagedBuild, managedLabel, whereCreated } from ".
 import {
   applyProvisionPlan,
   approveClusterDestroy,
+  approveProvisionPlan,
   createClusterTemplate,
   discardProvisionJob,
   getProvisionJobConfig,
@@ -300,6 +301,85 @@ export function ProvisionProgress({ build, now, compact = false }) {
         </details>
       ) : null}
     </div>
+  );
+}
+
+/** OKE by workload identity (K13): a second person, signed in with MFA and
+ *  never the requester, approves one exact plan by its hash. The provisioner
+ *  Job applies only the saved plan with that hash. */
+function HashApproval({ build, job, currentUserId, canExecute, busy, act, refusal }) {
+  const own = currentUserId != null && job.requestedByUserId === currentUserId;
+  const [note, setNote] = useState("");
+  const [read, setRead] = useState(false);
+  const hash = job.planSha256 || "";
+  const verb = job.operation === "destroy" ? "Destroy" : job.operation === "grow" ? "Change the node pool of" : "Create";
+  return (
+    <PlanReview
+      job={job}
+      title={`${verb} ${build.name}?`}
+      lede={own
+        ? "Waiting for a second person who can run cluster builds and signs in with MFA. You asked, so you cannot approve it."
+        : `${job.requestedBy || "Someone"} asked for this. Read the plan, then approve exactly this plan: any new plan needs a new approval.`}
+      busy={busy}
+    >
+      <div className="sg-cb-pv-ask">
+        <div className="who">
+          <span className="sg-cb-pv-avatar" aria-hidden="true">
+            {(job.requestedBy || "?").slice(0, 2).toUpperCase()}
+          </span>
+          <span>
+            <b>{job.requestedBy || "Unknown"}</b> asked {timeAgo(job.createdAt)}
+            {job.reason ? <> · <span className="muted">“{job.reason}”</span></> : null}
+          </span>
+        </div>
+        <div className="sg-cb-field-label">Plan sha256</div>
+        <code className="sg-cb-mono" style={{ wordBreak: "break-all" }}>{hash || "—"}</code>
+        <p className="muted">
+          Made by a provisioner Job as kubesight-provisioner (OKE workload identity, no key).
+          {job.summary?.encrypted ? " The plan file is encrypted with the platform's state key." : ""}
+        </p>
+        {!own && canExecute ? (
+          <>
+            <label className="sg-cb-check">
+              <input type="checkbox" checked={read} onChange={(event) => setRead(event.target.checked)} />
+              {" "}I read this plan and approve this hash.
+            </label>
+            <label className="sg-cb-field-label" htmlFor="pv-hash-note">Note (optional)</label>
+            <input id="pv-hash-note" className="sg-cb-input" value={note}
+                   onChange={(event) => setNote(event.target.value)} placeholder="Checked with the platform owner" />
+            <div className="sg-cb-actions">
+              <button className="btn-outline" type="button" disabled={busy}
+                      onClick={() => act(() => rejectClusterDestroy(build.id, job.id, note))}>
+                Reject
+              </button>
+              <button className={job.operation === "destroy" ? "btn-danger" : "primary"} type="button"
+                      disabled={busy || !read || !hash || Boolean(job.summary?.blocked)}
+                      onClick={async () => {
+                        if (!(await confirmDialog({
+                          title: `Approve plan ${hash.slice(0, 12)}`,
+                          message: `${verb} ${build.name} by applying exactly this plan (sha256 ${hash.slice(0, 12)}…). The platform owner is emailed.`,
+                          confirmLabel: "Approve and apply",
+                          tone: job.operation === "destroy" ? "danger" : undefined,
+                        }))) return;
+                        act(() => approveProvisionPlan(build.id, job.id, hash, note));
+                      }}>
+                {busy ? "Working…" : "Approve and apply"}
+              </button>
+            </div>
+          </>
+        ) : own ? (
+          <div className="sg-cb-actions">
+            <button className="btn-outline" type="button" disabled={busy}
+                    onClick={() => act(() => discardProvisionJob(build.id, job.id))}>
+              Withdraw request
+            </button>
+          </div>
+        ) : (
+          <p className="muted">Someone with permission to run cluster builds, signed in with MFA, decides.</p>
+        )}
+        {refusal}
+      </div>
+    </PlanReview>
   );
 }
 
@@ -608,6 +688,13 @@ export function ProvisionCard({
   }
 
   if (job.status === "planning") return <PlanningState job={job} now={now} build={build} />;
+
+  if (job.needsHashApproval && job.status === "awaiting_approval") {
+    return (
+      <HashApproval build={build} job={job} currentUserId={currentUserId}
+                    canExecute={canExecute} busy={busy} act={act} refusal={refusalNote} />
+    );
+  }
 
   if (job.operation === "destroy") {
     if (job.status === "awaiting_approval") {

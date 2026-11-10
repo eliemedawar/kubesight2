@@ -251,6 +251,9 @@ const jobAction = (id, jobId, action, body = {}) =>
 
 export const applyProvisionPlan = (id, jobId) => jobAction(id, jobId, "apply");
 export const approveClusterDestroy = (id, jobId, note = "") => jobAction(id, jobId, "approve", { note });
+/** OKE by workload identity (K13): approve one exact plan, by its sha256. */
+export const approveProvisionPlan = (id, jobId, planSha256, note = "") =>
+  jobAction(id, jobId, "approve", { planSha256, note });
 export const rejectClusterDestroy = (id, jobId, note = "") => jobAction(id, jobId, "reject", { note });
 export const discardProvisionJob = (id, jobId) => jobAction(id, jobId, "discard");
 export const retryProvisionConnect = (id, jobId) => jobAction(id, jobId, "retry-connect");

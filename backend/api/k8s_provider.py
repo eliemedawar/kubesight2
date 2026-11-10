@@ -177,6 +177,17 @@ def _request_timeout_flag(args: List[str], effective_timeout: int) -> List[str]:
     return [f"--request-timeout={seconds}s"]
 
 
+def _refuse_provisioner_reach(args: List[str], kubeconfig_path: Optional[str]) -> None:
+    """K4: nothing reaches the OKE provisioner's identity through KubeSight
+    (``provisioner_guard``)."""
+    from .provisioner_guard import ProvisionerGuardError, check_kubectl
+
+    try:
+        check_kubectl(args, kubeconfig_path=kubeconfig_path)
+    except ProvisionerGuardError as exc:
+        raise K8sCommandError(str(exc)) from exc
+
+
 def _refuse_unsafe_kubectl_args(args: List[str]) -> None:
     """Defence in depth against flag injection through user-supplied names.
 
@@ -258,6 +269,7 @@ def _run_kubectl(
         )
 
     _refuse_unsafe_kubectl_args(args)
+    _refuse_provisioner_reach(args, kubeconfig_path)
     effective_timeout = timeout if timeout is not None else _KUBECTL_DEFAULT_TIMEOUT
 
     from . import kube_direct
@@ -2835,6 +2847,7 @@ def _popen_kubectl(
     ``kubeconfig_path`` must already be a readable plaintext path — the caller
     owns the ``kubeconfig_vault`` lease for the lifetime of the process."""
     _refuse_unsafe_kubectl_args(args)
+    _refuse_provisioner_reach(args, kubeconfig_path)
     command = ["kubectl"]
     if kubeconfig_path:
         command += ["--kubeconfig", kubeconfig_path]

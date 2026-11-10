@@ -20,6 +20,24 @@ createNamespaces: false
 rbac:
   clusterWide: true
 
+# --- OKE clusters in K8s-UAT by workload identity -----------------------------
+# The platform's requirements, version 2 (2026-11-10). CHG-KS-015 adds only the
+# service account (for the proof); CHG-KS-016 switches the rest on after the proof.
+oke:
+  provisioner:
+    serviceAccount: true                  # CHG-KS-015
+    image: ""                             # CHG-KS-016: registry.areeba.com/kubesight-provisioner@sha256:...
+    pullSecret: regcred
+  workloadIdentity:
+    enabled: false                        # CHG-KS-016
+    region: me-dubai-1
+    compartmentOcid: ocid1.compartment.oc1..aaaaaaaajihvv42vja5ofypuvvhhxujlknsqwaolivymekmitqzhxxqesqgq
+    backendRole: kubesight-backend
+    approvalHours: 24
+    notifyEmails: HAllaw@areeba.com
+  stateEncryption:
+    enabled: false                        # once the platform says kubesight-tofu-state is live
+
 # --- Images ------------------------------------------------------------------
 image:
   # The nodes can pull from it (platform, 2026-10-28).
@@ -194,6 +212,10 @@ externalSecrets:
     - {name: hermes, key: kubesight/hermes, module: hermes, enabled: false}
     # Fields TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USERS, TELEGRAM_HOME_CHANNEL.
     - {name: hermes-env, key: kubesight/hermes-env, module: hermes}
+    # Fields KUBESIGHT_OKE_PULL_USERNAME, KUBESIGHT_OKE_PULL_PASSWORD: the
+    # read-only Nexus account KubeSight puts on each OKE cluster it creates (K16).
+    # CHG-KS-016 switches it on, with backend.extraEnvFromSecrets.
+    - {name: kubesight-oke-pull, key: kubesight/oke-pull, module: kubesight-backend, enabled: false}
     # Fields tls.crt and tls.key.
     - {name: kubesight-tls, key: kubesight/tls, type: kubernetes.io/tls, module: kubesight-frontend}
     # Fields registry, username, password; one entry per namespace, because

@@ -96,6 +96,41 @@
 {{- $_ := merge $data (dict "HERMES_SERVICE_NAMESPACE" $ns "HERMES_SERVICE_PORT" "8642") }}
 {{- end }}
 {{- end }}
+{{- with .Values.oke }}
+{{- if .workloadIdentity.enabled }}
+{{- $_ := merge $data (dict
+  "KUBESIGHT_PROVISIONER_NAMESPACE" $ns
+  "KUBESIGHT_PROVISIONER_SERVICE_ACCOUNT" "kubesight-provisioner"
+  "KUBESIGHT_PROVISIONER_IMAGE" (.provisioner.image | default "")
+  "KUBESIGHT_PROVISIONER_PULL_SECRET" (.provisioner.pullSecret | default "")
+) }}
+{{- $_ := required "oke.workloadIdentity needs oke.provisioner.serviceAccount" .provisioner.serviceAccount }}
+{{- $_ := required "oke.workloadIdentity needs oke.provisioner.image (by digest)" .provisioner.image }}
+{{- $_ := required "oke.workloadIdentity needs oke.workloadIdentity.compartmentOcid" .workloadIdentity.compartmentOcid }}
+{{- $_ := merge $data (dict
+  "OCI_RESOURCE_PRINCIPAL_VERSION" "2.2"
+  "OCI_RESOURCE_PRINCIPAL_REGION" .workloadIdentity.region
+  "KUBESIGHT_OCI_AUTH_MODES" "workload_identity"
+  "KUBESIGHT_OCI_VMS" "false"
+  "KUBESIGHT_OCI_COMPARTMENT_LOCK" .workloadIdentity.compartmentOcid
+  "KUBESIGHT_TOFU_RUNNER" "kubernetes"
+  "KUBESIGHT_OKE_BACKEND_ROLE" .workloadIdentity.backendRole
+  "KUBESIGHT_PROVISION_APPROVAL_HOURS" (toString .workloadIdentity.approvalHours)
+  "KUBESIGHT_PROVISION_NOTIFY_EMAILS" (.workloadIdentity.notifyEmails | default "")
+) }}
+{{- end }}
+{{- if .stateEncryption.enabled }}
+{{- $_ := merge $data (dict
+  "KUBESIGHT_TOFU_STATE_ENCRYPTION" "openbao"
+  "KUBESIGHT_OPENBAO_ADDRESS" .stateEncryption.address
+  "KUBESIGHT_OPENBAO_CA_CONFIGMAP" .stateEncryption.caConfigMap
+  "KUBESIGHT_OPENBAO_CA_KEY" .stateEncryption.caKey
+  "KUBESIGHT_OPENBAO_ROLE" .stateEncryption.role
+  "KUBESIGHT_OPENBAO_TRANSIT_PATH" .stateEncryption.transitPath
+  "KUBESIGHT_OPENBAO_KEY_NAME" .stateEncryption.keyName
+) }}
+{{- end }}
+{{- end }}
 {{- with .Values.hermes.agentRole }}
 {{- $_ := set $data "KUBESIGHT_HERMES_AGENT_ROLE" . }}
 {{- end }}

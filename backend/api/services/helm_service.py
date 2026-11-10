@@ -306,6 +306,23 @@ def run_helm(
     from ..ttl_cache import caching_disabled
 
     verb = args[0] if args else ""
+    if verb not in _HELM_CLUSTER_READ_VERBS:
+        # K4: no Helm change in the OKE provisioner's namespace of KubeSight's own cluster.
+        from ..provisioner_guard import (
+            ProvisionerGuardError, check_helm, helm_guard_env, helm_post_renderer_args, namespace_of,
+        )
+
+        target = namespace_of(args)
+        try:
+            check_helm(target, kubeconfig_path=access.kubeconfig_path)
+            # Helm's rendered manifests go through the guard too (a chart can
+            # name another namespace or service account in its templates).
+            guard_flags = helm_post_renderer_args(args, kubeconfig_path=access.kubeconfig_path)
+        except ProvisionerGuardError as exc:
+            raise HelmCommandError(str(exc)) from exc
+        if guard_flags:
+            args = list(args) + guard_flags
+            extra_env = {**(extra_env or {}), **helm_guard_env(kubeconfig_path=access.kubeconfig_path)}
     # Same per-cluster breaker kubectl uses: a cluster that just timed out
     # fails fast instead of every helm read waiting out its own timeout.
     breaker_key = f"down:{kubeconfig_identity(access.kubeconfig_path)}:{access.context_name or ''}"

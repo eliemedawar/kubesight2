@@ -61,6 +61,7 @@ from ....secret_encryption import decrypt_secret, encrypt_secret
 from ...vsphere_client import VSphereError
 from ..os_adapters.base import SATELLITE_MARKER
 from ..scrub import scrub
+from . import oke_onboard, remote
 from . import (
     cloud_build, host_placement, inventory, ip_pool, state_store, templates, tofu_config,
     tofu_runner, vm_watch,
@@ -191,6 +192,12 @@ def serialize_job(job: ClusterProvisionJob, *, include_plan: bool = False,
         "decisionNote": job.decision_note,
         "autoApply": bool(job.auto_apply),
         "recoveredFromJobId": job.recovered_from_job_id,
+        # OKE by workload identity (K3, K13): where OpenTofu ran, and the plan
+        # hash a second person approves.
+        "runner": job.runner or "local",
+        "planSha256": job.plan_sha256,
+        "approvedPlanSha256": job.approved_plan_sha256,
+        "needsHashApproval": (job.runner or "") == "kubernetes",
         "createdAt": _iso(job.created_at),
         "startedAt": _iso(job.started_at),
         "finishedAt": _iso(job.finished_at),
@@ -210,12 +217,13 @@ def serialize_job(job: ClusterProvisionJob, *, include_plan: bool = False,
 
 _PROVISION_STATUS = {
     "create": {
-        "planning": "planning", "planned": "planned", "plan_failed": "plan_failed",
-        "applying": "applying", "connecting": "connecting", "apply_failed": "apply_failed",
+        "planning": "planning", "planned": "planned", "awaiting_approval": "planned",
+        "plan_failed": "plan_failed", "applying": "applying", "connecting": "connecting", "apply_failed": "apply_failed",
         "connect_failed": "connect_failed", "succeeded": "ready", "interrupted": "applying",
     },
     "grow": {
-        "planning": "grow_planning", "planned": "grow_planned", "plan_failed": "grow_plan_failed",
+        "planning": "grow_planning", "planned": "grow_planned", "awaiting_approval": "grow_planned",
+        "plan_failed": "grow_plan_failed",
         "applying": "grow_applying", "connecting": "grow_connecting",
         "apply_failed": "grow_failed", "connect_failed": "grow_failed",
         "succeeded": "ready", "interrupted": "grow_applying",
@@ -1338,6 +1346,9 @@ def _apply_new_addresses(build: ClusterBuild, job: ClusterProvisionJob, addresse
 def _do_plan(job: ClusterProvisionJob, engine) -> None:
     build = db.session.get(ClusterBuild, job.build_id)
     target = _target(build)
+    if remote.is_remote(build):
+        _do_remote_plan(job, build, target)
+        return
     progress = dict(job.progress_json or {})
     progress["phase"] = "checking"
     job.progress_json = progress
@@ -1393,17 +1404,59 @@ def _do_plan(job: ClusterProvisionJob, engine) -> None:
     db.session.commit()
 
 
+def _do_remote_plan(job: ClusterProvisionJob, build: ClusterBuild, target) -> None:
+    """OKE by workload identity: the plan is made by a provisioner Job (K3)
+    and always waits for a second person to approve its hash (K13)."""
+    refused = remote.require_encryption()
+    if refused:
+        raise JobFailed(refused)
+    progress = dict(job.progress_json or {})
+    if not (job.config_json or {}).get("tofu"):
+        progress["phase"] = "checking"
+        job.progress_json = progress
+        job.runner = remote.RUNNER
+        db.session.commit()
+        checks = target.checks(build, job)
+        config = target.render(build, job)
+        job.config_json = {**(job.config_json or {}), "tofu": config, "checks": checks}
+        progress = dict(job.progress_json or {})
+        progress["phase"] = "planning"
+        job.progress_json = progress
+        db.session.commit()
+        remote.audit("plan-requested", job=job, build=build)
+    output = _Output(job, list(target.hide))
+    try:
+        remote.run_phase(job.id, "plan", output.on_line, _PLAN_TIMEOUT_S)
+    except remote.RemoteError as exc:
+        output.flush()
+        summary = output.error_summary()
+        raise JobFailed(str(exc) + ("\n" + summary if summary else "")) from exc
+    output.flush()
+    db.session.expire_all()
+    job = db.session.get(ClusterProvisionJob, job.id)
+    build = db.session.get(ClusterBuild, job.build_id)
+    if not job.plan_sha256:
+        raise JobFailed("The provisioner Job finished without a plan.")
+    job.status = "awaiting_approval"
+    progress = dict(job.progress_json or {})
+    progress["phase"] = "planned"
+    job.progress_json = progress
+    _sync_build_status(build, job)
+    db.session.commit()
+
+
 def _direct_destroy_may_apply(job: ClusterProvisionJob) -> bool:
     """An admin's destroy applies itself once planned (service.request_destroy)."""
     return (
-        job.operation == "destroy" and bool(job.auto_apply) and not job.recovered_from_job_id
+        not remote.is_remote_job(job)
+        and job.operation == "destroy" and bool(job.auto_apply) and not job.recovered_from_job_id
         and job.status == "awaiting_approval" and not (job.plan_summary_json or {}).get("blocked")
     )
 
 
 def _recovery_may_apply(job: ClusterProvisionJob) -> bool:
     """A recovery plan applies itself only when it finishes the approved job."""
-    if not job.auto_apply or not job.recovered_from_job_id:
+    if not job.auto_apply or not job.recovered_from_job_id or remote.is_remote_job(job):
         return False
     summary = job.plan_summary_json or {}
     if summary.get("blocked"):
@@ -1432,6 +1485,8 @@ def _do_apply(job: ClusterProvisionJob, engine) -> bool:
     """Returns True when OpenTofu applied the plan."""
     build = db.session.get(ClusterBuild, job.build_id)
     target = _target(build)
+    if remote.is_remote_job(job):
+        return _do_remote_apply(job, build, target)
     config = (job.config_json or {}).get("tofu")
     if not config or not job.plan_cipher:
         raise JobFailed("This job has no saved plan to apply. Make a new plan.")
@@ -1511,6 +1566,42 @@ def _do_apply(job: ClusterProvisionJob, engine) -> bool:
                 + summary
             )
         raise JobFailed(summary or "OpenTofu apply failed.")
+    return True
+
+
+def _do_remote_apply(job: ClusterProvisionJob, build: ClusterBuild, target) -> bool:
+    """The approved plan, applied by a provisioner Job that checks its hash
+    first (K3, K13). The Job reports facts, never the state (K22)."""
+    started = ((job.progress_json or {}).get("remote") or {}).get("apply")
+    problem = remote.approval_problem(job)
+    if problem and not started:
+        remote.audit("apply-refused", job=job, build=build, reason=problem)
+        raise JobFailed(problem)
+    progress = dict(job.progress_json or {})
+    progress["phase"] = "applying"
+    progress.setdefault("applyStartedAt", _iso(_utcnow()))
+    job.progress_json = progress
+    db.session.commit()
+    output = _Output(job, list(target.hide))
+    try:
+        remote.run_phase(job.id, "apply", output.on_line, _APPLY_TIMEOUT_S)
+    except remote.RemoteError as exc:
+        output.flush()
+        db.session.expire_all()
+        job = db.session.get(ClusterProvisionJob, job.id)
+        job.plan_cipher = None
+        db.session.commit()
+        remote.notify(job, db.session.get(ClusterBuild, job.build_id), "failed")
+        summary = output.error_summary()
+        if "Saved plan is stale" in summary:
+            summary = "The plan is out of date: the state changed after it was made. Make a new plan.\n" + summary
+        raise JobFailed(str(exc) + ("\n" + summary if summary else "")) from exc
+    output.flush()
+    db.session.expire_all()
+    job = db.session.get(ClusterProvisionJob, job.id)
+    job.plan_cipher = None
+    db.session.commit()
+    remote.notify(job, db.session.get(ClusterBuild, job.build_id), "succeeded")
     return True
 
 
@@ -1746,10 +1837,38 @@ def _onboard_managed(job: ClusterProvisionJob, build: ClusterBuild) -> None:
     db.session.commit()
 
 
+def _onboard_remote(job: ClusterProvisionJob, build: ClusterBuild) -> None:
+    progress = dict(job.progress_json or {})
+    progress["phase"] = "registering"
+    job.progress_json = progress
+    db.session.commit()
+    target = _target(build)
+    output = _Output(job, list(target.hide))
+    try:
+        public_id = oke_onboard.onboard(job, build, output.on_line)
+    except (oke_onboard.OnboardError, remote.RemoteError, cloud_build.CloudError, ValueError, KeyError) as exc:
+        output.on_line(f"Error: {scrub(str(exc))}")
+        output.flush()
+        raise JobFailed(
+            f"The OKE cluster exists, but KubeSight could not register it: {scrub(str(exc))}. "
+            "Fix that, then Try again."
+        ) from exc
+    output.flush()
+    progress = dict(job.progress_json or {})
+    if public_id:
+        progress["clusterId"] = public_id
+    job.progress_json = progress
+    db.session.commit()
+
+
 def _do_connect(job: ClusterProvisionJob) -> None:
     from .. import executor
 
     build = db.session.get(ClusterBuild, job.build_id)
+    if remote.is_remote_job(job):
+        if job.operation == "create":
+            _onboard_remote(job, build)
+        return
     if cloud_build.is_managed(build):
         _onboard_managed(job, build)
         return
@@ -2423,7 +2542,13 @@ def advance_provision_jobs() -> None:
             "Recovering provision job %s (%s, %s)%s", job.id, job.operation, job.status,
             " and releasing its state lock" if released else "",
         )
-        if job.status == "planning":
+        if remote.is_remote_job(job) and job.status in ("planning", "applying"):
+            # The Job runs in the cluster, not in this process: follow it (or
+            # read what it reported); never re-plan or re-apply on our own.
+            job.updated_at = _utcnow()
+            db.session.commit()
+            start_worker(job.id, "plan" if job.status == "planning" else "apply")
+        elif job.status == "planning":
             job.updated_at = _utcnow()
             db.session.commit()
             start_worker(job.id, "plan")

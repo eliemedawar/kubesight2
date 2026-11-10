@@ -152,6 +152,49 @@ backend:
     # (for a cluster with no StorageClass). The export must exist.
     nfs: {server: "", path: "", mountOptions: []}
 
+# --- OKE clusters by OKE workload identity (Oracle Cloud) -------------------------
+# KubeSight creates OKE clusters with no OCI user and no API key: OCI's policy
+# trusts two service accounts in this namespace on the cluster KubeSight runs
+# in (it must be an ENHANCED OKE cluster). OpenTofu runs only in Jobs as
+# kubesight-provisioner; the backend (kubesight-backend) only reads and makes
+# short-lived tokens for the clusters' APIs.
+oke:
+  provisioner:
+    # The service account OCI's policy names for create/delete. Its name must
+    # stay kubesight-provisioner: the policy matches that name only.
+    serviceAccount: false
+    # The provisioner image BY DIGEST, e.g.
+    #   registry.areeba.com/kubesight-provisioner@sha256:...
+    # (the Bitbucket image step prints the digest).
+    image: ""
+    # Pull Secret for the provisioner pods (already in the namespace).
+    pullSecret: ""
+  workloadIdentity:
+    # The backend signs in to OCI by workload identity, API keys for Oracle are
+    # refused, Oracle VMs are refused, and builds run OpenTofu in Jobs.
+    enabled: false
+    region: me-dubai-1
+    # Where clusters may go; any other compartment is refused.
+    compartmentOcid: ""
+    # The built-in or named ClusterRole the backend's subject gets on a created
+    # cluster: "kubesight-backend" (KubeSight's own role, created by the
+    # provisioner), or a built-in one such as "edit". Never cluster-admin.
+    backendRole: kubesight-backend
+    # A second person, with MFA, approves each plan's hash within this many hours.
+    approvalHours: 24
+    # Who is emailed on every apply and destroy (the platform owner).
+    notifyEmails: ""
+  # The state key (K15): OpenTofu's openbao key provider on OpenBao's Transit.
+  # Off until the platform says the key and role are live.
+  stateEncryption:
+    enabled: false
+    address: https://openbao.openbao.svc:8200
+    caConfigMap: openbao-ca
+    caKey: ca.crt
+    role: kubesight-provisioner-state
+    transitPath: /transit
+    keyName: kubesight-tofu-state
+
 frontend:
   replicas: 1
   resources:

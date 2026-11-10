@@ -38,7 +38,10 @@ def catalog() -> List[Dict]:
             "id": provider,
             "label": module.LABEL,
             "managedLabel": module.MANAGED_LABEL,
-            "fields": module.FIELDS,
+            "fields": module.fields() if hasattr(module, "fields") else module.FIELDS,
+            # Oracle on a workload-identity install: OKE clusters only, no keys.
+            "workloadIdentity": bool(getattr(module, "oci_wi", None) and module.oci_wi.enabled()),
+            "vmsAllowed": not (provider == "oci" and not module.oci_wi.vms_allowed()),
             "tofuProvider": dict(module.TOFU_PROVIDER),
         })
     return out

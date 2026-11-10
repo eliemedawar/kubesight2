@@ -1,0 +1,104 @@
+# The OKE proof pods (CHG-KS-015), from the platform's example (requirements
+# version 2, section 10). Replace <digest> with the provisioner image's digest
+# (the Bitbucket image step prints it), then:
+#   kubectl apply -f deploy/ai-cluster/proof/pods.yaml
+# Both sleep; people `kubectl exec` into them: the one exception to K4, for these
+# two pods during the proof only. Delete both when the proof ends.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kubesight-proof-provisioner
+  namespace: kubesight
+  labels:
+    app.kubernetes.io/name: kubesight-proof
+    areeba.com/module: kubesight-provisioner
+    areeba.com/change: CHG-KS-015
+spec:
+  serviceAccountName: kubesight-provisioner
+  automountServiceAccountToken: true
+  restartPolicy: Never
+  activeDeadlineSeconds: 604800
+  imagePullSecrets:
+    - name: regcred
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: proof
+      image: registry.areeba.com/kubesight-provisioner@sha256:<digest>
+      command: ["sleep", "604800"]
+      env:
+        - {name: OCI_RESOURCE_PRINCIPAL_VERSION, value: "2.2"}
+        - {name: OCI_RESOURCE_PRINCIPAL_REGION, value: me-dubai-1}
+        - {name: OCI_CLI_AUTH, value: oke_workload_identity}
+        - {name: TF_CLI_CONFIG_FILE, value: /etc/tofu/tofurc}
+        - {name: HOME, value: /work}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: {cpu: 250m, memory: 512Mi}
+        limits: {memory: 1Gi}
+      volumeMounts:
+        - {name: work, mountPath: /work}
+        - {name: tmp, mountPath: /tmp}
+  volumes:
+    - name: work
+      emptyDir: {sizeLimit: 1Gi}
+    - name: tmp
+      emptyDir: {sizeLimit: 256Mi}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kubesight-proof-backend
+  namespace: kubesight
+  labels:
+    app.kubernetes.io/name: kubesight-proof
+    areeba.com/module: kubesight-backend
+    areeba.com/change: CHG-KS-015
+spec:
+  serviceAccountName: kubesight-backend
+  automountServiceAccountToken: true
+  restartPolicy: Never
+  activeDeadlineSeconds: 604800
+  imagePullSecrets:
+    - name: regcred
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: proof
+      image: registry.areeba.com/kubesight-provisioner@sha256:<digest>
+      command: ["sleep", "604800"]
+      env:
+        - {name: OCI_RESOURCE_PRINCIPAL_VERSION, value: "2.2"}
+        - {name: OCI_RESOURCE_PRINCIPAL_REGION, value: me-dubai-1}
+        - {name: OCI_CLI_AUTH, value: oke_workload_identity}
+        - {name: HOME, value: /work}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: {cpu: 100m, memory: 256Mi}
+        limits: {memory: 512Mi}
+      volumeMounts:
+        - {name: work, mountPath: /work}
+        - {name: tmp, mountPath: /tmp}
+  volumes:
+    - name: work
+      emptyDir: {sizeLimit: 256Mi}
+    - name: tmp
+      emptyDir: {sizeLimit: 128Mi}

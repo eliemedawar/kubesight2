@@ -315,13 +315,16 @@ def approve_destroy(build_id: int, job_id: int):
     job, err = _job_or_404(build_id, job_id)
     if err:
         return err
-    refused = _day_two_approval_refusal(build_id, "destroy")
-    if refused is not None:
-        return refused
+    if job.operation in ("destroy", "grow"):
+        refused = _day_two_approval_refusal(build_id, job.operation)
+        if refused is not None:
+            return refused
     user, actor = _actor()
-    note = (request.get_json(silent=True) or {}).get("note") or ""
+    body = request.get_json(silent=True) or {}
+    note = body.get("note") or ""
     try:
-        provisioning.approve_destroy(build, job, actor=actor, user=user, note=note)
+        provisioning.approve_destroy(build, job, actor=actor, user=user, note=note,
+                                     plan_sha256=str(body.get("planSha256") or ""))
     except PermissionError as exc:
         return error_response(str(exc), 403)
     except ValueError as exc:
@@ -591,11 +594,25 @@ def release_lock(build_id: int):
 _LOOPBACK = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
 
 
+def _provisioner_state_caller(build_id: int, token: str):
+    """A provisioner Job (OKE workload identity) reaching the state through its
+    loopback proxy: its projected token, checked by TokenReview, must be the
+    pod of the step the build's open job is waiting for."""
+    from ..services.cluster_build.provisioning import remote
+
+    refused = Response("unauthorized\n", 401, {"WWW-Authenticate": 'Basic realm="tofu-state"'})
+    job = jobs.open_job(build_id)
+    if job is None or not remote.is_remote_job(job) or job.status not in ("planning", "applying"):
+        return None, refused
+    why = remote.authenticate(job, token)
+    if why is not None:
+        remote.audit("provisioner-refused", job=job, reason=why, path=request.path)
+        return None, refused
+    return job, None
+
+
 def _state_caller(build_id: int):
     """The job behind this request, or an error response."""
-    remote_ok = os.getenv("KUBESIGHT_TOFU_STATE_ALLOW_REMOTE", "").lower() in ("1", "true", "yes")
-    if not remote_ok and request.remote_addr not in _LOOPBACK:
-        return None, Response("state backend is only reachable from inside KubeSight\n", 403)
     header = request.headers.get("Authorization", "")
     username = password = ""
     if header.lower().startswith("basic "):
@@ -604,6 +621,11 @@ def _state_caller(build_id: int):
             username, _, password = decoded.partition(":")
         except (ValueError, UnicodeDecodeError):
             pass
+    if username == "kubesight-provisioner" and password:
+        return _provisioner_state_caller(build_id, password)
+    remote_ok = os.getenv("KUBESIGHT_TOFU_STATE_ALLOW_REMOTE", "").lower() in ("1", "true", "yes")
+    if not remote_ok and request.remote_addr not in _LOOPBACK:
+        return None, Response("state backend is only reachable from inside KubeSight\n", 403)
     job = jobs.authenticate(username, password, build_id)
     if job is None:
         return None, Response("unauthorized\n", 401, {"WWW-Authenticate": 'Basic realm="tofu-state"'})

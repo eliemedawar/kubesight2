@@ -213,6 +213,12 @@ def _migrate_cluster_build_columns() -> None:
     _add_column_if_missing("cluster_builds", "template_id", "VARCHAR(64)")
     _add_column_if_missing("cluster_builds", "provisioning_json", "JSON")
     _add_column_if_missing("cluster_builds", "provision_status", "VARCHAR(24)")
+    # OKE by workload identity: provisioner Jobs, plan hashes, reported facts.
+    _add_column_if_missing("cluster_builds", "cloud_facts_json", "JSON")
+    if "cluster_provision_jobs" in _table_names():
+        _add_column_if_missing("cluster_provision_jobs", "runner", "VARCHAR(16)")
+        _add_column_if_missing("cluster_provision_jobs", "plan_sha256", "VARCHAR(64)")
+        _add_column_if_missing("cluster_provision_jobs", "approved_plan_sha256", "VARCHAR(64)")
     _add_column_if_missing("cluster_builds", "vms_only", "BOOLEAN DEFAULT false")
     _add_column_if_missing("cluster_builds", "etcd_backups_json", "JSON")
     # Public clouds (Oracle, AWS, Google) next to vCenter.

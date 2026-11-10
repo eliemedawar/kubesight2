@@ -1,0 +1,61 @@
+# Proof step 4 on the CREATED cluster (step4-use.sh fills in __IMAGE__).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+  namespace: kubesight-proof
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: oci-bv
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: kubesight-proof
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      imagePullSecrets:
+        - name: nexus-pull
+      containers:
+        - name: web
+          image: __IMAGE__
+          ports:
+            - containerPort: 80
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: data
+---
+# K21: exactly these annotations on every LoadBalancer Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: kubesight-proof
+  annotations:
+    service.beta.kubernetes.io/oci-load-balancer-internal: "true"
+    service.beta.kubernetes.io/oci-load-balancer-shape: "flexible"
+    service.beta.kubernetes.io/oci-load-balancer-shape-flex-min: "10"
+    service.beta.kubernetes.io/oci-load-balancer-shape-flex-max: "100"
+    service.beta.kubernetes.io/oci-load-balancer-security-list-management-mode: "None"
+spec:
+  type: LoadBalancer
+  selector: {app: web}
+  ports:
+    - port: 80
+      targetPort: 80

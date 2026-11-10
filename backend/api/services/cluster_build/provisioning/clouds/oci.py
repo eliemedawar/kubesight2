@@ -40,7 +40,7 @@ import re
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import base
+from . import base, oci_wi
 from .base import Account, CloudError, ManagedContext, VmContext, check
 
 PROVIDER = "oci"
@@ -55,6 +55,7 @@ NODE_POOL_TYPE = "oci_containerengine_node_pool"
 DEFAULT_SHAPE = "VM.Standard.E5.Flex"
 # x86 flexible shapes: one OCPU = two vCPUs; memory 1–64 GB per OCPU.
 FLEX_SHAPES: List[Dict[str, Any]] = [
+    oci_wi.SHAPE_ENTRY,
     {"id": "VM.Standard.E5.Flex", "maxOcpus": 94, "maxMemoryGb": 1049, "note": "AMD EPYC (E5), 1–94 OCPU"},
     {"id": "VM.Standard.E4.Flex", "maxOcpus": 64, "maxMemoryGb": 1024, "note": "AMD EPYC (E4), 1–64 OCPU"},
     {"id": "VM.Standard3.Flex", "maxOcpus": 32, "maxMemoryGb": 512, "note": "Intel Xeon, 1–32 OCPU"},
@@ -85,6 +86,11 @@ FIELDS = [
                placeholder="ocid1.compartment.oc1..aaaa…",
                help="Where networks are listed and resources created unless a build picks another. Empty: the tenancy root."),
 ]
+
+def fields() -> List[Dict[str, Any]]:
+    """The account form: workload identity's on an install that uses it (K1, K5)."""
+    return oci_wi.FIELDS if oci_wi.enabled() else FIELDS
+
 
 _OCID_BODY = r"\.[a-z0-9]+\.[a-z0-9.\-]*[a-z0-9]$"
 
@@ -141,6 +147,10 @@ def key_fingerprint(private_key) -> str:
 def normalize_account(settings: Dict[str, Any], secrets: Dict[str, Any],
                       previous_settings: Optional[Dict[str, Any]] = None,
                       previous_secrets: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    if oci_wi.enabled():
+        return oci_wi.normalize_account(settings, secrets, previous_settings)
+    if (settings or {}).get("authMode") == oci_wi.MODE or (previous_settings or {}).get("authMode") == oci_wi.MODE:
+        raise ValueError("OKE workload identity is not switched on for this KubeSight.")
     settings = settings if isinstance(settings, dict) else {}
     secrets = secrets if isinstance(secrets, dict) else {}
     previous_settings = previous_settings or {}
@@ -190,6 +200,8 @@ def _shorten(ocid: str) -> str:
 
 
 def identity_label(account: Account) -> str:
+    if oci_wi.is_account(account):
+        return oci_wi.identity_label(account)
     return f"user {_shorten(str(account.settings.get('userOcid') or ''))}"
 
 
@@ -285,7 +297,15 @@ def _endpoint(service: str, region: str) -> str:
 def _call(account: Account, method: str, url: str, *, body: Any = None,
           what: str = "the request", accept: str = "application/json") -> Tuple[bytes, Dict[str, str]]:
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    headers = sign(account, method, url, body=data, headers={"accept": accept})
+    if oci_wi.is_account(account):
+        headers = oci_wi.signed_headers(method, url, data, {"accept": accept, "content-type": "application/json"}
+                                        if data is not None else {"accept": accept})
+    elif oci_wi.enabled():
+        # K5: an account saved before the switch still holds a key; never use it.
+        raise CloudError("API keys for Oracle Cloud are switched off on this KubeSight. "
+                         "Use an OKE workload identity account.")
+    else:
+        headers = sign(account, method, url, body=data, headers={"accept": accept})
     status, response_headers, raw = base.http(method, url, headers=headers, body=data, ca_pem=account.ca_pem)
     if status >= 300:
         raise _error(status, raw, what)
@@ -315,6 +335,8 @@ def _list(account: Account, url: str, params: Dict[str, Any], *, what: str) -> L
 
 
 def test(account: Account) -> str:
+    if oci_wi.is_account(account):
+        return oci_wi.test(account, _list, _get_json)
     user_id = account.settings["userOcid"]
     user = _get_json(
         account, f"{_endpoint('identity', account.region)}/users/{urllib.parse.quote(user_id, safe='')}",
@@ -324,6 +346,8 @@ def test(account: Account) -> str:
 
 
 def regions(account: Account) -> List[Dict[str, str]]:
+    if oci_wi.is_account(account):
+        return [{"id": account.region, "name": account.region}]
     tenancy = account.settings["tenancyOcid"]
     items = _get_json(
         account,
@@ -401,6 +425,8 @@ def _machine_types() -> List[Dict[str, Any]]:
 
 
 def inventory(account: Account, region: str, scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if oci_wi.is_account(account):
+        return oci_wi.inventory(account, region, _get_json, _list)
     out = base.empty_inventory(region)
     out["nodeImages"] = []
     out["warnings"] = []
@@ -628,6 +654,8 @@ def resolve_machine_type(size: Dict[str, Any], spec: Dict[str, Any],
 def plan_checks(account: Account, spec: Dict[str, Any]) -> List[Dict[str, str]]:
     """Read what the plan points at, fresh. Anything gone raises CloudError
     (the plan stops, as it does when a vCenter object disappears)."""
+    if oci_wi.is_account(account):
+        return oci_wi.plan_checks(account, spec, _get_json)
     region = spec["region"]
     core = _endpoint("core", region)
     quote = lambda value: urllib.parse.quote(str(value), safe="")  # noqa: E731
@@ -1030,6 +1058,8 @@ def endpoint_from_state(resources: List[Dict[str, Any]]) -> Optional[str]:
 
 def cluster_token(account: Account, region: str, cluster_id: str, *, date: Optional[str] = None) -> str:
     """What ``oci ce cluster generate-token`` prints as the token."""
+    if oci_wi.is_account(account):
+        return oci_wi.cluster_token(region, cluster_id)
     url = f"https://containerengine.{region}.oraclecloud.com/cluster_request/{cluster_id}"
     headers = sign(account, "GET", url, date=date)
     query = urllib.parse.urlencode({"authorization": headers["authorization"], "date": headers["date"]})

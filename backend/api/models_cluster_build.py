@@ -525,6 +525,10 @@ class ClusterBuild(db.Model):
     # connect_failed | ready | grow_* | destroy_planning | destroy_pending |
     # destroy_plan_failed | destroying | destroy_failed | destroyed
     provision_status = db.Column(db.String(24), nullable=True)
+    # OKE by workload identity: the facts the provisioner Job reported after its
+    # last apply or destroy (K22): cluster OCID, endpoint, node pools, NSGs.
+    # The backend never opens OpenTofu's state for these builds.
+    cloud_facts_json = db.Column(db.JSON, nullable=True)
 
     nodes = db.relationship(
         "ClusterBuildNode",
@@ -777,6 +781,13 @@ class ClusterProvisionJob(db.Model):
     decision_note = db.Column(db.Text, nullable=True)
     # sha256 of the per-job secret OpenTofu presents to the state backend.
     auth_token_hash = db.Column(db.String(64), nullable=True)
+    # Where OpenTofu ran: "local" (inside the backend) or "kubernetes" (a
+    # provisioner Job as kubesight-provisioner: OKE workload identity, K3).
+    runner = db.Column(db.String(16), nullable=True)
+    # sha256 of the saved plan file, and the hash a second person approved
+    # (K13). The apply Job applies only a plan whose hash is the approved one.
+    plan_sha256 = db.Column(db.String(64), nullable=True)
+    approved_plan_sha256 = db.Column(db.String(64), nullable=True)
     # Recovery jobs apply on their own when the new plan only finishes what
     # the interrupted, already-approved job set out to do.
     auto_apply = db.Column(db.Boolean, nullable=False, default=False)

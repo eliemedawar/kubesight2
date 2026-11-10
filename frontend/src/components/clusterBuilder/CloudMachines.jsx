@@ -26,6 +26,7 @@ import {
   needsZone,
   providerLabel,
   subnetsOf,
+  WI_OCI_SHAPE,
 } from "../../utils/cloudProvisioning.js";
 import { getCloudInventory, listCloudRegions, resolveCloudSizes } from "../../api/clusterBuildsApi.js";
 
@@ -132,7 +133,8 @@ export default function CloudMachines({
 }) {
   const { data: inventory, loading, error, readAt, refresh } = inventoryState;
   const account = accounts.find((row) => String(row.id) === String(cloud.accountId)) || null;
-  const managed = !vmsOnly && cloud.kind === "managed";
+  const wi = Boolean(inventory?.workloadIdentity);
+  const managed = !vmsOnly && (cloud.kind === "managed" || wi);
   const network = (inventory?.networks || []).find((n) => n.id === cloud.networkId) || null;
   const subnets = subnetsOf(inventory, cloud.networkId);
   const subnet = subnets.find((s) => s.id === cloud.subnetId) || null;
@@ -217,6 +219,22 @@ export default function CloudMachines({
               </select>
             </Field>
           ) : null}
+          {wi ? (
+            <div className="sg-cb-wide">
+              <div className="sg-cb-field-label">Network (fixed by the platform)</div>
+              <ul className="sg-cb-plain-list sg-cb-mono">
+                <li>{network?.name || "VCN"} {network?.cidr ? `· ${network.cidr}` : ""}</li>
+                {Object.entries(network?.fixed || inventory?.networks?.[0]?.fixed || {}).map(([role, item]) => (
+                  <li key={role}>{role === "endpoint" ? "API endpoint" : role === "workers" ? "Workers" : "Load balancers"}: {item.name} · {item.cidr || "?"}</li>
+                ))}
+              </ul>
+              <p className="muted">
+                Signed in by OKE workload identity: no key. Clusters are ENHANCED, private, on {WI_OCI_SHAPE} nodes,
+                behind two NSGs with no SSH, and every plan needs a second person&apos;s approval of its hash.
+              </p>
+            </div>
+          ) : null}
+          {wi ? null : (
           <Field label={NETWORK_LABELS[provider] || "Network"} htmlFor="cl-net" hint={network?.cidr || ""}>
             <select id="cl-net" className="sg-cb-input" value={cloud.networkId}
                     onChange={(e) => set({ networkId: e.target.value, subnetId: "", subnetIds: [] })}>
@@ -226,6 +244,8 @@ export default function CloudMachines({
               ))}
             </select>
           </Field>
+          )}
+          {wi ? null : (
           <Field label="Subnet" htmlFor="cl-sub"
                  hint={subnet ? [subnet.cidr, subnet.zone ? `in ${subnet.zone}` : "regional"].filter(Boolean).join(" · ") : ""}>
             <select id="cl-sub" className="sg-cb-input" value={cloud.subnetId}
@@ -239,6 +259,7 @@ export default function CloudMachines({
               ))}
             </select>
           </Field>
+          )}
           {needsZone(provider, managed, cloud) ? (
             <Field label={zoneLabel} htmlFor="cl-zone"
                    hint={subnet?.zone ? `Set by the subnet, which lives in ${subnet.zone}.` : ""}>
@@ -252,7 +273,26 @@ export default function CloudMachines({
         </div>
       </div>
 
-      {!vmsOnly ? (
+      {wi ? (
+        <div className="card sg-cb-card">
+          <div className="sg-cb-sect"><h2>Owner and expiry</h2></div>
+          <p className="muted sg-cb-pv-lede">
+            Tagged on the cluster. A cluster past its expiry date is deleted after a reminder.
+          </p>
+          <div className="sg-cb-qgrid">
+            <Field label="Owner (work email)" htmlFor="cl-owner">
+              <input id="cl-owner" className="sg-cb-input" type="email" value={cloud.ownerEmail || ""}
+                     placeholder="name@areeba.com" onChange={(e) => set({ ownerEmail: e.target.value.trim() })} />
+            </Field>
+            <Field label="Expires on" htmlFor="cl-expiry">
+              <input id="cl-expiry" className="sg-cb-input" type="date" value={cloud.expiresOn || ""}
+                     onChange={(e) => set({ expiresOn: e.target.value })} />
+            </Field>
+          </div>
+        </div>
+      ) : null}
+
+      {!vmsOnly && !wi ? (
         <div className="card sg-cb-card">
           <div className="sg-cb-sect"><h2>Who runs Kubernetes</h2></div>
           <div className="sg-cb-choices">
@@ -385,6 +425,7 @@ export default function CloudMachines({
         ) : null}
       </div>
 
+      {wi ? (problem ? <p className="sg-cb-field-hint">{problem}</p> : null) : (
       <div className="card sg-cb-card">
         <div className="sg-cb-sect"><h2>Who may reach them</h2></div>
         <Field
@@ -399,6 +440,7 @@ export default function CloudMachines({
         </Field>
         {problem ? <p className="sg-cb-field-hint">{problem}</p> : null}
       </div>
+      )}
 
       {!managed && machines.length ? (
         <div className="card sg-cb-card">

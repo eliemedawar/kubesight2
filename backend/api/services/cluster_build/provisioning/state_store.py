@@ -107,14 +107,34 @@ def write_state(build_id: int, text: str, *, lock_id: Optional[str] = None) -> C
         db.session.rollback()
         raise StateLocked(row.lock_info_json)
     row.state_cipher = encrypt_secret(text)
-    row.serial = document.get("serial") if isinstance(document.get("serial"), int) else row.serial
-    row.lineage = str(document.get("lineage") or row.lineage or "")[:64] or None
-    row.resource_count = _count_resources(document)
-    row.vm_count = _count_vms(document)
+    if is_encrypted(document):
+        # OpenTofu's state encryption (K15): an opaque blob the backend never
+        # opens. The counts come from the provisioner Job's facts report
+        # (``set_resource_count``), not from the state.
+        row.vm_count = 0
+    else:
+        row.serial = document.get("serial") if isinstance(document.get("serial"), int) else row.serial
+        row.lineage = str(document.get("lineage") or row.lineage or "")[:64] or None
+        row.resource_count = _count_resources(document)
+        row.vm_count = _count_vms(document)
     row.version = (row.version or 0) + 1
     row.updated_at = _utcnow()
     db.session.commit()
     return row
+
+
+def is_encrypted(document: Dict[str, Any]) -> bool:
+    """An OpenTofu state written with state encryption on."""
+    return "encrypted_data" in document and "resources" not in document
+
+
+def set_resource_count(build_id: int, count: int) -> None:
+    """What exists, as the provisioner Job reported it (the state itself may
+    be encrypted). Leaves the transaction to the caller."""
+    row = _row(build_id, create=True)
+    row.resource_count = max(0, int(count or 0))
+    row.vm_count = 0
+    row.updated_at = _utcnow()
 
 
 def delete_state(build_id: int, *, lock_id: Optional[str] = None) -> None:

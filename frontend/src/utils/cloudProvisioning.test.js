@@ -21,6 +21,7 @@ import {
   resolveCloud,
   whereCreated,
   withCloudBus,
+  WI_OCI_SHAPE,
 } from "./cloudProvisioning.js";
 
 const INVENTORY = {
@@ -294,5 +295,39 @@ describe("needsZone", () => {
     expect(needsZone("gcp", true, { regional: true })).toBe(false);
     expect(needsZone("aws", true)).toBe(false);
     expect(needsZone("oci", true)).toBe(false);
+  });
+});
+
+describe("OKE by workload identity", () => {
+  const inventory = {
+    workloadIdentity: true,
+    region: "me-dubai-1",
+    compartments: [{ id: "ocid1.compartment.oc1..uat", name: "K8s-UAT" }],
+    zones: [{ id: "wchx:ME-DUBAI-1-AD-1" }],
+    networks: [{ id: "ocid1.vcn.x", name: "uat", cidr: "10.43.20.0/24",
+      subnets: [{ id: "ocid1.subnet.workers", name: "workers", cidr: "10.43.20.192/26" }] }],
+    images: [],
+    kubernetesVersions: ["v1.36.4"],
+  };
+
+  it("forces OKE on E6 in the platform's compartment, with an expiry", () => {
+    const next = defaultCloudChoices(inventory, { ...EMPTY_CLOUD }, "oci");
+    expect(next.kind).toBe("managed");
+    expect(next.shape).toBe(WI_OCI_SHAPE);
+    expect(next.compartmentId).toBe("ocid1.compartment.oc1..uat");
+    expect(next.expiresOn).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it("asks for the owner before a plan", () => {
+    const cloud = defaultCloudChoices(inventory, { ...EMPTY_CLOUD, accountId: "1", region: "me-dubai-1" }, "oci");
+    const resolved = resolveCloud(inventory, cloud);
+    expect(cloudProblem({ provider: "oci", account: { id: 1 }, cloud, inventory, resolved })).toMatch(/owner/);
+    const ok = { ...cloud, ownerEmail: "emedawer@areeba.com" };
+    expect(cloudProblem({ provider: "oci", account: { id: 1 }, cloud: ok, inventory, resolved })).toBeFalsy();
+    const payload = cloudProvisioningPayload({ provider: "oci", cloud: ok, resolved, counts: { worker: 2 },
+      sizes: { worker: { cpu: 4, memoryGb: 16, diskGb: 50 } } });
+    expect(payload.ownerEmail).toBe("emedawer@areeba.com");
+    expect(payload.shape).toBe(WI_OCI_SHAPE);
+    expect(payload.kind).toBe("managed");
   });
 });

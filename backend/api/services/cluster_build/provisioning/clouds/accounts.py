@@ -229,6 +229,8 @@ def regions(account_id: int, *, refresh: bool = False) -> List[Dict[str, Any]]:
     row = get_row(account_id)
     module = adapter(row.provider)
     if simulated():
+        if row.provider == "oci" and (row.settings_json or {}).get("authMode") == "workload_identity":
+            return [{"id": row.region, "name": row.region}]
         return module.simulated_regions()
     return _cached((row.id, "regions", ""), refresh, lambda: module.regions(view(row)))
 
@@ -242,6 +244,9 @@ def inventory(account_id: int, region: str, scope: Optional[Dict[str, Any]] = No
         raise ValueError("Choose a region.")
     scope = {k: v for k, v in (scope or {}).items() if v}
     if simulated():
+        if row.provider == "oci" and (row.settings_json or {}).get("authMode") == "workload_identity":
+            from . import oci_wi
+            return oci_wi.simulated_inventory(view(row), region)
         return module.simulated_inventory(region, scope)
     key = (row.id, region, json.dumps(scope, sort_keys=True))
     return _cached(key, refresh, lambda: module.inventory(view(row), region, scope))

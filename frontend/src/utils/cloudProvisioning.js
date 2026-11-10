@@ -146,7 +146,18 @@ export const EMPTY_CLOUD = {
   regional: false,
   shape: DEFAULT_OCI_SHAPE,
   nodeImageId: "",
+  // OKE by workload identity: the cluster's owner and expiry (freeform tags).
+  ownerEmail: "",
+  expiresOn: "",
 };
+
+/** The only node shape on an OKE workload-identity install (K9). */
+export const WI_OCI_SHAPE = "VM.Standard.E6.Flex";
+
+function inDays(days) {
+  const date = new Date(Date.now() + days * 86400000);
+  return date.toISOString().slice(0, 10);
+}
 
 /** Fill blanks from what the cloud offers: the likeliest sane choice for each. */
 export function defaultCloudChoices(inventory, current = EMPTY_CLOUD, provider = "") {
@@ -178,6 +189,14 @@ export function defaultCloudChoices(inventory, current = EMPTY_CLOUD, provider =
   if (provider === "oci" && !next.compartmentId) {
     next.compartmentId = inventory.compartments?.[0]?.id || "";
   }
+  if (inventory.workloadIdentity) {
+    // The platform's landing zone: one compartment, one VCN, OKE only, E6 only.
+    next.kind = "managed";
+    next.shape = WI_OCI_SHAPE;
+    next.machineTypes = {};
+    next.compartmentId = inventory.compartments?.[0]?.id || next.compartmentId;
+    if (!next.expiresOn) next.expiresOn = inDays(14);
+  }
   return next;
 }
 
@@ -202,6 +221,11 @@ export function cloudProblem({ provider, account, cloud, inventory, resolved, vm
   if (needsZone(provider, managed, cloud) && !resolved.subnet.zone && !cloud.zone) return `Choose the ${(ZONE_LABELS[provider] || "zone").toLowerCase()}.`;
   if (!managed && !resolved.image) return "Choose the image the machines start from.";
   if (managed && !cloud.kubernetesVersion) return "Choose the Kubernetes version.";
+  if (inventory.workloadIdentity) {
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(cloud.ownerEmail || "")) return "Give the cluster's owner (a work email).";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(cloud.expiresOn || "")) return "Give the cluster's expiry date.";
+    return "";
+  }
   if (managed && provider === "aws") {
     const error = awsManagedSubnetError(resolved.network.subnets, cloud.subnetIds);
     if (error) return error;
@@ -247,6 +271,10 @@ export function cloudProvisioningPayload({ provider, cloud, resolved, counts, si
     payload.compartmentId = cloud.compartmentId;
     payload.shape = cloud.shape || DEFAULT_OCI_SHAPE;
     if (managed && cloud.nodeImageId) payload.nodeImageId = cloud.nodeImageId;
+    if (cloud.ownerEmail || cloud.expiresOn) {
+      payload.ownerEmail = cloud.ownerEmail;
+      payload.expiresOn = cloud.expiresOn;
+    }
   }
   return payload;
 }
@@ -273,6 +301,8 @@ export function cloudFromSpec(spec) {
     regional: Boolean(spec.regional),
     shape: spec.shape || DEFAULT_OCI_SHAPE,
     nodeImageId: spec.nodeImageId || "",
+    ownerEmail: spec.ownerEmail || "",
+    expiresOn: spec.expiresOn || "",
   };
 }
 

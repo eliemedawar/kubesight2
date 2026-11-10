@@ -98,6 +98,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 # Windows CRLF breaks shebang — normalize and invoke via sh explicitly
 RUN sed -i 's/\r$//' /app/k8s_entrypoint.sh && chmod +x /app/k8s_entrypoint.sh
+# kubectl's exec plugin for OKE clusters made by workload identity: KubeSight
+# stores no token for them, this makes a short-lived one each time (K20).
+RUN printf '#!/bin/sh\nexec python /app/kubesight_oke_token.py "$@"\n' > /usr/local/bin/kubesight-oke-token \
+    && chmod 0755 /usr/local/bin/kubesight-oke-token \
+    && printf '#!/bin/sh\nexec python /app/kubesight_helm_guard.py "$@"\n' > /usr/local/bin/kubesight-helm-guard \
+    && chmod 0755 /usr/local/bin/kubesight-helm-guard
 
 ENV PYTHONUNBUFFERED=1
 EXPOSE 5000

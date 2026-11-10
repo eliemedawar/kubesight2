@@ -96,3 +96,80 @@ subjects:
     namespace: {{ $ns }}
 {{- end }}
 {{- end }}
+{{- if .Values.oke.provisioner.serviceAccount }}
+---
+# OKE clusters (Oracle Cloud): the identity OCI's workload-identity policy lets
+# create and delete clusters, node pools and NSGs. Only the Jobs the backend
+# launches from its fixed template run as it; it has no Kubernetes rights.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubesight-provisioner
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" (dict "root" . "module" "kubesight-provisioner") | nindent 4 }}
+automountServiceAccountToken: false
+{{- end }}
+{{- if .Values.oke.workloadIdentity.enabled }}
+---
+# The backend launches and watches provisioner Jobs in its own namespace
+# (also covered by the deployer ClusterRole when rbac.clusterWide is on).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubesight-backend-provisioner-launcher
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" (dict "root" . "module" "kubesight-backend") | nindent 4 }}
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [""]
+    resources: [pods, pods/log]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubesight-backend-provisioner-launcher
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" (dict "root" . "module" "kubesight-backend") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubesight-backend-provisioner-launcher
+subjects:
+  - kind: ServiceAccount
+    name: kubesight-backend
+    namespace: {{ $ns }}
+---
+# The provisioner Jobs sign in to the backend with a projected token
+# (audience kubesight-backend); the backend checks it with a TokenReview.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}-backend-tokenreview
+  labels:
+    {{- include "kubesight.labels" (dict "root" . "module" "kubesight-backend") | nindent 4 }}
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}-backend-tokenreview
+  labels:
+    {{- include "kubesight.labels" (dict "root" . "module" "kubesight-backend") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}-backend-tokenreview
+subjects:
+  - kind: ServiceAccount
+    name: kubesight-backend
+    namespace: {{ $ns }}
+{{- end }}

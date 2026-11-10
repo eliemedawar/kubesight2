@@ -15,11 +15,12 @@ Who may do what (the routes add the permission check):
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ....db import db
 from ....models import ClusterBuild, ClusterInfraState, ClusterProvisionJob, VSphereConnection
+from . import remote
 from . import cloud_build, inventory, ip_pool, jobs, state_store, templates, tofu_runner
 
 _NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,48}[a-z0-9])?$")
@@ -547,6 +548,9 @@ def request_destroy(build: ClusterBuild, payload: Dict[str, Any], *, actor: str 
     reason = str(payload.get("reason") or "").strip()[:1000] or None
     _require_no_open_job(build, supersede_planned=True)
     job = _new_job(build, "destroy", actor=actor, user=user, reason=reason)
+    if remote.is_remote(build):
+        # K13: every destroy is approved against its plan by a second person.
+        direct = False
     if direct:
         job.auto_apply = True
         job.approved_by = actor or None
@@ -562,6 +566,8 @@ def request_destroy(build: ClusterBuild, payload: Dict[str, Any], *, actor: str 
 
 
 def apply_plan(build: ClusterBuild, job: ClusterProvisionJob, *, actor: str = "", user=None) -> ClusterProvisionJob:
+    if remote.is_remote_job(job):
+        raise ValueError("This plan is applied once a second person, signed in with MFA, approves its hash.")
     if job.operation == "destroy":
         raise ValueError("A destroy plan is applied by approving it — and not by the person who asked.")
     if job.status != "planned":
@@ -587,8 +593,66 @@ def apply_plan(build: ClusterBuild, job: ClusterProvisionJob, *, actor: str = ""
     return job
 
 
+def approve_plan_hash(build: ClusterBuild, job: ClusterProvisionJob, *, actor: str = "", user=None,
+                      note: str = "", plan_sha256: str = "") -> ClusterProvisionJob:
+    """K13: a second DevOps person, signed in with MFA and never the requester,
+    approves one exact plan (its sha256). The apply Job applies only that file;
+    a new plan needs a new approval; an old plan cannot be approved."""
+    # One decision at a time: a concurrent discard, reject or second approve
+    # waits for this row and then finds it decided.
+    job = ClusterProvisionJob.query.filter_by(id=job.id).with_for_update().one()
+    if job.status != "awaiting_approval":
+        raise ValueError("There is no plan waiting for approval.")
+    if user is None or getattr(user, "id", None) is None:
+        raise PermissionError("Sign in to approve.")
+    if ((job.requested_by_user_id is not None and job.requested_by_user_id == user.id)
+            or (job.requested_by_user_id is None and job.requested_by and job.requested_by == actor)):
+        remote.audit("approval-refused", job=job, build=build, reason="self-approval", by=actor)
+        raise PermissionError("You asked for this change, so someone else has to approve it.")
+    if not getattr(user, "mfa_enabled", False):
+        remote.audit("approval-refused", job=job, build=build, reason="no MFA", by=actor)
+        raise PermissionError("Approving needs a second factor: turn on MFA for your account first.")
+    asked = str(plan_sha256 or "").strip().lower()
+    if not job.plan_sha256 or asked != job.plan_sha256:
+        remote.audit("approval-refused", job=job, build=build, reason="hash mismatch", by=actor)
+        raise ValueError("The plan you approved is not the saved plan (its hash differs). Reload and read it again.")
+    latest = jobs.open_job(build.id)
+    if latest is None or latest.id != job.id:
+        raise ValueError("A newer plan replaced this one.")
+    planned_at = remote.planned_at(job)
+    if planned_at is not None and _utcnow() - planned_at > timedelta(hours=remote.approval_hours()):
+        remote.audit("approval-refused", job=job, build=build, reason="expired", by=actor)
+        raise ValueError("This plan is too old to approve. Make a new plan.")
+    if (job.plan_summary_json or {}).get("blocked"):
+        raise ValueError(job.plan_summary_json["blocked"])
+    if build.status in _BUSY_BUILD_STATUSES:
+        raise ValueError(f"Wait: the build is '{build.status}'.")
+    job.approved_by = actor or None
+    job.approved_by_user_id = user.id
+    job.approved_at = _utcnow()
+    job.approved_plan_sha256 = job.plan_sha256
+    job.decision_note = (note or "").strip()[:1000] or None
+    job.applied_by = actor or None
+    job.applied_by_user_id = user.id
+    job.status = "applying"
+    job.prior_build_status = build.status
+    if job.operation == "destroy":
+        build.status = "destroying"
+    elif job.operation == "create":
+        build.status = "provisioning"
+        build.error = None
+    jobs._sync_build_status(build, job)
+    db.session.commit()
+    remote.audit("approved", job=job, build=build, by=actor, note=job.decision_note)
+    jobs.start_worker(job.id, "apply")
+    db.session.refresh(job)
+    return job
+
+
 def approve_destroy(build: ClusterBuild, job: ClusterProvisionJob, *, actor: str = "", user=None,
-                    note: str = "") -> ClusterProvisionJob:
+                    note: str = "", plan_sha256: str = "") -> ClusterProvisionJob:
+    if remote.is_remote_job(job):
+        return approve_plan_hash(build, job, actor=actor, user=user, note=note, plan_sha256=plan_sha256)
     if job.operation != "destroy" or job.status != "awaiting_approval":
         raise ValueError("There is no destroy request waiting for approval.")
     if (user is not None and job.requested_by_user_id and job.requested_by_user_id == user.id
@@ -618,6 +682,19 @@ def approve_destroy(build: ClusterBuild, job: ClusterProvisionJob, *, actor: str
 
 def reject_destroy(build: ClusterBuild, job: ClusterProvisionJob, *, actor: str = "", user=None,
                    note: str = "") -> ClusterProvisionJob:
+    if remote.is_remote_job(job) and job.status == "awaiting_approval":
+        if user is not None and job.requested_by_user_id == user.id:
+            raise PermissionError("Withdraw your own request instead of rejecting it.")
+        job.status = "rejected"
+        job.plan_cipher = None
+        job.decision_note = (note or "").strip()[:1000] or None
+        job.approved_by = actor or None
+        job.approved_by_user_id = getattr(user, "id", None)
+        job.finished_at = _utcnow()
+        jobs._sync_build_status(build, job)
+        db.session.commit()
+        remote.audit("rejected", job=job, build=build, by=actor)
+        return job
     if job.operation != "destroy" or job.status != "awaiting_approval":
         raise ValueError("There is no destroy request waiting for a decision.")
     if user is not None and job.requested_by_user_id == user.id:
@@ -637,7 +714,8 @@ def discard(build: ClusterBuild, job: ClusterProvisionJob, *, actor: str = "", u
     """Throw away a plan (or withdraw a destroy request) that was never applied."""
     if job.status not in ("planned", "plan_failed", "awaiting_approval"):
         raise ValueError(f"A job that is '{job.status}' cannot be discarded.")
-    if job.status == "awaiting_approval" and user is not None and job.requested_by_user_id not in (None, user.id):
+    if (job.status == "awaiting_approval" and user is not None
+            and job.requested_by_user_id not in (None, user.id)):
         raise PermissionError("Only the person who asked can withdraw a destroy request; others reject it.")
     job.status = "discarded"
     job.plan_cipher = None

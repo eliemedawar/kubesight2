@@ -20,3 +20,5 @@ pyvmomi>=8.0.3,<10
 fpdf2>=2.8.0,<3.0.0
 # Every CI test/coverage report is untrusted XML; parsed only through defusedxml.
 defusedxml>=0.7,<1
+# OKE workload identity (Oracle Cloud without API keys): the SDK's signer only.
+oci>=2.111.0,<3
