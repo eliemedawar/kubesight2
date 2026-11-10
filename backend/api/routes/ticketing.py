@@ -918,10 +918,29 @@ def _refuse_unverified_inbound(provider):
     return inbound_secret_refusal(provider.sync, provider.name, provided)
 
 
+def _delivery_body():
+    """(payload, is_check) for an inbound POST.
+
+    Zoho Desk checks a webhook URL, when one is created or moved, with a POST
+    whose body is ``{}`` sent as ``application/x-www-form-urlencoded`` (seen on
+    the wire 2026-11-10, User-Agent ``DeskWebhook``), and refuses the webhook
+    unless it gets a 200. So the body is parsed whatever the Content-Type says,
+    and an empty one is that check: answered 200 and never processed (it would
+    otherwise be recorded as an empty ticket, or refused as "no JSON body").
+    """
+    payload = request.get_json(force=True, silent=True)
+    is_check = payload in (None, {}, []) and request.get_data(cache=True).strip() in (b"", b"{}", b"[]")
+    return payload, is_check
+
+
+def _check_answer(provider):
+    return success_response({"ok": True, "provider": provider.key, "check": True})
+
+
 @ticketing_bp.route("/<provider_key>/inbound", methods=["GET"])
 @ticketing_bp.route("/<provider_key>/inbound/comment", methods=["GET"])
 def inbound_validation(provider_key: str):
-    """Zoho Desk checks a webhook URL with a GET (and refuses the webhook
+    """A URL check sent as a GET (and refuses the webhook
     unless it answers 200) when the webhook is created or moved. Nothing is
     processed, so no secret is needed to answer it."""
     provider = _provider(provider_key)
@@ -964,7 +983,9 @@ def inbound_webhook(provider_key: str):
     refused = _refuse_unverified_inbound(provider)
     if refused is not None:
         return refused
-    payload = request.get_json(silent=True)
+    payload, is_check = _delivery_body()
+    if is_check:
+        return _check_answer(provider)
     if payload is None:
         payload = {}
     if not isinstance(payload, (dict, list)):
@@ -988,7 +1009,9 @@ def inbound_comment_webhook(provider_key: str):
     refused = _refuse_unverified_inbound(provider)
     if refused is not None:
         return refused
-    payload = request.get_json(silent=True)
+    payload, is_check = _delivery_body()
+    if is_check:
+        return _check_answer(provider)
     if payload is None:
         return error_response("Expected a JSON body.", 400)
     return success_response({"comments": _handle_comment_webhook(provider.key, payload)})

@@ -259,6 +259,10 @@ networkPolicies:
     # requests) and Git over HTTPS (CHG-KS-011).
     - {name: api.bitbucket.org}
     - {name: bitbucket.org}
+    # Zoho Desk (.com data centre): OAuth token refresh, then the Desk API
+    # for field sync, ticket write-back and webhook registration.
+    - {name: accounts.zoho.com}
+    - {name: desk.zoho.com}
   backendEgressCIDRs:
     # Nexus registry.areeba.com: the image check before every deploy and the
     # registry test in Integrations, Docker API on 443, and on 9443 and 4443,

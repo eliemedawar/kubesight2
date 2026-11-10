@@ -1,0 +1,23 @@
+# Header handling on kubesight-gateway. Applied with kubectl, like the rest of
+# this folder.
+#
+# Envoy Gateway's default is to REJECT any request carrying a header whose
+# name has an underscore, with a 400 that never reaches KubeSight. Zoho Desk
+# sends one on every webhook call (`Zsec_user_import_url: true`), so its
+# webhook check failed and "Set up in Zoho Desk" could never register the
+# webhooks. Dropping the header instead lets the request through; KubeSight
+# does not read it.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: kubesight-client-traffic
+  namespace: kubesight
+  labels:
+    areeba.com/module: kubesight-frontend
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: kubesight-gateway
+  headers:
+    withUnderscoresAction: DropHeader

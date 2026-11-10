@@ -184,6 +184,47 @@ def test_desk_validation_get_answers_200(client, path):
     assert client.get(path).status_code == 200
 
 
+@pytest.mark.parametrize("path", ("/api/ticketing/zoho/inbound", "/api/ticketing/zoho/inbound/comment"))
+def test_desk_validation_post_answers_200_and_records_nothing(desk, client, path):
+    # What Desk really sends when a webhook is created (seen on the wire
+    # 2026-11-10): a POST of "{}" labelled as a form, User-Agent DeskWebhook.
+    zoho_sync_service.update_config({"inboundSecret": "s"})
+    res = client.post(
+        f"{path}?secret=s",
+        data="{}",
+        content_type="application/x-www-form-urlencoded",
+        headers={"User-Agent": "DeskWebhook"},
+    )
+    assert res.status_code == 200
+    assert res.get_json()["data"]["check"] is True
+    from api.models import ZohoInboundTicket
+
+    assert ZohoInboundTicket.query.count() == 0
+
+
+def test_desk_validation_post_still_needs_the_secret(desk, client):
+    zoho_sync_service.update_config({"inboundSecret": "s"})
+    res = client.post(
+        "/api/ticketing/zoho/inbound?secret=wrong",
+        data="{}",
+        content_type="application/x-www-form-urlencoded",
+    )
+    assert res.status_code == 401
+
+
+def test_a_json_event_list_sent_as_a_form_is_still_read(desk, client):
+    zoho_sync_service.update_config({"inboundSecret": "s"})
+    body = '[{"eventType": "Ticket_Add", "payload": {"id": "T-5", "ticketNumber": "5"}}]'
+    res = client.post(
+        "/api/ticketing/zoho/inbound?secret=s", data=body, content_type="application/x-www-form-urlencoded"
+    )
+    assert res.status_code == 200
+    assert len(res.get_json()["data"]["tickets"]) == 1
+    from api.models import ZohoInboundTicket
+
+    assert ZohoInboundTicket.query.filter_by(ticket_id="T-5").one().ticket_number == "5"
+
+
 def test_a_desk_event_list_is_resolved_per_ticket_on_the_layout_only(desk, client):
     zoho_sync_service.update_config({"inboundSecret": "s"})
     body = [

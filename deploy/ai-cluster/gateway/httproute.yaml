@@ -20,6 +20,11 @@ spec:
   rules:
     - matches:
         - path: {type: PathPrefix, value: /}
+      # Envoy's default is 15s. Calls that wait on another system (Zoho Desk
+      # checks a webhook URL before it answers "Set up in Zoho Desk") run
+      # longer and came back as 504 while the backend was still working.
+      timeouts:
+        request: 120s
       backendRefs:
         # Plain HTTP: the gateway ends TLS (no BackendTLSPolicy).
         - name: frontend-service
