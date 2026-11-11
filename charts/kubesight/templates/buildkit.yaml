@@ -9,8 +9,26 @@ metadata:
     {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-buildkit") | nindent 4 }}
 automountServiceAccountToken: false
 ---
+# BuildKit sizes its cache clean-up from the disk under the cache, not from the
+# cache's own limit: with no limits here an emptyDir cache grows past its
+# sizeLimit and the kubelet evicts the builder mid-build. Rootless buildkitd
+# reads ~/.config/buildkit/buildkitd.toml on its own.
+{{- $toml := include "kubesight.buildkitToml" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: buildkitd-config
+  namespace: {{ .namespace }}
+  labels:
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-buildkit") | nindent 4 }}
+data:
+  buildkitd.toml: |
+    {{- $toml | nindent 4 }}
+---
 apiVersion: apps/v1
-kind: Deployment
+{{- /* With persistence each builder keeps its cache on its own volume: a
+StatefulSet, one claim per builder. Without, a Deployment and an emptyDir. */}}
+kind: {{ if .persistence.enabled }}StatefulSet{{ else }}Deployment{{ end }}
 metadata:
   name: buildkitd
   namespace: {{ .namespace }}
@@ -21,9 +39,20 @@ spec:
   # Image stages use the first builder that answers from its own node, so a
   # second replica on another node is the failover.
   replicas: {{ .replicas }}
+  {{- if .persistence.enabled }}
+  serviceName: buildkitd-pods
+  # Both builders start together; an update still replaces one at a time, so
+  # it never needs room for a third pod.
+  podManagementPolicy: Parallel
+  # The cache is disposable: its claims go with the builders.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Delete
+    whenScaled: Delete
+  {{- else }}
   {{- with .strategy }}
   strategy:
     {{- toYaml . | nindent 4 }}
+  {{- end }}
   {{- end }}
   selector:
     matchLabels:
@@ -33,15 +62,22 @@ spec:
       labels:
         app: buildkitd
         {{- with include "kubesight.podLabels" (dict "root" $ "module" "kubesight-buildkit") }}{{ . | nindent 8 }}{{ end }}
-      {{- /* Kubernetes 1.30+ takes securityContext.appArmorProfile instead. */ -}}
-      {{- if not (hasKey .securityContext "appArmorProfile") }}
       annotations:
+        checksum/config: {{ $toml | sha256sum }}
+        {{- /* Kubernetes 1.30+ takes securityContext.appArmorProfile instead. */}}
+        {{- if not (hasKey .securityContext "appArmorProfile") }}
         container.apparmor.security.beta.kubernetes.io/buildkitd: unconfined
-      {{- end }}
+        {{- end }}
     spec:
       serviceAccountName: buildkitd
       automountServiceAccountToken: false
       enableServiceLinks: false
+      {{- if .persistence.enabled }}
+      # A new volume is root's: the group lets uid 1000 write the cache.
+      securityContext:
+        fsGroup: {{ .securityContext.runAsGroup | default 1000 }}
+        fsGroupChangePolicy: OnRootMismatch
+      {{- end }}
       {{- with .hostAliases }}
       hostAliases:
         {{- toYaml . | nindent 8 }}
@@ -78,10 +114,35 @@ spec:
           volumeMounts:
             - name: cache
               mountPath: /home/user/.local/share/buildkit
+            - name: config
+              mountPath: /home/user/.config/buildkit/buildkitd.toml
+              subPath: buildkitd.toml
+              readOnly: true
       volumes:
+        - name: config
+          configMap:
+            name: buildkitd-config
+        {{- if not .persistence.enabled }}
         - name: cache
           emptyDir:
             sizeLimit: {{ .cacheSize }}
+        {{- end }}
+  {{- if .persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: cache
+        labels:
+          {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-buildkit") | nindent 10 }}
+          kubesight.io/purpose: buildkit-cache
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .persistence.storageClass }}
+        storageClassName: {{ if eq . "-" }}""{{ else }}{{ . }}{{ end }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .persistence.size }}
+  {{- end }}
 ---
 apiVersion: v1
 kind: Service

@@ -63,12 +63,24 @@ the other.
 
 Each builder may use up to 4Gi of memory (8Gi of the 10Gi) and 2 CPU.
 
-## The layer cache is disposable
+## The layer cache has a volume of its own
 
-The cache lives in an `emptyDir` of up to 10Gi on the node's disk, so it is
-lost when a builder restarts. That costs only time: the next build pulls and
-rebuilds its layers. It also avoids a volume claim in a namespace that has
-two.
+Until CHG-KS-018 the cache was an `emptyDir` of up to 10Gi on the node's disk,
+with no clean-up limits. BuildKit sizes its clean-up from the disk under the
+cache, the node's whole disk, not the 10Gi, so the cache grew past the
+limit and on 2026-11-11 the kubelet evicted a builder mid-build ("Usage of
+EmptyDir volume "cache" exceeds the limit "10Gi"").
+
+Now `buildkitd` is a StatefulSet and each builder has its own 50Gi block
+volume (`oci-bv`, the smallest OCI volume; the two use the namespace's 2
+claims and 100Gi). The cache is no longer node scratch space, so the kubelet
+never evicts a builder over it, and it survives restarts, so builds stay
+fast. `buildkitd.toml` (ConfigMap `buildkitd-config`) trims it to 35GB and
+keeps 10GB of the volume free for the build in progress.
+
+The cache is still disposable: the claims go when the StatefulSet or a
+replica goes (`persistentVolumeClaimRetentionPolicy: Delete`), and a lost
+cache only costs the next build its time.
 
 ## Network
 

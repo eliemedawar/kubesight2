@@ -44,6 +44,26 @@ commonLabels stay off pods: a new change ID would otherwise restart them all.
 {{- if and .Values.ci.enabled .Values.buildkit.enabled }}true{{ end -}}
 {{- end -}}
 
+{{/* buildkitd.toml, from buildkit.gc (called with .Values.buildkit). */}}
+{{- define "kubesight.buildkitToml" -}}
+[worker.oci]
+  gc = true
+{{- with .gc }}
+{{- with .reservedSpace }}
+  # Never trim the cache below this.
+  reservedSpace = {{ . | quote }}
+{{- end }}
+{{- with .maxUsedSpace }}
+  # Trim anything above this.
+  maxUsedSpace = {{ . | quote }}
+{{- end }}
+{{- with .minFreeSpace }}
+  # Trim until the cache's disk has this much free.
+  minFreeSpace = {{ . | quote }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
 {{/* registry/repository:tag for a KubeSight image (dict "root" . "repo" name). */}}
 {{- define "kubesight.image" -}}
 {{- $tag := required "image.tag is required: the KubeSight release to run, e.g. --set image.tag=1.2.0" .root.Values.image.tag -}}

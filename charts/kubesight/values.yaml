@@ -311,7 +311,28 @@ buildkit:
   # The Deployment's update strategy, e.g. {type: RollingUpdate, rollingUpdate:
   # {maxSurge: 0, maxUnavailable: 1}} when the quota has no room for a third pod.
   strategy: {}
+  # The layer cache's emptyDir limit (ignored with persistence.enabled).
   cacheSize: 10Gi
+  # Cache clean-up (buildkitd.toml). Without limits BuildKit works them out
+  # from the whole disk under the cache (for an emptyDir, the node's disk),
+  # so the cache outgrows cacheSize and the kubelet evicts the builder
+  # mid-build. Keep maxUsedSpace well under the room the cache has: clean-up
+  # runs between builds, and the build in progress needs the rest. "" leaves
+  # a setting to BuildKit. minFreeSpace only makes sense on a volume of the
+  # cache's own (persistence), where "free" is the cache's own disk.
+  gc:
+    reservedSpace: 2GB
+    maxUsedSpace: 6GB
+    minFreeSpace: ""
+  # Each builder keeps its cache on a volume of its own (a StatefulSet with
+  # one claim per builder) instead of an emptyDir: the cache survives restarts
+  # and is not node scratch space, so the kubelet never evicts a builder over
+  # it. Raise gc with the size. storageClass: "" = the cluster default,
+  # "-" = none (a pre-made PV).
+  persistence:
+    enabled: false
+    size: 50Gi
+    storageClass: ""
   # Registry ports buildkitd pushes to and pulls from.
   egressPorts: [443, 8443, 8082, 5000, 9443]
   hostAliases: []
