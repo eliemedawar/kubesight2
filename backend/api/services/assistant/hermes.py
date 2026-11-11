@@ -14,9 +14,11 @@ the no-tools one Application Intelligence uses, and a chat that cannot look at
 anything would answer from guesses.
 
 Hermes' chat endpoint is stateless — the conversation so far travels in
-``messages`` with every turn. ``X-Hermes-Session-Key`` only scopes Hermes'
-long-term memory, one scope per admin, so chat never lands in the ticket
-agent's memory (or another admin's).
+``messages`` with every turn. ``X-Hermes-Session-Key`` names the conversation
+(one per admin) for Hermes and for an external memory provider if one is set
+up. It does NOT separate Hermes' built-in memory: MEMORY.md is one per Hermes
+profile, shared on purpose by every admin, Telegram and the ticket agent, so
+what one of them teaches Hermes the others benefit from.
 """
 
 from __future__ import annotations
@@ -53,6 +55,13 @@ try to approve anything yourself.
 
 The administrator's screen is described below (page, cluster, namespace). When they say "this
 pod", "here" or "this cluster", they mean what is on that screen.
+
+You have a long-term memory (the memory tool), shared with the ticket agent and Telegram. Save one
+short line when you learn something durable and verified that will save time later — how the team
+names things, where something runs, a recurring failure and its cause, a preference the
+administrator states — and fix or remove a note that turned out wrong. Never save secrets,
+passwords or tokens. A note is a hint: read live state before acting on it.
+kubesight_ticket_history shows how past tickets went (diagnoses, rejections, run errors).
 
 Reply in Markdown: short paragraphs, bullet lists, `code` for names, fenced code blocks for YAML,
 logs and commands, a table when you list several resources. Lead with the answer; keep it short.

@@ -392,7 +392,9 @@ hermes:
     fallback_providers: []
     toolsets: []
     agent:
-      max_turns: 20
+      # Room for looking back (ticket history, past sessions) and saving a
+      # lesson on top of the investigation itself.
+      max_turns: 30
       gateway_timeout: 900
       api_max_retries: 1
       task_completion_guidance: false
@@ -400,12 +402,31 @@ hermes:
       coding_context: "off"
       reasoning_effort: low
       verbose: false
+    # Long-term memory: one MEMORY.md + USER.md per Hermes, on its volume,
+    # shown in every session's prompt and written with the memory tool. It is
+    # shared by the ticket agent, Telegram and every admin's chat on purpose
+    # (X-Hermes-Session-Key does not split it); the prompts and the KubeSight
+    # skill say what may be saved. Limits above Hermes' defaults (2200/1375)
+    # so lessons from tickets fit.
+    memory:
+      memory_enabled: true
+      user_profile_enabled: true
+      memory_char_limit: 6000
+      user_char_limit: 2000
     # kubesight = KubeSight's MCP server; skills lets Hermes read the
-    # KubeSight skill (without a skills tool it never lists the skill).
+    # KubeSight skill (without a skills tool it never lists the skill) and
+    # write its own (skill_manage); memory = its long-term notes;
+    # session_search = search its past conversations; todo = a task list
+    # within one task. All built in: nothing to install, no new egress.
+    # No terminal/file/code_execution: Hermes acts as KubeSight admin and
+    # reads requester text, so it gets no shell.
     platform_toolsets:
       api_server:
         - kubesight
         - skills
+        - memory
+        - session_search
+        - todo
   # Copy the KubeSight skill (files/hermes-skills/kubesight) into Hermes on
   # every start, so it always matches this release.
   installSkill: true

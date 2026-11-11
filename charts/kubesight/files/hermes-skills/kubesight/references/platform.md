@@ -66,6 +66,8 @@ you handle it end to end. You write every comment the requester sees.
 
 ```
 kubesight_ticket_get               {ticketRecordId: 88}   ← ticket + catalog + runs
+kubesight_ticket_history           {ticketRecordId?, query?, application?, environment?,
+                                    problemsOnly?, limit?}  ← past tickets like it, how each ended
 kubesight_ticket_execute           {ticketRecordId, action, environment, application,
                                     tag | variable+value, confidence, understanding, comment}
                                    or, for several applications:

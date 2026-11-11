@@ -191,7 +191,7 @@ def test_hermes_agent_role_is_the_ticket_agent_and_nothing_that_manages(app):
 def test_a_hermes_agent_token_sees_exactly_the_ticket_tools(client, app, admin_token):
     names = _tool_names(client, _hermes_token(client, app, admin_token))
     assert TICKET_AGENT_WRITE_TOOLS <= names
-    assert {"kubesight_ticket_get", "kubesight_tickets_list"} <= names
+    assert {"kubesight_ticket_get", "kubesight_tickets_list", "kubesight_ticket_history"} <= names
     # Integration management and every other domain stay out of reach.
     assert "kubesight_automation_run_start" not in names
     assert "kubesight_automation_run_cancel" not in names

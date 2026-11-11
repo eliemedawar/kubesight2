@@ -199,9 +199,11 @@ hermes:
     # server (chart default). Left open it loads every built-in tool, and some
     # install their packages from PyPI at first use, which egress drops.
     # skills: without it Hermes never sees the KubeSight skill (CHG-KS-007).
+    # memory, session_search, todo: built in, nothing to install (CHG-KS-017)
+    # — Hermes learns from tickets and chats; the memory is one, shared.
     platform_toolsets:
-      cli: [kubesight, skills]
-      telegram: [kubesight, skills]
+      cli: [kubesight, skills, memory, session_search, todo]
+      telegram: [kubesight, skills, memory, session_search, todo]
   persistence:
     size: 50Gi
     storageClass: oci-bv-retain

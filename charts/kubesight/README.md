@@ -143,7 +143,8 @@ The proxy must:
   read after `kubesight-secrets`, so its value wins for the backend, while Hermes keeps
   the generated key.
 - **Pass everything through as is.** That covers the request body, the
-  `X-Hermes-Session-Key` header (it keeps ticket text out of the operators' Hermes memory)
+  `X-Hermes-Session-Key` header (it names each conversation; Hermes' built-in memory is one,
+  shared by the ticket agent and the operators' chats)
   and the whole JSON response. KubeSight reads the response's `hermes` object to tell an
   unfinished run from an answer. If the proxy routes by model name, send `hermes-agent`
   and `hermes-analysis` to Hermes.
