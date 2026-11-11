@@ -24,6 +24,12 @@ Kubernetes, whoever asks.
 
 Active when the install runs OKE by workload identity
 (``KUBESIGHT_PROVISIONER_SERVICE_ACCOUNT`` set).
+
+``KUBESIGHT_ALLOW_SELF_DEPLOY`` (off by default) lets one change through on
+KubeSight's own cluster: ``kubectl apply -f`` of KubeSight's own Deployments
+(``KUBESIGHT_SELF_DEPLOY_DEPLOYMENTS``) whose every container runs one of its
+own images (``KUBESIGHT_SELF_DEPLOY_IMAGES`` prefixes), so its CI can roll it
+out. The provisioner checks above still apply to those manifests.
 """
 
 from __future__ import annotations
@@ -80,6 +86,54 @@ def _files(args: List[str]) -> List[str]:
     return out
 
 
+def self_deploy_allowed() -> bool:
+    """KUBESIGHT_ALLOW_SELF_DEPLOY: KubeSight's CI may roll out KubeSight itself
+    (its own Deployments, its own images) in its own namespace. Off by default:
+    K4 keeps that namespace read-only, because whoever changes the backend's
+    image also drives the provisioner Jobs the backend launches."""
+    return (os.getenv("KUBESIGHT_ALLOW_SELF_DEPLOY") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _csv(name: str, default: str) -> List[str]:
+    return [part.strip() for part in (os.getenv(name) or default).split(",") if part.strip()]
+
+
+def self_deploy_deployments() -> List[str]:
+    return _csv("KUBESIGHT_SELF_DEPLOY_DEPLOYMENTS", "kubesight-backend,kubesight-frontend")
+
+
+def self_deploy_images() -> List[str]:
+    return _csv("KUBESIGHT_SELF_DEPLOY_IMAGES",
+                "registry.areeba.com/kubesight-backend:,registry.areeba.com/kubesight-frontend:")
+
+
+def _is_self_deploy(document) -> bool:
+    """One of KubeSight's own Deployments, every container on KubeSight's own
+    images: the only change self-deploy lets into the provisioner's namespace."""
+    if not self_deploy_allowed() or not isinstance(document, dict):
+        return False
+    meta = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    if document.get("kind") != "Deployment" or meta.get("name") not in self_deploy_deployments():
+        return False
+    if meta.get("namespace") not in (None, namespace()):
+        return False
+    pod = (((document.get("spec") or {}).get("template") or {}).get("spec") or {})
+    containers = list(pod.get("containers") or []) + list(pod.get("initContainers") or [])
+    if not containers or pod.get("ephemeralContainers"):
+        return False
+    prefixes = self_deploy_images()
+    return all(isinstance(c, dict) and any(str(c.get("image") or "").startswith(p) for p in prefixes)
+               for c in containers)
+
+
+def _only_self_deploys(text: str) -> bool:
+    try:
+        documents = [d for d in yaml.safe_load_all(text) if d is not None]
+    except yaml.YAMLError:
+        return False
+    return bool(documents) and all(_is_self_deploy(d) for d in documents)
+
+
 def _walk(node) -> Iterable[dict]:
     if isinstance(node, dict):
         yield node
@@ -111,7 +165,7 @@ def check_manifest_text(text: str, *, self_cluster: bool) -> None:
             annotations = (node.get("metadata") or {}).get("annotations") if isinstance(node.get("metadata"), dict) else None
             if isinstance(annotations, dict) and annotations.get(_TOKEN_ANNOTATION) == sa:
                 raise ProvisionerGuardError(f"Refused: no token Secret for {sa}.")
-        if self_cluster and isinstance(document, dict):
+        if self_cluster and isinstance(document, dict) and not _is_self_deploy(document):
             for node in _walk(document):
                 meta = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
                 if meta.get("namespace") == ns or (node.get("kind") == "Namespace" and meta.get("name") == ns):
@@ -137,8 +191,11 @@ def check_kubectl(args: List[str], *, kubeconfig_path: Optional[str]) -> None:
         return
     self_cluster = not kubeconfig_path
     verb = args[0]
-    for path in _files(args):
+    files = _files(args)
+    self_deploy = bool(files) and verb == "apply" and "--prune" not in args
+    for path in files:
         if path == "-":
+            self_deploy = False
             continue
         try:
             with open(path, encoding="utf-8") as handle:
@@ -146,6 +203,7 @@ def check_kubectl(args: List[str], *, kubeconfig_path: Optional[str]) -> None:
         except OSError as exc:
             raise ProvisionerGuardError("Refused: the manifest file could not be read to check it.") from exc
         check_manifest_text(text, self_cluster=self_cluster)
+        self_deploy = self_deploy and _only_self_deploys(text)
     if not self_cluster:
         return
     target = namespace_of(args)
@@ -153,6 +211,9 @@ def check_kubectl(args: List[str], *, kubeconfig_path: Optional[str]) -> None:
     if verb in _READ_VERBS:
         if (target == namespace() or everywhere) and _mentions_secrets(args):
             raise ProvisionerGuardError(f"Refused: KubeSight does not read the Secrets of {namespace()}.")
+        return
+    if self_deploy and not everywhere:
+        # KUBESIGHT_ALLOW_SELF_DEPLOY: only KubeSight's own Deployments on its own images.
         return
     if target == namespace() or everywhere:
         raise ProvisionerGuardError(

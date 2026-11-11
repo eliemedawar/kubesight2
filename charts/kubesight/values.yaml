@@ -186,6 +186,10 @@ oke:
     # Sets aside K13's "never the requester"; each one is audited and flagged
     # in the email to notifyEmails.
     adminSelfApprove: false
+    # true: KubeSight's CI may roll out KubeSight itself (kubectl apply of the
+    # kubesight-backend / kubesight-frontend Deployments, KubeSight images
+    # only) although K4 keeps its own namespace read-only.
+    allowSelfDeploy: false
     # Who is emailed on every apply and destroy (the platform owner).
     notifyEmails: ""
   # Egress the backend and the provisioner Jobs need once workloadIdentity is

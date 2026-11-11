@@ -17,6 +17,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 
 from api.auth_utils import create_access_token
 from api.db import db
@@ -819,6 +820,63 @@ class TestReviewFixes:
         assert "kube-system" in limits["spec"]["validations"][0]["expression"]
         with pytest.raises(remote.RemoteError):
             remote.bind_manifests("x' || true || '")
+
+
+def _deployment(name="kubesight-backend", image="registry.areeba.com/kubesight-backend:main-15",
+                sa="kubesight-backend", kind="Deployment"):
+    return yaml.safe_dump({
+        "apiVersion": "apps/v1", "kind": kind,
+        "metadata": {"name": name, "namespace": "kubesight"},
+        "spec": {"template": {"metadata": {"labels": {"app": name}},
+                              "spec": {"serviceAccountName": sa,
+                                       "containers": [{"name": "c", "image": image}]}}},
+    })
+
+
+class TestSelfDeploy:
+    @pytest.fixture(autouse=True)
+    def _active(self, monkeypatch):
+        monkeypatch.setenv("KUBESIGHT_PROVISIONER_SERVICE_ACCOUNT", "kubesight-provisioner")
+        monkeypatch.setenv("KUBESIGHT_PROVISIONER_NAMESPACE", "kubesight")
+        monkeypatch.setenv("KUBESIGHT_ALLOW_SELF_DEPLOY", "true")
+
+    def _apply(self, tmp_path, text, *extra):
+        from api.provisioner_guard import check_kubectl
+        path = tmp_path / "m.yaml"
+        path.write_text(text, encoding="utf-8")
+        check_kubectl(["apply", "-f", str(path), "-n", "kubesight", *extra], kubeconfig_path=None)
+
+    def test_kubesight_rolls_out_its_own_images(self, tmp_path):
+        self._apply(tmp_path, _deployment())
+        self._apply(tmp_path, _deployment("kubesight-frontend", "registry.areeba.com/kubesight-frontend:main-15"))
+
+    @pytest.mark.parametrize("text", [
+        _deployment(image="docker.io/library/busybox:1.36"),                 # not a KubeSight image
+        _deployment(name="something-else"),                                  # not KubeSight's Deployment
+        _deployment(kind="StatefulSet"),
+        _deployment() + "---\n" + yaml.safe_dump({"apiVersion": "v1", "kind": "ConfigMap",
+                                                   "metadata": {"name": "x", "namespace": "kubesight"}}),
+    ])
+    def test_anything_else_in_the_namespace_is_refused(self, tmp_path, text):
+        from api.provisioner_guard import ProvisionerGuardError
+        with pytest.raises(ProvisionerGuardError):
+            self._apply(tmp_path, text)
+
+    def test_never_as_the_provisioner(self, tmp_path):
+        from api.provisioner_guard import ProvisionerGuardError
+        with pytest.raises(ProvisionerGuardError, match="nothing may run as"):
+            self._apply(tmp_path, _deployment(sa="kubesight-provisioner"))
+
+    def test_prune_is_refused(self, tmp_path):
+        from api.provisioner_guard import ProvisionerGuardError
+        with pytest.raises(ProvisionerGuardError):
+            self._apply(tmp_path, _deployment(), "--prune", "-l", "app=x")
+
+    def test_off_by_default(self, tmp_path, monkeypatch):
+        from api.provisioner_guard import ProvisionerGuardError
+        monkeypatch.delenv("KUBESIGHT_ALLOW_SELF_DEPLOY")
+        with pytest.raises(ProvisionerGuardError, match="does not change the namespace"):
+            self._apply(tmp_path, _deployment())
 
 
 class TestGuardHoles:

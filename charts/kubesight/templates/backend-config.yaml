@@ -118,6 +118,7 @@
   "KUBESIGHT_PROVISION_APPROVAL_HOURS" (toString .workloadIdentity.approvalHours)
   "KUBESIGHT_PROVISION_NOTIFY_EMAILS" (.workloadIdentity.notifyEmails | default "")
   "KUBESIGHT_PROVISION_ADMIN_SELF_APPROVE" (ternary "true" "false" (.workloadIdentity.adminSelfApprove | default false))
+  "KUBESIGHT_ALLOW_SELF_DEPLOY" (ternary "true" "false" (.workloadIdentity.allowSelfDeploy | default false))
 ) }}
 {{- end }}
 {{- if .stateEncryption.enabled }}
