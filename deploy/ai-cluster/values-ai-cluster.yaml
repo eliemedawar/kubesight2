@@ -36,6 +36,9 @@ oke:
     backendRole: kubesight-backend
     approvalHours: 24
     notifyEmails: HAllaw@areeba.com
+  network:
+    # The created clusters' private API endpoints (OCIDUSUBK8SUATMASTER).
+    clusterEndpointCIDRs: [10.43.20.128/26]
   stateEncryption:
     enabled: true                         # CHG-KS-016: needs the platform's Transit key kubesight-tofu-state
 

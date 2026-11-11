@@ -1,0 +1,81 @@
+{{- if and .Values.networkPolicies.enabled .Values.oke.workloadIdentity.enabled }}
+{{- $ns := include "kubesight.namespace" . }}
+{{- $net := .Values.oke.network }}
+---
+# OKE by workload identity (CHG-KS-016): the backend reads OCI (compartments,
+# network, kubeconfigs) and reaches the clusters it created on 6443. The OCI
+# token exchange goes to the API server, which kubesight-backend-egress allows.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kubesight-backend-oke-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-backend") | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app: kubesight-backend
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports: [{port: "53", protocol: ANY}]
+          rules:
+            dns: [{matchPattern: "*"}]
+    {{- range $net.ociDomainPatterns }}
+    - toFQDNs: [{matchPattern: {{ . | quote }}}]
+      toPorts:
+        - ports: [{port: "443", protocol: TCP}]
+    {{- end }}
+    {{- range $net.clusterEndpointCIDRs }}
+    - toCIDR: [{{ . | quote }}]
+      toPorts:
+        - ports: [{port: "6443", protocol: TCP}]
+    {{- end }}
+---
+# The provisioner Jobs (pods running as kubesight-provisioner): the OCI token
+# exchange on the API server, Oracle's APIs, the created clusters on 6443 (the
+# bind step), OpenBao for the state key. The backend on 5000 is in this
+# namespace, which allow-dns-and-same-namespace already allows.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kubesight-provisioner-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-provisioner") | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      io.cilium.k8s.policy.serviceaccount: kubesight-provisioner
+  egress:
+    - toEntities: [kube-apiserver]
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports: [{port: "53", protocol: ANY}]
+          rules:
+            dns: [{matchPattern: "*"}]
+    {{- range $net.ociDomainPatterns }}
+    - toFQDNs: [{matchPattern: {{ . | quote }}}]
+      toPorts:
+        - ports: [{port: "443", protocol: TCP}]
+    {{- end }}
+    {{- range $net.clusterEndpointCIDRs }}
+    - toCIDR: [{{ . | quote }}]
+      toPorts:
+        - ports: [{port: "6443", protocol: TCP}]
+    {{- end }}
+    {{- if .Values.oke.stateEncryption.enabled }}
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ $net.openbaoNamespace }}
+      toPorts:
+        - ports: [{port: {{ $net.openbaoPort | quote }}, protocol: TCP}]
+    {{- end }}
+{{- end }}

@@ -184,6 +184,17 @@ oke:
     approvalHours: 24
     # Who is emailed on every apply and destroy (the platform owner).
     notifyEmails: ""
+  # Egress the backend and the provisioner Jobs need once workloadIdentity is
+  # on (with networkPolicies.enabled): Oracle's APIs by name, the created
+  # clusters' API endpoints on 6443, and (with stateEncryption) OpenBao.
+  network:
+    ociDomainPatterns:
+      - "*.me-dubai-1.oraclecloud.com"
+      - "*.me-dubai-1.oci.oraclecloud.com"
+    # The subnet the created clusters' private API endpoints are in.
+    clusterEndpointCIDRs: []
+    openbaoNamespace: openbao
+    openbaoPort: 8200
   # The state key (K15): OpenTofu's openbao key provider on OpenBao's Transit.
   # Off until the platform says the key and role are live.
   stateEncryption:
