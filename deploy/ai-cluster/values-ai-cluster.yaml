@@ -26,17 +26,18 @@ rbac:
 oke:
   provisioner:
     serviceAccount: true                  # CHG-KS-015
-    image: ""                             # CHG-KS-016: registry.areeba.com/kubesight-provisioner@sha256:...
+    # CHG-KS-016: built by KubeSight CI as kubesight-provisioner:main-14
+    image: registry.areeba.com/kubesight-provisioner@sha256:1f3f6e68b9f90958e19107fe79880e0d7e599b197cc23ed7e36e6658c9f9a80f
     pullSecret: regcred
   workloadIdentity:
-    enabled: false                        # CHG-KS-016
+    enabled: true                         # CHG-KS-016
     region: me-dubai-1
     compartmentOcid: ocid1.compartment.oc1..aaaaaaaajihvv42vja5ofypuvvhhxujlknsqwaolivymekmitqzhxxqesqgq
     backendRole: kubesight-backend
     approvalHours: 24
     notifyEmails: HAllaw@areeba.com
   stateEncryption:
-    enabled: false                        # once the platform says kubesight-tofu-state is live
+    enabled: true                         # CHG-KS-016: needs the platform's Transit key kubesight-tofu-state
 
 # --- Images ------------------------------------------------------------------
 image:
@@ -94,6 +95,9 @@ backend:
       hostnames: [registry.areeba.com]
   # OKE upgrades its own control plane; KubeSight must not run kubeadm here.
   autoUpgrade: false
+  # KUBESIGHT_OKE_PULL_USERNAME/PASSWORD: the read-only Nexus login KubeSight
+  # puts on every OKE cluster it creates (CHG-KS-016).
+  extraEnvFromSecrets: [kubesight-oke-pull]
   config:
     ALERT_CPU_THRESHOLD_PERCENT: "80"
     JWT_EXPIRY_HOURS: "8"
@@ -215,7 +219,7 @@ externalSecrets:
     # Fields KUBESIGHT_OKE_PULL_USERNAME, KUBESIGHT_OKE_PULL_PASSWORD: the
     # read-only Nexus account KubeSight puts on each OKE cluster it creates (K16).
     # CHG-KS-016 switches it on, with backend.extraEnvFromSecrets.
-    - {name: kubesight-oke-pull, key: kubesight/oke-pull, module: kubesight-backend, enabled: false}
+    - {name: kubesight-oke-pull, key: kubesight/oke-pull, module: kubesight-backend, enabled: true}
     # Fields tls.crt and tls.key.
     - {name: kubesight-tls, key: kubesight/tls, type: kubernetes.io/tls, module: kubesight-frontend}
     # Fields registry, username, password; one entry per namespace, because

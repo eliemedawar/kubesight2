@@ -6,7 +6,7 @@
 | Modules | kubesight-backend, kubesight-provisioner |
 | Status | Proposed |
 | Asked by | Platform owner, requirements version 2 (2026-11-10), section 4 |
-| Depends on | CHG-KS-015 (proof passed, proof pods deleted); the platform's state key live (Transit `kubesight-tofu-state`, role `kubesight-provisioner-state`, egress to OpenBao 8200) |
+| Depends on | CHG-KS-015's service account (the proof itself was waived by the platform owner on 2026-11-11; proof pods deleted); the VCN `OCIDUVCNK8SUAT` tagged `AreebaPlatform.Zone = kubesight-provisioning` like its subnets; the platform's state key live (Transit `kubesight-tofu-state`, role `kubesight-provisioner-state`, egress to OpenBao 8200) |
 | Prepared by | ____ |
 | Approved by | ____ (platform owner, name, date) |
 | Run by | ____ (name, date) |
@@ -59,10 +59,14 @@ Jobs, any exec/attach/port-forward into them, and any token request for
 
 ## Before you start
 
-1. CHG-KS-015 done: the proof passed (all four steps) and both proof pods are
-   deleted.
-2. A release tag built by the Bitbucket tag pipeline (backend, frontend and
-   provisioner). Note the provisioner's digest from the pipeline log.
+1. CHG-KS-015's service account is in place and both proof pods are deleted
+   (the proof was waived by the platform owner on 2026-11-11). Step 1 of the
+   proof did run: workload identity signs in, compartments and the three
+   subnets read; the VCN was refused until it carries the
+   `AreebaPlatform.Zone` tag.
+2. Images: KubeSight CI build `main-14` (backend, frontend and provisioner,
+   from Bitbucket `main` 784c08fe). The provisioner's digest is already in
+   `values-ai-cluster.yaml`.
 3. OpenBao: write `kv/kubesight/oke-pull` with fields
    `KUBESIGHT_OKE_PULL_USERNAME` and `KUBESIGHT_OKE_PULL_PASSWORD` (the
    read-only Nexus account).
@@ -72,9 +76,9 @@ Jobs, any exec/attach/port-forward into them, and any token request for
 
 On the bastion, as for the other changes (pull in `~/kubesight-ai`, copy
 `charts/kubesight` and `deploy/ai-cluster` to `~/kubesight`), then in
-`~/kubesight`. In `deploy/ai-cluster/values-ai-cluster.yaml`:
+`~/kubesight`. `deploy/ai-cluster/values-ai-cluster.yaml` already holds:
 
-- `oke.provisioner.image: registry.areeba.com/kubesight-provisioner@sha256:<digest>`
+- `oke.provisioner.image: registry.areeba.com/kubesight-provisioner@sha256:1f3f6e68…a80f`
 - `oke.workloadIdentity.enabled: true`
 - `oke.stateEncryption.enabled: true`
 - the `kubesight-oke-pull` item: `enabled: true`
@@ -82,7 +86,7 @@ On the bastion, as for the other changes (pull in `~/kubesight-ai`, copy
 
 ```bash
 CHG=CHG-KS-016
-TAG=<the new release tag>
+TAG=main-14
 ARGS="-n kubesight -f deploy/ai-cluster/values-ai-cluster.yaml --set image.tag=$TAG --set-string commonLabels.areeba\.com/change=$CHG"
 
 # Read only
