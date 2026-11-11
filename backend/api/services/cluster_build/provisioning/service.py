@@ -605,8 +605,9 @@ def approve_plan_hash(build: ClusterBuild, job: ClusterProvisionJob, *, actor: s
         raise ValueError("There is no plan waiting for approval.")
     if user is None or getattr(user, "id", None) is None:
         raise PermissionError("Sign in to approve.")
-    if ((job.requested_by_user_id is not None and job.requested_by_user_id == user.id)
-            or (job.requested_by_user_id is None and job.requested_by and job.requested_by == actor)):
+    own = ((job.requested_by_user_id is not None and job.requested_by_user_id == user.id)
+           or (job.requested_by_user_id is None and job.requested_by and job.requested_by == actor))
+    if own and not (remote.admin_self_approve() and _is_admin(user)):
         remote.audit("approval-refused", job=job, build=build, reason="self-approval", by=actor)
         raise PermissionError("You asked for this change, so someone else has to approve it.")
     if not getattr(user, "mfa_enabled", False):
@@ -631,6 +632,8 @@ def approve_plan_hash(build: ClusterBuild, job: ClusterProvisionJob, *, actor: s
     job.approved_by_user_id = user.id
     job.approved_at = _utcnow()
     job.approved_plan_sha256 = job.plan_sha256
+    if own:
+        remote.mark_self_approved(job)
     job.decision_note = (note or "").strip()[:1000] or None
     job.applied_by = actor or None
     job.applied_by_user_id = user.id
@@ -643,7 +646,7 @@ def approve_plan_hash(build: ClusterBuild, job: ClusterProvisionJob, *, actor: s
         build.error = None
     jobs._sync_build_status(build, job)
     db.session.commit()
-    remote.audit("approved", job=job, build=build, by=actor, note=job.decision_note)
+    remote.audit("approved", job=job, build=build, by=actor, note=job.decision_note, selfApproved=bool(own))
     jobs.start_worker(job.id, "apply")
     db.session.refresh(job)
     return job

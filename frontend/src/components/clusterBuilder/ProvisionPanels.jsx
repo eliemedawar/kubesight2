@@ -308,7 +308,10 @@ export function ProvisionProgress({ build, now, compact = false }) {
  *  never the requester, approves one exact plan by its hash. The provisioner
  *  Job applies only the saved plan with that hash. */
 function HashApproval({ build, job, currentUserId, canExecute, busy, act, refusal }) {
+  const { isAdmin } = useAuth();
   const own = currentUserId != null && job.requestedByUserId === currentUserId;
+  // KUBESIGHT_PROVISION_ADMIN_SELF_APPROVE: an admin may approve their own plan.
+  const selfOk = own && Boolean(isAdmin) && Boolean(job.adminSelfApprove);
   const [note, setNote] = useState("");
   const [read, setRead] = useState(false);
   const hash = job.planSha256 || "";
@@ -317,7 +320,9 @@ function HashApproval({ build, job, currentUserId, canExecute, busy, act, refusa
     <PlanReview
       job={job}
       title={`${verb} ${build.name}?`}
-      lede={own
+      lede={selfOk
+        ? "You asked for this. As an admin you may approve your own plan (self-approval is on, MFA required); the platform owner's email says it was self-approved."
+        : own
         ? "Waiting for a second person who can run cluster builds and signs in with MFA. You asked, so you cannot approve it."
         : `${job.requestedBy || "Someone"} asked for this. Read the plan, then approve exactly this plan: any new plan needs a new approval.`}
       busy={busy}
@@ -338,7 +343,7 @@ function HashApproval({ build, job, currentUserId, canExecute, busy, act, refusa
           Made by a provisioner Job as kubesight-provisioner (OKE workload identity, no key).
           {job.summary?.encrypted ? " The plan file is encrypted with the platform's state key." : ""}
         </p>
-        {!own && canExecute ? (
+        {(!own || selfOk) && canExecute ? (
           <>
             <label className="sg-cb-check">
               <input type="checkbox" checked={read} onChange={(event) => setRead(event.target.checked)} />
@@ -357,7 +362,7 @@ function HashApproval({ build, job, currentUserId, canExecute, busy, act, refusa
                       onClick={async () => {
                         if (!(await confirmDialog({
                           title: `Approve plan ${hash.slice(0, 12)}`,
-                          message: `${verb} ${build.name} by applying exactly this plan (sha256 ${hash.slice(0, 12)}…). The platform owner is emailed.`,
+                          message: `${verb} ${build.name} by applying exactly this plan (sha256 ${hash.slice(0, 12)}…). The platform owner is emailed${selfOk ? ", and told you approved your own plan" : ""}.`,
                           confirmLabel: "Approve and apply",
                           tone: job.operation === "destroy" ? "danger" : undefined,
                         }))) return;

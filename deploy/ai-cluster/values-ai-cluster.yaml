@@ -35,6 +35,8 @@ oke:
     compartmentOcid: ocid1.compartment.oc1..aaaaaaaajihvv42vja5ofypuvvhhxujlknsqwaolivymekmitqzhxxqesqgq
     backendRole: kubesight-backend
     approvalHours: 24
+    # Elie, 2026-11-11: admins may approve their own plans (flagged in the email).
+    adminSelfApprove: true
     notifyEmails: HAllaw@areeba.com
   network:
     # The created clusters' private API endpoints (OCIDUSUBK8SUATMASTER).

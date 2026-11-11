@@ -69,6 +69,7 @@ def wi_install(tmp_path, monkeypatch, audit_lines):
     monkeypatch.setenv("KUBESIGHT_PROVISIONER_NAMESPACE", "kubesight")
     monkeypatch.setenv("OCI_RESOURCE_PRINCIPAL_REGION", "me-dubai-1")
     monkeypatch.delenv("KUBESIGHT_PROVISION_NOTIFY_EMAILS", raising=False)
+    monkeypatch.delenv("KUBESIGHT_PROVISION_ADMIN_SELF_APPROVE", raising=False)
     # The simulated engine keeps no OpenBao; production refuses plain state (K15).
     monkeypatch.setenv("KUBESIGHT_ALLOW_PLAIN_STATE", "1")
     tofu_runner.set_engine(tofu_runner.SimulatedEngine())
@@ -347,6 +348,39 @@ class TestFlow:
         job = plan(client, admin_token, build["id"])
         response = approve(client, admin_token, build["id"], job["id"], job["planSha256"])
         assert response.status_code == 403
+
+    def test_admin_may_approve_own_plan_when_switched_on(self, app, client, wi_install, audit_lines, monkeypatch):
+        monkeypatch.setenv("KUBESIGHT_PROVISION_ADMIN_SELF_APPROVE", "true")
+        boss = second_person(app, username="boss")
+        account = create_wi_account(client, boss)
+        build = create_build(client, boss, account)
+        job = plan(client, boss, build["id"])
+        assert job["adminSelfApprove"] is True
+        response = approve(client, boss, build["id"], job["id"], job["planSha256"])
+        assert response.status_code == 200, response.get_json()
+        row = db.session.get(ClusterProvisionJob, job["id"])
+        assert remote.self_approved(row)
+        assert any(line["event"] == "approved" and line.get("selfApproved") for line in audit_lines)
+
+    def test_own_approval_still_needs_mfa(self, app, client, wi_install, monkeypatch):
+        monkeypatch.setenv("KUBESIGHT_PROVISION_ADMIN_SELF_APPROVE", "true")
+        boss = second_person(app, username="boss", mfa=False)
+        account = create_wi_account(client, boss)
+        build = create_build(client, boss, account)
+        job = plan(client, boss, build["id"])
+        response = approve(client, boss, build["id"], job["id"], job["planSha256"])
+        assert response.status_code == 403 and "MFA" in response.get_json()["error"]
+
+    def test_own_approval_lapses_when_switched_off(self, app, wi_install, monkeypatch):
+        job = ClusterProvisionJob(plan_sha256="a" * 64, approved_plan_sha256="a" * 64, plan_cipher="x",
+                                  requested_by_user_id=1, approved_by_user_id=1,
+                                  approved_at=datetime.now(timezone.utc), config_json={})
+        monkeypatch.setenv("KUBESIGHT_PROVISION_ADMIN_SELF_APPROVE", "true")
+        assert "cannot approve" in remote.approval_problem(job)   # not recorded as a self-approval
+        remote.mark_self_approved(job)
+        assert remote.approval_problem(job) is None
+        monkeypatch.setenv("KUBESIGHT_PROVISION_ADMIN_SELF_APPROVE", "false")
+        assert "cannot approve" in remote.approval_problem(job)
 
     def test_approver_needs_mfa(self, app, client, admin_token, wi_install):
         account = create_wi_account(client, admin_token)

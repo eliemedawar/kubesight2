@@ -117,6 +117,7 @@
   "KUBESIGHT_OKE_BACKEND_ROLE" .workloadIdentity.backendRole
   "KUBESIGHT_PROVISION_APPROVAL_HOURS" (toString .workloadIdentity.approvalHours)
   "KUBESIGHT_PROVISION_NOTIFY_EMAILS" (.workloadIdentity.notifyEmails | default "")
+  "KUBESIGHT_PROVISION_ADMIN_SELF_APPROVE" (ternary "true" "false" (.workloadIdentity.adminSelfApprove | default false))
 ) }}
 {{- end }}
 {{- if .stateEncryption.enabled }}

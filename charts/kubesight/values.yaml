@@ -182,6 +182,10 @@ oke:
     backendRole: kubesight-backend
     # A second person, with MFA, approves each plan's hash within this many hours.
     approvalHours: 24
+    # true: an admin (with MFA) may approve a plan they asked for themselves.
+    # Sets aside K13's "never the requester"; each one is audited and flagged
+    # in the email to notifyEmails.
+    adminSelfApprove: false
     # Who is emailed on every apply and destroy (the platform owner).
     notifyEmails: ""
   # Egress the backend and the provisioner Jobs need once workloadIdentity is

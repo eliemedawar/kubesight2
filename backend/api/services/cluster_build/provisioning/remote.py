@@ -657,9 +657,13 @@ def approval_problem(job: ClusterProvisionJob) -> Optional[str]:
         return "Nobody has approved this plan."
     if job.approved_plan_sha256 != job.plan_sha256:
         return "The approved hash is not the saved plan's hash."
-    if job.requested_by_user_id and job.approved_by_user_id == job.requested_by_user_id:
-        return "The person who asked cannot approve."
-    if not job.requested_by_user_id and job.requested_by and job.approved_by == job.requested_by:
+    own = bool(
+        (job.requested_by_user_id and job.approved_by_user_id == job.requested_by_user_id)
+        or (not job.requested_by_user_id and job.requested_by and job.approved_by == job.requested_by)
+    )
+    # An admin's own approval counts only while the switch is still on and the
+    # approval was recorded as one (service.approve_plan_hash checked the admin).
+    if own and not (admin_self_approve() and self_approved(job)):
         return "The person who asked cannot approve."
     approved = _as_utc(job.approved_at)
     if approved is None:
@@ -668,6 +672,24 @@ def approval_problem(job: ClusterProvisionJob) -> Optional[str]:
     if _utcnow() - planned > timedelta(hours=approval_hours()):
         return "The approval has expired. Plan again."
     return None
+
+
+def admin_self_approve() -> bool:
+    """KUBESIGHT_PROVISION_ADMIN_SELF_APPROVE: an admin (with MFA) may approve
+    a plan they asked for themselves. Off by default: it sets aside K13's
+    "never the requester"; every such approval is audited and named in the
+    platform owner's email."""
+    return (os.getenv("KUBESIGHT_PROVISION_ADMIN_SELF_APPROVE") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def self_approved(job: ClusterProvisionJob) -> bool:
+    return bool(((job.config_json or {}).get("remote") or {}).get("selfApproved"))
+
+
+def mark_self_approved(job: ClusterProvisionJob) -> None:
+    config = dict(job.config_json or {})
+    config["remote"] = {**(config.get("remote") or {}), "selfApproved": True}
+    job.config_json = config
 
 
 def planned_at(job: ClusterProvisionJob) -> Optional[datetime]:
@@ -1113,7 +1135,8 @@ def notify(job: ClusterProvisionJob, build: ClusterBuild, outcome: str) -> None:
         f"KubeSight {verb} on {build.name}: {outcome}.",
         "",
         f"Requested by: {job.requested_by or '-'}",
-        f"Approved by:  {job.approved_by or '-'} at {job.approved_at.isoformat() if job.approved_at else '-'}",
+        f"Approved by:  {job.approved_by or '-'} at {job.approved_at.isoformat() if job.approved_at else '-'}"
+        + ("  (SELF-APPROVED by an admin: no second person)" if self_approved(job) else ""),
         f"Plan sha256:  {job.approved_plan_sha256 or '-'}",
         f"Cluster OCID: {facts.get('id') or '-'}",
         f"Job:          #{job.id} ({job.operation})",
