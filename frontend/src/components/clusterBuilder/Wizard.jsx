@@ -96,11 +96,12 @@ import { whenVisible } from "../../lib/visibleInterval";
 
 /** The steps this build walks, as [step, label]. A VMs-only build has no
     cluster to put add-ons, workloads or Helm charts on, so it skips those. */
-function wizardSteps(machineSource, vmsOnly, managed = false) {
+function wizardSteps(machineSource, vmsOnly, managed = false, oke = false) {
   const creates = machineSource === "vmware" || isCloud(machineSource);
   // A managed cluster has no nodes KubeSight logs in to, so nothing to put
   // add-ons, workloads or Helm charts on from here either.
   if (creates && (vmsOnly || managed)) {
+    if (oke) return [[STEP_SHAPE, "Cluster"], [STEP_MACHINES, "Version & nodes"], [STEP_VERIFY, "Plan & create"]];
     return [[STEP_SHAPE, "Template"], [STEP_MACHINES, "Machines"], [STEP_VERIFY, "Plan & create"]];
   }
   return [
@@ -472,15 +473,24 @@ function SourceChoice({ value, onChange, canVmware, canCloud = false, vmsOnly = 
 }
 
 /** The first question: a cluster, or VMs now and Kubernetes later (or never). */
-function GoalChoice({ vmsOnly, onChange, canVmware }) {
+function GoalChoice({ vmsOnly, onChange, canVmware, okeAccount = null, oke = false, onOke }) {
   return (
     <div className="card sg-cb-card">
       <div className="sg-cb-sect"><h2>What do you want to create?</h2></div>
       <div className="sg-cb-choices">
-        <button type="button" className="sg-cb-choice" aria-pressed={!vmsOnly} onClick={() => onChange(false)}>
+        <button type="button" className="sg-cb-choice" aria-pressed={!vmsOnly && !oke} onClick={() => onChange(false)}>
           <span className="ct">A Kubernetes cluster</span>
           <span className="cd">Pick a shape (Lab, Small, Standard HA), then new VMs or machines you already have.</span>
         </button>
+        {okeAccount ? (
+          <button type="button" className="sg-cb-choice" aria-pressed={oke} onClick={onOke}>
+            <span className="ct">A managed OKE cluster <span className="sg-cb-pill is-brand">Oracle Cloud</span></span>
+            <span className="cd">
+              Oracle runs the control plane and the API, so no template and no SSH. You choose the Kubernetes version,
+              the owner and expiry, and the nodes. Account {okeAccount.name}, signed in by workload identity (no key).
+            </span>
+          </button>
+        ) : null}
         <button type="button" className="sg-cb-choice" aria-pressed={vmsOnly}
                 disabled={!canVmware} onClick={() => onChange(true)}>
           <span className="ct">VMs only <span className="sg-cb-pill is-brand">OpenTofu</span></span>
@@ -491,6 +501,25 @@ function GoalChoice({ vmsOnly, onChange, canVmware }) {
           </span>
         </button>
       </div>
+    </div>
+  );
+}
+
+/** A managed OKE cluster: only the name here; version, owner and nodes come next. */
+function OkeStart({ basics, setBasic }) {
+  return (
+    <div className="card sg-cb-card sg-cb-fields">
+      <div className="sg-cb-sect"><h2>Managed OKE cluster</h2></div>
+      <p className="muted sg-cb-pv-lede">
+        No template: Oracle runs the control plane and the API (an ENHANCED cluster with a private endpoint), so there are
+        no control-plane or load-balancer machines to size, and nothing to log in to over SSH. Next: the Kubernetes version,
+        the owner and expiry, and the nodes. The plan then waits for an approval of its hash.
+      </p>
+      <Field label="Cluster name" htmlFor="cb-name" hint={`Also names the node pool: ${basics.name || "name"}-workers`}
+             error={vmwareNameError(basics.name)}>
+        <input id="cb-name" className="sg-cb-input sg-cb-mono" value={basics.name}
+               onChange={(event) => setBasic("name", event.target.value)} placeholder="uat-payments-01" />
+      </Field>
     </div>
   );
 }
@@ -1152,7 +1181,20 @@ export default function Wizard({
   const cloudAccounts = useMemo(() => infra.cloudAccounts || [], [infra.cloudAccounts]);
   const vmsOnly = creates && basics.vmsOnly;
   const managed = cloud && !vmsOnly && basics.cloud.kind === "managed";
-  const steps = wizardSteps(basics.machineSource, basics.vmsOnly, managed);
+  // OKE by workload identity: its own short wizard (no templates).
+  const okeAccount = cloudAccounts.find((row) => row.provider === "oci" && row.settings?.authMode === "workload_identity") || null;
+  const oke = managed && Boolean(okeAccount) && String(basics.cloud.accountId) === String(okeAccount?.id);
+  const chooseOke = () => setBasics((previous) => ({
+    ...previous,
+    vmsOnly: false,
+    machineSource: "oci",
+    cloud: {
+      ...previous.cloud, accountId: String(okeAccount.id), region: okeAccount.region || "",
+      compartmentId: okeAccount.settings?.compartmentOcid || "", kind: "managed",
+    },
+  }));
+  const steps = wizardSteps(basics.machineSource, basics.vmsOnly, managed, oke);
+
   const canCreateMachines = provisioningConnections.length > 0 || cloudAccounts.length > 0;
   const providerOf = (accountId) => cloudAccounts.find((row) => String(row.id) === String(accountId))?.provider;
   /** Pick a cloud account: the build's machine source follows its provider. */
@@ -1915,7 +1957,7 @@ export default function Wizard({
           disabled={!shapeReady}
           onClick={() => setStep(STEP_MACHINES)}
         >
-          Next — machines
+          {oke ? "Next — version & nodes" : "Next — machines"}
         </button>
       </>
     ) : step === STEP_MACHINES && (vmsOnly || managed) ? planFooter : step === STEP_MACHINES ? (
@@ -2055,7 +2097,9 @@ export default function Wizard({
           : step === STEP_SHAPE
             ? {
               tone: "plain",
-              text: `${shapeLabel(basics.counts)}. The drawing fills in as you assign machines.`,
+              text: oke
+                ? "Oracle runs the control plane and the API. The version and the nodes come on the next step."
+                : `${shapeLabel(basics.counts)}. The drawing fills in as you assign machines.`,
             }
           : affinityNote}
         facts={step === STEP_ADDONS ? addonFacts
@@ -2080,14 +2124,24 @@ export default function Wizard({
         <button className="btn-ghost" type="button" onClick={onCancel}>Cancel</button>
       </div>
 
-      <SourcesBar
-        basics={basics}
-        infra={infra}
-        onChange={setBasic}
-        editing={editingSource}
-        setEditing={setEditingSource}
-        sshOptional={managed}
-      />
+      {oke ? (
+        <div className="sg-cb-srcbar">
+          <span className="sg-cb-srcbar-label">Access</span>
+          <span className="muted">
+            No SSH and no package sources: Oracle installs and runs the nodes. KubeSight reaches the cluster only through
+            its private API (6443) with short-lived tokens from its workload identity.
+          </span>
+        </div>
+      ) : (
+        <SourcesBar
+          basics={basics}
+          infra={infra}
+          onChange={setBasic}
+          editing={editingSource}
+          setEditing={setEditingSource}
+          sshOptional={managed}
+        />
+      )}
 
       <div className="sg-cb-split">
         <div className="sg-cb-vstack">
@@ -2095,7 +2149,15 @@ export default function Wizard({
             <GoalChoice
               vmsOnly={vmsOnly}
               canVmware={canCreateMachines}
-              onChange={(only) => setBasics((previous) => ({
+              okeAccount={okeAccount}
+              oke={oke}
+              onOke={chooseOke}
+              onChange={(only) => setBasics((current) => {
+                // Leaving the OKE wizard: back to a cluster on machines, nothing chosen yet.
+                const previous = oke
+                  ? { ...current, machineSource: "existing", cloud: { ...current.cloud, kind: "vms", accountId: "" } }
+                  : current;
+                return {
                 ...previous,
                 vmsOnly: only,
                 machineSource: !only || previous.machineSource !== "existing" ? previous.machineSource
@@ -2108,13 +2170,16 @@ export default function Wizard({
                   && cloudAccounts[0] && !previous.cloud.accountId
                   ? { ...previous.cloud, accountId: String(cloudAccounts[0].id), region: cloudAccounts[0].region || "" }
                   : previous.cloud,
-              }))}
+                };
+              })}
             />
           ) : null}
 
           {step === STEP_SHAPE && vmsOnly ? <VmsOnlyStep basics={basics} setBasic={setBasic} /> : null}
 
-          {step === STEP_SHAPE && !vmsOnly ? (
+          {step === STEP_SHAPE && oke ? <OkeStart basics={basics} setBasic={setBasic} /> : null}
+
+          {step === STEP_SHAPE && !vmsOnly && !oke ? (
             <>
               <div className="card sg-cb-card">
                 <div className="sg-cb-sect">
@@ -2146,13 +2211,15 @@ export default function Wizard({
 
           {step === STEP_MACHINES ? (
             <>
-              <SourceChoice
-                value={cloud ? "cloud" : basics.machineSource}
-                canVmware={provisioningConnections.length > 0}
-                canCloud={cloudAccounts.length > 0}
-                vmsOnly={vmsOnly}
-                onChange={chooseSource}
-              />
+              {oke ? null : (
+                <SourceChoice
+                  value={cloud ? "cloud" : basics.machineSource}
+                  canVmware={provisioningConnections.length > 0}
+                  canCloud={cloudAccounts.length > 0}
+                  vmsOnly={vmsOnly}
+                  onChange={chooseSource}
+                />
+              )}
               {cloud ? (
                 <CloudMachines
                   accounts={cloudAccounts}

@@ -178,8 +178,10 @@ export default function CloudMachines({
           </span>
         </div>
         <p className="muted sg-cb-pv-lede">
-          Read with the account&apos;s own keys. The machines get private addresses only, picked by the cloud from the
-          subnet — KubeSight reaches them over your VPN or peering, or through the SSH route&apos;s bastion.
+          {wi
+            ? "Read by KubeSight's OKE workload identity (no key). The cluster goes into the platform's compartment and network; its API has a private address only."
+            : <>Read with the account&apos;s own keys. The machines get private addresses only, picked by the cloud from the
+              subnet — KubeSight reaches them over your VPN or peering, or through the SSH route&apos;s bastion.</>}
         </p>
         {error ? <p className="sg-cb-field-error">{error}</p> : null}
         <div className="sg-cb-qgrid">
@@ -230,7 +232,7 @@ export default function CloudMachines({
               </ul>
               <p className="muted">
                 Signed in by OKE workload identity: no key. Clusters are ENHANCED, private, on {WI_OCI_SHAPE} nodes,
-                behind two NSGs with no SSH, and every plan needs a second person&apos;s approval of its hash.
+                behind two NSGs with no SSH, and every plan waits for an approval of its hash.
               </p>
             </div>
           ) : null}
