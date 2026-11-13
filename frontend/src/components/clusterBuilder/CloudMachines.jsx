@@ -279,7 +279,8 @@ export default function CloudMachines({
         <div className="card sg-cb-card">
           <div className="sg-cb-sect"><h2>Owner and expiry</h2></div>
           <p className="muted sg-cb-pv-lede">
-            Tagged on the cluster. A cluster past its expiry date is deleted after a reminder.
+            Tagged on the cluster and its nodes (the platform requires both, K17): who owns it and until when it is
+            needed, at most 180 days ahead. KubeSight only sets the tags; it never deletes a cluster on that date.
           </p>
           <div className="sg-cb-qgrid">
             <Field label="Owner (work email)" htmlFor="cl-owner">
