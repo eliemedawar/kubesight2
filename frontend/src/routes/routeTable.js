@@ -288,6 +288,8 @@ export const ROUTES = [
     path: "/cluster-builder/:tab?",
     params: { tab: { values: TAB_VALUES.clusterBuilder } },
     defaults: { tab: "floor" },
+    // section = the Sources rail entry (vcenter, ssh, packages …).
+    query: ["section"],
   },
   // One cluster's upgrade workspace; ?job= opens a run or a request.
   { key: "upgradeCluster", path: "/upgrade/cluster/:clusterId", pageKey: "upgrade", query: ["job"] },

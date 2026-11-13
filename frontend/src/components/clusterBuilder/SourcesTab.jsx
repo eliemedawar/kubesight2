@@ -8,6 +8,9 @@
  *  The repository-profile form — image prefixes, a same-prefix checkbox,
  *  registry credentials, two proxies, NO_PROXY and a PEM textarea — becomes the
  *  three questions it was always asking.
+ *
+ *  The sections sit behind a grouped rail (sourcesNav.js), one at a time, with
+ *  the open one in the address (?section=), instead of eight cards down a page.
  */
 
 import { useState } from "react";
@@ -17,6 +20,8 @@ import { AllowedHosts, NetworkRanges, OpenTofuStatus, ProvisioningAccount } from
 import VmRequestProfiles from "./VmRequestProfiles.jsx";
 import CloudAccounts from "./CloudAccounts.jsx";
 import AppProfiles from "./AppProfiles.jsx";
+import { SOURCE_GROUPS, activeSection, sourceSections } from "./sourcesNav.js";
+import { useRouteQuery } from "../../routes/RouterContext.jsx";
 import {
   bundleCoverage,
   freshness,
@@ -531,6 +536,7 @@ export default function SourcesTab({
   canManageApps = false,
 }) {
   const { vsphere, credentials, profiles, buildProfiles } = infra;
+  const [requestedSection, setRequestedSection] = useRouteQuery("section", "", { replace: false });
   const [open, setOpen] = useState(null);
   const [busy, setBusy] = useState(false);
   const [vsForm, setVsForm] = useState({ ...EMPTY_VS });
@@ -596,9 +602,21 @@ export default function SourcesTab({
 
   const coverage = bundleCoverage(addonCatalog);
 
-  return (
-    <div className="sg-cb-sources">
-      {canManageVSphere ? (
+  const sections = sourceSections(infra, {
+    vsphere: canManageVSphere,
+    ssh: canManageSSH,
+    buildProfiles: canManageBuildProfiles,
+    apps: canManageApps,
+  });
+  const active = activeSection(sections, requestedSection);
+  // A half-filled add form belongs to the section it was opened in.
+  const pick = (id) => {
+    setOpen(null);
+    setRequestedSection(id);
+  };
+
+  const panels = {
+    vcenter: () => (
       <Group
         title="vCenter"
         description="A read-only link powers the machine picker and the placement checks. To let KubeSight create VMs here, add a separate provisioning account."
@@ -681,9 +699,9 @@ export default function SourcesTab({
           </div>
         )) : <p className="muted">Nothing configured yet — machines can still be entered by hand.</p>}
       </Group>
-      ) : null}
+    ),
 
-      {canManageVSphere ? (
+    cloud: () => (
         <Group
           title="Cloud accounts"
           description="Keys for Oracle Cloud, AWS and Google Cloud. KubeSight creates VMs there with OpenTofu, or a managed cluster (OKE, EKS, GKE), on private addresses only — it reaches them over your VPN, peering or the SSH route's bastion. Keys are encrypted at rest and never shown again."
@@ -707,45 +725,45 @@ export default function SourcesTab({
             reloadInfra={reloadInfra}
           />
         </Group>
-      ) : null}
+    ),
 
-      {canManageVSphere ? (
+    addresses: () => (
         <Group
           title="Addresses for new VMs"
           description="VMs KubeSight creates get static addresses from these ranges, never DHCP. A plan reserves its addresses first, so two builds can never be handed the same one, and skips any that already answer on the network."
         >
           <NetworkRanges connections={vsphere} notify={notify} />
         </Group>
-      ) : null}
+    ),
 
-      {canManageVSphere ? (
+    "vm-requests": () => (
         <Group
           title="VMs from tickets"
           description="Where VMs a ticket asks for go. Hermes picks one of these profiles by name and fills in only how many and how big, within its limits. Nothing is created until a VM approver approves the OpenTofu plan."
         >
           <VmRequestProfiles vsphere={vsphere} sshProfiles={profiles} buildProfiles={buildProfiles} addonCatalog={addonCatalog} notify={notify} />
         </Group>
-      ) : null}
+    ),
 
-      {canManageApps ? (
+    "app-requests": () => (
         <Group
           title="Apps from tickets"
           description="Applications a ticket may ask for: an Inventory Helm chart with its version, values, namespace and release. Hermes picks a profile by name — with new VMs and Kubernetes, or onto a cluster the Cluster Builder built — and never sees the values. Nothing is installed until an approver approves."
         >
           <AppProfiles notify={notify} />
         </Group>
-      ) : null}
+    ),
 
-      {canManageVSphere ? (
+    opentofu: () => (
         <Group
           title="OpenTofu"
           description="Creates and deletes the VMs and cloud resources. It runs inside KubeSight with the vSphere, Oracle Cloud, AWS and Google Cloud providers baked into the image, and keeps each cluster's state, encrypted and locked, in KubeSight's database."
         >
           <OpenTofuStatus notify={notify} canRelease={canManageVSphere} />
         </Group>
-      ) : null}
+    ),
 
-      {canManageSSH ? (
+    ssh: () => (
       <Group
         title="SSH reach"
         description="Who KubeSight logs in as, and the route it takes. Secrets are encrypted at rest and never shown again. A route that has never been proved is the usual cause of a build dying in node preparation."
@@ -971,9 +989,9 @@ export default function SourcesTab({
 
         <HostKeysPanel profiles={profiles} notify={notify} />
       </Group>
-      ) : null}
+    ),
 
-      {canManageBuildProfiles ? (
+    packages: () => (
       <Group
         title="Packages & images"
         description="Four questions decide a source profile: where packages come from, whether machines register with Satellite, where images come from, and what stands in the way."
@@ -1157,7 +1175,47 @@ export default function SourcesTab({
           </p>
         ) : null}
       </Group>
-      ) : null}
+    ),
+  };
+
+  const groups = SOURCE_GROUPS
+    .map((group) => ({ ...group, sections: sections.filter((s) => s.group === group.id) }))
+    .filter((group) => group.sections.length);
+
+  return (
+    <div className="sg-cb-sources">
+      <nav className="sg-cb-src-rail" aria-label="Sources">
+        {groups.map((group) => (
+          <div className="sg-cb-src-group" key={group.id}>
+            <span className="sg-cb-src-grouplabel">{group.label}</span>
+            {group.sections.map((section) => (
+              <button
+                key={section.id}
+                type="button"
+                className={`sg-cb-src-link${section.id === active ? " is-active" : ""}`}
+                aria-current={section.id === active ? "page" : undefined}
+                onClick={() => pick(section.id)}
+              >
+                <span className="sg-cb-src-label">{section.label}</span>
+                {section.failing ? (
+                  <span className="sg-cb-src-count is-bad" title={`${section.failing} failing`}>
+                    {section.failing} failing
+                  </span>
+                ) : section.count !== null ? (
+                  <span className={`sg-cb-src-count${section.count ? "" : " is-empty"}`}>
+                    {section.count}
+                  </span>
+                ) : null}
+              </button>
+            ))}
+          </div>
+        ))}
+      </nav>
+      <div className="sg-cb-src-panel">
+        {active && panels[active] ? panels[active]() : (
+          <p className="muted">You cannot manage any build sources.</p>
+        )}
+      </div>
     </div>
   );
 }
