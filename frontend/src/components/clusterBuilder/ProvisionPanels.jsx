@@ -1134,6 +1134,9 @@ export function DestroyPanel({ build, notify, onChanged, onClose }) {
           {whereCreated(build)}{build.resultClusterId ? ", and removes the cluster from Clusters, Dashboard and Inventory — its kubeconfig stops working" : ""}.
           This cannot be undone. Only what is in this cluster&apos;s OpenTofu state is touched: the network, subnets,
           images and everything else in the account stay as they are.
+          {build.provisioning?.spec?.authMode === "workload_identity"
+            ? " Once approved, KubeSight first deletes the cluster's LoadBalancer Services and waits until OCI has removed their load balancers, which OpenTofu does not know about. Block volumes made by PersistentVolumeClaims are not touched."
+            : ""}
         </p>
       ) : (
         <p className="sg-cb-pv-lede">

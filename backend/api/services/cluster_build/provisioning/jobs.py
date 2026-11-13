@@ -1588,6 +1588,18 @@ def _do_remote_apply(job: ClusterProvisionJob, build: ClusterBuild, target) -> b
     job.progress_json = progress
     db.session.commit()
     output = _Output(job, list(target.hide))
+    if job.operation == "destroy" and not started:
+        # Approved: first the OCI load balancers Kubernetes made (OpenTofu
+        # never knew them, so they would outlive the cluster).
+        from . import oke_teardown
+        from .clouds import accounts as _cloud_accounts
+
+        if _cloud_accounts.simulated() and oke_teardown._runner is None:
+            output.on_line("Simulated cloud: no OCI load balancers to remove first.")
+        else:
+            oke_teardown.release_load_balancers(build.result_cluster_id, output.on_line)
+        output.flush()
+        db.session.commit()
     try:
         remote.run_phase(job.id, "apply", output.on_line, _APPLY_TIMEOUT_S)
     except remote.RemoteError as exc:

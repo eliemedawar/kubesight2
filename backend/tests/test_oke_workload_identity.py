@@ -1219,3 +1219,104 @@ class TestRegisterAfterReportedApply:
         assert jobs.serialize_job(job)["applyReported"] is False
         with pytest.raises(ValueError):
             provisioning_service.retry_connect(row, job)
+
+
+class TestReleaseLoadBalancersBeforeDestroy:
+    def _svc(self, ns, name, kind="LoadBalancer"):
+        return {"metadata": {"namespace": ns, "name": name}, "spec": {"type": kind},
+                "status": {"loadBalancer": {"ingress": [{"ip": "10.43.20.5"}]}}}
+
+    def test_deletes_lb_services_and_waits_until_oci_removed_them(self):
+        from api.services.cluster_build.provisioning import oke_teardown
+
+        live = [self._svc("ingress", "nginx"), self._svc("app", "web"), self._svc("app", "api", "ClusterIP")]
+        calls, lines, rounds = [], [], {"n": 0}
+
+        def fake(cluster_id, args):
+            calls.append(args)
+            if args[0] == "get":
+                rounds["n"] += 1
+                items = live if rounds["n"] < 3 else [live[2]]   # gone after two polls
+                return json.dumps({"items": items})
+            return ""
+
+        oke_teardown.set_runner(fake)
+        try:
+            result = oke_teardown.release_load_balancers(7, lines.append, poll_s=0, sleep=lambda s: None)
+        finally:
+            oke_teardown.set_runner(None)
+        deleted = [a for a in calls if a[0] == "delete"]
+        assert deleted == [["delete", "service", "nginx", "-n", "ingress", "--wait=false"],
+                           ["delete", "service", "web", "-n", "app", "--wait=false"]]
+        assert result == {"checked": True, "deleted": ["ingress/nginx", "app/web"], "left": []}
+        assert any("OCI removed the load balancers" in line for line in lines)
+
+    def test_an_unreachable_cluster_does_not_block_the_destroy(self):
+        from api.services.cluster_build.provisioning import oke_teardown
+
+        def broken(cluster_id, args):
+            raise RuntimeError("dial tcp 10.43.20.130:6443: i/o timeout")
+
+        lines = []
+        oke_teardown.set_runner(broken)
+        try:
+            result = oke_teardown.release_load_balancers(7, lines.append, poll_s=0, sleep=lambda s: None)
+        finally:
+            oke_teardown.set_runner(None)
+        assert result["checked"] is False and "delete it in OCI" in lines[0]
+
+    def test_a_destroy_runs_it_before_opentofu(self, app, client, admin_token, wi_install, monkeypatch):
+        from api.services.cluster_build.provisioning import oke_teardown
+
+        order = []
+        monkeypatch.setattr(oke_teardown, "release_load_balancers",
+                            lambda cluster_id, on_line, **kw: order.append(("release", cluster_id)) or {})
+        real = remote.run_phase
+        monkeypatch.setattr(remote, "run_phase", lambda *a, **kw: order.append(("tofu", a[1])) or real(*a, **kw))
+        account = create_wi_account(client, admin_token)
+        build = create_build(client, admin_token, account)
+        job = plan(client, admin_token, build["id"])
+        assert approve(client, second_person(app), build["id"], job["id"], job["planSha256"]).status_code == 200
+        row = db.session.get(ClusterBuild, build["id"])
+        row.status, row.result_cluster_id = "completed", 9
+        db.session.commit()
+        response = client.post(f"/api/cluster-builds/{row.id}/provision/destroy",
+                               json={"confirmName": row.name}, headers=auth_headers(admin_token))
+        assert response.status_code in (200, 202), response.get_json()
+        destroy = ClusterProvisionJob.query.filter_by(build_id=row.id, operation="destroy").first()
+        db.session.refresh(destroy)
+        assert destroy.status == "awaiting_approval", destroy.error
+        order.clear()
+        assert approve(client, second_person(app, username="approver2"), row.id, destroy.id,
+                       destroy.plan_sha256).status_code == 200
+        assert [(step, str(arg)) for step, arg in order[:2]] == [("release", "9"), ("tofu", "apply")]
+
+
+def test_real_plan_checks_run_with_node_images(app, wi_install):
+    """Mock mode skips plan_checks: run the real one against fake OCI answers
+    (a missing import there failed every live OKE plan)."""
+    account = oci_wi.base.Account(id=1, name="oci-x", provider="oci", region="me-dubai-1",
+                                  settings={**wi_account_payload()["settings"], "authMode": "workload_identity"},
+                                  secrets={})
+    s = account.settings
+
+    def get_json(_account, url, what=""):
+        if "/vcns/" in url:
+            return {"displayName": "vcn", "cidrBlock": "10.43.20.0/24"}
+        if "/subnets/" in url:
+            cidr = {"master": "10.43.20.128/26", "workers": "10.43.20.192/26", "lb": "10.43.20.0/25"}
+            key = next(k for k in cidr if k in url)
+            return {"displayName": key, "cidrBlock": cidr[key], "vcnId": s["vcnOcid"], "prohibitPublicIpOnVnic": True}
+        if "clusterOptions" in url:
+            return {"kubernetesVersions": ["v1.37.0"]}
+        if "nodePoolOptions" in url:
+            return {"sources": [{"sourceName": "Oracle-Linux-9.8-2026.08.14-0-OKE-1.37.0-1820",
+                                 "imageId": "ocid1.image.oc1.me-dubai-1.aaaaaaaaxyz12345"}]}
+        return {}
+
+    spec = {"region": "me-dubai-1", "compartmentId": s["compartmentOcid"], "managed": {"kubernetesVersion": "v1.37.0"},
+            "ownerEmail": "emedawer@areeba.com", "expiresOn": "2026-12-31",
+            "nodePools": [{"name": "workers", "count": 2, "ocpus": 1, "memoryGb": 8, "diskGb": 100}]}
+    lines = oci_wi.plan_checks(account, spec, get_json)
+    image = next(line for line in lines if line["label"] == "Node image · workers")
+    assert "Oracle-Linux-9.8-2026.08.14-0-OKE-1.37.0-1820" in image["detail"]

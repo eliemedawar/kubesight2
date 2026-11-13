@@ -743,7 +743,7 @@ def render_managed(ctx: ManagedContext, network: Dict[str, Any], account_setting
 
 
 def plan_checks(account: Account, spec: Dict[str, Any], get_json) -> List[Dict[str, str]]:
-    from .oci import _endpoint, _oke_version, _version_key
+    from .oci import _endpoint, _oke_images, _oke_version, _version_key
 
     checks = [check("ok", "Signed in", identity_label(account))]
     network = read_network(account, spec["region"], get_json)
