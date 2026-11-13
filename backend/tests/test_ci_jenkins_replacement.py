@@ -422,3 +422,70 @@ def test_trigger_variables_reach_every_stage_environment(app, client, admin_toke
     ).get_data(as_text=True)
     # The mock runner echoes the env var names it received.
     assert "IMAGE_TAG" in logs
+
+
+# ---------------------------------------------------------------------------
+# One ticket, several deployments of one CI service → ONE build
+# ---------------------------------------------------------------------------
+
+def _check_missing(app, run_id):
+    from api.services.deploy_automation_service import get_or_create_jenkins as _jenkins
+
+    with app.app_context():
+        run = db.session.get(DeployAutomationRun, run_id)
+        with patch(
+            "api.services.registry_service.check_image",
+            return_value={"status": "not_found", "message": "", "registry": "", "enforcement": "block"},
+        ):
+            _do_check(run, _jenkins())
+        db.session.commit()
+        return run.ci_build_id
+
+
+def test_two_deployments_of_one_ticket_share_one_build(app, runnable_service):
+    backend = _make_run(app)
+    frontend = _make_run(app, deployment_name="payment-frontend")
+    first = _check_missing(app, backend)
+    second = _check_missing(app, frontend)
+    assert first is not None and first == second
+    with app.app_context():
+        assert CiBuild.query.filter_by(service_id=runnable_service).count() == 1
+        run = db.session.get(DeployAutomationRun, frontend)
+        assert run.status == "building"
+        step = next(s for s in run.steps if s["key"] == "build")
+        assert "shared with payment-service" in step["detail"]
+
+    _drain_ci(app)
+    with app.app_context():
+        for run_id in (backend, frontend):
+            run = db.session.get(DeployAutomationRun, run_id)
+            _do_poll_build(run, get_or_create_jenkins())
+            db.session.commit()
+            assert run.status == "verifying_image", run.steps
+
+
+def test_another_ticket_gets_its_own_build(app, runnable_service):
+    first = _check_missing(app, _make_run(app))
+    second = _check_missing(app, _make_run(app, deployment_name="payment-frontend", ticket_number="DR-146"))
+    assert first != second
+
+
+def test_a_failed_build_is_not_shared(app, runnable_service):
+    first = _check_missing(app, _make_run(app))
+    with app.app_context():
+        db.session.get(CiBuild, first).status = "failed"
+        db.session.commit()
+    second = _check_missing(app, _make_run(app, deployment_name="payment-frontend"))
+    assert second != first
+
+
+def test_cancelling_one_run_keeps_the_shared_build_for_the_other(app, runnable_service):
+    from api.services.deploy_automation_service import cancel_run
+
+    backend = _make_run(app)
+    build_id = _check_missing(app, backend)
+    _check_missing(app, _make_run(app, deployment_name="payment-frontend"))
+    with app.app_context():
+        cancel_run(backend)
+        db.session.commit()
+        assert db.session.get(CiBuild, build_id).status in ("queued", "running")

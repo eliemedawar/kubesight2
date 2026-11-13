@@ -818,7 +818,10 @@ def cancel_run(run_id: int, user=None) -> Dict[str, Any]:
             from .ci import engine as ci_engine
 
             build = db.session.get(CiBuild, run.ci_build_id)
-            if build is not None and build.status in ("queued", "running"):
+            if build is not None and build.status in ("queued", "running") and _build_shared_by_open_run(run):
+                note = (f"Cancelled by operator — CI build #{build.number} keeps running for the "
+                        "other deployment of this ticket that shares it.")
+            elif build is not None and build.status in ("queued", "running"):
                 try:
                     ci_engine.cancel_build(build, actor=user)
                     note = "Cancelled by operator — the CI build was cancelled with it."
@@ -1910,6 +1913,34 @@ def _trigger_native_build(run: DeployAutomationRun, service, pipeline=None) -> b
     if image_name:
         # ...under the repository the deployment pulls from.
         variables["IMAGE_NAME"] = image_name
+    shared = _shared_native_build(run, service, pipeline, image_name)
+    if shared is not None:
+        build_row, sibling = shared
+        run.ci_build_id = build_row.id
+        run.build_triggered_at = datetime.now(timezone.utc)
+        run.retry_count = 0
+        run.status = "building"
+        _set_step(
+            run, "build", "run",
+            f"KubeSight CI build #{build_row.number} on service '{service.name}' — shared with "
+            f"{sibling.deployment_name}, which asked for the same build in this ticket",
+        )
+        log_audit(
+            "automation_build_shared",
+            actor=None,
+            target_type="deploy_automation_run",
+            target_id=str(run.id),
+            details={
+                "ticket": run.ticket_number,
+                "deployment": run.deployment_name,
+                "ciService": service.slug,
+                "ciBuildId": build_row.id,
+                "ciBuildNumber": build_row.number,
+                "sharedWithRun": sibling.id,
+            },
+            commit=False,
+        )
+        return True
     try:
         build = ci_engine.trigger_build(
             service,
@@ -1953,6 +1984,60 @@ def _trigger_native_build(run: DeployAutomationRun, service, pipeline=None) -> b
         commit=False,
     )
     return True
+
+
+def _shared_native_build(run: DeployAutomationRun, service, pipeline, image_name: str):
+    """``(build, sibling run)`` when another run of the same ticket already
+    started the very build this run needs, else None.
+
+    One ticket naming an application with several deployments (backend +
+    frontend of one CI service) makes one run per deployment; each used to
+    start its own build of the same service, so the pipeline ran twice. The
+    same service, pipeline, tag and image name is the same build — this run
+    follows that one instead. A failed or cancelled build is not reused.
+    """
+    from ..models_ci import CiBuild, CiPipeline
+
+    if not run.ticket_record_id and not run.ticket_number:
+        return None
+    query = DeployAutomationRun.query.filter(
+        DeployAutomationRun.id != run.id,
+        DeployAutomationRun.ci_build_id.isnot(None),
+        DeployAutomationRun.image_tag == (run.image_tag or ""),
+    )
+    if run.ticket_record_id:
+        query = query.filter(DeployAutomationRun.ticket_record_id == run.ticket_record_id)
+    else:
+        query = query.filter(DeployAutomationRun.ticket_number == run.ticket_number)
+    for sibling in query.order_by(DeployAutomationRun.id.desc()).all():
+        build = db.session.get(CiBuild, sibling.ci_build_id)
+        if build is None or build.service_id != service.id:
+            continue
+        if build.status not in ("queued", "running", "success"):
+            continue
+        if pipeline is not None:
+            if build.pipeline_id != pipeline.id:
+                continue
+        else:
+            built_with = db.session.get(CiPipeline, build.pipeline_id) if build.pipeline_id else None
+            if built_with is not None and not built_with.is_default:
+                continue
+        if (_target_image_name(sibling, service, pipeline) or "") != (image_name or ""):
+            continue
+        return build, sibling
+    return None
+
+
+def _build_shared_by_open_run(run: DeployAutomationRun) -> bool:
+    """Another run still waiting on this run's CI build (see _shared_native_build)."""
+    return (
+        DeployAutomationRun.query.filter(
+            DeployAutomationRun.id != run.id,
+            DeployAutomationRun.ci_build_id == run.ci_build_id,
+            DeployAutomationRun.status.in_(OPEN_STATUSES),
+        ).first()
+        is not None
+    )
 
 
 def _target_image_name(run: DeployAutomationRun, service, pipeline=None) -> str:
