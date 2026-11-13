@@ -1269,6 +1269,8 @@ class TestReleaseLoadBalancersBeforeDestroy:
         from api.services.cluster_build.provisioning import oke_teardown
 
         order = []
+        # A runner stands for a real cluster (in plain simulation the step is skipped).
+        monkeypatch.setattr(oke_teardown, "_runner", lambda cluster_id, args: "{}")
         monkeypatch.setattr(oke_teardown, "release_load_balancers",
                             lambda cluster_id, on_line, **kw: order.append(("release", cluster_id)) or {})
         real = remote.run_phase
