@@ -908,7 +908,7 @@ const GROW_ROLES = [
  *  pools; the change is planned, and applies once its hash is approved. */
 function OkeNodePoolsPanel({ build, notify, onChanged, onClose }) {
   const spec = build.provisioning?.spec || {};
-  const [pools, setPools] = useState(() => nodePoolsFromSpec(spec.nodePools));
+  const [pools, setPools] = useState(() => nodePoolsFromSpec(spec.nodePools, spec));
   const [busy, setBusy] = useState(false);
   const [images, setImages] = useState(null);
   const version = spec.managed?.kubernetesVersion || "";
@@ -920,7 +920,7 @@ function OkeNodePoolsPanel({ build, notify, onChanged, onClose }) {
     return () => { live = false; };
   }, [spec.cloudAccountId, spec.region, spec.compartmentId, version]);
   const problem = nodePoolsProblem(pools, images);
-  const before = new Set((spec.nodePools || []).map((p) => p.name));
+  const before = new Set(nodePoolsFromSpec(spec.nodePools, spec).map((p) => p.name));
   const removed = [...before].filter((name) => !pools.some((p) => p.name === name));
   const submit = async () => {
     if (removed.length && !(await confirmDialog({
@@ -948,9 +948,9 @@ function OkeNodePoolsPanel({ build, notify, onChanged, onClose }) {
           <button className="btn-ghost btn-sm" type="button" onClick={onClose}>Close</button>
         </div>
         <p className="muted sg-cb-pv-lede">
-          Add, resize, relabel or remove pools. KubeSight makes a plan; it applies once its hash is approved. Changing a
-          pool&apos;s labels, taints or size applies to nodes created after the change: Oracle replaces nodes only when you
-          cycle them.
+          Add, resize, relabel or remove pools. KubeSight makes a plan; it applies once its hash is approved, so read it:
+          a renamed or removed pool is deleted with its nodes. A pool&apos;s new labels, taints, size or image apply to
+          nodes created after the change; Oracle replaces existing nodes only when you cycle them.
         </p>
       </div>
       <NodePoolsEditor pools={pools} onChange={setPools} problem={problem} locked={busy}

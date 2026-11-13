@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   newNodePool,
+  nodePoolsFromSpec,
   nodeImagesFor,
   nodePoolsPayload,
   nodePoolsProblem,
@@ -362,5 +363,11 @@ describe("OKE node pools", () => {
     expect(sent.taints).toEqual([{ key: "dedicated", value: "db", effect: "NoSchedule" }]);
     expect("imageId" in sent).toBe(false);
     expect(nodePoolsPayload([{ ...newNodePool("db"), imageId: images[0].id }])[0].imageId).toBe(images[0].id);
+  });
+
+  it("gives a cluster made before node pools its one workers pool", () => {
+    const [pool] = nodePoolsFromSpec([], { counts: { worker: 2 }, sizes: { worker: { cpu: 4, memoryGb: 16, diskGb: 50 } } });
+    expect(pool).toMatchObject({ name: "workers", count: 2, ocpus: 2, memoryGb: 16, diskGb: 50, faultDomains: "any", imageId: "" });
+    expect(nodePoolsFromSpec([], null)).toEqual([]);
   });
 });

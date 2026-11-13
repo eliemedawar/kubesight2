@@ -457,6 +457,12 @@ def render(build: ClusterBuild, job) -> Dict[str, Any]:
             pick = (module.simulated_default_node_image(spec) if accounts.simulated()
                     else module.default_node_image(account, spec))
             spec = {**spec, "nodeImageId": pick}
+            from .clouds import oci_wi as _oci_wi
+
+            if module.PROVIDER == "oci" and _oci_wi.is_account(account):
+                # Kept: a later node-pool change must not move the pools that
+                # chose no image onto whatever image is newest by then.
+                build.provisioning_json = {**(build.provisioning_json or {}), "nodeImageId": pick}
         context = ManagedContext(
             cluster_name=build.name, build_id=build.id, region=spec["region"], spec=spec,
             kubernetes_version=spec["managed"]["kubernetesVersion"],

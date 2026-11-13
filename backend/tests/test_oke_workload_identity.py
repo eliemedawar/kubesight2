@@ -1108,3 +1108,51 @@ class TestNodeImages:
         wrong = {"nodePools": [{**POOLS[0], "imageId": "ocid1.image.oc1.me-dubai-1.aaaaaaaasimol9oke1364"}]}
         with pytest.raises(oci_wi.CloudError, match="not an OKE node image for Kubernetes v1.37.0"):
             oci_wi.image_checks(wrong, OKE_IMAGES, "v1.37.0")
+
+
+class TestOlderClusterDayTwo:
+    """A cluster made before node pools existed: no nodePools saved."""
+
+    def _legacy(self, client, admin_token):
+        account = create_wi_account(client, admin_token)
+        build = create_build(client, admin_token, account)
+        row = db.session.get(ClusterBuild, build["id"])
+        spec = dict(row.provisioning_json)
+        spec.pop("nodePools", None)
+        spec.pop("nodeImageId", None)
+        row.provisioning_json = spec
+        row.status = "completed"
+        row.result_cluster_id = 1
+        db.session.commit()
+        return row
+
+    def test_its_one_pool_is_workers_with_its_saved_size(self, client, admin_token, wi_install):
+        row = self._legacy(client, admin_token)
+        [pool] = cloud_build.node_pools_for(row, None)
+        assert pool["name"] == "workers" and pool["count"] == 2 and pool["ocpus"] == 2
+        assert pool["faultDomains"] == "any"   # as it was created: no fault-domain spread
+
+    def test_the_same_pools_are_nothing_to_change(self, client, admin_token, wi_install):
+        row = self._legacy(client, admin_token)
+        same = [{k: v for k, v in p.items()} for p in cloud_build.node_pools_for(row, None)]
+        response = client.post(f"/api/cluster-builds/{row.id}/provision/grow-plan",
+                               json={"nodePools": same}, headers=auth_headers(admin_token))
+        assert response.status_code == 400 and "nothing to change" in response.get_json()["error"]
+
+    def test_adding_a_pool_keeps_workers_at_its_address(self, client, admin_token, wi_install):
+        row = self._legacy(client, admin_token)
+        pools = cloud_build.node_pools_for(row, None) + [POOLS[1]]
+        response = client.post(f"/api/cluster-builds/{row.id}/provision/grow-plan",
+                               json={"nodePools": pools}, headers=auth_headers(admin_token))
+        assert response.status_code in (200, 202), response.get_json()
+        job = ClusterProvisionJob.query.filter_by(build_id=row.id, operation="grow").order_by(ClusterProvisionJob.id.desc()).first()
+        config = cloud_build.render(row, job)
+        assert set(config["resource"]["oci_containerengine_node_pool"]) == {"workers", "db_pool"}
+
+    def test_the_default_image_is_kept_once_picked(self, client, admin_token, wi_install):
+        row = self._legacy(client, admin_token)
+        job = ClusterProvisionJob(build_id=row.id, operation="create", status="planning")
+        db.session.add(job)
+        db.session.commit()
+        first = cloud_build.render(row, job)["resource"]["oci_containerengine_node_pool"]["workers"]
+        assert row.provisioning_json["nodeImageId"] == first["node_source_details"][0]["image_id"]

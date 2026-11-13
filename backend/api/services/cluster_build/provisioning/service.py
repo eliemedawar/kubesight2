@@ -518,8 +518,7 @@ def _request_node_pools_change(build: ClusterBuild, payload: Dict[str, Any], *, 
     pools = oci_wi.normalize_node_pools(payload.get("nodePools"))
     if oci_wi.pool_totals(pools)["nodes"] > templates.MAX_WORKERS:
         raise ValueError(f"A cluster takes at most {templates.MAX_WORKERS} nodes in all.")
-    current = oci_wi.normalize_node_pools((build.provisioning_json or {}).get("nodePools"),
-                                          fallback=cloud_build.node_pools_for(build, None)[0])
+    current = cloud_build.node_pools_for(build, None)
     if pools == current:
         raise ValueError("The node pools are as they are now: nothing to change.")
     _require_no_open_job(build, supersede_planned=True)

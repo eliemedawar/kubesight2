@@ -415,8 +415,21 @@ export function nodePoolsPayload(pools) {
   }));
 }
 
-/** A spec's pools, read back into the editor's shape. */
-export function nodePoolsFromSpec(pools) {
+/** A spec's pools, read back into the editor's shape. A cluster made before
+ *  node pools existed has none saved: its one pool, "workers", comes from its
+ *  saved node count and size (``spec``). */
+export function nodePoolsFromSpec(pools, spec = null) {
+  if (!(pools || []).length && spec) {
+    const size = spec.sizes?.worker || {};
+    return [{
+      ...newNodePool("workers"),
+      count: Number(spec.counts?.worker) || 1,
+      ocpus: Math.max(1, Math.round((Number(size.cpu) || 2) / 2)),
+      memoryGb: Number(size.memoryGb) || 16,
+      diskGb: Math.max(50, Number(size.diskGb) || 50),
+      faultDomains: "any",
+    }];
+  }
   return (pools || []).map((pool) => ({
     ...newNodePool(pool.name),
     count: pool.count, ocpus: pool.ocpus, memoryGb: pool.memoryGb, diskGb: pool.diskGb || 50,
