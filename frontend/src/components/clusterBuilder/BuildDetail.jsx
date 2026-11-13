@@ -53,6 +53,7 @@ import {
   getClusterBuildKubeconfig,
   getClusterBuildLogs,
   preflightClusterBuild,
+  rebindOkeBackend,
   removeClusterBuildAddon,
   retryClusterBuild,
   startClusterBuild,
@@ -68,6 +69,7 @@ import {
   withCloudBus,
 } from "../../utils/cloudProvisioning.js";
 import { confirmDialog } from "../../lib/dialogs.js";
+import { useAuth } from "../../context/AuthContext";
 
 const DETAIL_POLL_INTERVAL_MS = 2500;
 const LOG_REFRESH_MS = 2500;
@@ -120,8 +122,31 @@ function FailureHero({ point, build, log, canExecute, onRetry, busy }) {
 
 function DayTwo({
   build, canCreate, canDownloadKubeconfig, onOpenCluster, onGrow, onBringWorkloads,
-  onAddAddons, onInstallApps, onSaveTemplate, onDestroy, notify, busy, setBusy,
+  onAddAddons, onInstallApps, onSaveTemplate, onDestroy, notify, busy, setBusy, onChanged,
 }) {
+  const { isAdmin } = useAuth();
+  // OKE by workload identity: KubeSight's role as bound vs as this install sets it.
+  const oke = build.cloud?.backendRoleWanted != null;
+  const fullRightsMissing = oke && build.cloud.backendRoleWanted === "cluster-admin"
+    && build.cloud.backendRole !== "cluster-admin";
+  const giveFullRights = async () => {
+    if (!(await confirmDialog({
+      title: `Give KubeSight full rights on ${build.name}?`,
+      message: "A provisioner Job binds KubeSight's backend to cluster-admin on this cluster (agreed with the platform "
+        + "owner), so any Helm chart can be installed, CRDs and kube-system included. Nothing changes in OCI.",
+      confirmLabel: "Give full rights",
+    }))) return;
+    setBusy(true);
+    try {
+      await rebindOkeBackend(build.id);
+      notify("Binding KubeSight again: follow it on this page.");
+      if (onChanged) await onChanged();
+    } catch (error) {
+      notify(error.message || String(error), true);
+    } finally {
+      setBusy(false);
+    }
+  };
   const download = async () => {
     setBusy(true);
     try {
@@ -154,7 +179,7 @@ function DayTwo({
       <span className="sg-cb-day2-label">Day two</span>
       {canCreate ? (
         <button className="btn-outline btn-sm" type="button" onClick={onGrow}>
-          {managed ? "Grow node pool" : "Add machines"}
+          {oke ? "Node pools" : managed ? "Grow node pool" : "Add machines"}
         </button>
       ) : null}
       {canCreate && !managed ? (
@@ -167,7 +192,12 @@ function DayTwo({
           Bring workloads over
         </button>
       ) : null}
-      {canCreate && onInstallApps && !managed ? (
+      {fullRightsMissing && isAdmin ? (
+        <button className="btn-outline btn-sm" type="button" disabled={busy} onClick={giveFullRights}>
+          Give KubeSight full rights
+        </button>
+      ) : null}
+      {canCreate && onInstallApps && (!managed || oke) ? (
         <button className="btn-outline btn-sm" type="button" onClick={onInstallApps}>
           Install apps
         </button>
@@ -1040,6 +1070,7 @@ export default function BuildDetail({
               notify={notify}
               busy={busy}
               setBusy={setBusy}
+              onChanged={load}
             />
           )}
         />

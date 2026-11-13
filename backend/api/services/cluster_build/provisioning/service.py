@@ -505,6 +505,30 @@ def request_grow_plan(build: ClusterBuild, payload: Dict[str, Any], *, actor: st
     return job
 
 
+def request_rebind(build: ClusterBuild, *, actor: str = "", user=None) -> ClusterProvisionJob:
+    """Bind KubeSight's backend on an OKE (workload identity) cluster again,
+    with the role this install sets (full rights: cluster-admin). Only a
+    provisioner Job may bind; nothing changes in OCI."""
+    from .clouds import oci_wi
+
+    if build.status != "completed" or not build.result_cluster_id:
+        raise ValueError("The cluster must be up and registered first.")
+    _module, account = cloud_build.account_for(build)
+    if not oci_wi.is_account(account):
+        raise ValueError("Only OKE clusters made by workload identity are bound this way.")
+    _require_no_open_job(build, supersede_planned=True)
+    job = _new_job(build, "grow", actor=actor, user=user, runner=remote.RUNNER,
+                   config_json={"rebind": True, "role": remote.backend_role()})
+    job.status = "connecting"
+    build.status = "provisioning"
+    jobs._sync_build_status(build, job)
+    db.session.commit()
+    remote.audit("rebind-requested", job=job, build=build, role=remote.backend_role(), by=actor)
+    jobs.start_worker(job.id, "connect")
+    db.session.refresh(job)
+    return job
+
+
 def _request_node_pools_change(build: ClusterBuild, payload: Dict[str, Any], *, actor: str = "",
                                user=None) -> ClusterProvisionJob:
     """Day two on an OKE (workload identity) cluster: the whole new set of node

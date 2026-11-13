@@ -379,6 +379,26 @@ def discard_provision_job(build_id: int, job_id: int):
     return _build_response(build)
 
 
+@cluster_provisioning_bp.route("/api/cluster-builds/<int:build_id>/provision/rebind", methods=["POST"])
+@require_permission("cluster_builds:execute")
+def rebind_backend(build_id: int):
+    """OKE (workload identity): bind KubeSight's backend again with the role
+    this install sets (full rights). Admins only: it changes KubeSight's own
+    rights on the cluster."""
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    user, actor = _actor()
+    if not provisioning._is_admin(user):
+        return error_response("Only an administrator may change KubeSight's rights on a cluster.", 403)
+    try:
+        job = provisioning.request_rebind(build, actor=actor, user=user)
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    _audit_job("cluster_build_oke_rebind", user, build, job)
+    return _build_response(build, 202)
+
+
 @cluster_provisioning_bp.route(
     "/api/cluster-builds/<int:build_id>/provision/jobs/<int:job_id>/retry-connect", methods=["POST"]
 )

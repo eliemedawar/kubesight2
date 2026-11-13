@@ -607,7 +607,18 @@ def _cloud_summary(build: ClusterBuild) -> Optional[Dict[str, Any]]:
             "nodeCount": int((spec.get("counts") or {}).get("worker") or 0),
             "size": (spec.get("sizes") or {}).get("worker"),
         } if managed else None),
+        # OKE by workload identity: KubeSight's role on the cluster, as bound
+        # and as this install sets it (a rebind brings the first to the second).
+        **({"backendRole": spec.get("backendRole") or "kubesight-backend",
+            "backendRoleWanted": _oke_backend_role()}
+           if spec.get("authMode") == "workload_identity" else {}),
     }
+
+
+def _oke_backend_role() -> str:
+    from .provisioning import remote
+
+    return remote.backend_role()
 
 
 def _apply_build_payload(build: ClusterBuild, payload: Dict[str, Any]) -> None:

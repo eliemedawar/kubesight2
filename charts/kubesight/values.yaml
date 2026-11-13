@@ -176,9 +176,12 @@ oke:
     region: me-dubai-1
     # Where clusters may go; any other compartment is refused.
     compartmentOcid: ""
-    # The built-in or named ClusterRole the backend's subject gets on a created
-    # cluster: "kubesight-backend" (KubeSight's own role, created by the
-    # provisioner), or a built-in one such as "edit". Never cluster-admin.
+    # The ClusterRole the backend's subject gets on a cluster it created:
+    # "kubesight-backend" (KubeSight's own limited role, created by the
+    # provisioner), a built-in one ("view", "edit", "admin"), or
+    # "cluster-admin" (full rights: any Helm chart, CRDs and kube-system
+    # included) where the platform owner agreed to it. An existing cluster
+    # moves to a new role with "Give KubeSight full rights" on its build page.
     backendRole: kubesight-backend
     # A second person, with MFA, approves each plan's hash within this many hours.
     approvalHours: 24

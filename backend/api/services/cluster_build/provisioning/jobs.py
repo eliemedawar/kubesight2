@@ -1878,6 +1878,20 @@ def _onboard_remote(job: ClusterProvisionJob, build: ClusterBuild) -> None:
     db.session.commit()
 
 
+def _rebind_remote(job: ClusterProvisionJob, build: ClusterBuild) -> None:
+    """Day two: bind KubeSight's backend again with the role set now."""
+    target = _target(build)
+    output = _Output(job, list(target.hide))
+    try:
+        oke_onboard.rebind(job, build, output.on_line)
+    except (oke_onboard.OnboardError, remote.RemoteError, cloud_build.CloudError, ValueError, KeyError) as exc:
+        output.on_line(f"Error: {scrub(str(exc))}")
+        output.flush()
+        raise JobFailed(f"KubeSight's rights on the cluster were not changed: {scrub(str(exc))}") from exc
+    output.flush()
+    db.session.commit()
+
+
 def _do_connect(job: ClusterProvisionJob) -> None:
     from .. import executor
 
@@ -1885,6 +1899,8 @@ def _do_connect(job: ClusterProvisionJob) -> None:
     if remote.is_remote_job(job):
         if job.operation == "create":
             _onboard_remote(job, build)
+        elif (job.config_json or {}).get("rebind"):
+            _rebind_remote(job, build)
         return
     if cloud_build.is_managed(build):
         _onboard_managed(job, build)

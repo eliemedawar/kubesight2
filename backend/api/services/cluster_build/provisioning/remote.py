@@ -62,7 +62,7 @@ _POLL_S = 3.0
 _REVIEW_TTL_S = 60.0
 BACKEND_ROLE = "kubesight-backend"
 LB_POLICY = "kubesight-internal-load-balancers"
-_BUILTIN_ROLES = ("view", "edit", "admin")
+_BUILTIN_ROLES = ("view", "edit", "admin", "cluster-admin")
 
 
 class RemoteError(RuntimeError):
@@ -182,10 +182,22 @@ def approval_hours() -> float:
 
 
 def backend_role() -> str:
-    role = (os.getenv("KUBESIGHT_OKE_BACKEND_ROLE") or BACKEND_ROLE).strip()
-    if role == "cluster-admin":
-        raise RemoteError("The backend's role on a created cluster is never cluster-admin.")
-    return role
+    """The backend's ClusterRole on a cluster it created. ``cluster-admin`` is
+    allowed since 2026-11-13 (the platform owner agreed KubeSight manages the
+    OKE clusters it creates as it does the vCenter ones, any Helm chart
+    included); the default stays KubeSight's own limited role."""
+    return (os.getenv("KUBESIGHT_OKE_BACKEND_ROLE") or BACKEND_ROLE).strip()
+
+
+def full_rights() -> bool:
+    return backend_role() == "cluster-admin"
+
+
+def binding_name(role: Optional[str] = None) -> str:
+    """One binding per role: a binding's roleRef never changes, so a new role
+    is a new binding (the first clusters keep "kubesight-backend")."""
+    role = role or backend_role()
+    return "kubesight-backend" if role == BACKEND_ROLE else f"kubesight-backend-{role}"
 
 
 # ---------------------------------------------------------------------------
@@ -1122,12 +1134,15 @@ def bind_manifests(subject: str) -> List[Dict[str, Any]]:
     items.append({
         "apiVersion": "rbac.authorization.k8s.io/v1",
         "kind": "ClusterRoleBinding",
-        "metadata": {"name": "kubesight-backend", "labels": {"app.kubernetes.io/managed-by": "kubesight"}},
+        "metadata": {"name": binding_name(role), "labels": {"app.kubernetes.io/managed-by": "kubesight"}},
         "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": role},
         "subjects": [{"apiGroup": "rbac.authorization.k8s.io", "kind": "User", "name": subject}],
     })
     items.extend(load_balancer_policy())
-    items.extend(backend_limits_policy(subject))
+    if role != "cluster-admin":
+        # With full rights (charts in kube-system, cluster-wide objects) the
+        # backend is not fenced; the K21 load-balancer rule still stands.
+        items.extend(backend_limits_policy(subject))
     return items
 
 

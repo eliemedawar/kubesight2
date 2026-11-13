@@ -156,9 +156,9 @@ def _pull_secret(server: str, ca_data: str, region: str, cluster_id: str, settin
     on_line(f"Registry pull Secret {PULL_SECRET} put on the cluster (default namespace).")
 
 
-def onboard(job: ClusterProvisionJob, build: ClusterBuild, on_line=lambda line: None) -> Optional[str]:
-    from .. import onboard as build_onboard
-
+def _bind(job: ClusterProvisionJob, build: ClusterBuild, on_line) -> Optional[Dict[str, Any]]:
+    """Sign in, have a provisioner Job bind the backend's subject to its role,
+    and check the backend can read the cluster. None in simulation."""
     facts = build.cloud_facts_json or {}
     cluster = facts.get("cluster") or {}
     cluster_id = cluster.get("id")
@@ -195,6 +195,39 @@ def onboard(job: ClusterProvisionJob, build: ClusterBuild, on_line=lambda line: 
     status, answer = _api(server, ca_data, "GET", "/api/v1/namespaces/default", region=region, cluster_id=cluster_id)
     if status != 200:
         raise OnboardError(f"After the binding the backend still cannot read the cluster (HTTP {status}).")
+    if remote.full_rights():
+        _drop_backend_fence(server, ca_data, region, cluster_id, on_line)
+    build.provisioning_json = {**(build.provisioning_json or {}), "backendRole": remote.backend_role()}
+    return {"server": server, "ca": ca_data, "clusterId": cluster_id, "region": region,
+            "account": account, "endpoint": endpoint}
+
+
+def _drop_backend_fence(server: str, ca_data: str, region: str, cluster_id: str, on_line) -> None:
+    """With full rights the old fence (no kube-system writes) goes, so charts
+    may install there. The backend deletes it itself, now cluster-admin."""
+    base = "/apis/admissionregistration.k8s.io/v1"
+    for kind in ("validatingadmissionpolicybindings", "validatingadmissionpolicies"):
+        status, _ = _api(server, ca_data, "DELETE", f"{base}/{kind}/{remote.BACKEND_LIMITS}",
+                         region=region, cluster_id=cluster_id)
+        if status not in (200, 202, 404):
+            raise OnboardError(f"Could not remove the {kind[:-1]} {remote.BACKEND_LIMITS} (HTTP {status}).")
+    on_line("KubeSight has full rights on this cluster (cluster-admin); the load-balancer rule (K21) stays.")
+
+
+def rebind(job: ClusterProvisionJob, build: ClusterBuild, on_line=lambda line: None) -> None:
+    """Day two: bind the backend again with the role set now (e.g. full rights);
+    the cluster's registration in KubeSight stays as it is."""
+    _bind(job, build, on_line)
+
+
+def onboard(job: ClusterProvisionJob, build: ClusterBuild, on_line=lambda line: None) -> Optional[str]:
+    from .. import onboard as build_onboard
+
+    bound = _bind(job, build, on_line)
+    if bound is None:
+        return None
+    server, ca_data, cluster_id, region = bound["server"], bound["ca"], bound["clusterId"], bound["region"]
+    account, endpoint = bound["account"], bound["endpoint"]
     _pull_secret(server, ca_data, region, cluster_id, account.settings, on_line)
 
     host = endpoint["address"]

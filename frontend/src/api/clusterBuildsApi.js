@@ -257,6 +257,9 @@ export const approveProvisionPlan = (id, jobId, planSha256, note = "") =>
 export const rejectClusterDestroy = (id, jobId, note = "") => jobAction(id, jobId, "reject", { note });
 export const discardProvisionJob = (id, jobId) => jobAction(id, jobId, "discard");
 export const retryProvisionConnect = (id, jobId) => jobAction(id, jobId, "retry-connect");
+/** OKE (workload identity): bind KubeSight again with this install's role (full rights). Admins only. */
+export const rebindOkeBackend = (id) =>
+  request(`/api/cluster-builds/${id}/provision/rebind`, { method: "POST" });
 /** Stop waiting for the new VMs to answer SSH (nothing in vCenter changes). */
 export const stopProvisionWait = (id, jobId) => jobAction(id, jobId, "stop");
 

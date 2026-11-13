@@ -2655,6 +2655,25 @@ def _start_heartbeat(app, build_id: int) -> Optional[threading.Event]:
     return stop
 
 
+def _is_managed_cloud(build: ClusterBuild) -> bool:
+    from .provisioning import cloud_build
+
+    try:
+        return cloud_build.is_managed(build)
+    except Exception:  # noqa: BLE001 — a build without a cloud is not managed
+        return False
+
+
+def _complete_build(build: ClusterBuild) -> None:
+    """A managed build's apps run is done: back to completed (its build time
+    stays the first run's)."""
+    ClusterBuild.query.filter_by(id=build.id, status="building").update(
+        {"status": "completed", "error": None, "finished_at": _utcnow()},
+        synchronize_session=False,
+    )
+    db.session.commit()
+
+
 def _run_build(app, build_id: int) -> None:
     with app.app_context():
         build = db.session.get(ClusterBuild, build_id)
@@ -2674,6 +2693,15 @@ def _run_build(app, build_id: int) -> None:
             resolved = resolve_profile(profile_row)
 
             _check_cancelled(build)
+            if _is_managed_cloud(build):
+                # OKE/EKS/GKE: the cloud runs the cluster and KubeSight has no
+                # nodes to log in to, so the only phase there is is the Helm
+                # apps one (run on the KubeSight server with the cluster's
+                # kubeconfig). Covers day-two installs, retries and restarts.
+                _phase_apps(build)
+                _check_cancelled(build)
+                _complete_build(build)
+                return
             _phase_base_prep(build, resolved)
             _check_cancelled(build)
             _phase_loadbalancer(build, resolved)
@@ -2737,7 +2765,10 @@ def _run_build(app, build_id: int) -> None:
             build.finished_at = _utcnow()
             db.session.commit()
         except _PhaseFailed as exc:
-            build.status = "failed"
+            # A managed cluster still runs when a chart fails: it stays
+            # completed (its node pools and destroy stay open); the chart shows
+            # its error and can be installed again.
+            build.status = "completed" if _is_managed_cloud(build) else "failed"
             build.error = scrub(str(exc))[:2000]
             build.finished_at = _utcnow()
             db.session.commit()

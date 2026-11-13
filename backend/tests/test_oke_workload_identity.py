@@ -564,7 +564,18 @@ class TestCreatedCluster:
             assert not {"escalate", "bind", "impersonate", "*"} & set(rule["verbs"])
             if "rbac.authorization.k8s.io" in rule["apiGroups"]:
                 assert "clusterroles" not in rule["resources"]
+        # Full rights (platform owner, 2026-11-13): its own binding, no fence,
+        # the K21 load-balancer rule kept.
         monkeypatch.setenv("KUBESIGHT_OKE_BACKEND_ROLE", "cluster-admin")
+        items = remote.bind_manifests("ocid1.workload.backend")
+        binding = next(i for i in items if i["kind"] == "ClusterRoleBinding")
+        assert binding["metadata"]["name"] == "kubesight-backend-cluster-admin"
+        assert binding["roleRef"]["name"] == "cluster-admin"
+        assert not any(i["kind"] == "ClusterRole" for i in items)
+        assert not any(i["metadata"]["name"] == remote.BACKEND_LIMITS for i in items)
+        assert any(i["kind"] == "ValidatingAdmissionPolicy" and i["metadata"]["name"] != remote.BACKEND_LIMITS
+                   for i in items)
+        monkeypatch.setenv("KUBESIGHT_OKE_BACKEND_ROLE", "superuser")
         with pytest.raises(remote.RemoteError):
             remote.bind_manifests("x")
 
@@ -1322,3 +1333,88 @@ def test_real_plan_checks_run_with_node_images(app, wi_install):
     lines = oci_wi.plan_checks(account, spec, get_json)
     image = next(line for line in lines if line["label"] == "Node image · workers")
     assert "Oracle-Linux-9.8-2026.08.14-0-OKE-1.37.0-1820" in image["detail"]
+
+
+class TestFullRightsAndApps:
+    """Platform owner, 2026-11-13: KubeSight manages the OKE clusters it creates
+    with full rights (any Helm chart), like the vCenter ones."""
+
+    def _completed(self, client, admin_token):
+        account = create_wi_account(client, admin_token)
+        build = create_build(client, admin_token, account)
+        row = db.session.get(ClusterBuild, build["id"])
+        row.status, row.result_cluster_id = "completed", "custom-5"
+        row.cloud_facts_json = {"cluster": {"id": "ocid1.cluster.oc1.me-dubai-1.x",
+                                            "privateEndpoint": {"address": "10.43.20.130", "port": 6443}}}
+        db.session.commit()
+        return row
+
+    def test_rebind_binds_cluster_admin_and_drops_the_fence(self, app, client, admin_token, wi_install, monkeypatch):
+        monkeypatch.setenv("KUBESIGHT_OKE_BACKEND_ROLE", "cluster-admin")
+        calls = []
+
+        def api(method, url, body, ca):
+            calls.append((method, url))
+            if url.endswith("/selfsubjectreviews"):
+                return 201, {"status": {"userInfo": {"username": "ocid1.workload.backend"}}}
+            return (404, {}) if method == "DELETE" and "bindings" in url else (200, {})
+
+        oke_onboard.set_api(api)
+        oke_onboard.set_ca_reader(lambda account, region, cluster_id: "Q0E=")
+        row = self._completed(client, admin_token)
+        serialized = client.get(f"/api/cluster-builds/{row.id}", headers=auth_headers(admin_token)).get_json()["data"]
+        assert serialized["cloud"]["backendRole"] == "kubesight-backend"
+        assert serialized["cloud"]["backendRoleWanted"] == "cluster-admin"
+        response = client.post(f"/api/cluster-builds/{row.id}/provision/rebind", headers=auth_headers(admin_token))
+        assert response.status_code == 202, response.get_json()
+        db.session.refresh(row)
+        job = ClusterProvisionJob.query.filter_by(build_id=row.id).order_by(ClusterProvisionJob.id.desc()).first()
+        assert job.status == "succeeded", job.error
+        assert row.status == "completed" and row.result_cluster_id == "custom-5"   # not registered again
+        binding = next(i for i in remote._results(job)["bind"]["spec"]["manifests"] if i["kind"] == "ClusterRoleBinding")
+        assert binding["roleRef"]["name"] == "cluster-admin"
+        deleted = [url for method, url in calls if method == "DELETE"]
+        assert any(url.endswith(f"/validatingadmissionpolicies/{remote.BACKEND_LIMITS}") for url in deleted)
+        assert row.provisioning_json["backendRole"] == "cluster-admin"
+
+    def test_rebind_is_for_admins(self, app, client, admin_token, wi_install):
+        row = self._completed(client, admin_token)
+        role = Role.query.filter(Role.name != "admin").first()
+        if role is None:
+            pytest.skip("no non-admin role seeded")
+        user = User(username="viewer2", email="v2@areeba.com", full_name="v", role_id=role.id,
+                    is_active=True, mfa_enabled=True, first_login_completed=True)
+        user.password_hash = "x"
+        db.session.add(user)
+        db.session.commit()
+        response = client.post(f"/api/cluster-builds/{row.id}/provision/rebind",
+                               headers=auth_headers(create_access_token(user)))
+        assert response.status_code in (403, 401)
+
+    def test_apps_on_a_managed_cluster_run_only_the_apps_phase(self, app, client, admin_token, wi_install, monkeypatch):
+        from api.services.cluster_build import executor
+
+        row = self._completed(client, admin_token)
+        ran = []
+        monkeypatch.setattr(executor, "_phase_apps", lambda build: ran.append("apps"))
+        monkeypatch.setattr(executor, "_phase_base_prep", lambda *a: ran.append("base_prep"))
+        row.status = "building"
+        db.session.commit()
+        executor.start_build_worker(row.id)
+        db.session.refresh(row)
+        assert ran == ["apps"] and row.status == "completed"
+
+    def test_a_failed_chart_leaves_a_managed_cluster_completed(self, app, client, admin_token, wi_install, monkeypatch):
+        from api.services.cluster_build import executor
+
+        row = self._completed(client, admin_token)
+
+        def fail(build):
+            raise executor._PhaseFailed("Helm apps failed: nginx: timed out")
+
+        monkeypatch.setattr(executor, "_phase_apps", fail)
+        row.status = "building"
+        db.session.commit()
+        executor.start_build_worker(row.id)
+        db.session.refresh(row)
+        assert row.status == "completed" and "nginx" in row.error

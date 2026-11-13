@@ -33,7 +33,9 @@ oke:
     enabled: true                         # CHG-KS-016
     region: me-dubai-1
     compartmentOcid: ocid1.compartment.oc1..aaaaaaaajihvv42vja5ofypuvvhhxujlknsqwaolivymekmitqzhxxqesqgq
-    backendRole: kubesight-backend
+    # Platform owner (Hussein), 2026-11-13: KubeSight manages the OKE clusters
+    # it creates with full rights, like the vCenter ones in UAT (any Helm chart).
+    backendRole: cluster-admin
     approvalHours: 24
     # Elie, 2026-11-11: admins may approve their own plans (flagged in the email).
     adminSelfApprove: true
