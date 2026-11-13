@@ -268,6 +268,10 @@ def test_every_tool_declares_honestly_whether_it_writes(client, admin_token):
         # Apps a ticket asks for: an approver approves first, then the
         # cluster's own change-approval rule applies.
         "kubesight_ticket_install_apps",
+        # OKE (Oracle Cloud): a new cluster or node pools — only ever a PLAN;
+        # a person approves its hash (MFA) in KubeSight.
+        "kubesight_ticket_request_oke_cluster",
+        "kubesight_ticket_request_oke_node_pools",
     }
 
 

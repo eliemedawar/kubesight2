@@ -378,6 +378,7 @@ def _task_message(task: TicketInterpretation, ticket: ZohoInboundTicket) -> Dict
             "catalog": catalog.catalog_entries(targets),
             "vmProfiles": vm_requests.catalog(),
             "appProfiles": vm_requests.app_catalog(),
+            "okeClusters": _oke_catalog(),
         }
     return {
         **base,
@@ -391,6 +392,9 @@ def _task_message(task: TicketInterpretation, ticket: ZohoInboundTicket) -> Dict
             "applications on the new cluster. Applications on a cluster the Cluster Builder already "
             "built: kubesight_ticket_install_apps with names from appProfiles — if the app is not "
             "in appProfiles, set the ticket to impediment. "
+            "A new OKE (Oracle Cloud) cluster: kubesight_ticket_request_oke_cluster; node pools on an "
+            "OKE cluster in okeClusters.clusters: kubesight_ticket_request_oke_node_pools — if "
+            "okeClusters is empty, set it to impediment. "
             "A question or a problem report (something is wrong, failing, slow, not working): "
             "investigate with your read-only KubeSight tools and answer it with "
             "kubesight_ticket_answer — unless troubleshooting is false below."
@@ -400,6 +404,7 @@ def _task_message(task: TicketInterpretation, ticket: ZohoInboundTicket) -> Dict
         "catalog": catalog.catalog_entries(targets),
         "vmProfiles": vm_requests.catalog(),
         "appProfiles": vm_requests.app_catalog(),
+            "okeClusters": _oke_catalog(),
     }
 
 
@@ -417,10 +422,18 @@ def process(task_id: int) -> None:
     except Exception as exc:  # noqa: BLE001
         _fail(task, f"Could not prepare the task for Hermes: {exc}")
         return
-    if task.kind == "handle" and not message.get("catalog") and not message.get("vmProfiles"):
-        _fail(task, "No deploy targets are published for this provider — pick a source cluster and "
-                    "namespaces in its Field sync first.")
-        return
+    # An empty catalog no longer stops the task: Hermes reads the description
+    # and can still answer questions, troubleshoot, request VMs or park the
+    # ticket. It just cannot pick a deploy target, and the validator still
+    # refuses any change whose target is not in the catalog.
+    if task.kind == "handle" and not message.get("catalog"):
+        message["catalogNote"] = (
+            "No deploy targets are published for this provider yet, so no deploy or variable "
+            "change can be executed. Work from the ticket's description: answer questions and "
+            "problem reports, handle VM and app requests from vmProfiles / appProfiles, and set "
+            "a request for a deploy or a variable change to impediment with a comment saying "
+            "KubeSight has no deploy targets for it yet."
+        )
 
     # Hermes can take up to its timeout (minutes) and calls back into KubeSight
     # over MCP: hold no transaction (and no pooled connection) meanwhile.
@@ -608,6 +621,7 @@ def brief(record_id: Any) -> Dict[str, Any]:
         # Applications a ticket may ask for (kubesight_ticket_request_vms
         # `apps`, kubesight_ticket_install_apps); empty when switched off.
         "appProfiles": vm_requests.app_catalog(),
+            "okeClusters": _oke_catalog(),
         "confidenceBar": agent_settings.get_or_create().min_confidence or "High",
         "runs": [
             {"id": r.id, "status": r.status, "changeType": r.change_type, "deployment": r.deployment_name,
@@ -1913,3 +1927,14 @@ def ticket_has_open_task(record_id: int) -> bool:
             TicketInterpretation.status.in_(OPEN_STATUSES + ("deciding",)),
         ).first()
     )
+
+
+def _oke_catalog():
+    """OKE accounts and clusters for Hermes (empty when OKE is not set up)."""
+    from . import oke_requests
+
+    try:
+        return oke_requests.catalog()
+    except Exception:  # noqa: BLE001 — a broken catalog must not stop ticket handling
+        logger.exception("Could not list OKE clusters for Hermes")
+        return {}

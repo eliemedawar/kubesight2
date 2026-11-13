@@ -88,6 +88,15 @@ kubesight_ticket_request_vms       {ticketRecordId, profile, name, count, size?:
                                     understanding, comment, commentOnApprove}
 kubesight_ticket_install_apps      {ticketRecordId, cluster, apps: [appProfile names],
                                     confidence, understanding, comment, commentOnApprove}
+kubesight_ticket_request_oke_cluster {ticketRecordId, name, ownerEmail, nodePools?: [pool],
+                                    kubernetesVersion?, expiresOn?, account?, confidence,
+                                    understanding, comment, commentOnApprove}
+kubesight_ticket_request_oke_node_pools {ticketRecordId, cluster, nodePools?: [pool],
+                                    removePools?: [names], confidence, understanding,
+                                    comment, commentOnApprove}
+                                    pool = {name, count?, ocpus?, memoryGb?, diskGb?,
+                                    labels?: {k: v}, taints?: [{key, value, effect}],
+                                    faultDomains?: spread|any}
 ```
 
 **One ticket can name several applications** — "deploy issuing-ms 1.4.2 and

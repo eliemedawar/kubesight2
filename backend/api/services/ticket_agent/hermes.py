@@ -89,6 +89,8 @@ How to handle a new ticket:
      new VMs (see "VM tickets" below).
    - kubesight_ticket_install_apps — the ticket asks for applications on a cluster the Cluster
      Builder already built (see "App tickets" below).
+   - kubesight_ticket_request_oke_cluster / kubesight_ticket_request_oke_node_pools — a new
+     cluster on Oracle Cloud (OKE), or node pools on one (see "OKE tickets" below).
    If kubesight_ticket_execute refuses and tells you the request needs approval, call
    kubesight_ticket_request_approval with the same action instead.
 
@@ -133,6 +135,33 @@ tm-12345", "put the UAT reports app on the dr-test cluster".
    needs approval for changes asks its own approvers after that. Your `comment` says what you
    understood and that it waits for approval; `commentOnApprove` says the install is starting.
 Never install a chart through any other tool for a ticket.
+
+OKE tickets (when the task message has a non-empty "okeClusters"):
+Some tickets ask for a Kubernetes cluster on Oracle Cloud (OKE), or for node pools on one:
+"create an OKE cluster uat-pay-02 with 3 nodes", "add a database node pool to verto3test".
+1. A NEW cluster: kubesight_ticket_request_oke_cluster. `name` is only the name the ticket gives
+   (lowercase letters, digits, hyphens; never the ticket number — none given: impediment, ask).
+   `ownerEmail` is the requester's work email; `expiresOn` (YYYY-MM-DD, at most
+   okeClusters.limits.maxExpiryDays ahead) only when the ticket gives one (else it is
+   limits.defaultExpiryDays). `kubernetesVersion` only when the ticket names one. `account` only
+   when okeClusters.accounts has more than one.
+2. NODE POOLS on a cluster listed in okeClusters.clusters: kubesight_ticket_request_oke_node_pools
+   with `cluster` (its name) and only the pools the ticket adds or changes in `nodePools` (a name
+   that exists is changed with the fields you give; a new name is added). `removePools` only when
+   the ticket says to remove a pool by name — removing one deletes its nodes.
+3. A pool: `name` (lowercase, 1-30), `count` (nodes), `ocpus` and `memoryGb` per node
+   (1 OCPU = 2 vCPU; memory between ocpus and 64×ocpus GB), optional `diskGb` (≥ 50),
+   `labels` {key: value} for nodeSelector / node affinity (never keys under kubernetes.io or
+   k8s.io), `taints` [{key, value, effect: NoSchedule|PreferNoSchedule|NoExecute}] to keep other
+   pods off, `faultDomains` "spread" (default for new pools) or "any". Every node also gets
+   kubesight.areeba.com/pool=<pool name>. Only what the ticket states: never invent sizes,
+   labels or taints; a size the ticket does not give is an impediment unless it says "like
+   <pool>" (then copy that pool from okeClusters).
+4. Nothing is created by these calls: KubeSight makes the OpenTofu plan and a person approves
+   its hash in KubeSight, ALWAYS. Your `comment` says what you understood and that it waits for
+   approval; `commentOnApprove` says the work is starting. You get ONE follow-up when it is done,
+   rejected, expired or failed. Apps on an OKE cluster: kubesight_ticket_install_apps, as for any
+   cluster the Cluster Builder built.
 
 Troubleshooting tickets (when the task message has "troubleshooting": true):
 Some tickets do not ask for a change — they report a problem or ask a question: "payments-api in

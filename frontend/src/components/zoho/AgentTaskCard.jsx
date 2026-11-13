@@ -24,12 +24,21 @@ const VM_PILL = {
   installing: ["info", "Installing Kubernetes"],
   ready: ["ok", "VMs ready"],
   cluster_ready: ["ok", "Cluster ready"],
+  pools_ready: ["ok", "Node pools ready"],
   needs_attention: ["warn", "Needs DevOps"],
   failed: ["danger", "VMs failed"],
   plan_failed: ["danger", "Plan failed"],
   rejected: ["muted", "Rejected"],
   expired: ["muted", "Expired"],
   withdrawn: ["muted", "Withdrawn"],
+};
+
+// An OKE request reads by its plan, not by VMs.
+const OKE_PILL = {
+  planning: ["info", "Planning (OKE)"],
+  awaiting_approval: ["warn", "OKE plan needs approval"],
+  creating: ["info", "Applying (OKE)"],
+  failed: ["danger", "OKE change failed"],
 };
 
 const EVENT_LABEL = {
@@ -67,8 +76,62 @@ function VmTable({ vms, label }) {
   );
 }
 
+const OKE_KINDS = ["oke_cluster", "oke_node_pools"];
+
+/** An OKE request (new cluster, or node pools): the pools, the plan, and that
+ *  approving it approves the plan's hash (MFA). */
+function OkeRequestBody({ vm }) {
+  const pools = vm.pools || [];
+  return (
+    <div className="sg-zh-vmreq">
+      <p className="sg-zh-agent-line">
+        <span className="muted">{vm.kind === "oke_cluster" ? "New OKE cluster:" : "Node pools of:"}</span>{" "}
+        <span className="mono">{vm.clusterId || vm.name}</span>
+        {vm.kubernetesVersion ? <span className="muted"> · Kubernetes {vm.kubernetesVersion}</span> : null}
+        {vm.account ? <span className="muted"> · account {vm.account}</span> : null}
+      </p>
+      {vm.kind === "oke_cluster" ? (
+        <p className="sg-zh-agent-line">
+          <span className="muted">Owner:</span> {vm.ownerEmail || "—"} <span className="muted">· expires</span> {vm.expiresOn}
+        </p>
+      ) : null}
+      {pools.length ? (
+        <div className="table-wrap">
+          <table className="sg-zh-vmtable" aria-label="Node pools">
+            <thead><tr><th>Pool</th><th>Nodes</th><th>Labels</th><th>Taints</th><th>Fault domains</th></tr></thead>
+            <tbody>
+              {pools.map((p) => (
+                <tr key={p.name}>
+                  <td className="mono">{p.name}</td>
+                  <td>{p.count} × {p.ocpus} OCPU · {p.memoryGb} GB</td>
+                  <td className="mono">{Object.entries(p.labels || {}).map(([k, v]) => `${k}=${v}`).join(", ") || "—"}</td>
+                  <td className="mono">{(p.taints || []).map((t) => `${t.key}=${t.value || ""}:${t.effect}`).join(", ") || "—"}</td>
+                  <td>{p.faultDomains === "spread" ? "spread" : "Oracle chooses"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      {vm.plan && vm.phase === "awaiting_approval" ? (
+        <p className="sg-zh-fhint">
+          OpenTofu plan #{vm.jobId}: {vm.plan.add || 0} to add, {vm.plan.change || 0} to change,{" "}
+          {vm.plan.destroy || 0} to destroy. Approving approves exactly this plan&apos;s hash: you must be signed in
+          with MFA, and not be the account Hermes runs on (unless self-approval is on).
+        </p>
+      ) : null}
+      {vm.note ? <p className="sg-zh-fhint">{vm.note}</p> : null}
+      {vm.error ? <p className="sg-zh-inline-error">{vm.error}</p> : null}
+      {vm.buildId && !vm.draftDeleted ? (
+        <p className="sg-zh-fhint"><a href={`#/cluster-builder/builds/${vm.buildId}`}>Open the build in Cluster Builder</a></p>
+      ) : null}
+    </div>
+  );
+}
+
 /** What a VM request asks for, how far it got, and the VMs themselves. */
 function VmRequestBody({ vm }) {
+  if (OKE_KINDS.includes(vm.kind)) return <OkeRequestBody vm={vm} />;
   const k8s = vm.kubernetes;
   const counts = k8s?.counts || {};
   const showBuild = vm.buildId && !vm.draftDeleted;
@@ -127,6 +190,8 @@ export function AgentTaskPill({ task }) {
   if (!task) return <span className="muted">—</span>;
   const [tone, label] =
     (task.route === "answered" && ANSWERED_PILL[task.status]) ||
+    (task.vmRequest && task.status !== "error" && task.status !== "superseded"
+      && ["oke_cluster", "oke_node_pools"].includes(task.vmRequest.kind) && OKE_PILL[task.vmRequest.phase]) ||
     (task.vmRequest && task.status !== "error" && task.status !== "superseded" && VM_PILL[task.vmRequest.phase]) ||
     TASK_PILL[task.status] || ["muted", task.status];
   return (

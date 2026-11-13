@@ -67,10 +67,17 @@ PLACEMENT_KEYS = (
     "antiAffinity",
 )
 # Outcomes after which nothing more happens to the request.
-FINISHED = ("ready", "cluster_ready", "apps_ready", "needs_attention", "failed", "plan_failed",
+FINISHED = ("ready", "cluster_ready", "apps_ready", "pools_ready", "needs_attention", "failed", "plan_failed",
             "rejected", "expired", "withdrawn")
 # vmRequest.kind for a request that installs apps on a cluster that exists.
 APPS_KIND = "apps"
+
+
+def _oke():
+    """OKE (workload identity) requests: a new cluster, or node pools."""
+    from . import oke_requests
+
+    return oke_requests
 # A started Kubernetes install leaves 'vms_ready' within seconds (the build
 # turns into a draft and preflights). Still there after this long, the install
 # thread died — a backend restart, or a crash — and nobody would ever be told.
@@ -1073,6 +1080,8 @@ def _advance_one(task: TicketInterpretation) -> bool:
         return _finish(task, "failed", error="The build was deleted in Cluster Builder before the request finished.")
     if vm.get("kind") == APPS_KIND:
         return _advance_apps(task, vm, build)
+    if vm.get("kind") in _oke().OKE_KINDS:
+        return _oke().advance(task, vm, build)
 
     if task.status == PLANNING:
         job = _latest_job(build.id)
@@ -1494,6 +1503,8 @@ def _send_for_approval(task: TicketInterpretation) -> None:
     ticket = db.session.get(ZohoInboundTicket, task.ticket_record_id) if task.ticket_record_id else None
     if agent_settings.telegram_ready(row):
         approvers = agent_settings.vm_approvers(row)
+        if vm.get("kind") in _oke().OKE_KINDS:
+            approvers = []  # the plan hash is approved in KubeSight, with MFA
         buttons = [[
             {"text": "✅ Approve and install" if vm.get("kind") == APPS_KIND else "✅ Approve and create",
              "callback_data": f"ka:{task.id}:a:{task.approval_nonce}"},
@@ -1551,6 +1562,8 @@ def approval_text(task: TicketInterpretation, ticket: Optional[ZohoInboundTicket
     vm = _vm(task)
     if vm.get("kind") == APPS_KIND:
         return _apps_approval_text(task, ticket)
+    if vm.get("kind") in _oke().OKE_KINDS:
+        return _oke().approval_text(task, ticket)
     machines = vm.get("machines") or []
     lines = [
         f"🖥 {task.ticket_number or 'Ticket'} — Hermes asks for new VMs",
@@ -1597,6 +1610,8 @@ def approval_text(task: TicketInterpretation, ticket: Optional[ZohoInboundTicket
 
 def describe(task: TicketInterpretation) -> str:
     vm = _vm(task)
+    if vm.get("kind") in _oke().OKE_KINDS:
+        return _oke().describe(vm)
     apps = ", ".join(f"{a.get('release')} ({a.get('profile')})" for a in vm.get("apps") or [])
     if vm.get("kind") == APPS_KIND:
         return f"install {apps} on cluster {vm.get('clusterId')}"
@@ -1619,7 +1634,17 @@ def check_approver(task: TicketInterpretation, user) -> None:
     who approves is always a person, and an installation that runs Hermes on
     an administrator's token must still be able to approve its requests.
     (Kept as the one place this rule lives, should it ever tighten again.)
+
+    OKE requests (one approval = the plan's sha256, K13) need a KubeSight
+    account signed in with MFA: checked here, before the request is claimed.
     """
+    vm = _vm(task)
+    if vm.get("kind") in _oke().OKE_KINDS:
+        if user is None or getattr(user, "id", None) is None:
+            raise VmRequestError("Approve OKE requests in KubeSight (Approvals): the plan's hash needs a "
+                                 "person signed in with MFA.", 403)
+        if not getattr(user, "mfa_enabled", False):
+            raise VmRequestError("Approving an OKE plan needs a second factor: turn on MFA for your account.", 403)
     return None
 
 
@@ -1632,6 +1657,9 @@ def approve(task: TicketInterpretation, by: str, user=None) -> None:
     vm = _vm(task)
     if vm.get("kind") == APPS_KIND:
         _approve_apps(task, by)
+        return
+    if vm.get("kind") in _oke().OKE_KINDS:
+        _oke().approve(task, by, user)
         return
     build = db.session.get(ClusterBuild, vm.get("buildId") or 0)
     if build is None:
@@ -1700,13 +1728,16 @@ def _release(task: TicketInterpretation, phase: str, *, note: str = "",
 
     vm = _vm(task)
     build_id = vm.get("buildId") or 0
-    # An apps request points at a cluster that exists: there is no draft.
-    kept = None if vm.get("kind") == APPS_KIND else _delete_draft(build_id)
+    # An apps (or node-pool) request points at a cluster that exists: there is
+    # no draft; a node-pool request's unapproved plan goes.
+    if vm.get("kind") == _oke().OKE_POOLS_KIND:
+        _oke().discard_plan(vm)
+    kept = None if vm.get("kind") in (APPS_KIND, _oke().OKE_POOLS_KIND) else _delete_draft(build_id)
     vm["phase"] = phase
     vm["finished"] = True
     if note:
         vm["note"] = note[:1500]
-    if vm.get("kind") == APPS_KIND:
+    if vm.get("kind") in (APPS_KIND, _oke().OKE_POOLS_KIND):
         pass
     elif kept and kept == "OpenTofu is still working on it":
         vm["cleanup"] = True  # the plan worker is still running: next tick
@@ -1810,7 +1841,9 @@ def _finish(task: TicketInterpretation, outcome: str, *, build: Optional[Cluster
         from ..cluster_build import app_ingress
 
         apps_listed += "\nIngress:\n" + "\n".join(app_ingress.lines(vm["ingresses"]))
-    if outcome == "apps_ready":
+    if vm.get("kind") in _oke().OKE_KINDS:
+        fallback = _oke().finish_comment(vm, outcome, build)
+    elif outcome == "apps_ready":
         fallback = {"outcome": "deployed",
                     "comment": f"Installed on cluster {vm.get('clusterId')}:\n{apps_listed}"}
     elif outcome == "ready":

@@ -452,6 +452,109 @@ def _ticket_install_apps(arguments: Dict[str, Any], *, user=None) -> Dict[str, A
                        "— waiting for approval; nothing installed yet", **result}
 
 
+_POOL_SCHEMA = {
+    "type": "object",
+    "description": "One node pool: only what the ticket states.",
+    "properties": {
+        "name": {"type": "string", "description": "Lowercase letters, digits, dashes (1-30)."},
+        "count": {"type": "integer", "description": "Nodes in the pool."},
+        "ocpus": {"type": "integer", "description": "OCPUs per node (1 OCPU = 2 vCPU)."},
+        "memoryGb": {"type": "integer", "description": "Memory per node, between ocpus and 64×ocpus GB."},
+        "diskGb": {"type": "integer", "description": "Boot disk per node, at least 50 GB."},
+        "labels": {"type": "object", "additionalProperties": {"type": "string"},
+                   "description": "Node labels for nodeSelector / node affinity (not kubernetes.io / k8s.io keys)."},
+        "taints": {"type": "array", "items": {"type": "object", "properties": {
+            "key": {"type": "string"}, "value": {"type": "string"},
+            "effect": {"type": "string", "enum": ["NoSchedule", "PreferNoSchedule", "NoExecute"]}}}},
+        "faultDomains": {"type": "string", "enum": ["spread", "any"]},
+    },
+    "required": ["name"],
+}
+_OKE_COMMON = {
+    "confidence": {"type": "string", "enum": ["High", "Medium", "Low"]},
+    "understanding": {"type": "string", "description": "One or two sentences, for the approver, on what the ticket asks."},
+    "concerns": {"type": "array", "items": {"type": "string"}},
+    "reasons": {"type": "array", "items": {"type": "string"}},
+    "comment": {"type": "string", "description": "Posted now: what you understood, and that it waits for approval."},
+    "commentOnApprove": {"type": "string", "description": "Posted when it is approved and the work starts."},
+}
+
+
+@tool(
+    "kubesight_ticket_request_oke_cluster",
+    permission="ticketing:agent",
+    description=(
+        "Ask for a NEW Kubernetes cluster on Oracle Cloud (OKE) a ticket requests. `name` only as the "
+        "ticket gives it (never the ticket number — none given: set the ticket to impediment and ask). "
+        "`ownerEmail` is the requester's work email. `nodePools` only as the ticket states them (default: "
+        "one pool 'workers', 2 × 2 OCPU · 16 GB). `kubernetesVersion` and `expiresOn` (YYYY-MM-DD) only "
+        "when the ticket names them; `account` only when okeClusters.accounts lists more than one. "
+        "Nothing is created by this call: KubeSight makes the OpenTofu plan and a person approves its "
+        "hash in KubeSight first, ALWAYS. You get ONE follow-up when the cluster is up, or rejected, "
+        "expired or failed."
+    ),
+    approval="Never creates anything itself: a person approves the plan's hash (MFA) first.",
+    write=True,
+    schema={
+        "type": "object",
+        "properties": {
+            "ticketRecordId": _RECORD,
+            "name": {"type": "string"},
+            "ownerEmail": {"type": "string"},
+            "account": {"type": "string", "description": "Copied from okeClusters.accounts (only if several)."},
+            "kubernetesVersion": {"type": "string", "description": "e.g. 1.37 — only if the ticket names one."},
+            "expiresOn": {"type": "string", "description": "YYYY-MM-DD — only if the ticket gives one."},
+            "nodePools": {"type": "array", "items": _POOL_SCHEMA},
+            **_OKE_COMMON,
+        },
+        "required": ["ticketRecordId", "name", "ownerEmail", "confidence", "understanding", "comment",
+                     "commentOnApprove"],
+    },
+)
+def _ticket_request_oke_cluster(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
+    from ...services.ticket_agent import oke_requests
+
+    result = _call(oke_requests.request_cluster, arguments.get("ticketRecordId"), arguments, user=user)
+    return {"changed": f"asked for the OKE cluster {result.get('name')} for ticket record "
+                       f"{arguments.get('ticketRecordId')} — planning, then waiting for approval; nothing "
+                       "created yet", **result}
+
+
+@tool(
+    "kubesight_ticket_request_oke_node_pools",
+    permission="ticketing:agent",
+    description=(
+        "Add or change node pools on an OKE cluster listed in okeClusters.clusters, as a ticket asks. "
+        "`cluster` is its name. `nodePools`: only the pools the ticket adds or changes (an existing name "
+        "is changed with the fields you give; a new name is added). `removePools`: only pool names the "
+        "ticket says to remove (their nodes are deleted). Labels and taints are how workloads are kept on "
+        "or off a pool (nodeSelector / node affinity / tolerations). Nothing is changed by this call: "
+        "KubeSight makes the plan and a person approves its hash in KubeSight first, ALWAYS. You get ONE "
+        "follow-up when the pools are ready, or rejected, expired or failed."
+    ),
+    approval="Never changes anything itself: a person approves the plan's hash (MFA) first.",
+    write=True,
+    schema={
+        "type": "object",
+        "properties": {
+            "ticketRecordId": _RECORD,
+            "cluster": {"type": "string", "description": "A name from okeClusters.clusters."},
+            "nodePools": {"type": "array", "items": _POOL_SCHEMA},
+            "removePools": {"type": "array", "items": {"type": "string"}},
+            **_OKE_COMMON,
+        },
+        "required": ["ticketRecordId", "cluster", "confidence", "understanding", "comment", "commentOnApprove"],
+    },
+)
+def _ticket_request_oke_node_pools(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
+    from ...services.ticket_agent import oke_requests
+
+    result = _call(oke_requests.request_node_pools, arguments.get("ticketRecordId"), arguments, user=user)
+    return {"changed": f"asked to change the node pools of {result.get('cluster')} for ticket record "
+                       f"{arguments.get('ticketRecordId')} — planning, then waiting for approval; nothing "
+                       "changed yet", **result}
+
+
 @tool(
     "kubesight_ticket_comment",
     permission="ticketing:agent",
