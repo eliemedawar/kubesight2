@@ -964,3 +964,18 @@ def test_token_review_skips_client_side_validation(app, wi_install):
         remote.set_kubectl(None)
     assert "--validate=false" in seen["args"]
     assert info["podName"] == "p-1" and remote.AUDIENCE in info["audiences"]
+
+
+def test_each_run_writes_its_own_cli_config(tmp_path, monkeypatch):
+    """The Job never depends on /etc/tofu/tofurc (unreadable in the first
+    image): providers come only from the image's mirror."""
+    work = tmp_path / "run-1"
+    provision.prepare_workdir(str(work), {"terraform": {}})
+    text = (work / provision.CLI_CONFIG_NAME).read_text(encoding="utf-8")
+    assert 'path    = "/opt/tofu/providers"' in text
+    assert 'include = ["registry.opentofu.org/oracle/oci"]' in text
+    assert "direct" not in text   # no way out to a registry
+    monkeypatch.setenv("KUBESIGHT_WORKDIR", str(tmp_path))
+    monkeypatch.setattr(provision.StateProxy, "start", lambda self: "http://127.0.0.1:1")
+    _, _, env = provision._start({"runId": 1, "buildId": 1, "config": {}}, "http://backend:5000")
+    assert env["TF_CLI_CONFIG_FILE"] == str(work / provision.CLI_CONFIG_NAME)

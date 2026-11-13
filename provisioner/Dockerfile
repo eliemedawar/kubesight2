@@ -50,7 +50,10 @@ RUN apt-get update \
 RUN pip install "oci-cli==${OCI_CLI_VERSION}" \
     && oci --version
 
-COPY tofurc /etc/tofu/tofurc
+# Readable by the Job's uid whatever mode the checkout gave it (KubeSight CI's
+# checkout made it owner-only, and OpenTofu then went to the internet).
+COPY --chmod=0644 tofurc /etc/tofu/tofurc
+RUN chmod 0755 /etc/tofu
 
 # The oracle/oci provider in an UNPACKED filesystem mirror (tofu init links it
 # into the working folder instead of copying ~400 MB), and the lock file
@@ -84,6 +87,10 @@ RUN sed -i 's/\r$//' /usr/local/bin/kubesight-provision /opt/kubesight/proof/* \
 
 USER 10001:10001
 WORKDIR /work
+
+# Fail the build, not the first cluster: the Job's uid must read the CLI
+# config, the lock file and the provider in the mirror.
+RUN test -r /etc/tofu/tofurc     && test -r /opt/kubesight/tofu/.terraform.lock.hcl     && test -x /opt/tofu/providers/registry.opentofu.org/oracle/oci/${OCI_PROVIDER_VERSION}/linux_amd64/terraform-provider-oci_v${OCI_PROVIDER_VERSION}     && tofu version
 
 # The proof pods override this with `sleep`; KubeSight's Jobs run it as is.
 ENTRYPOINT ["/usr/local/bin/kubesight-provision"]

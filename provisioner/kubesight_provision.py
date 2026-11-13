@@ -62,6 +62,21 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 BACKEND_TOKEN_FILE = os.environ.get("KUBESIGHT_BACKEND_TOKEN_FILE", "/var/run/kubesight/token")
 SA_TOKEN_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 LOCK_FILE = "/opt/kubesight/tofu/.terraform.lock.hcl"
+PROVIDER_MIRROR = "/opt/tofu/providers"
+# OpenTofu's CLI configuration, written into each run's folder: providers come
+# only from the image's own mirror (K3). Not read from /etc/tofu/tofurc, so a
+# build that leaves that file unreadable to uid 10001 cannot send OpenTofu to
+# registry.opentofu.org (which this Job cannot reach).
+CLI_CONFIG = "\n".join([
+    "provider_installation {",
+    "  filesystem_mirror {",
+    f'    path    = "{PROVIDER_MIRROR}"',
+    '    include = ["registry.opentofu.org/oracle/oci"]',
+    "  }",
+    "}",
+    "",
+])
+CLI_CONFIG_NAME = ".kubesight.tofurc"
 PLAN_FILE = "job.tfplan"
 PLAN_TEXT_LIMIT = 400_000
 SENSITIVE = "(sensitive value)"
@@ -347,6 +362,8 @@ def prepare_workdir(work: str, config: Dict[str, Any]) -> None:
         json.dump(config, handle, indent=2)
     if os.path.exists(LOCK_FILE):
         shutil.copyfile(LOCK_FILE, os.path.join(work, ".terraform.lock.hcl"))
+    with open(os.path.join(work, CLI_CONFIG_NAME), "w", encoding="utf-8") as handle:
+        handle.write(CLI_CONFIG)
 
 
 def init(env: Dict[str, str], work: str) -> None:
@@ -476,6 +493,7 @@ def _start(spec: Dict[str, Any], backend_base: str) -> Tuple[str, StateProxy, Di
         say("Signed in to OpenBao for the state key (the key stays in OpenBao).")
     proxy = StateProxy(backend_base)
     env = tofu_env(spec, proxy.start(), bao_token)
+    env["TF_CLI_CONFIG_FILE"] = os.path.join(work, CLI_CONFIG_NAME)
     return work, proxy, env
 
 
