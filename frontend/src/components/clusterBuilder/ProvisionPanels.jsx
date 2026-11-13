@@ -23,13 +23,18 @@ import {
   provisionRail,
   vmRows,
 } from "../../utils/clusterProvisioning.js";
-import { cloudShapesForVms, isManagedBuild, managedLabel, whereCreated } from "../../utils/cloudProvisioning.js";
+import {
+  cloudShapesForVms, isManagedBuild, managedLabel, nodeImagesFor, nodePoolsFromSpec, nodePoolsPayload, nodePoolsProblem,
+  whereCreated,
+} from "../../utils/cloudProvisioning.js";
+import NodePoolsEditor from "./NodePoolsEditor.jsx";
 import {
   applyProvisionPlan,
   approveClusterDestroy,
   approveProvisionPlan,
   createClusterTemplate,
   discardProvisionJob,
+  getCloudInventory,
   getProvisionJobConfig,
   getInstalledKubernetes,
   installKubernetesOnVms,
@@ -899,8 +904,75 @@ const GROW_ROLES = [
   ["loadbalancer", "loadbalancer", "loadBalancers"],
 ];
 
+/** Day two on an OKE (workload identity) cluster: edit the whole set of node
+ *  pools; the change is planned, and applies once its hash is approved. */
+function OkeNodePoolsPanel({ build, notify, onChanged, onClose }) {
+  const spec = build.provisioning?.spec || {};
+  const [pools, setPools] = useState(() => nodePoolsFromSpec(spec.nodePools));
+  const [busy, setBusy] = useState(false);
+  const [images, setImages] = useState(null);
+  const version = spec.managed?.kubernetesVersion || "";
+  useEffect(() => {
+    let live = true;
+    getCloudInventory(spec.cloudAccountId, { region: spec.region, compartmentId: spec.compartmentId })
+      .then((data) => { if (live) setImages(nodeImagesFor(data?.nodeImages, version)); })
+      .catch(() => { if (live) setImages(null); });
+    return () => { live = false; };
+  }, [spec.cloudAccountId, spec.region, spec.compartmentId, version]);
+  const problem = nodePoolsProblem(pools, images);
+  const before = new Set((spec.nodePools || []).map((p) => p.name));
+  const removed = [...before].filter((name) => !pools.some((p) => p.name === name));
+  const submit = async () => {
+    if (removed.length && !(await confirmDialog({
+      title: `Remove ${removed.join(", ")}?`,
+      message: `The nodes of ${removed.join(", ")} are deleted once the plan is approved; their pods move to the other pools if they fit.`,
+      confirmLabel: "Plan it",
+      tone: "danger",
+    }))) return;
+    setBusy(true);
+    try {
+      await planMoreWorkers(build.id, { nodePools: nodePoolsPayload(pools) });
+      await onChanged();
+      onClose();
+    } catch (error) {
+      notify(refusalText(error), true);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="sg-cb-pv-panel">
+      <div className="card sg-cb-card">
+        <div className="sg-cb-sect">
+          <h2>Node pools of {build.name}</h2>
+          <button className="btn-ghost btn-sm" type="button" onClick={onClose}>Close</button>
+        </div>
+        <p className="muted sg-cb-pv-lede">
+          Add, resize, relabel or remove pools. KubeSight makes a plan; it applies once its hash is approved. Changing a
+          pool&apos;s labels, taints or size applies to nodes created after the change: Oracle replaces nodes only when you
+          cycle them.
+        </p>
+      </div>
+      <NodePoolsEditor pools={pools} onChange={setPools} problem={problem} locked={busy}
+                       images={images} version={version} />
+      <div className="sg-cb-actions">
+        <button className="primary" type="button" disabled={busy || Boolean(problem)} onClick={submit}>
+          {busy ? "Planning…" : "Plan the change"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /** Day two: ask OpenTofu for more machines. The card above takes over from the plan. */
 export function ProvisionGrowPanel({ build, canExecute, notify, onChanged, onClose }) {
+  if ((build.provisioning?.spec || {}).authMode === "workload_identity") {
+    return <OkeNodePoolsPanel build={build} notify={notify} onChanged={onChanged} onClose={onClose} />;
+  }
+  return <ProvisionGrowPanelVms build={build} canExecute={canExecute} notify={notify} onChanged={onChanged} onClose={onClose} />;
+}
+
+function ProvisionGrowPanelVms({ build, canExecute, notify, onChanged, onClose }) {
   const spec = build.provisioning?.spec || {};
   const growth = growthState(build);
   const cloud = Boolean(build.cloud);

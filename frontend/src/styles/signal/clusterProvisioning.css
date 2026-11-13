@@ -358,3 +358,14 @@
 }
 .sg-cb-cloud-subnets .sg-cb-inlinecheck { gap: 8px; flex-wrap: wrap; }
 .sg-cb-secret { -webkit-text-security: disc; }
+
+/* OKE node pools editor */
+.sg-cb-np { border: 1px solid var(--border-subtle, rgba(0,0,0,.12)); border-radius: 12px; padding: 12px 14px 14px; margin: 0 0 12px; min-width: 0; }
+.sg-cb-np-head { display: flex; align-items: center; gap: 10px; padding: 0 6px; font-weight: 600; }
+.sg-cb-np-head .muted { font-weight: 400; }
+.sg-cb-np-split { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin-top: 10px; }
+.sg-cb-np-rows { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.sg-cb-np-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; width: 100%; }
+.sg-cb-np-row .sg-cb-input { flex: 1 1 110px; min-width: 0; }
+.sg-cb-np-row select.sg-cb-input { flex: 0 1 150px; }
+.sg-cb-np-rowerr { flex-basis: 100%; margin: 0; }

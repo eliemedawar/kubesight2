@@ -422,6 +422,25 @@ def machines_in_scope(build: ClusterBuild, job) -> List[Dict[str, Any]]:
     return machines
 
 
+def node_pools_for(build: ClusterBuild, job) -> List[Dict[str, Any]]:
+    """The OKE (workload identity) node pools this job makes: a day-two change
+    names them all; an "add N nodes" grows the first pool; else the build's."""
+    from .clouds import oci_wi
+
+    spec = build.provisioning_json or {}
+    config = (job.config_json or {}) if job is not None else {}
+    size = (spec.get("sizes") or {}).get("worker") or {}
+    fallback = {"count": (spec.get("counts") or {}).get("worker") or 1, "cpu": size.get("cpu"),
+                "memoryGb": size.get("memoryGb"), "diskGb": size.get("diskGb")}
+    if config.get("nodePools"):
+        return oci_wi.normalize_node_pools(config["nodePools"])
+    pools = oci_wi.normalize_node_pools(spec.get("nodePools"), fallback=fallback)
+    if config.get("nodeCount"):
+        others = sum(p["count"] for p in pools[1:])
+        pools[0]["count"] = max(1, int(config["nodeCount"]) - others)
+    return pools
+
+
 def render(build: ClusterBuild, job) -> Dict[str, Any]:
     module, account = account_for(build)
     spec = build.provisioning_json or {}
@@ -456,6 +475,7 @@ def render(build: ClusterBuild, job) -> Dict[str, Any]:
         if module.PROVIDER == "oci" and oci_wi.is_account(account):
             if context.node_pool["machineType"]["type"] != oci_wi.SHAPE:
                 raise ValueError(f"Only {oci_wi.SHAPE} nodes are allowed here.")
+            context.node_pool["pools"] = node_pools_for(build, job)
             network = (oci_wi.simulated_network(account) if accounts.simulated()
                        else oci_wi.read_network(account, spec["region"], module._get_json))
             config = oci_wi.render_managed(context, network, account.settings)

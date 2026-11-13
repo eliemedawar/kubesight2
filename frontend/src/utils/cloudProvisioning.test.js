@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  newNodePool,
+  nodeImagesFor,
+  nodePoolsPayload,
+  nodePoolsProblem,
   EMPTY_CLOUD,
   accountFormError,
   accountPayload,
@@ -329,5 +333,34 @@ describe("OKE by workload identity", () => {
     expect(payload.ownerEmail).toBe("emedawer@areeba.com");
     expect(payload.shape).toBe(WI_OCI_SHAPE);
     expect(payload.kind).toBe("managed");
+  });
+});
+
+describe("OKE node pools", () => {
+  const images = [
+    { id: "ocid1.image.oc1.me-dubai-1.aaaaaaaa9", name: "OL9-OKE-1.37.0", kubernetesVersion: "v1.37.0" },
+    { id: "ocid1.image.oc1.me-dubai-1.aaaaaaaa8", name: "OL8-OKE-1.36.4", kubernetesVersion: "v1.36.4" },
+  ];
+
+  it("offers only the images built for the chosen version", () => {
+    expect(nodeImagesFor(images, "1.37.0").map((i) => i.name)).toEqual(["OL9-OKE-1.37.0"]);
+    expect(nodeImagesFor(images, "v1.36.4").map((i) => i.name)).toEqual(["OL8-OKE-1.36.4"]);
+  });
+
+  it("refuses an image of another version, and kubernetes.io label keys", () => {
+    const pool = { ...newNodePool("workers"), imageId: images[1].id };
+    expect(nodePoolsProblem([pool], nodeImagesFor(images, "1.37.0"))).toMatch(/not built for this Kubernetes version/);
+    expect(nodePoolsProblem([{ ...pool, imageId: images[0].id }], nodeImagesFor(images, "1.37.0"))).toBe("");
+    expect(nodePoolsProblem([{ ...pool, imageId: "", labels: [{ key: "node-role.kubernetes.io/db", value: "" }] }]))
+      .toMatch(/Kubernetes' own/);
+  });
+
+  it("sends labels as an object and the image only when chosen", () => {
+    const [sent] = nodePoolsPayload([{ ...newNodePool("db"), labels: [{ key: "tier", value: "db" }],
+      taints: [{ key: "dedicated", value: "db", effect: "NoSchedule" }] }]);
+    expect(sent.labels).toEqual({ tier: "db" });
+    expect(sent.taints).toEqual([{ key: "dedicated", value: "db", effect: "NoSchedule" }]);
+    expect("imageId" in sent).toBe(false);
+    expect(nodePoolsPayload([{ ...newNodePool("db"), imageId: images[0].id }])[0].imageId).toBe(images[0].id);
   });
 });

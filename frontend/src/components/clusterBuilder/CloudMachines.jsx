@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Field } from "./common.jsx";
+import NodePoolsEditor from "./NodePoolsEditor.jsx";
 import { SizesTable } from "./VmwareMachines.jsx";
 import { timeAgo } from "../../utils/clusterBuilder.js";
 import { DEFAULT_MINIMUMS, ROLE_ONE, ROLE_TITLE } from "../../utils/clusterProvisioning.js";
@@ -24,6 +25,8 @@ import {
   machineTypeText,
   managedLabel,
   needsZone,
+  nodeImagesFor,
+  nodePoolsProblem,
   providerLabel,
   subnetsOf,
   WI_OCI_SHAPE,
@@ -386,6 +389,12 @@ export default function CloudMachines({
         )}
       </div>
 
+      {wi ? (
+        <NodePoolsEditor pools={cloud.nodePools || []} onChange={(nodePools) => set({ nodePools })}
+                         images={nodeImagesFor(inventory?.nodeImages, cloud.kubernetesVersion)}
+                         version={cloud.kubernetesVersion}
+                         problem={nodePoolsProblem(cloud.nodePools, nodeImagesFor(inventory?.nodeImages, cloud.kubernetesVersion))} />
+      ) : (
       <div className="card sg-cb-card">
         <div className="sg-cb-sect">
           <h2>{managed ? "Node pool" : "Machine sizes"}</h2>
@@ -427,8 +436,9 @@ export default function CloudMachines({
           </Field>
         ) : null}
       </div>
+      )}
 
-      {wi ? (problem ? <p className="sg-cb-field-hint">{problem}</p> : null) : (
+      {wi ? (problem ?<p className="sg-cb-field-hint">{problem}</p> : null) : (
       <div className="card sg-cb-card">
         <div className="sg-cb-sect"><h2>Who may reach them</h2></div>
         <Field

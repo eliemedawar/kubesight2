@@ -149,6 +149,8 @@ export const EMPTY_CLOUD = {
   // OKE by workload identity: the cluster's owner and expiry (freeform tags).
   ownerEmail: "",
   expiresOn: "",
+  // OKE by workload identity: the node pools (see nodePoolsPayload).
+  nodePools: [],
 };
 
 /** The only node shape on an OKE workload-identity install (K9). */
@@ -196,6 +198,7 @@ export function defaultCloudChoices(inventory, current = EMPTY_CLOUD, provider =
     next.machineTypes = {};
     next.compartmentId = inventory.compartments?.[0]?.id || next.compartmentId;
     if (!next.expiresOn) next.expiresOn = inDays(14);
+    if (!(next.nodePools || []).length) next.nodePools = [newNodePool("workers")];
   }
   return next;
 }
@@ -224,7 +227,7 @@ export function cloudProblem({ provider, account, cloud, inventory, resolved, vm
   if (inventory.workloadIdentity) {
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(cloud.ownerEmail || "")) return "Give the cluster's owner (a work email).";
     if (!/^\d{4}-\d{2}-\d{2}$/.test(cloud.expiresOn || "")) return "Give the cluster's expiry date.";
-    return "";
+    return nodePoolsProblem(cloud.nodePools, nodeImagesFor(inventory.nodeImages, cloud.kubernetesVersion));
   }
   if (managed && provider === "aws") {
     const error = awsManagedSubnetError(resolved.network.subnets, cloud.subnetIds);
@@ -275,6 +278,13 @@ export function cloudProvisioningPayload({ provider, cloud, resolved, counts, si
       payload.ownerEmail = cloud.ownerEmail;
       payload.expiresOn = cloud.expiresOn;
     }
+    if (managed && (cloud.nodePools || []).length) {
+      const pools = nodePoolsPayload(cloud.nodePools);
+      const first = pools[0];
+      payload.nodePools = pools;
+      payload.counts = { loadbalancer: 0, controlPlane: 0, worker: nodePoolTotals(pools).nodes };
+      payload.sizes = { worker: { cpu: first.ocpus * 2, memoryGb: first.memoryGb, diskGb: first.diskGb } };
+    }
   }
   return payload;
 }
@@ -303,7 +313,118 @@ export function cloudFromSpec(spec) {
     nodeImageId: spec.nodeImageId || "",
     ownerEmail: spec.ownerEmail || "",
     expiresOn: spec.expiresOn || "",
+    nodePools: nodePoolsFromSpec(spec.nodePools),
   };
+}
+
+// ---------------------------------------------------------------------------
+// OKE node pools (workload identity): size, nodes, labels, taints, spread
+// ---------------------------------------------------------------------------
+
+export const MAX_NODE_POOLS = 8;
+export const POOL_LABEL = "kubesight.areeba.com/pool";
+export const TAINT_EFFECTS = ["NoSchedule", "PreferNoSchedule", "NoExecute"];
+const POOL_NAME_RE = /^[a-z]([a-z0-9-]{0,28}[a-z0-9])?$/;
+const KEY_NAME_RE = /^[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?$/;
+const KEY_PREFIX_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
+const VALUE_RE = /^([A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?)?$/;
+
+/** A new pool: 1 node of 2 OCPUs and 16 GB, spread over fault domains. */
+export function newNodePool(name = "") {
+  return { name, count: 1, ocpus: 2, memoryGb: 16, diskGb: 50, labels: [], taints: [], faultDomains: "spread", imageId: "" };
+}
+
+export function nodePoolTotals(pools) {
+  return (pools || []).reduce((sum, p) => ({
+    nodes: sum.nodes + (Number(p.count) || 0),
+    ocpus: sum.ocpus + (Number(p.count) || 0) * (Number(p.ocpus) || 0),
+    memoryGb: sum.memoryGb + (Number(p.count) || 0) * (Number(p.memoryGb) || 0),
+  }), { nodes: 0, ocpus: 0, memoryGb: 0 });
+}
+
+/** Why a label or taint key is refused, or "". */
+export function nodeKeyError(key) {
+  const text = String(key || "").trim();
+  const slash = text.lastIndexOf("/");
+  const prefix = slash >= 0 ? text.slice(0, slash) : "";
+  const name = slash >= 0 ? text.slice(slash + 1) : text;
+  if (!KEY_NAME_RE.test(name) || (prefix && !KEY_PREFIX_RE.test(prefix))) return `"${text}" is not a valid key (e.g. team or example.com/tier).`;
+  if (prefix.endsWith("kubernetes.io") || prefix.endsWith("k8s.io")) return `"${text}": keys under kubernetes.io or k8s.io are Kubernetes' own.`;
+  if (text === POOL_LABEL) return `${POOL_LABEL} is set by KubeSight to the pool's name.`;
+  return "";
+}
+
+/** The OKE node images built for ``version`` (inventory.nodeImages), newest first. */
+export function nodeImagesFor(images, version) {
+  const wanted = `v${String(version || "").replace(/^v/, "")}`;
+  return (images || []).filter((image) => image.kubernetesVersion === wanted);
+}
+
+/** What is wrong with the pools, as one sentence, or "". ``images``: the
+ *  node images for the chosen version, when known. */
+export function nodePoolsProblem(pools, images = null) {
+  const list = pools || [];
+  if (!list.length) return "Add at least one node pool.";
+  if (list.length > MAX_NODE_POOLS) return `At most ${MAX_NODE_POOLS} node pools.`;
+  const names = new Set();
+  for (const pool of list) {
+    const name = String(pool.name || "").trim();
+    const what = `Node pool "${name || "?"}"`;
+    if (!POOL_NAME_RE.test(name)) return `${what}: the name is 1-30 lowercase letters, digits and dashes.`;
+    if (names.has(name)) return `Two node pools are called "${name}".`;
+    names.add(name);
+    const count = Number(pool.count); const ocpus = Number(pool.ocpus);
+    const memory = Number(pool.memoryGb); const disk = Number(pool.diskGb || 50);
+    if (!Number.isInteger(count) || count < 1 || count > 50) return `${what}: 1 to 50 nodes.`;
+    if (!Number.isInteger(ocpus) || ocpus < 1 || ocpus > 64) return `${what}: 1 to 64 OCPUs.`;
+    if (!Number.isInteger(memory) || memory < ocpus || memory > Math.min(1024, ocpus * 64)) return `${what}: memory is ${ocpus} to ${Math.min(1024, ocpus * 64)} GB for ${ocpus} OCPUs.`;
+    if (!Number.isInteger(disk) || disk < 50 || disk > 2048) return `${what}: boot disk 50 to 2048 GB.`;
+    if (pool.imageId && images && !images.some((image) => image.id === pool.imageId)) {
+      return `${what}: its image is not built for this Kubernetes version. Choose another.`;
+    }
+    const keys = new Set();
+    for (const row of pool.labels || []) {
+      const error = nodeKeyError(row.key);
+      if (error) return `${what}: label ${error}`;
+      if (keys.has(row.key)) return `${what}: the label ${row.key} is there twice.`;
+      keys.add(row.key);
+      if (!VALUE_RE.test(String(row.value || ""))) return `${what}: label ${row.key} has a value Kubernetes refuses.`;
+    }
+    for (const taint of pool.taints || []) {
+      const error = nodeKeyError(taint.key);
+      if (error) return `${what}: taint ${error}`;
+      if (!VALUE_RE.test(String(taint.value || ""))) return `${what}: taint ${taint.key} has a value Kubernetes refuses.`;
+      if (!TAINT_EFFECTS.includes(taint.effect)) return `${what}: choose the taint's effect.`;
+    }
+  }
+  return "";
+}
+
+/** The pools as the backend reads them (labels as an object). */
+export function nodePoolsPayload(pools) {
+  return (pools || []).map((pool) => ({
+    name: String(pool.name || "").trim(),
+    count: Number(pool.count),
+    ocpus: Number(pool.ocpus),
+    memoryGb: Number(pool.memoryGb),
+    diskGb: Number(pool.diskGb || 50),
+    labels: Object.fromEntries((pool.labels || []).filter((row) => row.key).map((row) => [row.key.trim(), String(row.value || "").trim()])),
+    taints: (pool.taints || []).filter((t) => t.key).map((t) => ({ key: t.key.trim(), value: String(t.value || "").trim(), effect: t.effect })),
+    faultDomains: pool.faultDomains === "any" ? "any" : "spread",
+    ...(pool.imageId ? { imageId: pool.imageId } : {}),
+  }));
+}
+
+/** A spec's pools, read back into the editor's shape. */
+export function nodePoolsFromSpec(pools) {
+  return (pools || []).map((pool) => ({
+    ...newNodePool(pool.name),
+    count: pool.count, ocpus: pool.ocpus, memoryGb: pool.memoryGb, diskGb: pool.diskGb || 50,
+    labels: Object.entries(pool.labels || {}).map(([key, value]) => ({ key, value })),
+    taints: (pool.taints || []).map((t) => ({ key: t.key, value: t.value || "", effect: t.effect || "NoSchedule" })),
+    faultDomains: pool.faultDomains === "any" ? "any" : "spread",
+    imageId: pool.imageId || "",
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -372,9 +493,21 @@ export function cloudBus({ loadBalancer, endpoint = "", state = "idle" }) {
 }
 
 /** The drawing of a managed cluster: the cloud's control plane, then the node pool. */
-export function managedBlueprint({ provider, count, machineType = "", state = "outline", nodeState = "set", endpoint = "" }) {
+export function managedBlueprint({ provider, count, machineType = "", state = "outline", nodeState = "set", endpoint = "", pools = null }) {
   const slots = [];
-  for (let index = 1; index <= (count || 0); index += 1) {
+  if (pools && pools.length) {
+    // OKE node pools: one slot per node, named after its pool.
+    for (const pool of pools) {
+      for (let index = 1; index <= (Number(pool.count) || 0); index += 1) {
+        slots.push({
+          key: `${pool.name}-${index}`, name: `${pool.name || "pool"} ${index}`, host: null,
+          sub: `${Number(pool.ocpus) || 0} OCPU · ${Number(pool.memoryGb) || 0} GB`, state: nodeState, stamp: null, tie: false,
+        });
+      }
+    }
+    count = slots.length;
+  }
+  for (let index = 1; !(pools && pools.length) && index <= (count || 0); index += 1) {
     slots.push({
       key: `pool-${index}`, name: `node ${index}`, host: null,
       sub: machineType || "size on plan", state: nodeState, stamp: null, tie: false,
@@ -392,7 +525,7 @@ export function managedBlueprint({ provider, count, machineType = "", state = "o
           sub: "run by the cloud", state: nodeState === "joined" ? "joined" : "set", stamp: null, tie: false,
         }],
       },
-      { role: "worker", label: "Node pool", target: count || 0, filled: slots.length, slots },
+      { role: "worker", label: pools && pools.length > 1 ? `Node pools (${pools.length})` : "Node pool", target: count || 0, filled: slots.length, slots },
     ],
   };
 }

@@ -505,11 +505,41 @@ def request_grow_plan(build: ClusterBuild, payload: Dict[str, Any], *, actor: st
     return job
 
 
+def _request_node_pools_change(build: ClusterBuild, payload: Dict[str, Any], *, actor: str = "",
+                               user=None) -> ClusterProvisionJob:
+    """Day two on an OKE (workload identity) cluster: the whole new set of node
+    pools (add, resize, relabel, retaint, remove). It is planned and approved
+    like any change; a removed pool's nodes are deleted."""
+    from .clouds import oci_wi
+
+    _module, account = cloud_build.account_for(build)
+    if not oci_wi.is_account(account):
+        raise ValueError("Node pools are set this way on OKE clusters made by workload identity.")
+    pools = oci_wi.normalize_node_pools(payload.get("nodePools"))
+    if oci_wi.pool_totals(pools)["nodes"] > templates.MAX_WORKERS:
+        raise ValueError(f"A cluster takes at most {templates.MAX_WORKERS} nodes in all.")
+    current = oci_wi.normalize_node_pools((build.provisioning_json or {}).get("nodePools"),
+                                          fallback=cloud_build.node_pools_for(build, None)[0])
+    if pools == current:
+        raise ValueError("The node pools are as they are now: nothing to change.")
+    _require_no_open_job(build, supersede_planned=True)
+    job = _new_job(build, "grow", actor=actor, user=user, config_json={
+        "nodePools": pools, "nodeCount": oci_wi.pool_totals(pools)["nodes"],
+        "poolChange": {"before": [p["name"] for p in current], "after": [p["name"] for p in pools]},
+    })
+    db.session.commit()
+    jobs.start_worker(job.id, "plan")
+    db.session.refresh(job)
+    return job
+
+
 def _request_node_pool_resize(build: ClusterBuild, payload: Dict[str, Any], *, actor: str = "",
                               user=None) -> ClusterProvisionJob:
     """Day two on a managed cluster: the cloud adds the nodes to its pool."""
     if build.status != "completed" or not build.result_cluster_id:
         raise ValueError("Nodes can be added once the cluster is up and registered.")
+    if payload.get("nodePools") is not None:
+        return _request_node_pools_change(build, payload, actor=actor, user=user)
     adding = _grow_counts(payload)
     if adding["controlPlane"] or adding["loadbalancer"]:
         raise ValueError("The cloud runs this cluster's control plane; only nodes can be added.")

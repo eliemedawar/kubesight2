@@ -307,7 +307,7 @@ def inventory(account: Account, region: str, get_json, list_items) -> Dict[str, 
     options = get_json(account, f"{engine}/clusterOptions/all?{query}", what="reading OKE cluster options") or {}
     out["kubernetesVersions"] = sorted(options.get("kubernetesVersions") or [], key=_version_key, reverse=True)
     pool = get_json(account, f"{engine}/nodePoolOptions/all?{query}", what="reading OKE node pool options") or {}
-    out["nodeImages"] = _oke_images(pool.get("sources") or [])[:40]
+    out["nodeImages"] = _oke_images(pool.get("sources") or [])[:150]
     out["workloadIdentity"] = True
     return out
 
@@ -335,9 +335,10 @@ def simulated_inventory(account: Account, region: str) -> Dict[str, Any]:
     out["machineTypes"] = machine_types()
     out["kubernetesVersions"] = ["v1.37.0", "v1.36.4", "v1.35.2", "v1.34.0"]
     out["nodeImages"] = [
-        {"id": f"ocid1.image.oc1.{region}.aaaaaaaasimoke{v.replace('.', '')}",
-         "name": f"Oracle-Linux-9.8-2026.10.16-0-OKE-{v}-2067", "kubernetesVersion": f"v{v}"}
+        {"id": f"ocid1.image.oc1.{region}.aaaaaaaasim{os_tag}oke{v.replace('.', '')}",
+         "name": f"Oracle-Linux-{os_name}-2026.10.16-0-OKE-{v}-2067", "kubernetesVersion": f"v{v}"}
         for v in ("1.37.0", "1.36.4", "1.35.2")
+        for os_tag, os_name in (("ol9", "9.8"), ("ol8", "8.10"))
     ]
     out["workloadIdentity"] = True
     return out
@@ -401,7 +402,137 @@ def normalize_spec(account: Account, spec: Dict[str, Any], raw: Dict[str, Any],
         raise ValueError(f"The expiry date may be at most {MAX_EXPIRY_DAYS} days away.")
     spec["ownerEmail"] = owner
     spec["expiresOn"] = expiry.isoformat()
+    size = (spec.get("sizes") or {}).get("worker") or {}
+    pools = normalize_node_pools(
+        raw["nodePools"] if "nodePools" in raw else previous.get("nodePools"),
+        fallback={"count": (spec.get("counts") or {}).get("worker") or 1, "cpu": size.get("cpu"),
+                  "memoryGb": size.get("memoryGb"), "diskGb": size.get("diskGb")},
+    )
+    spec["nodePools"] = pools
+    # The one-pool fields other code reads: the total, and the first pool's size.
+    spec["counts"] = {**(spec.get("counts") or {}), "worker": pool_totals(pools)["nodes"]}
+    first = pools[0]
+    spec["sizes"] = {"worker": {"cpu": first["ocpus"] * 2, "memoryGb": first["memoryGb"], "diskGb": first["diskGb"]}}
     return spec
+
+
+# ---------------------------------------------------------------------------
+# Node pools: size, count, labels, taints, fault domains
+# ---------------------------------------------------------------------------
+
+MAX_POOLS = 8
+MAX_POOL_NODES = 50
+POOL_LABEL = "kubesight.areeba.com/pool"
+FAULT_DOMAINS = ["FAULT-DOMAIN-1", "FAULT-DOMAIN-2", "FAULT-DOMAIN-3"]
+TAINT_EFFECTS = ("NoSchedule", "PreferNoSchedule", "NoExecute")
+_POOL_NAME_RE = re.compile(r"^[a-z]([a-z0-9-]{0,28}[a-z0-9])?$")
+_LABEL_NAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?$")
+_LABEL_PREFIX_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
+_IMAGE_RE = re.compile(r"^ocid1\.image\.oc1\.[a-z0-9-]*\.[a-z0-9]{8,}$")
+_LABEL_VALUE_RE = re.compile(r"^([A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?)?$")
+
+
+def _label_key(key: str, what: str) -> str:
+    key = str(key or "").strip()
+    prefix, _, name = key.rpartition("/")
+    if not _LABEL_NAME_RE.fullmatch(name) or (prefix and (len(prefix) > 253 or not _LABEL_PREFIX_RE.fullmatch(prefix))):
+        raise ValueError(f"{what} '{key}' is not a valid Kubernetes key (e.g. team or example.com/tier).")
+    if prefix and (prefix.endswith("kubernetes.io") or prefix.endswith("k8s.io")):
+        # The kubelet may not set these itself (NodeRestriction), so OKE would fail the node.
+        raise ValueError(f"{what} '{key}': keys under kubernetes.io or k8s.io are Kubernetes' own.")
+    if key == POOL_LABEL:
+        raise ValueError(f"{POOL_LABEL} is set by KubeSight to the pool's name.")
+    return key
+
+
+def _label_value(value: Any, what: str) -> str:
+    value = str(value if value is not None else "").strip()
+    if not _LABEL_VALUE_RE.fullmatch(value):
+        raise ValueError(f"{what} value '{value}' is not a valid Kubernetes label value (63 characters at most).")
+    return value
+
+
+def _whole(value: Any, what: str, low: int, high: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{what} must be a whole number.") from exc
+    if not low <= number <= high:
+        raise ValueError(f"{what} must be between {low} and {high}.")
+    return number
+
+
+def normalize_node_pools(raw: Any, *, fallback: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """The cluster's node pools, checked. ``fallback`` (count, cpu, memoryGb,
+    diskGb) makes the single ``workers`` pool of a build that names none."""
+    if not raw:
+        fb = fallback or {}
+        raw = [{"name": "workers", "count": fb.get("count") or 1,
+                "ocpus": max(1, int(fb.get("cpu") or 2) // 2), "memoryGb": fb.get("memoryGb") or 16,
+                "diskGb": fb.get("diskGb") or 50}]
+    if not isinstance(raw, list):
+        raise ValueError("nodePools must be a list.")
+    if not 1 <= len(raw) <= MAX_POOLS:
+        raise ValueError(f"A cluster has 1 to {MAX_POOLS} node pools.")
+    pools: List[Dict[str, Any]] = []
+    seen = set()
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            raise ValueError("Each node pool is an object.")
+        name = str(item.get("name") or "").strip().lower()
+        if not _POOL_NAME_RE.fullmatch(name):
+            raise ValueError(f"Node pool {index}: the name is 1-30 lowercase letters, digits and dashes.")
+        if name in seen:
+            raise ValueError(f"Two node pools are called '{name}'.")
+        seen.add(name)
+        what = f"Node pool '{name}'"
+        ocpus = _whole(item.get("ocpus"), f"{what}: OCPUs", 1, 64)
+        memory = _whole(item.get("memoryGb"), f"{what}: memory (GB)", ocpus, min(1024, ocpus * 64))
+        labels_in = item.get("labels") or {}
+        if isinstance(labels_in, list):
+            labels_in = {str(row.get("key") or ""): row.get("value") for row in labels_in if isinstance(row, dict)}
+        if not isinstance(labels_in, dict) or len(labels_in) > 20:
+            raise ValueError(f"{what}: at most 20 labels.")
+        pool_labels = {_label_key(k, f"{what}: label"): _label_value(v, f"{what}: label") for k, v in labels_in.items()}
+        taints_in = item.get("taints") or []
+        if not isinstance(taints_in, list) or len(taints_in) > 10:
+            raise ValueError(f"{what}: at most 10 taints.")
+        taints = []
+        for taint in taints_in:
+            if not isinstance(taint, dict):
+                raise ValueError(f"{what}: each taint is an object.")
+            effect = str(taint.get("effect") or "NoSchedule")
+            if effect not in TAINT_EFFECTS:
+                raise ValueError(f"{what}: a taint's effect is one of {', '.join(TAINT_EFFECTS)}.")
+            taints.append({"key": _label_key(taint.get("key"), f"{what}: taint"),
+                           "value": _label_value(taint.get("value"), f"{what}: taint"), "effect": effect})
+        image = str(item.get("imageId") or "").strip()
+        if image and not _IMAGE_RE.fullmatch(image):
+            raise ValueError(f"{what}: the image must be an OKE node image OCID (ocid1.image...).")
+        spread = str(item.get("faultDomains") or "any")
+        if spread not in ("any", "spread"):
+            raise ValueError(f"{what}: faultDomains is 'any' or 'spread'.")
+        pools.append({
+            "name": name,
+            "count": _whole(item.get("count"), f"{what}: nodes", 1, MAX_POOL_NODES),
+            "ocpus": ocpus,
+            "memoryGb": memory,
+            "diskGb": _whole(item.get("diskGb") or 50, f"{what}: boot disk (GB)", 50, 2048),
+            "labels": pool_labels,
+            "taints": taints,
+            "faultDomains": spread,
+            # Empty: the newest Oracle Linux OKE image for the cluster's version.
+            "imageId": image,
+        })
+    return pools
+
+
+def pool_totals(pools: List[Dict[str, Any]]) -> Dict[str, int]:
+    return {"nodes": sum(p["count"] for p in pools), "ocpus": sum(p["count"] * p["ocpus"] for p in pools)}
+
+
+def _pool_key(name: str) -> str:
+    return name.replace("-", "_")
 
 
 def labels(base_labels: Dict[str, str], spec: Dict[str, Any]) -> Dict[str, str]:
@@ -492,16 +623,23 @@ def nsg_rules(spec: Dict[str, Any], network: Dict[str, Any], account_settings: D
     return out
 
 
-def cloud_init(registry_host: str, registry_address: str) -> str:
-    """Oracle's OKE bootstrap first, then the registry's name (K16)."""
+def cloud_init(registry_host: str, registry_address: str, taints: Optional[List[Dict[str, str]]] = None) -> str:
+    """Oracle's OKE bootstrap first (with the pool's taints for the kubelet),
+    then the registry's name (K16)."""
     if not _HOST_RE.fullmatch(registry_host):
         raise ValueError("Bad registry host.")
     ipaddress.ip_address(registry_address)
+    bootstrap = "bash /var/run/oke-init.sh"
+    if taints:
+        # Keys and values are checked label syntax ([A-Za-z0-9._/-]), safe in quotes.
+        spec = ",".join(f"{t['key']}={t['value']}:{t['effect']}" if t.get("value") else f"{t['key']}:{t['effect']}"
+                        for t in taints)
+        bootstrap += f' --kubelet-extra-args "--register-with-taints={spec}"'
     return (
         "#!/bin/bash\n"
         'curl --fail -H "Authorization: Bearer Oracle" -L0 '
         "http://169.254.169.254/opc/v2/instance/metadata/oke_init_script | base64 --decode >/var/run/oke-init.sh\n"
-        "bash /var/run/oke-init.sh\n"
+        f"{bootstrap}\n"
         f"echo '{registry_address}      {registry_host}' >> /etc/hosts\n"
     )
 
@@ -553,32 +691,44 @@ def render_managed(ctx: ManagedContext, network: Dict[str, Any], account_setting
             "options[0].service_lb_config[0].defined_tags",
         ]}],
     }}
-    user_data = base64.b64encode(
-        cloud_init(account_settings["registryHost"], account_settings["registryAddress"]).encode("utf-8")
-    ).decode("ascii")
-    resources[NODE_POOL_TYPE] = {"workers": {
-        "cluster_id": "${" + CLUSTER_RESOURCE + ".cluster.id}",
-        "compartment_id": spec["compartmentId"],
-        "name": f"{ctx.cluster_name}-workers",
-        "kubernetes_version": version,
-        "node_shape": SHAPE,
-        "node_shape_config": [{"ocpus": int(machine["ocpus"]), "memory_in_gbs": int(machine["memoryGb"])}],
-        "node_config_details": [{
-            "size": int(ctx.node_pool["count"]),
-            "placement_configs": [{"availability_domain": spec["zone"], "subnet_id": subnets["workers"]["id"]}],
-            "nsg_ids": ["${oci_core_network_security_group.workers.id}"],
-            "node_pool_pod_network_option_details": [{"cni_type": CNI}],
+    pools = ctx.node_pool.get("pools") or normalize_node_pools(spec.get("nodePools"), fallback={
+        "count": ctx.node_pool["count"], "cpu": int(machine["ocpus"]) * 2,
+        "memoryGb": int(machine["memoryGb"]), "diskGb": ctx.node_pool.get("diskGb"),
+    })
+    resources[NODE_POOL_TYPE] = {}
+    for pool in pools:
+        placement: Dict[str, Any] = {"availability_domain": spec["zone"], "subnet_id": subnets["workers"]["id"]}
+        if pool["faultDomains"] == "spread":
+            placement["fault_domains"] = list(FAULT_DOMAINS)
+        user_data = base64.b64encode(cloud_init(
+            account_settings["registryHost"], account_settings["registryAddress"], pool["taints"],
+        ).encode("utf-8")).decode("ascii")
+        node_labels = {POOL_LABEL: pool["name"], **pool["labels"]}
+        # The first pool named "workers" keeps the address a one-pool build had.
+        resources[NODE_POOL_TYPE][_pool_key(pool["name"])] = {
+            "cluster_id": "${" + CLUSTER_RESOURCE + ".cluster.id}",
+            "compartment_id": spec["compartmentId"],
+            "name": f"{ctx.cluster_name}-{pool['name']}",
+            "kubernetes_version": version,
+            "node_shape": SHAPE,
+            "node_shape_config": [{"ocpus": pool["ocpus"], "memory_in_gbs": pool["memoryGb"]}],
+            "initial_node_labels": [{"key": k, "value": v} for k, v in node_labels.items()],
+            "node_config_details": [{
+                "size": pool["count"],
+                "placement_configs": [placement],
+                "nsg_ids": ["${oci_core_network_security_group.workers.id}"],
+                "node_pool_pod_network_option_details": [{"cni_type": CNI}],
+                "freeform_tags": {**tags, "pool": pool["name"]},
+            }],
+            "node_source_details": [{
+                "source_type": "IMAGE",
+                "image_id": pool.get("imageId") or spec["nodeImageId"],
+                "boot_volume_size_in_gbs": str(pool["diskGb"]),
+            }],
+            "node_metadata": {"user_data": user_data},
             "freeform_tags": tags,
-        }],
-        "node_source_details": [{
-            "source_type": "IMAGE",
-            "image_id": spec["nodeImageId"],
-            "boot_volume_size_in_gbs": str(max(50, int(ctx.node_pool.get("diskGb") or 50))),
-        }],
-        "node_metadata": {"user_data": user_data},
-        "freeform_tags": tags,
-        "lifecycle": [{"ignore_changes": ["defined_tags", "node_config_details[0].defined_tags"]}],
-    }}
+            "lifecycle": [{"ignore_changes": ["defined_tags", "node_config_details[0].defined_tags"]}],
+        }
     return {
         "terraform": {
             "required_providers": {
@@ -613,9 +763,34 @@ def plan_checks(account: Account, spec: Dict[str, Any], get_json) -> List[Dict[s
             + (f"; it offers {', '.join(sorted(offered, key=_version_key, reverse=True)[:5])}." if offered else ".")
         )
     checks.append(check("ok", "Kubernetes version", f"OKE offers {version}"))
+    pool_options = get_json(account, f"{engine}/nodePoolOptions/all?{query}", what="reading OKE node pool options") or {}
+    checks.extend(image_checks(spec, _oke_images(pool_options.get("sources") or [], version), version))
     checks.append(check("ok", "Cluster", f"{CLUSTER_TYPE}, private endpoint, {CNI}, {SHAPE} nodes"))
     checks.append(check("ok", "Owner", f"{spec.get('ownerEmail')}, expires {spec.get('expiresOn')}"))
     return checks
+
+
+def image_checks(spec: Dict[str, Any], images: List[Dict[str, Any]], version: str) -> List[Dict[str, str]]:
+    """Each pool's node image: the one chosen must be an OKE image built for
+    ``version``; none chosen means the newest one (said by name)."""
+    from .oci import _oke_version  # noqa: F401 — version is already OKE's form
+
+    by_id = {image["id"]: image for image in images}
+    newest = images[0] if images else None
+    out = []
+    for pool in normalize_node_pools(spec.get("nodePools"), fallback={"count": 1}):
+        chosen = pool.get("imageId") or ""
+        if chosen and chosen not in by_id:
+            raise CloudError(
+                f"Node pool '{pool['name']}': the image {chosen} is not an OKE node image for Kubernetes "
+                f"{version} here. Choose one built for {version}."
+            )
+        image = by_id.get(chosen) or newest
+        if image is None:
+            raise CloudError(f"OKE offers no Oracle Linux node image for Kubernetes {version} here.")
+        out.append(check("ok", f"Node image · {pool['name']}",
+                         f"{image['name']}{'' if chosen else ' (newest for ' + version + ')'}"))
+    return out
 
 
 # ---------------------------------------------------------------------------

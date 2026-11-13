@@ -2130,6 +2130,12 @@ def _managed_done(build: ClusterBuild, job: ClusterProvisionJob) -> None:
         counts = dict(spec.get("counts") or {})
         counts["worker"] = int((job.config_json or {}).get("nodeCount") or counts.get("worker") or 0)
         spec["counts"] = counts
+        if (job.config_json or {}).get("nodePools"):
+            spec["nodePools"] = job.config_json["nodePools"]
+        elif spec.get("nodePools") and (job.config_json or {}).get("nodeCount"):
+            from . import cloud_build as _cloud_build
+
+            spec["nodePools"] = _cloud_build.node_pools_for(build, job)
         build.provisioning_json = spec
     else:
         build.started_at = build.started_at or _as_utc(job.started_at) or now

@@ -77,6 +77,7 @@ import {
   defaultCloudChoices,
   isCloud,
   managedBlueprint,
+  nodePoolTotals,
   managedLabel,
   providerLabel,
   resolveCloud,
@@ -1858,7 +1859,12 @@ export default function Wizard({
         : { label: "Template", value: findTemplate(catalog, basics.templateId)?.name || "Custom" },
     { label: "Where", value: cloudWhere({ provider: basics.machineSource, region: basics.cloud.region,
       zone: managed ? "" : cloudResolved.subnet?.zone || basics.cloud.zone }) || providerLabel(basics.machineSource) },
-    { label: managed ? "Node pool" : "Machines", value: `${cloudSum.machines} ${managed ? "nodes" : "VMs"} · ${cloudSum.cpu} vCPU · ${cloudSum.memoryGb} GB` },
+    oke && (basics.cloud.nodePools || []).length
+      ? { label: "Node pools", value: (() => {
+        const totals = nodePoolTotals(basics.cloud.nodePools);
+        return `${basics.cloud.nodePools.length} · ${totals.nodes} nodes · ${totals.ocpus} OCPU · ${totals.memoryGb} GB`;
+      })() }
+      : { label: managed ? "Node pool" : "Machines", value: `${cloudSum.machines} ${managed ? "nodes" : "VMs"} · ${cloudSum.cpu} vCPU · ${cloudSum.memoryGb} GB` },
     ...(!managed && cloudResolved.image ? [{ label: "Image", value: cloudResolved.image.name }] : []),
     ...(!managed && !vmsOnly && shapeCounts.loadbalancer ? [{ label: "API", value: "cloud internal load balancer" }] : []),
   ];
@@ -1867,6 +1873,7 @@ export default function Wizard({
     ? managedBlueprint({
       provider: basics.machineSource, count: cloudCounts.worker,
       machineType: resolvedSizes.resolved.worker?.type || "", state, endpoint,
+      pools: oke ? basics.cloud.nodePools : null,
     })
     : withCloudBus(
       machinesBlueprint({ machines, state, slotState: () => "set" }),

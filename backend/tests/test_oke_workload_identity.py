@@ -979,3 +979,132 @@ def test_each_run_writes_its_own_cli_config(tmp_path, monkeypatch):
     monkeypatch.setattr(provision.StateProxy, "start", lambda self: "http://127.0.0.1:1")
     _, _, env = provision._start({"runId": 1, "buildId": 1, "config": {}}, "http://backend:5000")
     assert env["TF_CLI_CONFIG_FILE"] == str(work / provision.CLI_CONFIG_NAME)
+# ---------------------------------------------------------------------------
+# Node pools: size, labels, taints, fault domains (OKE by workload identity)
+# ---------------------------------------------------------------------------
+
+POOLS = [
+    {"name": "workers", "count": 2, "ocpus": 2, "memoryGb": 16, "diskGb": 50,
+     "labels": {"team": "payments"}, "taints": [], "faultDomains": "spread"},
+    {"name": "db-pool", "count": 1, "ocpus": 4, "memoryGb": 32, "diskGb": 100,
+     "labels": {"example.com/tier": "db"},
+     "taints": [{"key": "dedicated", "value": "database", "effect": "NoSchedule"}], "faultDomains": "any"},
+]
+
+
+class TestNodePools:
+    def _row(self, client, admin_token, **kwargs):
+        account = create_wi_account(client, admin_token)
+        build = create_build(client, admin_token, account, **kwargs)
+        return db.session.get(ClusterBuild, build["id"])
+
+    def test_a_build_without_pools_gets_one_workers_pool(self, client, admin_token, wi_install):
+        spec = self._row(client, admin_token).provisioning_json
+        assert [p["name"] for p in spec["nodePools"]] == ["workers"]
+        assert spec["nodePools"][0]["count"] == 2 and spec["nodePools"][0]["ocpus"] == 2
+
+    def test_pools_are_saved_with_the_total(self, client, admin_token, wi_install):
+        spec = self._row(client, admin_token, nodePools=POOLS).provisioning_json
+        assert [p["name"] for p in spec["nodePools"]] == ["workers", "db-pool"]
+        assert spec["counts"]["worker"] == 3
+        assert spec["nodePools"][1]["taints"][0] == {"key": "dedicated", "value": "database", "effect": "NoSchedule"}
+
+    def test_each_pool_renders_with_labels_taints_and_spread(self, client, admin_token, wi_install):
+        row = self._row(client, admin_token, nodePools=POOLS)
+        job = ClusterProvisionJob(build_id=row.id, operation="create", status="planning")
+        db.session.add(job)
+        db.session.commit()
+        pools = cloud_build.render(row, job)["resource"]["oci_containerengine_node_pool"]
+        assert set(pools) == {"workers", "db_pool"}
+        workers, database = pools["workers"], pools["db_pool"]
+        assert {"key": oci_wi.POOL_LABEL, "value": "workers"} in workers["initial_node_labels"]
+        assert {"key": "team", "value": "payments"} in workers["initial_node_labels"]
+        assert workers["node_config_details"][0]["placement_configs"][0]["fault_domains"] == oci_wi.FAULT_DOMAINS
+        assert "fault_domains" not in database["node_config_details"][0]["placement_configs"][0]
+        assert database["node_shape_config"] == [{"ocpus": 4, "memory_in_gbs": 32}]
+        assert database["node_source_details"][0]["boot_volume_size_in_gbs"] == "100"
+        script = base64.b64decode(database["node_metadata"]["user_data"]).decode()
+        assert 'bash /var/run/oke-init.sh --kubelet-extra-args "--register-with-taints=dedicated=database:NoSchedule"' in script
+        assert "register-with-taints" not in base64.b64decode(workers["node_metadata"]["user_data"]).decode()
+
+    @pytest.mark.parametrize("pools, words", [
+        ([{**POOLS[0], "name": "Bad_Name"}], "name"),
+        ([POOLS[0], {**POOLS[1], "name": "workers"}], "Two node pools"),
+        ([{**POOLS[0], "labels": {"node-role.kubernetes.io/db": ""}}], "Kubernetes' own"),
+        ([{**POOLS[0], "labels": {oci_wi.POOL_LABEL: "x"}}], "set by KubeSight"),
+        ([{**POOLS[0], "memoryGb": 1}], "memory"),
+        ([{**POOLS[0], "taints": [{"key": "a", "effect": "Sometimes"}]}], "effect"),
+        ([{**POOLS[0], "taints": [{"key": "a b", "effect": "NoSchedule"}]}], "valid Kubernetes key"),
+        ([{**POOLS[0], "faultDomains": "two"}], "faultDomains"),
+        ([], None),
+    ])
+    def test_bad_pools_are_refused(self, pools, words):
+        if words is None:   # no pools at all: the one-pool fallback
+            assert oci_wi.normalize_node_pools(pools, fallback={"count": 1})[0]["name"] == "workers"
+            return
+        with pytest.raises(ValueError, match=words):
+            oci_wi.normalize_node_pools(pools)
+
+    def test_day_two_change_is_planned_and_saved(self, app, client, admin_token, wi_install):
+        row = self._row(client, admin_token)
+        row.status = "completed"
+        row.result_cluster_id = 1
+        db.session.commit()
+        response = client.post(f"/api/cluster-builds/{row.id}/provision/grow-plan",
+                               json={"nodePools": POOLS}, headers=auth_headers(admin_token))
+        assert response.status_code in (200, 202), response.get_json()
+        job = ClusterProvisionJob.query.filter_by(build_id=row.id, operation="grow").order_by(ClusterProvisionJob.id.desc()).first()
+        assert [p["name"] for p in job.config_json["nodePools"]] == ["workers", "db-pool"]
+        assert job.config_json["nodeCount"] == 3
+        config = cloud_build.render(row, job)
+        assert set(config["resource"]["oci_containerengine_node_pool"]) == {"workers", "db_pool"}
+        jobs._managed_done(row, job)
+        assert [p["name"] for p in row.provisioning_json["nodePools"]] == ["workers", "db-pool"]
+
+    def test_day_two_refuses_no_change(self, client, admin_token, wi_install):
+        row = self._row(client, admin_token, nodePools=POOLS)
+        row.status = "completed"
+        row.result_cluster_id = 1
+        db.session.commit()
+        response = client.post(f"/api/cluster-builds/{row.id}/provision/grow-plan",
+                               json={"nodePools": POOLS}, headers=auth_headers(admin_token))
+        assert response.status_code == 400 and "nothing to change" in response.get_json()["error"]
+
+
+IMG_137 = "ocid1.image.oc1.me-dubai-1.aaaaaaaasimol8oke1370"
+OKE_IMAGES = [
+    {"id": "ocid1.image.oc1.me-dubai-1.aaaaaaaasimol9oke1370", "name": "Oracle-Linux-9.8-OKE-1.37.0", "kubernetesVersion": "v1.37.0"},
+    {"id": IMG_137, "name": "Oracle-Linux-8.10-OKE-1.37.0", "kubernetesVersion": "v1.37.0"},
+]
+
+
+class TestNodeImages:
+    def test_a_pool_may_name_its_image(self):
+        pool = oci_wi.normalize_node_pools([{**POOLS[0], "imageId": IMG_137}])[0]
+        assert pool["imageId"] == IMG_137
+        assert oci_wi.normalize_node_pools([POOLS[0]])[0]["imageId"] == ""
+
+    def test_a_bad_image_id_is_refused(self):
+        with pytest.raises(ValueError, match="OKE node image OCID"):
+            oci_wi.normalize_node_pools([{**POOLS[0], "imageId": "ubuntu:22.04"}])
+
+    def test_the_pool_boots_from_its_image_else_the_newest(self, client, admin_token, wi_install):
+        account = create_wi_account(client, admin_token)
+        build = create_build(client, admin_token, account,
+                             nodePools=[{**POOLS[0], "imageId": IMG_137}, POOLS[1]])
+        row = db.session.get(ClusterBuild, build["id"])
+        job = ClusterProvisionJob(build_id=row.id, operation="create", status="planning")
+        db.session.add(job)
+        db.session.commit()
+        pools = cloud_build.render(row, job)["resource"]["oci_containerengine_node_pool"]
+        assert pools["workers"]["node_source_details"][0]["image_id"] == IMG_137
+        assert pools["db_pool"]["node_source_details"][0]["image_id"] != IMG_137   # the default pick
+
+    def test_plan_check_names_each_image_and_refuses_one_for_another_version(self):
+        spec = {"nodePools": [{**POOLS[0], "imageId": IMG_137}, POOLS[1]]}
+        lines = oci_wi.image_checks(spec, OKE_IMAGES, "v1.37.0")
+        assert lines[0]["detail"] == "Oracle-Linux-8.10-OKE-1.37.0"
+        assert "newest for v1.37.0" in lines[1]["detail"] and "Oracle-Linux-9.8" in lines[1]["detail"]
+        wrong = {"nodePools": [{**POOLS[0], "imageId": "ocid1.image.oc1.me-dubai-1.aaaaaaaasimol9oke1364"}]}
+        with pytest.raises(oci_wi.CloudError, match="not an OKE node image for Kubernetes v1.37.0"):
+            oci_wi.image_checks(wrong, OKE_IMAGES, "v1.37.0")
