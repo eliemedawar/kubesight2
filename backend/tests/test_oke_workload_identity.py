@@ -944,3 +944,23 @@ def test_migration_run_is_not_enforced_but_still_writes_encrypted():
     assert text.split("plan {", 1)[1].count("enforced = true") == 1
     normal = provision.encryption_config({"keyName": "kubesight-tofu-state"})
     assert normal.count("enforced = true") == 2 and "unencrypted" not in normal
+
+
+def test_token_review_skips_client_side_validation(app, wi_install):
+    """kubectl validating a TokenReview lists CRDs, which the backend may not
+    do on the AI cluster: every Job was refused as "token not valid"."""
+    seen = {}
+
+    def fake(args, text=None):
+        seen["args"] = args
+        return 0, json.dumps({"status": {"authenticated": True, "audiences": [remote.AUDIENCE],
+                                         "user": {"username": "system:serviceaccount:kubesight:kubesight-provisioner",
+                                                  "extra": {"authentication.kubernetes.io/pod-name": ["p-1"]}}}}), ""
+
+    remote.set_kubectl(fake)
+    try:
+        info = remote._review("a-token")
+    finally:
+        remote.set_kubectl(None)
+    assert "--validate=false" in seen["args"]
+    assert info["podName"] == "p-1" and remote.AUDIENCE in info["audiences"]

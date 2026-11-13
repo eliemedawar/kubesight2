@@ -581,7 +581,10 @@ def _review(token: str) -> Optional[Dict[str, Any]]:
     body = {"apiVersion": "authentication.k8s.io/v1", "kind": "TokenReview",
             "spec": {"token": token, "audiences": [AUDIENCE]}}
     # The token goes through stdin only, never a command-line argument.
-    rc, out, err = _kubectl(["create", "-f", "-", "-o", "json"], json.dumps(body))
+    # --validate=false: kubectl's client-side check looks TokenReview up among
+    # the CRDs, and the backend may not list CRDs (AI cluster, 2026-11-13). The
+    # API server still validates the body; KubeSight builds it itself.
+    rc, out, err = _kubectl(["create", "--validate=false", "-f", "-", "-o", "json"], json.dumps(body))
     if rc != 0:
         logger.warning("TokenReview failed: %s", scrub(err.strip())[:300])
         return None
