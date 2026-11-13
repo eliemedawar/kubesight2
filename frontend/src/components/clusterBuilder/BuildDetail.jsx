@@ -64,6 +64,7 @@ import {
   isManagedBuild,
   managedBlueprint,
   managedLabel,
+  nodePoolTotals,
   withCloudBus,
 } from "../../utils/cloudProvisioning.js";
 import { confirmDialog } from "../../lib/dialogs.js";
@@ -212,7 +213,9 @@ function ManagedReceipt({ build, duration, dayTwo }) {
   const cloud = build.cloud || {};
   const pool = cloud.managed || {};
   const size = pool.size || {};
-  const nodes = pool.nodeCount || 0;
+  // OKE by workload identity keeps every pool (sizes, labels, taints, image).
+  const pools = build.provisioning?.spec?.nodePools || [];
+  const nodes = pools.length ? nodePoolTotals(pools).nodes : (pool.nodeCount || 0);
   const registered = Boolean(build.resultClusterId);
   return (
     <>
@@ -222,7 +225,7 @@ function ManagedReceipt({ build, duration, dayTwo }) {
           <h3>{build.name} is up</h3>
           <p className="muted">
             {cloud.managedLabel || "The cloud"} runs the control plane, with {nodes} node{nodes === 1 ? "" : "s"} in
-            the pool.{" "}
+            {pools.length > 1 ? ` ${pools.length} node pools` : " the pool"}.{" "}
             {registered
               ? "KubeSight registered it with its own service account; it is in Clusters, Dashboard and Inventory."
               : "It was not registered in KubeSight (demo mode has no API to reach)."}
@@ -240,12 +243,25 @@ function ManagedReceipt({ build, duration, dayTwo }) {
         {duration ? (
           <div className="sg-cb-fact"><div className="k">Build time</div><div className="v">{duration}</div></div>
         ) : null}
-        <div className="sg-cb-fact">
-          <div className="k">Node pool</div>
-          <div className="v">
-            {nodes} × {size.cpu ? `${size.cpu} vCPU · ${size.memoryGb} GB` : "—"}
+        {pools.length ? (
+          <div className="sg-cb-fact">
+            <div className="k">{pools.length > 1 ? `Node pools (${pools.length})` : "Node pool"}</div>
+            <div className="v">
+              {pools.map((p) => (
+                <div key={p.name}>
+                  <span className="sg-cb-mono">{p.name}</span> · {p.count} × {p.ocpus} OCPU · {p.memoryGb} GB
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="sg-cb-fact">
+            <div className="k">Node pool</div>
+            <div className="v">
+              {nodes} × {size.cpu ? `${size.cpu} vCPU · ${size.memoryGb} GB` : "—"}
+            </div>
+          </div>
+        )}
         <div className="sg-cb-fact">
           <div className="k">Kubernetes</div>
           <div className="v">{cloud.managedLabel} {pool.kubernetesVersion ? `v${String(pool.kubernetesVersion).replace(/^v/, "")}` : ""}</div>
@@ -624,6 +640,7 @@ export default function BuildDetail({
       const spec = build.provisioning?.spec || {};
       return managedBlueprint({
         provider: build.cloud.provider,
+        pools: spec.nodePools?.length ? spec.nodePools : null,
         count: spec.counts?.worker || 0,
         machineType: spec.machineTypes?.worker || "",
         state: build.status === "completed" ? "built" : build.status === "provisioning" ? "live" : "stamped",
