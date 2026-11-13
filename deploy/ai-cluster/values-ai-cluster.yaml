@@ -26,8 +26,8 @@ rbac:
 oke:
   provisioner:
     serviceAccount: true                  # CHG-KS-015
-    # CHG-KS-016: built by KubeSight CI as kubesight-provisioner:main-14
-    image: registry.areeba.com/kubesight-provisioner@sha256:1f3f6e68b9f90958e19107fe79880e0d7e599b197cc23ed7e36e6658c9f9a80f
+    # CHG-KS-016: built by KubeSight CI as kubesight-provisioner:main-21 (own CLI config, 4349c8ad)
+    image: registry.areeba.com/kubesight-provisioner@sha256:e3466e5c3b12ebe51bd41e3d547c4301c95d9e944aecc8e3cc5d7352558aaeec
     pullSecret: regcred
   workloadIdentity:
     enabled: true                         # CHG-KS-016
