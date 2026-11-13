@@ -131,8 +131,13 @@ spec:
   volumeClaimTemplates:
     - metadata:
         name: cache
+        # Fixed labels only: Kubernetes never lets a StatefulSet's claim
+        # template change, so the per-upgrade change label (commonLabels) and
+        # the chart version must not be in it, or every upgrade is refused.
         labels:
-          {{- include "kubesight.labels" (dict "root" $ "module" "kubesight-buildkit") | nindent 10 }}
+          app.kubernetes.io/part-of: kubesight
+          app.kubernetes.io/instance: {{ $.Release.Name }}
+          {{- include "kubesight.podLabels" (dict "root" $ "module" "kubesight-buildkit") | nindent 10 }}
           kubesight.io/purpose: buildkit-cache
       spec:
         accessModes: [ReadWriteOnce]
