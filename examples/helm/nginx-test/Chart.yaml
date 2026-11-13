@@ -1,0 +1,6 @@
+apiVersion: v2
+name: nginx-test
+description: Small nginx to test Hermes app installs on OKE
+type: application
+version: 0.1.0
+appVersion: "1.27"

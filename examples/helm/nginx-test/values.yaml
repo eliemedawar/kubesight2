@@ -1,0 +1,12 @@
+replicaCount: 1
+image:
+  # Pulled through Nexus; OKE nodes cannot reach Docker Hub directly.
+  repository: registry.areeba.com/nginxinc/nginx-unprivileged
+  tag: "1.27-alpine"
+  pullPolicy: IfNotPresent
+service:
+  # ClusterIP on purpose: LoadBalancer Services need the internal-LB annotations.
+  port: 80
+resources:
+  requests: { cpu: 50m, memory: 64Mi }
+  limits: { cpu: 200m, memory: 128Mi }
