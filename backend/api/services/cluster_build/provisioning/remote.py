@@ -36,6 +36,7 @@ import ipaddress
 import json
 import logging
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -360,6 +361,8 @@ class KubernetesLauncher:
                 except OSError:
                     return
                 for raw in process.stdout:  # type: ignore[union-attr]
+                    if raw.startswith("Error from server") and "is waiting to start" in raw:
+                        continue  # the pod is not running yet; the next try reads it
                     stamp, _, line = raw.rstrip("\n").partition(" ")
                     if since and stamp <= since:
                         continue
@@ -540,11 +543,29 @@ def run_phase(job_id: int, phase: str, on_line: Callable[[str], None], timeout_s
 
 
 def _wait(run, name: str, on_line: Callable[[str], None], timeout_s: int) -> Tuple[str, str]:
+    """Follow the Job until it ends. The log follower runs on its own thread
+    and only QUEUES lines: ``on_line`` writes the job row through the worker's
+    session, so it is called here, on the worker thread, never from the
+    follower (a session touched from two threads kept a connection checked out
+    for a whole apply; the database pooler closed it, and the job then failed
+    with "SSL connection has been closed unexpectedly" though OKE had built
+    the cluster)."""
+    lines: "queue.Queue[str]" = queue.Queue()
+
+    def drain() -> None:
+        while True:
+            try:
+                line = lines.get_nowait()
+            except queue.Empty:
+                return
+            on_line(line)
+
     stop = threading.Event()
-    follower = run.follow(name, on_line, stop)
+    follower = run.follow(name, lines.put, stop)
     deadline = time.monotonic() + timeout_s
     try:
         while True:
+            drain()
             state, detail = run.state(name)
             if state in ("succeeded", "failed"):
                 return state, detail
@@ -557,6 +578,7 @@ def _wait(run, name: str, on_line: Callable[[str], None], timeout_s: int) -> Tup
     finally:
         stop.set()
         follower.join(timeout=5)
+        drain()
 
 
 # ---------------------------------------------------------------------------
@@ -675,6 +697,11 @@ def approval_problem(job: ClusterProvisionJob) -> Optional[str]:
     if _utcnow() - planned > timedelta(hours=approval_hours()):
         return "The approval has expired. Plan again."
     return None
+
+
+def apply_reported_ok(job: ClusterProvisionJob) -> bool:
+    """The provisioner Job applied the plan and said so (its facts were kept)."""
+    return is_remote_job(job) and (_results(job).get("apply") or {}).get("result") == "ok"
 
 
 def admin_self_approve() -> bool:

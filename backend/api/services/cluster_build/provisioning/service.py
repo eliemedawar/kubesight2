@@ -793,7 +793,10 @@ def stop_waiting(build: ClusterBuild, job: ClusterProvisionJob, *, actor: str = 
 
 
 def retry_connect(build: ClusterBuild, job: ClusterProvisionJob) -> ClusterProvisionJob:
-    if job.status != "connect_failed":
+    # Also an OKE apply the provisioner Job reported as done, after which
+    # KubeSight itself lost track (a crash, a dropped database connection):
+    # the cluster exists, only the connect step is left.
+    if job.status != "connect_failed" and not (job.status == "apply_failed" and remote.apply_reported_ok(job)):
         raise ValueError("Only a job whose VMs did not answer can be retried this way.")
     job.status = "connecting"
     job.error = None

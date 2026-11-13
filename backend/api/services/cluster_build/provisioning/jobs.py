@@ -201,6 +201,8 @@ def serialize_job(job: ClusterProvisionJob, *, include_plan: bool = False,
         # An admin may approve their own plan (KUBESIGHT_PROVISION_ADMIN_SELF_APPROVE).
         "adminSelfApprove": (job.runner or "") == "kubernetes" and remote.admin_self_approve(),
         "selfApproved": remote.self_approved(job),
+        # OKE: the apply Job reported success, so only the connect step is left.
+        "applyReported": job.status == "apply_failed" and remote.apply_reported_ok(job),
         "createdAt": _iso(job.created_at),
         "startedAt": _iso(job.started_at),
         "finishedAt": _iso(job.finished_at),

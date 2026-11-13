@@ -25,6 +25,7 @@ from api.models import ClusterBuild, ClusterProvisionJob, CloudAccount, Role, Us
 from api.services.cluster_build.provisioning import (
     cloud_build, jobs, oke_onboard, remote, state_store, tofu_runner,
 )
+from api.services.cluster_build.provisioning import service as provisioning_service
 from api.services.cluster_build.provisioning.clouds import oci, oci_wi
 
 from tests.test_cluster_builds import auth_headers  # noqa: F401
@@ -1156,3 +1157,65 @@ class TestOlderClusterDayTwo:
         db.session.commit()
         first = cloud_build.render(row, job)["resource"]["oci_containerengine_node_pool"]["workers"]
         assert row.provisioning_json["nodeImageId"] == first["node_source_details"][0]["image_id"]
+
+
+class TestWorkerThreadOwnsTheSession:
+    def test_job_log_lines_reach_on_line_only_on_the_waiting_thread(self, monkeypatch):
+        """The follower thread only queues lines; touching the worker's
+        session from it kept a DB connection open for a whole apply."""
+        import threading as _threading
+
+        monkeypatch.setattr(remote, "_POLL_S", 0.01)
+        calls = {"n": 0}
+
+        class Run:
+            def follow(self, name, sink, stop):
+                def produce():
+                    for i in range(5):
+                        sink(f"line {i}")
+                thread = _threading.Thread(target=produce)
+                thread.start()
+                return thread
+
+            def state(self, name):
+                calls["n"] += 1
+                return ("succeeded", "") if calls["n"] > 3 else ("active", "")
+
+            def delete(self, name):
+                pass
+
+        seen = []
+        main = _threading.get_ident()
+        state, _ = remote._wait(Run(), "kubesight-provision-1-apply-1",
+                                lambda line: seen.append((line, _threading.get_ident())), 60)
+        assert state == "succeeded"
+        assert [line for line, _ in seen] == [f"line {i}" for i in range(5)]
+        assert all(thread == main for _, thread in seen)
+
+
+class TestRegisterAfterReportedApply:
+    def _failed_after_apply(self, client, admin_token, result):
+        account = create_wi_account(client, admin_token)
+        build = create_build(client, admin_token, account)
+        row = db.session.get(ClusterBuild, build["id"])
+        job = ClusterProvisionJob(build_id=row.id, operation="create", status="apply_failed", runner="kubernetes",
+                                  error="Internal error: (psycopg2.OperationalError) SSL connection has been closed unexpectedly")
+        db.session.add(job)
+        db.session.commit()
+        remote._set_results(job, "apply", {"result": result, "message": None})
+        db.session.commit()
+        return row, job
+
+    def test_offered_when_the_apply_job_reported_success(self, client, admin_token, wi_install, monkeypatch):
+        row, job = self._failed_after_apply(client, admin_token, "ok")
+        assert jobs.serialize_job(job)["applyReported"] is True
+        started = []
+        monkeypatch.setattr(jobs, "start_worker", lambda job_id, phase: started.append((job_id, phase)))
+        provisioning_service.retry_connect(row, job)
+        assert job.status == "connecting" and started == [(job.id, "connect")]
+
+    def test_refused_when_the_apply_did_not_report_success(self, client, admin_token, wi_install):
+        row, job = self._failed_after_apply(client, admin_token, "failed")
+        assert jobs.serialize_job(job)["applyReported"] is False
+        with pytest.raises(ValueError):
+            provisioning_service.retry_connect(row, job)

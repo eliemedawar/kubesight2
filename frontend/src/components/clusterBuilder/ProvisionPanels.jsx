@@ -822,7 +822,7 @@ export function ProvisionCard({
       <>
         <Failure
           title={isManagedBuild(build)
-            ? (job.status === "connect_failed"
+            ? (job.status === "connect_failed" || job.applyReported
               ? "The cluster exists but KubeSight could not register it"
               : "OpenTofu stopped before the cluster was ready")
             : job.status === "connect_failed"
@@ -830,7 +830,7 @@ export function ProvisionCard({
               : `${created} VM${created === 1 ? "" : "s"} created, then OpenTofu stopped`}
           error={job.error}
         >
-          {job.status === "connect_failed" && canExecute ? (
+          {(job.status === "connect_failed" || job.applyReported) && canExecute ? (
             <button className="primary" type="button" disabled={busy}
                     onClick={() => act(() => retryProvisionConnect(build.id, job.id))}>
               {isManagedBuild(build) ? "Try registering again" : "Try SSH again"}
