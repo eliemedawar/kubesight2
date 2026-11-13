@@ -1418,3 +1418,23 @@ class TestFullRightsAndApps:
         executor.start_build_worker(row.id)
         db.session.refresh(row)
         assert row.status == "completed" and "nginx" in row.error
+
+
+def test_app_namespace_gets_the_registry_pull_secret():
+    calls = []
+
+    def fake(cluster_id, args):
+        calls.append(args)
+        if args[:2] == ["get", "secret"]:
+            return json.dumps({"type": "kubernetes.io/dockerconfigjson", "data": {".dockerconfigjson": "e30="}})
+        return ""
+
+    oke_onboard.set_kubectl_runner(fake)
+    try:
+        assert oke_onboard.ensure_pull_secret("custom-1", "payments") is True
+    finally:
+        oke_onboard.set_kubectl_runner(None)
+    assert calls[0] == ["get", "secret", "kubesight-registry", "-n", "default", "-o", "json"]
+    assert calls[1][0] == "apply"
+    assert calls[2][:6] == ["patch", "serviceaccount", "default", "-n", "payments", "-p"]
+    assert oke_onboard.ensure_pull_secret("custom-1", "default") is True

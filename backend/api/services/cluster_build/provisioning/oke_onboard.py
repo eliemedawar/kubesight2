@@ -239,3 +239,76 @@ def onboard(job: ClusterProvisionJob, build: ClusterBuild, on_line=lambda line: 
     on_line(f"Registered as cluster {public_id}; KubeSight reaches it with short-lived tokens only.")
     remote.audit("registered", job=job, build=build, clusterId=public_id)
     return public_id
+
+
+# ---------------------------------------------------------------------------
+# The pull Secret where an app goes (K16: the read-only registry login lives on
+# the cluster only; onboarding puts it in "default", an app may use another
+# namespace)
+# ---------------------------------------------------------------------------
+
+_runner_override = None
+
+
+def set_kubectl_runner(fn) -> None:
+    """Test seam: ``fn(cluster_id, args) -> stdout``."""
+    global _runner_override
+    _runner_override = fn
+
+
+def _kubectl_on(cluster_id: str, args):
+    if _runner_override is not None:
+        return _runner_override(cluster_id, args)
+    from ...deployment_service import _run_kubectl_for_cluster
+
+    return _run_kubectl_for_cluster(cluster_id, args)
+
+
+def ensure_pull_secret(cluster_id: str, namespace: str, on_line=lambda line: None) -> bool:
+    """Copy the registry pull Secret from "default" into ``namespace`` and
+    attach it to that namespace's default service account. False (and a log
+    line) when there is none to copy; never raises."""
+    import tempfile
+
+    if not namespace or namespace == "default":
+        return True
+    try:
+        raw = _kubectl_on(cluster_id, ["get", "secret", PULL_SECRET, "-n", "default", "-o", "json"])
+        source = json.loads(raw or "{}")
+    except Exception as exc:  # noqa: BLE001
+        on_line(f"No registry pull Secret to copy into {namespace} ({str(exc)[:120]}): images from the "
+                "private registry will not pull there unless the chart brings its own.")
+        return False
+    secret = {
+        "apiVersion": "v1", "kind": "Secret", "type": source.get("type") or "kubernetes.io/dockerconfigjson",
+        "metadata": {"name": PULL_SECRET, "namespace": namespace,
+                     "labels": {"app.kubernetes.io/managed-by": "kubesight"}},
+        "data": source.get("data") or {},
+    }
+    namespace_doc = {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace}}
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
+            json.dump({"apiVersion": "v1", "kind": "List", "items": [namespace_doc, secret]}, handle)
+            path = handle.name
+        _kubectl_on(cluster_id, ["apply", "-f", path])
+        patch = json.dumps({"imagePullSecrets": [{"name": PULL_SECRET}]})
+        for attempt in range(10):
+            try:
+                _kubectl_on(cluster_id, ["patch", "serviceaccount", "default", "-n", namespace, "-p", patch])
+                break
+            except Exception:  # noqa: BLE001 — the controller makes "default" a moment after the namespace
+                if attempt == 9:
+                    raise
+                time.sleep(1)
+    except Exception as exc:  # noqa: BLE001
+        on_line(f"Could not put the registry pull Secret in {namespace}: {str(exc)[:200]}")
+        return False
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    on_line(f"Registry pull Secret {PULL_SECRET} is in {namespace} (its default service account uses it).")
+    return True

@@ -473,6 +473,14 @@ def install_one(build: ClusterBuild, app: ClusterBuildApp, approval_context: str
     app.status = "installing"
     app.error = None
     db.session.commit()
+    if (build.provisioning_json or {}).get("authMode") == "workload_identity":
+        # OKE: the registry pull Secret is only in "default"; the chart's
+        # namespace gets a copy first (K16: it never leaves the cluster).
+        from .provisioning import oke_onboard
+        from .provisioning.clouds import accounts as cloud_accounts
+
+        if not cloud_accounts.simulated():
+            oke_onboard.ensure_pull_secret(build.result_cluster_id, app.namespace)
     payload = install_payload(app, build.result_cluster_id, by_ref=False)
     data, error, status = _install_release(payload, approval_context)
     if error or status >= 300:
