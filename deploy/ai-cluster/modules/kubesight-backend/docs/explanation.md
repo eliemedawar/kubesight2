@@ -22,6 +22,10 @@ namespace), so KubeSight shows and manages this cluster too. They are the one
 exception to the platform's "no cluster-wide objects". What keeps changes in
 check is KubeSight's own roles and its cluster approval gate on `ociduai-k8s`.
 
+CHG-KS-019 adds `networkpolicies` (read only) to the reader role, for the
+Resources page's Network policies list. Cilium's own policy kinds are not
+read yet.
+
 ## Secrets from OpenBao, and the one key that must never change
 
 The chart can generate its own keys, but then they would be rendered by Helm
