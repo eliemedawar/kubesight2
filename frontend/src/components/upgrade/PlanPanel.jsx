@@ -30,7 +30,6 @@ export default function PlanPanel({ ws, target, readiness, waivers, onBack, onSu
   const [start, setStart] = useState(() => localInput(nextSaturdayAt(2)));
   const [end, setEnd] = useState(() => localInput(nextSaturdayAt(5)));
   const [note, setNote] = useState("");
-  const [phrase, setPhrase] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
@@ -70,7 +69,7 @@ export default function PlanPanel({ ws, target, readiness, waivers, onBack, onSu
               }
             : { mode: "asap" },
         waivers: waived.map(([key, reason]) => ({ key, reason })),
-        confirmation: phrase.trim(),
+        confirmation: expected,
         note: note.trim() || undefined,
       });
       onSubmitted(job);
@@ -258,17 +257,10 @@ export default function PlanPanel({ ws, target, readiness, waivers, onBack, onSu
             <textarea className="uc-input" rows={2} value={note} onChange={(e) => setNote(e.target.value)}
               placeholder="Why now, who is on call…" />
           </label>
-          <label className="uc-field">
-            <span className="uc-field__label">
-              Type <code className="uc-phrase">{expected}</code> to confirm
-            </span>
-            <input className="uc-input uc-mono" type="text" autoComplete="off" spellCheck="false" value={phrase}
-              onChange={(e) => setPhrase(e.target.value)} placeholder={expected} />
-          </label>
           {error ? <p className="uc-error" role="alert">{error}</p> : null}
           <div className="uc-row">
             <button type="button" className="btn-outline" onClick={onBack}>Back to readiness</button>
-            <button type="button" className="btn-primary" disabled={phrase.trim() !== expected || submitting} onClick={submit}>
+            <button type="button" className="btn-primary" disabled={submitting} onClick={submit}>
               {submitting ? "Sending…" : submitLabel}
             </button>
           </div>

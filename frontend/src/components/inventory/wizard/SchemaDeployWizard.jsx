@@ -385,7 +385,6 @@ export default function SchemaDeployWizard({
     mergeAnswers(initAnswers(template || {}, defaultClusterId), initialAnswers),
   );
   const [resolved, setResolved] = useState(null);
-  const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   // Set when the deploy was sent for approval instead of applied.
@@ -442,7 +441,6 @@ export default function SchemaDeployWizard({
     initialAnswersRef.current = JSON.stringify(next);
     setAnswers(next);
     setResolved(null);
-    setConfirmation("");
     setError("");
     setShowCloseConfirm(false);
     setImageChecks([]);
@@ -791,7 +789,7 @@ export default function SchemaDeployWizard({
       const result = await applyWizardDeploy({
         ...payload,
         changeSummary: answers.changeSummary || payload.changeSummary || "",
-        confirmation,
+        confirmation: confirmationPhrase,
       });
       if (isPendingApproval(result)) {
         // Nothing is deployed yet, so no success callback.
@@ -1784,9 +1782,6 @@ export default function SchemaDeployWizard({
                 <summary>View generated manifests</summary>
                 <YamlPreviewPanel yaml={resolved?.yaml || ""} readOnly />
               </details>
-              <Field label={`Confirmation — type "${confirmationPhrase}"`}>
-                <input value={confirmation} onChange={(e) => setConfirmation(e.target.value)} placeholder={confirmationPhrase} />
-              </Field>
             </div>
           ) : null}
         </div>
@@ -1816,7 +1811,7 @@ export default function SchemaDeployWizard({
                   Done
                 </button>
               ) : (
-              <button type="button" className="btn-primary" onClick={deploy} disabled={busy || confirmation !== confirmationPhrase || imageBlocked}>
+              <button type="button" className="btn-primary" onClick={deploy} disabled={busy || !confirmationPhrase || imageBlocked}>
                 {busy
                     ? "Deploying…"
                     : approvalMessage ? "Send for approval" : "Deploy Application"}

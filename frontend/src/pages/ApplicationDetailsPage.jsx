@@ -32,6 +32,7 @@ import {
   hasHelmRelease,
   inventoryIdsMatch,
 } from "../utils/inventoryPermissions.js";
+import { confirmDialog } from "../lib/dialogs.js";
 import { isPendingApproval, pendingApprovalMessage } from "../utils/pendingApproval.js";
 import { normalizeClusterOptions } from "../utils/clusterOptions.js";
 
@@ -148,7 +149,6 @@ export default function ApplicationDetailsPage({
   const [compareVersionB, setCompareVersionB] = useState("");
   const [versionDiff, setVersionDiff] = useState("");
   const [versionYaml, setVersionYaml] = useState("");
-  const [rollbackConfirm, setRollbackConfirm] = useState("");
   const [versionActionBusy, setVersionActionBusy] = useState(false);
   const [versionActionError, setVersionActionError] = useState("");
   const [compareBusy, setCompareBusy] = useState(false);
@@ -159,7 +159,6 @@ export default function ApplicationDetailsPage({
     setCompareVersionB("");
     setVersionDiff("");
     setCompareError("");
-    setRollbackConfirm("");
     setVersionActionError("");
   };
 
@@ -852,26 +851,27 @@ export default function ApplicationDetailsPage({
                     </button>
                     {compareError ? <p className="muted">{compareError}</p> : null}
                     {versionDiff ? <pre className="wizard-yaml-panel__diff">{versionDiff}</pre> : null}
-                    <label className="wizard-field">
-                      <span className="wizard-field__label">Rollback — type APPLY {summary.namespace}</span>
-                      <input value={rollbackConfirm} onChange={(e) => setRollbackConfirm(e.target.value)} />
-                    </label>
                     <button
                       type="button"
                       className="btn-primary btn-sm"
-                      disabled={versionActionBusy || rollbackConfirm !== `APPLY ${summary.namespace}`}
+                      disabled={versionActionBusy || !summary.namespace}
                       onClick={async () => {
+                        if (!(await confirmDialog({
+                          title: "Roll back",
+                          message: `Roll ${summary.namespace} back to ${selectedVersion.versionLabel}?`,
+                          confirmLabel: "Roll back",
+                        }))) return;
                         setVersionActionBusy(true);
                         setVersionActionError("");
                         try {
-                          const result = await rollbackApplicationVersion(selectedVersion.id, rollbackConfirm);
+                          // The server still checks the phrase; nobody types it any more.
+                          const result = await rollbackApplicationVersion(selectedVersion.id, `APPLY ${summary.namespace}`);
                           setApprovalNotice(
                             isPendingApproval(result)
                               ? pendingApprovalMessage(result)
                               : `Rolled back to ${selectedVersion.versionLabel}.`
                           );
                           onRefreshDetail?.();
-                          setRollbackConfirm("");
                         } catch (err) {
                           setVersionActionError(err.message || "Rollback failed");
                         } finally {

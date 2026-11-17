@@ -47,7 +47,6 @@ export default function HelmDeployForm({
   const [form, setForm] = useState(EMPTY_HELM);
   const [chartFile, setChartFile] = useState(null);
   const [preview, setPreview] = useState(null);
-  const [confirmation, setConfirmation] = useState("");
   const [confirmationPhrase, setConfirmationPhrase] = useState("");
   // Set when the release was sent for approval instead of installed.
   const [queuedMessage, setQueuedMessage] = useState("");
@@ -101,7 +100,7 @@ export default function HelmDeployForm({
     setError("");
     try {
       const payload = await buildPayload();
-      const result = await installHelmRelease({ ...payload, confirmation });
+      const result = await installHelmRelease({ ...payload, confirmation: confirmationPhrase });
       if (isPendingApproval(result)) {
         // Nothing is installed yet, so no success callback.
         setQueuedMessage(pendingApprovalMessage(result));
@@ -215,13 +214,9 @@ export default function HelmDeployForm({
         ))}
       </ul>
       {queuedMessage ? <p className="banner-message" role="status">{queuedMessage}</p> : null}
-      <label>
-        Type <strong>{confirmationPhrase}</strong> to confirm
-        <input value={confirmation} onChange={(e) => setConfirmation(e.target.value)} placeholder={confirmationPhrase} />
-      </label>
       <div className="modal-actions">
         <button type="button" className="btn-text" onClick={() => setStep("form")}>Back</button>
-        <button type="button" className="btn-primary" disabled={busy || confirmation !== confirmationPhrase || Boolean(queuedMessage)} onClick={applyHelm}>
+        <button type="button" className="btn-primary" disabled={busy || !confirmationPhrase || Boolean(queuedMessage)} onClick={applyHelm}>
           {busy ? "Installing..." : "Install / Upgrade Release"}
         </button>
       </div>

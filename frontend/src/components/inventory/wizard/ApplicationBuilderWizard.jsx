@@ -71,7 +71,6 @@ export default function ApplicationBuilderWizard({
   const [nameValidation, setNameValidation] = useState(null);
   const [preview, setPreview] = useState(null);
   const [deployDiff, setDeployDiff] = useState(null);
-  const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   // Set when the deploy was sent for approval instead of applied.
@@ -106,7 +105,6 @@ export default function ApplicationBuilderWizard({
     setNameValidation(null);
     setPreview(null);
     setDeployDiff(null);
-    setConfirmation("");
     setError("");
     setStorageClasses([]);
     setClusterNodes([]);
@@ -357,7 +355,7 @@ export default function ApplicationBuilderWizard({
     try {
       const result = await applyWizardDeploy({
         ...payload,
-        confirmation,
+        confirmation: confirmationPhrase,
         yaml: state.advancedYamlEdit ? state.editedYaml : undefined,
       });
       if (isPendingApproval(result)) {
@@ -552,9 +550,6 @@ export default function ApplicationBuilderWizard({
             {preview?.dryRun ? (
               <p className="muted">Dry-run: {preview.dryRun.message || "Server-side validation passed."}</p>
             ) : null}
-            <Field label={`Confirmation — type "${confirmationPhrase}"`}>
-              <input value={confirmation} onChange={(e) => setConfirmation(e.target.value)} placeholder={confirmationPhrase} />
-            </Field>
           </div>
         );
       default:
@@ -646,7 +641,7 @@ export default function ApplicationBuilderWizard({
                       type="button"
                       className="btn-primary"
                       onClick={applyDeploy}
-                      disabled={busy || confirmation !== confirmationPhrase}
+                      disabled={busy || !confirmationPhrase}
                     >
                       {busy ? "Deploying…" : approvalMessage ? "Send for approval" : "Deploy Application"}
                     </button>

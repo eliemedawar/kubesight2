@@ -174,7 +174,6 @@ export default function HelmChartDeployModal({
   const [step, setStep] = useState("configure");
   const [preview, setPreview] = useState(null);
   const [confirmationPhrase, setConfirmationPhrase] = useState("");
-  const [confirmation, setConfirmation] = useState("");
   // Set when the release was sent for approval instead of installed.
   const [queuedMessage, setQueuedMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -278,7 +277,6 @@ export default function HelmChartDeployModal({
       setStep("configure");
       setPreview(null);
       setConfirmationPhrase("");
-      setConfirmation("");
       // The modal stays mounted between charts: a previous "sent for approval"
       // must not keep Install disabled for the next one.
       setQueuedMessage("");
@@ -334,7 +332,6 @@ export default function HelmChartDeployModal({
       const confirmationResult = await getHelmConfirmationPhrase(payload);
       setPreview({ rendered, dryRun });
       setConfirmationPhrase(confirmationResult.confirmation || "");
-      setConfirmation("");
       setStep("preview");
     } catch (err) {
       setError(err.message || "Helm preview failed.");
@@ -348,7 +345,7 @@ export default function HelmChartDeployModal({
     setError("");
     try {
       const send = releaseTarget ? upgradeHelmRelease : installHelmRelease;
-      const result = await send({ ...payload, confirmation });
+      const result = await send({ ...payload, confirmation: confirmationPhrase });
       if (isPendingApproval(result)) {
         // Nothing is installed yet, so no success callback.
         setQueuedMessage(pendingApprovalMessage(result));
@@ -663,16 +660,6 @@ export default function HelmChartDeployModal({
                 {(preview.rendered.warnings || []).join("; ")}
               </div>
             ) : null}
-            <label>
-              <span>
-                Type <strong>{confirmationPhrase}</strong> to confirm
-              </span>
-              <input
-                value={confirmation}
-                onChange={(event) => setConfirmation(event.target.value)}
-                placeholder={confirmationPhrase}
-              />
-            </label>
             <div className="modal-actions">
               <button
                 type="button"
@@ -691,7 +678,7 @@ export default function HelmChartDeployModal({
                 <button
                   type="button"
                   className="btn-primary"
-                  disabled={busy || confirmation !== confirmationPhrase}
+                  disabled={busy || !confirmationPhrase}
                   onClick={install}
                 >
                   {busy
