@@ -415,6 +415,15 @@ class TestFlow:
         response = approve(client, second_person(app), build["id"], job["id"], job["planSha256"])
         assert response.status_code == 400 and "too old" in response.get_json()["error"]
 
+        # The page is told, and the requester withdraws it to plan again.
+        shown = client.get(f"/api/cluster-builds/{build['id']}", headers=auth_headers(admin_token)).get_json()
+        assert shown["data"]["provisioning"]["job"]["planExpired"] is True
+        response = client.post(f"/api/cluster-builds/{build['id']}/provision/jobs/{job['id']}/discard",
+                               headers=auth_headers(admin_token))
+        assert response.status_code == 200, response.get_json()
+        assert db.session.get(ClusterProvisionJob, job["id"]).status == "discarded"
+        assert plan(client, admin_token, build["id"])["planExpired"] is False
+
     def test_apply_refuses_a_plan_swapped_after_approval(self, app, wi_install):
         job = ClusterProvisionJob(build_id=1, operation="create", status="applying",
                                   config_json={"tofu": {"resource": {}}},

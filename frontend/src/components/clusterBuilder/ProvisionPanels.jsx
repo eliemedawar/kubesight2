@@ -348,20 +348,37 @@ function HashApproval({ build, job, currentUserId, canExecute, busy, act, refusa
           Made by a provisioner Job as kubesight-provisioner (OKE workload identity, no key).
           {job.summary?.encrypted ? " The plan file is encrypted with the platform's state key." : ""}
         </p>
+        {job.planExpired ? (
+          <div className="sg-cb-pv-note is-warn">
+            This plan is too old to approve. {own ? "Withdraw it" : "Reject it"}, then make a new plan
+            {job.operation === "destroy" ? " (ask to destroy again)" : job.operation === "grow" ? " (change the node pools again)" : ""}.
+          </div>
+        ) : null}
         {(!own || selfOk) && canExecute ? (
           <>
-            <label className="sg-cb-check">
-              <input type="checkbox" checked={read} onChange={(event) => setRead(event.target.checked)} />
-              {" "}I read this plan and approve this hash.
-            </label>
+            {job.planExpired ? null : (
+              <label className="sg-cb-check">
+                <input type="checkbox" checked={read} onChange={(event) => setRead(event.target.checked)} />
+                {" "}I read this plan and approve this hash.
+              </label>
+            )}
             <label className="sg-cb-field-label" htmlFor="pv-hash-note">Note (optional)</label>
             <input id="pv-hash-note" className="sg-cb-input" value={note}
                    onChange={(event) => setNote(event.target.value)} placeholder="Checked with the platform owner" />
             <div className="sg-cb-actions">
-              <button className="btn-outline" type="button" disabled={busy}
-                      onClick={() => act(() => rejectClusterDestroy(build.id, job.id, note))}>
-                Reject
-              </button>
+              {own ? (
+                // The requester withdraws; rejecting your own request is refused.
+                <button className="btn-outline" type="button" disabled={busy}
+                        onClick={() => act(() => discardProvisionJob(build.id, job.id))}>
+                  Withdraw request
+                </button>
+              ) : (
+                <button className="btn-outline" type="button" disabled={busy}
+                        onClick={() => act(() => rejectClusterDestroy(build.id, job.id, note))}>
+                  Reject
+                </button>
+              )}
+              {job.planExpired ? null : (
               <button className={job.operation === "destroy" ? "btn-danger" : "primary"} type="button"
                       disabled={busy || !read || !hash || Boolean(job.summary?.blocked)}
                       onClick={async () => {
@@ -375,6 +392,7 @@ function HashApproval({ build, job, currentUserId, canExecute, busy, act, refusa
                       }}>
                 {busy ? "Working…" : "Approve and apply"}
               </button>
+              )}
             </div>
           </>
         ) : own ? (

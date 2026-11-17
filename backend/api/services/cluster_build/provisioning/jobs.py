@@ -92,6 +92,14 @@ class JobFailed(Exception):
     """A job stopped for a reason a person can act on. The message says which."""
 
 
+def _plan_expired(job: ClusterProvisionJob) -> bool:
+    """A remote (hash-approved) plan still waiting, but older than approvals allow."""
+    if (job.runner or "") != "kubernetes" or job.status != "awaiting_approval":
+        return False
+    planned = remote.planned_at(job)
+    return planned is not None and _utcnow() - planned > timedelta(hours=remote.approval_hours())
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -201,6 +209,9 @@ def serialize_job(job: ClusterProvisionJob, *, include_plan: bool = False,
         # An admin may approve their own plan (KUBESIGHT_PROVISION_ADMIN_SELF_APPROVE).
         "adminSelfApprove": (job.runner or "") == "kubernetes" and remote.admin_self_approve(),
         "selfApproved": remote.self_approved(job),
+        # Past KUBESIGHT_PROVISION_APPROVAL_HOURS a waiting plan can no longer be
+        # approved: it is withdrawn (or rejected) and planned again.
+        "planExpired": _plan_expired(job),
         # OKE: the apply Job reported success, so only the connect step is left.
         "applyReported": job.status == "apply_failed" and remote.apply_reported_ok(job),
         "createdAt": _iso(job.created_at),
