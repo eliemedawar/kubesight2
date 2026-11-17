@@ -133,17 +133,19 @@ function ApprovalCard({ item, busy, onDecide }) {
           {item.href ? <a className="sg-ap-open" href={item.href}>Open where it lives</a> : null}
           {!item.canDecide && item.why ? <span className="muted sg-ap-why">{item.why}</span> : null}
         </div>
-        {item.canDecide ? (
+        {item.canDecide || item.canWithdraw ? (
           <div className="sg-rq-actions">
             <button type="button" className="btn-danger-outline btn-compact" disabled={busy}
                     onClick={() => onDecide(item, "reject")}>
               {item.actions?.rejectLabel || "Reject"}
             </button>
-            <button type="button" className="primary btn-compact" disabled={busy}
-                    onClick={() => onDecide(item, "approve")}>
-              <IconCheck className="sg-btn-ic" />
-              Approve
-            </button>
+            {item.canDecide ? (
+              <button type="button" className="primary btn-compact" disabled={busy}
+                      onClick={() => onDecide(item, "approve")}>
+                <IconCheck className="sg-btn-ic" />
+                Approve
+              </button>
+            ) : null}
           </div>
         ) : null}
       </footer>
@@ -199,7 +201,13 @@ function Inbox({ scope, onCounts }) {
 
   const decide = async (item, action) => {
     let text = "";
-    if (action === "reject" && item.actions?.rejectField) {
+    const withdrawing = action === "reject" && item.canWithdraw;
+    if (withdrawing && !(await confirmDialog({
+      title: "Withdraw request",
+      message: `Withdraw "${item.title}"? Nothing changes; the request is dropped.`,
+      confirmLabel: "Withdraw",
+    }))) return;
+    if (!withdrawing && action === "reject" && item.actions?.rejectField) {
       const answer = await promptDialog({
         title: "Reject",
         message: `Why reject "${item.title}"?`,
@@ -224,7 +232,7 @@ function Inbox({ scope, onCounts }) {
     setNotice("");
     try {
       await decideApproval(item, action, text);
-      setNotice(`${action === "approve" ? "Approved" : "Rejected"}: ${item.title}`);
+      setNotice(`${action === "approve" ? "Approved" : withdrawing ? "Withdrawn" : "Rejected"}: ${item.title}`);
       // A vote takes the item off "waiting on me": the badges drop at once,
       // and the reload below brings the exact numbers.
       adjustApprovalsWaiting(-1);

@@ -461,7 +461,12 @@ def _cluster_destroys(user) -> List[Dict[str, Any]]:
     execute = _can(user, "cluster_builds:execute")
     out = []
     for job, build in _pending_destroys():
-        why = _why_destroy(execute, _is_own(job.requested_by_user_id, user) and not _admin(user))
+        own = _is_own(job.requested_by_user_id, user)
+        why = _why_destroy(execute, own and not _admin(user))
+        jobs_url = f"/api/cluster-builds/{build.id}/provision/jobs/{job.id}"
+        # Your own request is withdrawn, never rejected (the reject route
+        # refuses the requester), so its card offers Withdraw instead.
+        withdraw = own and _can(user, "cluster_builds:create")
         summary = job.plan_summary_json or {}
         vms = [
             r.get("title") for r in summary.get("resources") or []
@@ -485,10 +490,12 @@ def _cluster_destroys(user) -> List[Dict[str, Any]]:
             href=f"#/cluster-builder/builds/{build.id}",
             canDecide=not why,
             why=why,
+            canWithdraw=withdraw,
             actions=_actions(
-                f"/api/cluster-builds/{build.id}/provision/jobs/{job.id}/approve",
-                f"/api/cluster-builds/{build.id}/provision/jobs/{job.id}/reject",
-                reject_field="note", approve_field="note",
+                f"{jobs_url}/approve",
+                f"{jobs_url}/discard" if withdraw else f"{jobs_url}/reject",
+                reject_field=None if withdraw else "note", approve_field="note",
+                reject_label="Withdraw" if withdraw else "Reject",
             ),
             buildId=build.id,
         ))

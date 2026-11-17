@@ -151,6 +151,29 @@ def test_a_destroy_needs_the_second_person(client, admin_token, admin2_token, mo
     [item] = _inbox(client, admin2_token)["items"]
     assert item["canDecide"] is True and "uat-09-vm-1" in item["details"][0]
     assert item["actions"]["reject"].endswith(f"/provision/jobs/{job.id}/reject")
+    assert item["canWithdraw"] is False and item["actions"]["rejectLabel"] == "Reject"
+
+
+def test_the_requester_withdraws_their_own_destroy(client, admin_token):
+    build = ClusterBuild(name="uat-10", status="vms_ready", machine_source="vmware", k8s_version="1.32.4")
+    db.session.add(build)
+    db.session.flush()
+    job = ClusterProvisionJob(
+        build_id=build.id, operation="destroy", status="awaiting_approval",
+        requested_by="admin", requested_by_user_id=_user("admin").id,
+    )
+    db.session.add(job)
+    db.session.commit()
+    [item] = _inbox(client, admin_token, "all")["items"]
+    # Rejecting your own request is refused, so the card withdraws it instead.
+    assert item["canWithdraw"] is True and item["actions"]["rejectLabel"] == "Withdraw"
+    assert item["actions"]["reject"].endswith(f"/provision/jobs/{job.id}/discard")
+    assert item["actions"]["rejectField"] is None
+    response = client.post(item["actions"]["reject"], json={}, headers=auth_headers(admin_token))
+    assert response.status_code == 200, response.get_json()
+    db.session.refresh(job)
+    assert job.status == "discarded"
+    assert _inbox(client, admin_token, "all")["items"] == []
 
 
 def test_a_ci_approval_stage_uses_its_own_approvers(app, client, admin_token, admin2_token, service):
