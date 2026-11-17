@@ -309,6 +309,26 @@ def _resolve_working_directory(
     return resolved
 
 
+def _resolve_scan_path(value: Any, env: Dict[str, Any], stage_name: str) -> str:
+    """A directory a Semgrep scan stage scans, with build inputs expanded:
+    ``modules/${MODULE}`` -> ``modules/ds-amex``. Held to the same plain path
+    alphabet as a working directory filled from an input."""
+    template = str(value or "").strip()
+    if "$" not in template:
+        return template
+    resolved = _expand_build_variables(template, env, stage_name, "a directory it scans")
+    resolved = "/".join(part for part in resolved.strip().split("/") if part)
+    problem = build_inputs.working_directory_problem(resolved)
+    if not problem and (not resolved or not _EXPANDED_PATH_RE.match(resolved)):
+        problem = (
+            "A directory filled from a build input may use letters, "
+            "digits, '.', '_', '-' and '/' only."
+        )
+    if problem:
+        raise BuildError(f"Stage '{stage_name}' resolved a directory to scan to '{resolved}': {problem}")
+    return resolved
+
+
 def _resolve_image_name(registry: Dict[str, Any], env: Dict[str, Any], stage_name: str) -> None:
     """Finish a templated IMAGE_NAME (``${MODULE}``) in place, from build inputs.
 
@@ -2047,6 +2067,13 @@ def _build_execution(
         scan_config = definition["scan"]
         if scan_config.get("tool") == "semgrep":
             code_scan_gate = scan_stage.gate_for(scan_config, definition.get("codeScan"), stage.name)
+            if scan_config.get("paths"):
+                scan_config = {
+                    **scan_config,
+                    "paths": [
+                        _resolve_scan_path(path, env, stage.name) for path in scan_config["paths"]
+                    ],
+                }
         commands = scan_stage.commands(
             scan_config,
             position=stage.position,

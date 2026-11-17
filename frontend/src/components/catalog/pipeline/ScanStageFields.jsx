@@ -20,7 +20,18 @@ import {
  * mirrored. `gate` is the code scan quality gate, rendered by the caller,
  * shown for Semgrep exactly as on a command stage.
  */
-export default function ScanStageFields({ ids, stage, index, scanTools, secretKeys, editable, onChange, error, gate }) {
+export default function ScanStageFields({
+  ids,
+  stage,
+  index,
+  scanTools,
+  secretKeys,
+  serviceDirectory,
+  editable,
+  onChange,
+  error,
+  gate,
+}) {
   const scan = stage.scan || null;
   const tool = scan?.tool || "";
   const catalog = (scanTools || []).find((item) => item.tool === tool) || null;
@@ -77,6 +88,27 @@ export default function ScanStageFields({ ids, stage, index, scanTools, secretKe
               placeholder={(catalog?.defaultRules || ["p/default"]).join(", ")}
               disabled={!editable}
               onChange={(rules) => setScan({ rules })}
+            />
+          </Field>
+          <Field
+            label="Directories to scan"
+            optional
+            hint={
+              <>
+                Empty scans everything under <code>{serviceDirectory || "the repository root"}</code>.
+                Name one or more modules to scan only those — e.g. <code>payments-core</code>, or{" "}
+                <code>{"${MODULE}"}</code> to pick the module from a build input. A directory missing
+                from the checkout fails the stage.
+              </>
+            }
+          >
+            <ChipsInput
+              label="Directories to scan"
+              value={scan.paths || []}
+              lowercase={false}
+              placeholder="Whole tree — or e.g. payments-core, modules/${MODULE}"
+              disabled={!editable}
+              onChange={(paths) => setScan({ paths })}
             />
           </Field>
           {gate}

@@ -420,6 +420,7 @@ export default function StageSheet({
             index={index}
             scanTools={scanTools}
             secretKeys={secretKeys}
+            serviceDirectory={stage.workingDirectory || service.workingDirectory || ""}
             editable={editable}
             onChange={onChange}
             error={problemFor("scan")}

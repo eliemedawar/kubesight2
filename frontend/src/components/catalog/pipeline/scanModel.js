@@ -55,6 +55,17 @@ export const SCAN_ON_FAIL = [
 const RULE_RE = /^[A-Za-z0-9_./:@+=~-]+$/;
 const GLOB_RE = /^[A-Za-z0-9_./*@+~-]+$/;
 const URL_RE = /^https?:\/\/[^\s'"`$\\]+$/;
+// A directory Semgrep scans: a repository path; ${NAME} takes a build input.
+const SCAN_PATH_RE = /^(?:[A-Za-z0-9_.@+~/-]|\$\{[A-Za-z_][A-Za-z0-9_]*\})+$/;
+
+/** Why a directory cannot be scanned, or null. Mirrors scan_stage.scan_path_problem. */
+export function scanPathProblem(path) {
+  const text = String(path || "");
+  if (text.startsWith("/")) return "it must be relative to the repository";
+  if (text.length > 200 || !SCAN_PATH_RE.test(text)) return "use letters, digits, . _ - / and ${VARIABLE} only";
+  if (text.split("/").includes("..")) return "it may not step outside the repository (..)";
+  return null;
+}
 
 /** What a stage gets when a tool is picked. Mirrors scan_stage.default_config. */
 export function defaultScan(tool) {
@@ -69,7 +80,7 @@ export function defaultScan(tool) {
         skipDirs: [...DEFAULT_SKIP_DIRS],
       };
     case "semgrep":
-      return { tool, rules: [] };
+      return { tool, rules: [], paths: [] };
     case "dependency_check":
       return { tool, failOnCvss: 7, onFail: "block", nvdApiKeySecret: "", nvdDatafeedUrl: "" };
     case "syft":
@@ -139,7 +150,8 @@ export function scanSummary(stage) {
     case "semgrep": {
       const allowed = Number(stage.codeScan?.maxBlocking) || 0;
       const rules = (scan.rules || []).length ? scan.rules.join(" ") : "rules for the app type";
-      return `Semgrep: ${rules} · fails over ${allowed} finding${allowed === 1 ? "" : "s"}`;
+      const where = (scan.paths || []).length ? ` in ${scan.paths.join(", ")}` : "";
+      return `Semgrep${where}: ${rules} · fails over ${allowed} finding${allowed === 1 ? "" : "s"}`;
     }
     case "dependency_check":
       return `Dependency-Check · ${verb} at CVSS ${cvss(scan.failOnCvss)}+`;
@@ -164,6 +176,14 @@ export function scanProblems(stage) {
   if (scan.tool === "semgrep") {
     const bad = (scan.rules || []).find((item) => !RULE_RE.test(String(item)) || String(item).length > 200);
     if (bad) problems.push({ field: "scan", message: `“${bad}” is not a valid rule set — a registry pack (p/java), a rule id or a path.` });
+    for (const path of scan.paths || []) {
+      const problem = scanPathProblem(path);
+      if (problem) {
+        problems.push({ field: "scan", message: `“${path}” is not a directory Semgrep can scan — ${problem}.` });
+        break;
+      }
+    }
+    if ((scan.paths || []).length > 20) problems.push({ field: "scan", message: "At most 20 directories to scan." });
   }
   if (scan.tool === "dependency_check") {
     const raw = scan.failOnCvss;

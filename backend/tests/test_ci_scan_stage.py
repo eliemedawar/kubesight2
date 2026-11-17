@@ -54,7 +54,7 @@ def test_each_tool_normalizes_to_its_defaults():
     assert trivy["code_scan"] is None and trivy["commands"] == [] and trivy["image"] is None
 
     semgrep = normalize_stage(_scan("semgrep"), 0, set())
-    assert semgrep["scan"] == {"tool": "semgrep", "rules": []}
+    assert semgrep["scan"] == {"tool": "semgrep", "rules": [], "paths": []}
     # A Semgrep scan stage always carries the quality gate: the default one.
     assert semgrep["code_scan"] == code_scan.default_config()
 
@@ -253,6 +253,67 @@ def test_semgrep_script_is_the_code_scan_gate_around_a_generated_scan():
     assert 'DEFAULT_RULES="p/owasp-top-ten"' in chosen
     # Rules somebody chose are not silently replaced by a .semgrep.yml.
     assert ".semgrep.yml" not in chosen
+
+
+def test_semgrep_scans_only_the_directories_named():
+    """One module of a multi-module repository: named directories replace '.',
+    from the same working directory, so .semgrep.yml at the root still counts."""
+    config = normalize_stage(
+        _scan("semgrep", paths=["./payments-core/", "modules/${MODULE}", ".", "payments-core"]), 0, set()
+    )["scan"]
+    assert config["paths"] == ["payments-core", "modules/${MODULE}"]
+    [script] = scan_stage.commands({**config, "paths": ["payments-core", "modules/ds-amex"]},
+                                   position=2, gate=code_scan.default_config())
+    assert ("semgrep scan $CONFIG_ARGS --metrics=off --disable-version-check "
+            "payments-core modules/ds-amex") in script
+    assert "if [ ! -e payments-core ]; then" in script
+    assert "if [ -f .semgrep.yml ]" in script
+    assert "== scan == Semgrep of payments-core, modules/ds-amex" in script
+    assert scan_stage.summary(config).startswith("Semgrep of payments-core, modules/${MODULE}")
+
+
+@pytest.mark.parametrize(
+    "path, says",
+    [
+        ("/etc", "relative to the repository"),
+        ("../other-repo", "outside the repository"),
+        ("mod; rm -rf /", "letters, digits"),
+        ("$(id)", "letters, digits"),
+        ("modules/$MODULE", "letters, digits"),
+    ],
+)
+def test_semgrep_refuses_a_directory_it_cannot_scan(path, says):
+    with pytest.raises(PipelineError) as exc:
+        normalize_stage(_scan("semgrep", paths=[path]), 0, set())
+    assert says in str(exc.value)
+
+
+@pytest.mark.skipif(not shutil.which("sh"), reason="needs sh")
+def test_semgrep_stage_fails_when_a_named_directory_is_missing(tmp_path):
+    bin_dir = _install(tmp_path, "semgrep", _FAKE_SEMGREP)
+    workspace, source = _workspace(tmp_path)
+    [script] = scan_stage.commands({"tool": "semgrep", "rules": [], "paths": ["no-such-module"]},
+                                   position=1, gate=code_scan.default_config())
+    result = _run(tmp_path, script, cwd=source, env=_env(tmp_path, bin_dir, workspace))
+    assert result.returncode == 1
+    assert "no-such-module is not in this checkout" in result.stderr
+    assert "Scan completed" not in result.stdout
+
+
+@pytest.mark.skipif(not _shell_available(), reason="needs sh and python3")
+def test_semgrep_stage_scans_the_named_module(tmp_path):
+    fake = _FAKE_SEMGREP.replace('echo "Scan completed successfully."',
+                                 'echo "$@" > "$FAKE_ARGS_FILE"\necho "Scan completed successfully."')
+    bin_dir = _install(tmp_path, "semgrep", fake)
+    workspace, source = _workspace(tmp_path)
+    (source / "payments-core").mkdir()
+    [script] = scan_stage.commands({"tool": "semgrep", "rules": ["p/java"], "paths": ["payments-core"]},
+                                   position=1, gate=code_scan.default_config())
+    result = _run(tmp_path, script, cwd=source, env=_env(tmp_path, bin_dir, workspace))
+    assert result.returncode == 0, result.stdout + result.stderr
+    args = (tmp_path / "args.txt").read_text().split()
+    # The gate's shim appends --json-output after the targets.
+    assert "payments-core" in args and "." not in args
 
 
 def test_dependency_check_script_shares_the_merge_check_database_and_lock():
@@ -743,6 +804,35 @@ def test_the_engine_generates_the_scan_into_the_execution(app, client, admin_tok
     assert code.code_scan["maxBlocking"] == 2 and code.code_scan["enabled"] is True
     assert 'DEFAULT_RULES="p/default p/java"' in code.commands[0]
     assert 'python3 - "$KS_CODE_SCAN_REPORT" 2 info' in code.commands[0]
+
+
+def test_the_engine_fills_a_build_input_into_the_directory_semgrep_scans(
+    app, client, admin_token, runnable_service  # noqa: F811
+):
+    from api.services.ci import engine
+
+    pipeline_id = _pipeline_id(client, admin_token, runnable_service)
+    saved = client.put(
+        f"/api/ci/pipelines/{pipeline_id}",
+        json={"parameters": [{"name": "MODULE", "type": "text", "default": "ds-amex"}], "stages": [
+            {"name": "Checkout", "stageType": "checkout", "runnerLabels": ["mock"]},
+            {"name": "Code", "stageType": "scan",
+             "scan": {"tool": "semgrep", "paths": ["modules/${MODULE}"]}},
+        ]},
+        headers=auth_headers(admin_token),
+    )
+    assert saved.status_code == 200, saved.get_json()
+    build_id = client.post(
+        f"/api/ci/services/{runnable_service}/builds", json={}, headers=auth_headers(admin_token)
+    ).get_json()["data"]["id"]
+
+    with app.app_context():
+        build = db.session.get(CiBuild, build_id)
+        rows = sorted(build.stages, key=lambda s: s.position)
+        code = engine._build_execution(build, rows[1], engine._definition_for(build, rows[1]))
+
+    assert code.scan["paths"] == ["modules/ds-amex"]
+    assert code.commands[0].rstrip().count("--disable-version-check modules/ds-amex") == 1
 
 
 # ---------------------------------------------------------------------------

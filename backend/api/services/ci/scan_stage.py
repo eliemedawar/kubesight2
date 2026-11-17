@@ -87,6 +87,9 @@ _RULE_RE = re.compile(r"^[A-Za-z0-9_./:@+=~-]+$")
 _GLOB_RE = re.compile(r"^[A-Za-z0-9_./*@+~-]+$")
 _URL_RE = re.compile(r"^https?://[^\s'\"`$\\]+$")
 _SECRET_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,120}$")
+# A directory Semgrep scans: a plain repository path, where ``${NAME}`` takes a
+# build input (``modules/${MODULE}``) that the engine fills in.
+_SCAN_PATH_RE = re.compile(r"^(?:[A-Za-z0-9_.@+~/-]|\$\{[A-Za-z_][A-Za-z0-9_]*\})+$")
 
 # A distinctive exit code for "Trivy found something at or above the gate", so
 # a Trivy that broke (exit 1) is never read as a verdict about the code.
@@ -127,7 +130,7 @@ def default_config(tool: str) -> Dict[str, Any]:
             "skipDirs": list(DEFAULT_SKIP_DIRS),
         }
     if tool == "semgrep":
-        return {"tool": tool, "rules": []}
+        return {"tool": tool, "rules": [], "paths": []}
     if tool == "dependency_check":
         return {
             "tool": tool,
@@ -172,6 +175,48 @@ def _clean_list(value: Any, pattern: re.Pattern, what: str, stage_name: str) -> 
             out.append(text)
     if len(out) > MAX_LIST:
         raise ScanConfigError(f"Stage '{stage_name}': at most {MAX_LIST} {what}.")
+    return out
+
+
+def scan_path_problem(path: str) -> Optional[str]:
+    """Why ``path`` cannot be a directory Semgrep scans, or None.
+
+    Shared with the engine, which checks the path again once ``${NAME}`` has
+    been filled from a build input."""
+    text = str(path or "")
+    if text.startswith("/"):
+        return "it must be relative to the repository"
+    if len(text) > MAX_ITEM or not _SCAN_PATH_RE.match(text):
+        return "use letters, digits, '.', '_', '-', '/' and ${VARIABLE} only"
+    if ".." in text.split("/"):
+        return "it may not step outside the repository ('..')"
+    return None
+
+
+def _clean_paths(value: Any, stage_name: str) -> List[str]:
+    """The directories a Semgrep stage scans, tidied: ``./src/`` is ``src``, and
+    ``.`` (the whole tree) is the same as naming none."""
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        value = re.split(r"[\s,]+", value)
+    if not isinstance(value, (list, tuple)):
+        raise ScanConfigError(f"Stage '{stage_name}': the directories to scan must be a list.")
+    out: List[str] = []
+    for item in value:
+        raw = str(item or "").strip()
+        if not raw:
+            continue
+        problem = scan_path_problem(raw)
+        if problem:
+            raise ScanConfigError(
+                f"Stage '{stage_name}': '{raw[:80]}' is not a directory Semgrep can scan - {problem}."
+            )
+        text = "/".join(part for part in raw.split("/") if part and part != ".")
+        if text and text not in out:
+            out.append(text)
+    if len(out) > MAX_LIST:
+        raise ScanConfigError(f"Stage '{stage_name}': at most {MAX_LIST} directories to scan.")
     return out
 
 
@@ -253,6 +298,11 @@ def normalize(
             # Empty is "automatic": the packs for the service's application type,
             # resolved when the build runs, so changing the type changes the scan.
             "rules": _clean_list(value.get("rules"), _RULE_RE, "rule sets", stage_name),
+            # Empty is the whole working directory. Named directories - one
+            # module of a multi-module repository, say - are scanned instead,
+            # from the same working directory, so rules committed at its root
+            # still apply and the report's paths still start there.
+            "paths": _clean_paths(value.get("paths"), stage_name),
         }
 
     if tool == "dependency_check":
@@ -578,18 +628,36 @@ def _semgrep_commands(config: Dict[str, Any], application_type: str) -> List[str
     rules = " ".join(chosen) or profiles.semgrep_rules(
         str(application_type or "generic").strip().lower() or "generic"
     )
+    paths = [str(item) for item in (config.get("paths") or []) if str(item or "").strip()]
+    # A directory missing from the checkout fails the stage before Semgrep runs:
+    # scanned anyway, Semgrep finds nothing and the gate passes a module nobody
+    # looked at.
+    missing: List[str] = []
+    for path in paths:
+        missing += [
+            f"if [ ! -e {_q(path)} ]; then",
+            f'  echo "[kubesight] Scan FAILED: {path} is not in this checkout (looked in $(pwd)).'
+            ' Nothing was scanned." >&2',
+            "  exit 1",
+            "fi",
+        ]
+    where = f" of {', '.join(paths)}" if paths else ""
     return [
         "# -- KubeSight scan: Semgrep --",
         *_on_path_check("semgrep"),
         'if [ -z "$KS_FOUND" ]; then',
         *_missing_tool("semgrep", "semgrep", build_environments.image("semgrep")).rstrip("\n").split("\n"),
         "fi",
+        *missing,
         *merge_check_stages.semgrep_rules_lines(rules, repository_rules_win=not chosen),
-        'echo "[kubesight] == scan == Semgrep"',
+        f'echo "[kubesight] == scan == Semgrep{where}"',
         # The target is named: the official image sets SEMGREP_IN_DOCKER and,
         # without one, insists the code is mounted at /src. --metrics=off
-        # because a build must not report on a private repository.
-        "semgrep scan $CONFIG_ARGS --metrics=off --disable-version-check .",
+        # because a build must not report on a private repository. Named
+        # directories replace '.', from the same working directory, so a
+        # .semgrep.yml at its root still applies.
+        "semgrep scan $CONFIG_ARGS --metrics=off --disable-version-check "
+        + (" ".join(_q(path) for path in paths) if paths else "."),
     ]
 
 
@@ -784,4 +852,6 @@ def summary(config: Any) -> str:
         return f"Dependency-Check, {config.get('onFail', 'block')} at CVSS {float(config.get('failOnCvss', 7.0)):.1f}"
     if tool == "syft":
         return f"SBOM with Syft ({config.get('format', SBOM_FORMATS[0])})"
-    return "Semgrep, with the code scan quality gate"
+    paths = config.get("paths") or []
+    where = f" of {', '.join(paths)}" if paths else ""
+    return f"Semgrep{where}, with the code scan quality gate"

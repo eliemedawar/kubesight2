@@ -645,6 +645,15 @@ _STAGE_SCHEMA = {
                 "ignoreUnfixed": {"type": "boolean"},
                 "skipDirs": {"type": "array", "items": {"type": "string"}},
                 "rules": {"type": "array", "items": {"type": "string"}},
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "semgrep only. Directories to scan, relative to the stage's working "
+                        "directory (e.g. one module: 'payments-core'); ${VAR} takes a build "
+                        "input. Empty scans the whole tree."
+                    ),
+                },
                 "failOnCvss": {"type": "number", "minimum": 0, "maximum": 10},
                 "nvdApiKeySecret": {"type": "string"},
                 "nvdDatafeedUrl": {"type": "string"},

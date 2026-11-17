@@ -78,7 +78,7 @@ describe("picking a tool", () => {
   it("gives Semgrep the quality gate and takes it away from every other tool", () => {
     const blank = { ...blankStage("scan"), name: "Scan" };
     const semgrep = scanToolPatch(blank, "semgrep");
-    expect(semgrep.scan).toEqual({ tool: "semgrep", rules: [] });
+    expect(semgrep.scan).toEqual({ tool: "semgrep", rules: [], paths: [] });
     expect(semgrep.codeScan).toMatchObject({ enabled: true, tool: "semgrep", maxBlocking: 0 });
 
     // A gate the stage already had is kept, and switched on.
@@ -168,5 +168,29 @@ describe("what a save would refuse", () => {
     // No "nothing runs semgrep" warning: KubeSight writes the semgrep line itself.
     const fine = scanStage("semgrep");
     expect(stageProblems(fine, 0, [fine], []).filter((problem) => problem.field === "codeScan")).toEqual([]);
+  });
+});
+
+describe("Semgrep directories to scan", () => {
+  const withPaths = (paths) => ({ ...scanStage("semgrep"), scan: { tool: "semgrep", rules: [], paths } });
+
+  it("names the module in the summary", () => {
+    expect(scanSummary(withPaths(["payments-core"]))).toBe(
+      "Semgrep in payments-core: rules for the app type · fails over 0 findings"
+    );
+  });
+
+  it("accepts modules and build inputs", () => {
+    expect(scanProblems(withPaths(["payments-core", "modules/${MODULE}", "./web/"]))).toEqual([]);
+  });
+
+  it.each([
+    ["/etc", "relative to the repository"],
+    ["../other", "outside the repository"],
+    ["a; rm -rf /", "letters, digits"],
+    ["$(id)", "letters, digits"],
+  ])("refuses %s", (path, says) => {
+    const [problem] = scanProblems(withPaths([path]));
+    expect(problem.message).toContain(says);
   });
 });
