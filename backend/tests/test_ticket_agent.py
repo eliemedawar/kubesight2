@@ -179,6 +179,33 @@ def test_webhook_hands_every_ticket_to_hermes_which_executes(client, agent, writ
     assert len(seen) == 1
 
 
+def test_no_deploy_targets_still_reaches_hermes_with_the_description(client, agent, writes, monkeypatch):
+    # No source namespaces chosen for this provider: an empty catalog used to
+    # fail the task before Hermes saw it ("No deploy targets are published").
+    agent.source_cluster_id = None
+    agent.selected_namespaces = json.dumps([])
+    db.session.commit()
+
+    def behaviour(message):
+        assert message["catalog"] == []
+        assert "no deploy targets" in message["catalogNote"].lower()
+        assert "Please deploy v9.9.9" in message["ticket"]["description"]
+        engine.set_status(message["ticketRecordId"], "impediment", "No deploy targets yet.")
+        return {"outcome": "impediment", "summary": "parked"}
+
+    seen = _fake_hermes(monkeypatch, behaviour)
+    ticket = _ticket()
+    engine.queue_ticket(ticket.id)
+    assert len(seen) == 1
+    task = TicketInterpretation.query.filter_by(ticket_record_id=ticket.id).one()
+    assert task.status != "error", task.error
+
+    # Even so, a change on a target outside the (empty) catalog is refused.
+    with pytest.raises(engine.AgentError, match="not in the catalog"):
+        engine.execute(ticket.id, _action())
+    assert DeployAutomationRun.query.filter_by(ticket_record_id=ticket.id).count() == 0
+
+
 def test_agent_off_keeps_the_dropdown_path(client, app, writes, monkeypatch):
     seen = _fake_hermes(monkeypatch, lambda m: None)
     agent_settings.update({"enabled": True})  # on, but no dedicated Hermes URL

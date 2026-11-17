@@ -5,6 +5,7 @@ import { IconChevronRight, IconPlay, IconRefresh, IconTrash } from "./icons.jsx"
 import AgentTaskCard, { AgentTaskPill } from "./AgentTaskCard.jsx";
 import { CopyButton } from "./common.jsx";
 import { ACTIVE_RUN_STATUSES, RunDetail, RunStatusPill } from "./ZohoRunDetail.jsx";
+import { isUnresolved } from "./ticketState.js";
 
 const FILTERS = [
   { key: "all", label: "All" },
@@ -98,19 +99,19 @@ export default function ZohoTicketsTab({
     const runsOf = (t) => runsByTicket.get(t.id) || [];
     return {
       all: tickets.length,
-      unresolved: tickets.filter((t) => !t.resolved).length,
+      unresolved: tickets.filter((t) => isUnresolved(t, agentActive)).length,
       active: tickets.filter((t) => anyRunActive(runsOf(t))).length,
       approval: tickets.filter(
         (t) => runsOf(t).some((r) => r.status === "awaiting_approval") || agentWaiting(t)
       ).length,
       impediment: tickets.filter((t) => handleTask(t)?.status === "impediment").length,
     };
-  }, [tickets, runsByTicket]);
+  }, [tickets, runsByTicket, agentActive]);
 
   const query = search.trim().toLowerCase();
   const visible = tickets.filter((t) => {
     const ticketRuns = runsByTicket.get(t.id) || [];
-    if (filter === "unresolved" && t.resolved) return false;
+    if (filter === "unresolved" && !isUnresolved(t, agentActive)) return false;
     if (filter === "active" && !anyRunActive(ticketRuns)) return false;
     if (
       filter === "approval" &&

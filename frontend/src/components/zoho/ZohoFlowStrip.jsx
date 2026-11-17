@@ -11,6 +11,7 @@ import { ACTIVE_RUN_STATUSES } from "./ZohoRunDetail.jsx";
 import { timeAgo } from "./common.jsx";
 import { useTicketing } from "../ticketing/TicketingContext.jsx";
 import { useRouter } from "../../routes/RouterContext.jsx";
+import { isUnresolved } from "./ticketState.js";
 
 // Tone ranking for connectors: a link inherits the worse of its two nodes.
 const TONE_RANK = { ok: 0, info: 1, muted: 2, warn: 3, danger: 4 };
@@ -48,6 +49,7 @@ export default function ZohoFlowStrip({
   ticketsLoading,
   runs,
   jenkins,
+  agentActive = false,
   onNavigate,
 }) {
   const { name: providerName, formNoun, api } = useTicketing();
@@ -130,7 +132,7 @@ export default function ZohoFlowStrip({
       : "Untested";
 
   // Inbound tickets
-  const unresolved = tickets.filter((t) => !t.resolved).length;
+  const unresolved = tickets.filter((t) => isUnresolved(t, agentActive)).length;
   const secretSet = Boolean(config?.inboundSecretConfigured);
   const inboundTone = unresolved > 0 ? "danger" : secretSet ? "ok" : "warn";
   const inboundPill =

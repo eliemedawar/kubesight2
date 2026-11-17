@@ -471,6 +471,7 @@ export default function ProviderWorkspace({ canManage = false, onBack }) {
         ticketsLoading={ticketsLoading}
         runs={runs}
         jenkins={jenkins}
+        agentActive={agentActive}
         onNavigate={setTab}
       />
 

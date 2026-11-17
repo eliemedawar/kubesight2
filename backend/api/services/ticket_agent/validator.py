@@ -140,7 +140,7 @@ def check(
             f"'{target.get('environment') or '?'}' is not in the catalog. Copy both from one "
             "catalog entry, or decide 'clarify'.",
             "I could not match the application and environment to anything KubeSight can deploy. "
-            "Please pick the Application and Environment from the ticket's dropdowns.",
+            "Please name the application and the environment in the ticket's description.",
         )
     plan.snapshot = snap
 
