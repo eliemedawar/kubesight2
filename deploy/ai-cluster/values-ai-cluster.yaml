@@ -297,5 +297,5 @@ networkPolicies:
     # the Docker connectors images are pushed to (CHG-KS-012).
     - {cidr: 10.43.17.16/32, ports: [443, 9443, 4443]}
     # UAT Kubernetes API through its load balancer, so the UAT cluster can be
-    # managed from here with its kubeconfig (CHG-KS-019).
+    # managed from here with its kubeconfig (CHG-KS-020; 58f11ea4).
     - {cidr: 10.4.27.15/32, ports: [6443]}

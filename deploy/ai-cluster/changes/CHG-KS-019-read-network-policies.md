@@ -4,7 +4,7 @@
 |---|---|
 | ID | CHG-KS-019 |
 | Modules | kubesight-backend |
-| Status | Proposed |
+| Status | Proposed. CHG-KS-020 (release `main-40`) carries the same rule: if 020 runs, skip this one |
 | Asked by | Elie, 2026-11-17: Resources › Network policies shows none for `ai-guard`, "why no network policies in oci even if we have" |
 | Depends on | CHG-KS-005 (the ClusterRole `kubesight-backend-reader` this change adds one rule to) |
 | Prepared by | ____ |
