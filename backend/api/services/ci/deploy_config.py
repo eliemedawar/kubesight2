@@ -571,13 +571,32 @@ def _image_values(value: Any, stage_name: str, where: str) -> Dict[str, str]:
         raise DeployConfigError(
             f"Stage '{stage_name}'{where}: the repository and the tag must be different chart values."
         )
+    if _clean(value.get("registry"), 200):
+        # Charts that keep the registry host apart (image.registry +
+        # image.repository): the host goes there, the repository without it.
+        # Only written when used, so existing targets read (and sign) as before.
+        values["registry"] = _value_path(value.get("registry"), f"image registry{where}", stage_name)
+        if values["registry"] in (values["repository"], values["tag"]):
+            raise DeployConfigError(
+                f"Stage '{stage_name}'{where}: the registry, the repository and the tag must be "
+                "different chart values."
+            )
     return values
 
 
-def _value_paths(image_values: Dict[str, str]) -> List[str]:
+# Values several images may share — one tag for every image a build pushes, one
+# registry host — provided they carry the same value when the stage deploys.
+_SHAREABLE = ("tag", "registry")
+
+
+def _value_paths(image_values: Dict[str, str]) -> List[Tuple[str, str]]:
+    """``(kind, path)`` of each chart value an image writes."""
     if image_values.get("mode") == "full":
-        return [image_values["path"]]
-    return [image_values["repository"], image_values["tag"]]
+        return [("image", image_values["path"])]
+    out = [("repository", image_values["repository"]), ("tag", image_values["tag"])]
+    if image_values.get("registry"):
+        out.append(("registry", image_values["registry"]))
+    return out
 
 
 def _helm_images(value: Any, stage_name: str) -> List[Dict[str, Any]]:
@@ -587,7 +606,10 @@ def _helm_images(value: Any, stage_name: str) -> List[Dict[str, Any]]:
     (checked by the pipeline validator, which sees every stage) or a fixed
     reference — and the chart values it goes into. No two rows may write the
     same value, nor one value inside another (``api.image`` and
-    ``api.image.tag``): one of them would be lost.
+    ``api.image.tag``): one of them would be lost. The exception is a tag or a
+    registry value shared by rows that all use it as their tag (registry):
+    charts with one ``image.tag`` for every image. Deploying checks the shared
+    value is the same for each.
     """
     rows_in = [row for row in (value if isinstance(value, list) else []) if isinstance(row, dict)]
     if not rows_in:
@@ -599,20 +621,23 @@ def _helm_images(value: Any, stage_name: str) -> List[Dict[str, Any]]:
             f"Stage '{stage_name}' sets {len(rows_in)} images; the limit is {MAX_HELM_IMAGES}."
         )
     rows: List[Dict[str, Any]] = []
-    owner: Dict[str, int] = {}
+    owner: Dict[str, Tuple[int, str]] = {}
     for number, raw in enumerate(rows_in, start=1):
         where = f", image {number}"
         source, stage, image = _row_source(raw, stage_name, where)
         image_values = _image_values(raw.get("imageValues"), stage_name, where)
-        for path in _value_paths(image_values):
-            for other, other_row in owner.items():
+        for kind, path in _value_paths(image_values):
+            for other, (other_row, other_kind) in owner.items():
+                if path == other and kind == other_kind and kind in _SHAREABLE:
+                    continue  # one tag (registry) value for several images
                 if path == other or path.startswith(other + ".") or other.startswith(path + "."):
                     clash = "the same chart value" if path == other else "overlapping chart values"
                     raise DeployConfigError(
                         f"Stage '{stage_name}': image {other_row} and image {number} set {clash} "
-                        f"('{other}' and '{path}'). Each image needs values of its own."
+                        f"('{other}' and '{path}'). Each image needs values of its own; only a tag "
+                        "or registry value may be shared."
                     )
-            owner[path] = number
+            owner.setdefault(path, (number, kind))
         rows.append({"from": source, "stage": stage, "image": image, "imageValues": image_values})
     return rows
 
@@ -720,7 +745,7 @@ def helm_images(config: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def image_value_label(image_values: Dict[str, Any]) -> str:
     """'image.repository / image.tag' — where an image goes, in one line."""
-    return " / ".join(_value_paths(image_values)) if image_values else "the image value"
+    return " / ".join(path for _, path in _value_paths(image_values)) if image_values else "the image value"
 
 
 def is_linked(config: Optional[Dict[str, Any]]) -> bool:
@@ -757,8 +782,16 @@ def helm_values_for(pairs: List[Tuple[Dict[str, Any], str]]) -> Dict[str, Any]:
     """The values that put each image into the chart, for ``(imageValues,
     image)`` pairs — one for a one-image target, one per row for several."""
     values: Dict[str, Any] = {}
+    written: Dict[str, Tuple[str, str]] = {}
 
-    def put(path: str, value: str) -> None:
+    def put(path: str, value: str, image: str) -> None:
+        if path in written and written[path][0] != value:
+            # A shared tag (registry) value, but these images disagree on it.
+            raise DeployConfigError(
+                f"{written[path][1]} and {image} share the chart value '{path}' but need "
+                f"'{written[path][0]}' and '{value}' there. Give each image its own value."
+            )
+        written[path] = (value, image)
         cursor = values
         parts = path.split(".")
         for part in parts[:-1]:
@@ -767,12 +800,25 @@ def helm_values_for(pairs: List[Tuple[Dict[str, Any], str]]) -> Dict[str, Any]:
 
     for settings, image in pairs:
         if settings.get("mode") == "full":
-            put(settings["path"], image)
+            put(settings["path"], image, image)
         else:
             repository, tag = split_image(image)
-            put(settings["repository"], repository)
-            put(settings["tag"], tag)
+            if settings.get("registry"):
+                host, repository = split_registry(repository)
+                put(settings["registry"], host, image)
+            put(settings["repository"], repository, image)
+            put(settings["tag"], tag, image)
     return values
+
+
+def split_registry(repository: str) -> Tuple[str, str]:
+    """``registry.areeba.com/ai-guard/admin`` -> ``("registry.areeba.com",
+    "ai-guard/admin")``. Like Docker, the first part is a host only when it
+    has a '.' or ':' or is ``localhost``; otherwise the image is on Docker Hub."""
+    first, _, rest = repository.partition("/")
+    if rest and ("." in first or ":" in first or first == "localhost"):
+        return first, rest
+    return "docker.io", repository
 
 
 def signature(config: Optional[Dict[str, Any]]) -> str:

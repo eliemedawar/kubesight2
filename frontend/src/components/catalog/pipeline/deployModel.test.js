@@ -278,6 +278,26 @@ describe("a Helm chart that runs several images", () => {
     const inside = rows.map((row, index) => (index === 2 ? { ...row, imageValues: { mode: "full", path: "api.image" } } : row));
     expect(deployProblems(target(inside), stages)[0].message).toMatch(/“api.image.repository” and “api.image”|“api.image” and/);
   });
+
+  it("reads a chart with one registry and one tag for several repositories", () => {
+    const aiGuard = {
+      image: {
+        registry: "registry.areeba.com",
+        repositories: { admin: "ai-guard/admin", gateway: "ai-guard/gateway" },
+        tag: "",
+      },
+    };
+    const found = findImageValues(aiGuard);
+    expect(found).toEqual([
+      { mode: "split", repository: "image.repositories.admin", tag: "image.tag", registry: "image.registry" },
+      { mode: "split", repository: "image.repositories.gateway", tag: "image.tag", registry: "image.registry" },
+    ]);
+    // Sharing the tag and the registry value is allowed; sharing a repository is not.
+    const rows = guessImageRows(aiGuard, ["Build API", "Build Worker"]);
+    expect(deployProblems(target(rows), stages)).toEqual([]);
+    const same = rows.map((row) => ({ ...row, imageValues: rows[0].imageValues }));
+    expect(deployProblems(target(same), stages)[0].message).toMatch(/only a tag or registry value may be shared/);
+  });
 });
 
 describe("a stage that deploys to several deployments", () => {

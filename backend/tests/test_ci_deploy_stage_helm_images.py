@@ -151,6 +151,60 @@ def test_every_image_goes_into_its_own_values_in_one_set():
     }
 
 
+def _shared(name, stage):
+    """A row for a chart like ai-guard: image.registry + image.repositories.<name> + image.tag."""
+    return {"from": "stage", "stage": stage, "imageValues": {
+        "mode": "split", "repository": f"image.repositories.{name}", "tag": "image.tag",
+        "registry": "image.registry"}}
+
+
+def test_images_may_share_one_tag_and_one_registry_value():
+    config = deploy_config.normalize(
+        _several("ai-guard", [_shared("admin", "Build API"), _shared("gateway", "Build Worker")]),
+        "deploy", "Deploy")
+    rows = deploy_config.helm_images(config)
+    assert rows[0]["imageValues"]["registry"] == "image.registry"
+    values = deploy_config.helm_values_for([
+        (rows[0]["imageValues"], "registry.areeba.com/ai-guard/admin:main-7"),
+        (rows[1]["imageValues"], "registry.areeba.com/ai-guard/gateway:main-7"),
+    ])
+    assert values == {"image": {
+        "registry": "registry.areeba.com", "tag": "main-7",
+        "repositories": {"admin": "ai-guard/admin", "gateway": "ai-guard/gateway"},
+    }}
+
+
+def test_a_shared_tag_with_different_values_deploys_nothing():
+    rows = [_shared("admin", "A")["imageValues"], _shared("gateway", "B")["imageValues"]]
+    with pytest.raises(deploy_config.DeployConfigError, match="share the chart value 'image.tag'"):
+        deploy_config.helm_values_for([(rows[0], "registry.areeba.com/ai-guard/admin:7"),
+                                       (rows[1], "registry.areeba.com/ai-guard/gateway:8")])
+
+
+def test_only_a_tag_or_registry_value_may_be_shared():
+    rows = [_shared("admin", "A"), _shared("admin", "B")]  # the same repository value twice
+    with pytest.raises(deploy_config.DeployConfigError, match="only a tag or registry value"):
+        deploy_config.normalize(_several("ai-guard", rows), "deploy", "Deploy")
+    # A repository value of one image may not be another's tag value.
+    crossed = [_shared("admin", "A"),
+               {"from": "stage", "stage": "B", "imageValues": {
+                   "mode": "split", "repository": "image.tag", "tag": "other.tag"}}]
+    with pytest.raises(deploy_config.DeployConfigError, match="same chart value"):
+        deploy_config.normalize(_several("ai-guard", crossed), "deploy", "Deploy")
+
+
+def test_a_registry_value_without_a_host_means_docker_hub():
+    assert deploy_config.split_registry("library/nginx") == ("docker.io", "library/nginx")
+    assert deploy_config.split_registry("nginx") == ("docker.io", "nginx")
+    assert deploy_config.split_registry("reg.local:5000/team/app") == ("reg.local:5000", "team/app")
+    assert deploy_config.split_registry("localhost/app") == ("localhost", "app")
+
+
+def test_one_image_without_a_registry_value_signs_as_before():
+    plain = deploy_config.normalize(_helm_deploy("payments"), "deploy", "Deploy")
+    assert "registry" not in plain["helm"]["imageValues"]
+
+
 def test_saving_needs_each_stage_to_be_an_image_stage_and_takes_its_spelling(client, admin_token, service):
     chart_id = _slug(client, admin_token)
     rows = _rows()

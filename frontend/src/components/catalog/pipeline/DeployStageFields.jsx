@@ -960,7 +960,12 @@ function ImageValuesFields({ ids, label, hint, value, editable, onChange }) {
             onChange(
               mode === "full"
                 ? { mode: "full", path: image.path || "image" }
-                : { mode: "split", repository: image.repository || "image.repository", tag: image.tag || "image.tag" }
+                : {
+                    mode: "split",
+                    repository: image.repository || "image.repository",
+                    tag: image.tag || "image.tag",
+                    ...(image.registry ? { registry: image.registry } : {}),
+                  }
             )
           }
         />
@@ -993,9 +998,27 @@ function ImageValuesFields({ ids, label, hint, value, editable, onChange }) {
               placeholder="image.tag"
               onChange={(tag) => onChange({ ...image, tag })}
             />
+            <TextField
+              id={`${ids}-registry`}
+              label="Registry value (optional)"
+              value={image.registry || ""}
+              disabled={!editable}
+              placeholder="image.registry"
+              onChange={(registry) => {
+                const { registry: _drop, ...rest } = image;
+                onChange(registry ? { ...rest, registry } : rest);
+              }}
+            />
           </>
         )}
       </div>
+      {image.mode !== "full" ? (
+        <p className="pl-field-hint">
+          These are paths in the chart’s values, not the image itself. With a registry value, the host
+          (registry.areeba.com) goes there and the repository without it. Several images may share one
+          tag or registry value.
+        </p>
+      ) : null}
     </>
   );
 }

@@ -203,8 +203,19 @@ export function findImageValues(defaultValues) {
   const found = [];
   const walk = (node, path) => {
     if (!node || typeof node !== "object" || Array.isArray(node) || found.length >= MAX_HELM_IMAGES) return;
+    const registry = typeof node.registry === "string" ? { registry: [...path, "registry"].join(".") } : {};
     if (typeof node.repository === "string" && path.length) {
-      found.push({ mode: "split", repository: [...path, "repository"].join("."), tag: [...path, "tag"].join(".") });
+      found.push({ mode: "split", repository: [...path, "repository"].join("."), tag: [...path, "tag"].join("."), ...registry });
+      return;
+    }
+    // One registry and one tag for several repositories (image.registry,
+    // image.repositories.<name>, image.tag): a row per repository, sharing both.
+    const repos = node.repositories;
+    if (repos && typeof repos === "object" && !Array.isArray(repos) && "tag" in node && path.length) {
+      for (const [key, value] of Object.entries(repos)) {
+        if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(key) || found.length >= MAX_HELM_IMAGES) continue;
+        found.push({ mode: "split", repository: [...path, "repositories", key].join("."), tag: [...path, "tag"].join("."), ...registry });
+      }
       return;
     }
     for (const [key, value] of Object.entries(node)) {
@@ -231,16 +242,27 @@ export function guessImageRows(defaultValues, imageStageNames) {
   return places.map((imageValues, index) => ({ ...blankHelmImage(names[index] || ""), imageValues }));
 }
 
-const imagePaths = (values) =>
-  values?.mode === "full" ? [values.path] : [values?.repository, values?.tag];
+/** [kind, path] of each chart value an image writes (deploy_config._value_paths). */
+const imagePaths = (values) => {
+  if (values?.mode === "full") return [["image", values.path]];
+  const out = [["repository", values?.repository], ["tag", values?.tag]];
+  if (values?.registry) out.push(["registry", values.registry]);
+  return out;
+};
+
+// Values several images may share: one tag, one registry host (deploy_config._SHAREABLE).
+const SHAREABLE = new Set(["tag", "registry"]);
 
 /** What a save would refuse about where one image goes. */
 function imageValuesProblem(values) {
-  if (imagePaths(values).some((path) => !VALUE_PATH.test(String(path || "")))) {
+  if (imagePaths(values).some(([, path]) => !VALUE_PATH.test(String(path || "")))) {
     return "Name the chart value(s) the image goes into, like image.repository and image.tag.";
   }
   if (values?.mode !== "full" && values?.repository === values?.tag) {
     return "The repository and the tag must be different chart values.";
+  }
+  if (values?.mode !== "full" && values?.registry && [values.repository, values.tag].includes(values.registry)) {
+    return "The registry, the repository and the tag must be different chart values.";
   }
   return "";
 }
@@ -332,13 +354,14 @@ function helmImagesProblems(rows, stages) {
       add(`${label}: ${problem}`);
       return;
     }
-    for (const path of imagePaths(row.imageValues)) {
-      for (const [other, otherIndex] of owner) {
+    for (const [kind, path] of imagePaths(row.imageValues)) {
+      for (const [other, [otherIndex, otherKind]] of owner) {
+        if (path === other && kind === otherKind && SHAREABLE.has(kind)) continue;
         if (path === other || path.startsWith(`${other}.`) || other.startsWith(`${path}.`)) {
-          add(`Images ${otherIndex + 1} and ${index + 1} both set ${path === other ? `“${path}”` : `“${other}” and “${path}”`}. Each image needs values of its own.`);
+          add(`Images ${otherIndex + 1} and ${index + 1} both set ${path === other ? `“${path}”` : `“${other}” and “${path}”`}. Each image needs values of its own; only a tag or registry value may be shared.`);
         }
       }
-      owner.set(path, index);
+      if (!owner.has(path)) owner.set(path, [index, kind]);
     }
   });
   return problems;
