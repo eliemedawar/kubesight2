@@ -160,32 +160,37 @@ const PAGE_TOURS = {
 
   resources: [
     {
-      target: ".resources-tab-bar",
-      title: "Resource types",
+      target: ".resources-rail",
+      title: "Resource kinds",
       body: (ctx) =>
         ctx.isAdmin
-          ? "Switch between pods, deployments, services, and the other resource types in the selected namespace."
-          : "Switch between resource types. Only the types your role can view appear as tabs.",
+          ? "Every kind in the namespace, grouped by what it does. A red or amber number counts the rows that need a look."
+          : "The kinds your role can view, grouped by what it does. A red or amber number counts the rows that need a look.",
+    },
+    {
+      target: ".resources-attention",
+      title: "Needs attention",
+      body: "The rows in this namespace with a problem, worst first. Click one to open its list filtered to the problems.",
     },
     {
       target: ".resource-search-input",
       title: "Search",
-      body: "Filter the current tab by name — handy in busy namespaces.",
+      body: "Filter the open list by name — handy in busy namespaces.",
     },
     {
-      target: ".resources-issues-filter",
-      title: "Issues only",
-      body: "Hide healthy workloads and focus on what's crashing, pending, or restarting.",
+      target: ".resources-segments",
+      title: "Quick filters",
+      body: "Show only what needs attention, only warning events, or the volumes claimed from this namespace.",
     },
     {
       target: ".resources-allns-filter",
       title: "All namespaces",
-      body: "On the Pods tab you can widen the view beyond the active namespace.",
+      body: "On Pods you can widen the view to every namespace's problem pods.",
     },
     {
       target: ".resources-tab-refresh",
       title: "Refresh",
-      body: "Re-fetch the current tab. Data is cached briefly to keep navigation fast.",
+      body: "Re-read the open list from the cluster. Data is cached briefly to keep navigation fast.",
     },
   ],
 

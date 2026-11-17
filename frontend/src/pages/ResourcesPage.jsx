@@ -5,6 +5,9 @@ import EmptyState from "../components/common/EmptyState.jsx";
 import LoadingState from "../components/common/LoadingState.jsx";
 import DataTable from "../components/common/DataTable.jsx";
 import ResourceRowActions from "../components/resources/ResourceRowActions.jsx";
+import ResourceKindRail from "../components/resources/ResourceKindRail.jsx";
+import ResourceAttentionStrip from "../components/resources/ResourceAttentionStrip.jsx";
+import { buildExtraKindTables } from "../components/resources/extraKindTables.jsx";
 import {
   getClusterPodIssues,
   getDeploymentRolloutHistory,
@@ -12,7 +15,16 @@ import {
   getResourceYaml,
   restartResource,
 } from "../api/clustersApi.js";
-import { RESOURCE_TAB_DEFINITIONS, listKeyForTab } from "../lib/resourceTypes.js";
+import {
+  RESOURCE_GROUPS,
+  RESOURCE_TAB_DEFINITIONS,
+  listKeyForTab,
+  listKeyHasTone,
+  rowTone,
+  tabDefinition,
+  tabKeyForListKey,
+} from "../lib/resourceTypes.js";
+import { useResourceSummary } from "../hooks/useResourceSummary.js";
 import { EMPTY_MESSAGES, formatAccessError } from "../utils/authz.js";
 import { usePermission } from "../hooks/usePermission.js";
 import { isPendingApproval, pendingApprovalMessage } from "../utils/pendingApproval.js";
@@ -50,34 +62,55 @@ const POD_FILTER_WORKLOAD_KINDS = new Set([
   "job",
 ]);
 
-// Column keys that hold a kubectl-style status we can filter on.
-const STATUS_COLUMN_KEYS = ["status", "updateStatus"];
-
-// Status values that mean the resource is fine. Anything else (CrashLoopBackOff,
-// ImagePullBackOff/ErrImagePull, ContainerCreating, Pending, Error, ExitCode:x,
-// Terminating, NotReady, Init:…) is treated as an issue when the filter is on.
-const HEALTHY_STATUSES = new Set([
-  "running",
-  "completed",
-  "succeeded",
-  "active",
-  "available",
-  "healthy",
-  "ready",
-  "bound",
-  "updated",
-  "true",
-]);
-
-function isIssueStatus(value) {
-  if (value == null) {
-    return false;
+/**
+ * The quick filters above a kind's table. The first one is where the kind
+ * opens. Rows "needing attention" follow rowTone (lib/resourceTypes.js), the
+ * same rule the server counts the rail badges with.
+ */
+function segmentsFor(tabKey, listKey, namespace) {
+  if (tabKey === "events") {
+    return [
+      { id: "warnings", label: "Warnings" },
+      { id: "all", label: "All" },
+    ];
   }
-  const status = String(value).trim().toLowerCase();
-  if (!status || status === "-" || status === "—") {
-    return false;
+  if (tabKey === "pvs") {
+    return [
+      { id: "here", label: `Claimed from ${namespace || "this namespace"}` },
+      { id: "all", label: "Whole cluster" },
+    ];
   }
-  return !HEALTHY_STATUSES.has(status);
+  if (listKeyHasTone(listKey)) {
+    return [
+      { id: "all", label: "All" },
+      { id: "issues", label: "Needs attention" },
+    ];
+  }
+  return [];
+}
+
+function rowInSegment(segmentId, listKey, row, namespace) {
+  if (segmentId === "issues" || segmentId === "warnings") {
+    return rowTone(listKey, row, namespace) !== "";
+  }
+  if (segmentId === "here") {
+    return row.claimNamespace === namespace;
+  }
+  return true;
+}
+
+function segmentEmptyMessage(segmentId, title, namespace) {
+  const ns = namespace || "this namespace";
+  if (segmentId === "warnings") {
+    return { text: `No warning events in ${ns} right now.`, action: "Show all events" };
+  }
+  if (segmentId === "here") {
+    return { text: `No volumes are claimed from ${ns}.`, action: "Show the whole cluster" };
+  }
+  return {
+    text: `Nothing in ${(title || "this list").toLowerCase()} needs attention in ${ns}.`,
+    action: "Show all",
+  };
 }
 
 function podsForWorkload(pods, workloadName) {
@@ -140,6 +173,7 @@ function formatUsageLimit(usage, limit) {
 }
 
 function getEmptyTabMessage({
+  tabKey,
   title,
   namespace,
   workloadPodFilter,
@@ -150,6 +184,14 @@ function getEmptyTabMessage({
 }) {
   if (workloadPodFilter?.name) {
     return `No pods found for ${workloadFilterLabel} ${workloadPodFilter.name}.`;
+  }
+  if (tabKey === "storageClasses") {
+    return "This cluster has no storage classes.";
+  }
+  if (tabKey === "pvs") {
+    return isAdmin
+      ? "This cluster has no volumes."
+      : "No volumes are claimed from the namespaces you can see.";
   }
   const label = (title || "resources").toLowerCase();
   const ns = namespace || "selected";
@@ -217,7 +259,9 @@ export default function ResourcesPage({
   const canDeploy = hasPermission("apps:deploy");
   const [workloadPodFilter, setWorkloadPodFilter] = useState({ name: "", kind: "" });
   const [search, setSearch] = useState("");
-  const [issuesOnly, setIssuesOnly] = useState(false);
+  // The quick filter chosen per kind ({ pods: "issues", events: "all", … });
+  // a kind not in here opens on its first segment.
+  const [segmentByTab, setSegmentByTab] = useState({});
   const [allNsMode, setAllNsMode] = useState(false);
   const [allNsData, setAllNsData] = useState({ pods: [], loading: false, error: "" });
   const [inspectModal, setInspectModal] = useState(CLOSED_MODAL);
@@ -230,6 +274,49 @@ export default function ResourcesPage({
       setActiveTab(tabKeys[0] || "pods", { replace: true });
     }
   }, [tabKeys, activeTab, setActiveTab]);
+
+  const { summary, refresh: refreshSummary } = useResourceSummary({
+    clusterId,
+    namespace,
+    enabled: Boolean(hasClusters && hasNamespaces && clusterId && namespace && tabKeys.length),
+    live,
+  });
+
+  // A kind picked from the rail opens clean: its own search, no pod filter.
+  const selectKind = useCallback(
+    (tabKey) => {
+      setActiveTab(tabKey);
+      setSearch("");
+      if (tabKey !== "pods") {
+        setWorkloadPodFilter({ name: "", kind: "" });
+      }
+    },
+    [setActiveTab]
+  );
+
+  // A link in a cell (an event's object, a claim's pod) opens that kind
+  // searched for the object, with nothing filtering it out.
+  const jumpTo = useCallback(
+    (tabKey, query) => {
+      setActiveTab(tabKey);
+      setSearch(query || "");
+      setWorkloadPodFilter({ name: "", kind: "" });
+      setSegmentByTab((prev) => ({ ...prev, [tabKey]: "all" }));
+    },
+    [setActiveTab]
+  );
+
+  const openAttentionItem = useCallback(
+    (item) => {
+      setActiveTab(item.tabKey);
+      setSearch("");
+      setWorkloadPodFilter({ name: "", kind: "" });
+      setSegmentByTab((prev) => ({ ...prev, [item.tabKey]: "issues" }));
+    },
+    [setActiveTab]
+  );
+
+  const canJump = useCallback((tabKey) => tabKeys.includes(tabKey), [tabKeys]);
 
   const closeInspectModal = useCallback(() => {
     setInspectModal(CLOSED_MODAL);
@@ -487,8 +574,52 @@ export default function ResourcesPage({
     [clusterId, namespace, onNavigateToLogs, onRefreshTab, openTextInspect, tabKeys]
   );
 
+  const isAllNsPodsHeader = allNsMode && activeTab === "pods";
   const header = (
-    <PageTitle title="Resources" subtitle="Inspect workload objects across cluster namespaces." />
+    <PageTitle
+      title="Resources"
+      subtitle="Everything in a namespace, grouped by what it does."
+      actions={
+        tabKeys.length && hasClusters && hasNamespaces ? (
+          <>
+            {onLiveChange ? (
+              <button
+                type="button"
+                className={`btn-outline btn-sm resources-live-toggle${live ? " active" : ""}`}
+                onClick={() => onLiveChange(!live)}
+                aria-pressed={live}
+                title={
+                  live
+                    ? `Live: statuses update every ${Math.round(liveIntervalMs / 1000)}s. Click to pause.`
+                    : "Paused: click to update statuses automatically"
+                }
+              >
+                <span className="resources-live-dot" aria-hidden="true" />
+                {live ? "Live" : "Paused"}
+              </button>
+            ) : null}
+            {onRefreshTab ? (
+              <button
+                type="button"
+                className="btn-outline btn-sm resources-tab-refresh"
+                onClick={() => {
+                  if (isAllNsPodsHeader) {
+                    loadAllNsIssues();
+                  } else {
+                    onRefreshTab();
+                  }
+                  refreshSummary();
+                }}
+                disabled={isAllNsPodsHeader ? allNsData.loading : tabLoading || tabRefreshing}
+                aria-busy={isAllNsPodsHeader ? allNsData.loading : tabRefreshing}
+              >
+                {(isAllNsPodsHeader ? allNsData.loading : tabRefreshing) ? "Refreshing…" : "Refresh"}
+              </button>
+            ) : null}
+          </>
+        ) : null
+      }
+    />
   );
 
   const scopeEmpty = !hasClusters
@@ -814,30 +945,60 @@ export default function ResourcesPage({
     },
   };
 
+  Object.assign(
+    tableConfig,
+    buildExtraKindTables({
+      resources: data.resources,
+      clusterId,
+      namespace,
+      onResourceAction: handleResourceAction,
+      onJump: jumpTo,
+      canJump,
+    })
+  );
+
   const visibleTableConfig = Object.fromEntries(
     Object.entries(tableConfig).filter(([key]) => tabKeys.includes(key))
   );
-  const active = visibleTableConfig[activeTab] || visibleTableConfig[tabKeys[0]];
+  const resolvedTab = visibleTableConfig[activeTab] ? activeTab : tabKeys[0];
+  const active = visibleTableConfig[resolvedTab];
+  const activeDef = tabDefinition(resolvedTab);
+  const activeRowsListKey = listKeyForTab(resolvedTab);
+
+  const segments = segmentsFor(resolvedTab, activeRowsListKey, namespace);
+  const activeSegment =
+    segments.find((seg) => seg.id === segmentByTab[resolvedTab])?.id || segments[0]?.id || "all";
 
   const searchTerm = search.trim().toLowerCase();
-  const statusKey = useMemo(
-    () => active?.columns.find((col) => STATUS_COLUMN_KEYS.includes(col.key))?.key || "",
-    [active]
-  );
-  const canFilterIssues = Boolean(statusKey);
+  const segmentCounts = useMemo(() => {
+    const rows = active?.rows || [];
+    return Object.fromEntries(
+      segments.map((seg) => [
+        seg.id,
+        rows.filter((row) => rowInSegment(seg.id, activeRowsListKey, row, namespace)).length,
+      ])
+    );
+    // `segments` is rebuilt each render from these same inputs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, activeRowsListKey, namespace, resolvedTab]);
+
   const filteredRows = useMemo(() => {
     if (!active) {
       return [];
     }
     let rows = active.rows;
-    if (issuesOnly && statusKey) {
-      rows = rows.filter((row) => isIssueStatus(row[statusKey]));
+    if (activeSegment !== "all") {
+      rows = rows.filter((row) => rowInSegment(activeSegment, activeRowsListKey, row, namespace));
     }
     if (!searchTerm) {
       return rows;
     }
-    return rows.filter((row) =>
-      active.columns.some((col) => {
+    return rows.filter((row) => {
+      // Rows whose cells are links or pills say what to search in `searchText`.
+      if (typeof row.searchText === "string") {
+        return row.searchText.toLowerCase().includes(searchTerm);
+      }
+      return active.columns.some((col) => {
         if (col.key === "actions") {
           return false;
         }
@@ -846,15 +1007,58 @@ export default function ResourcesPage({
           return false;
         }
         return String(value).toLowerCase().includes(searchTerm);
-      })
-    );
-  }, [active, searchTerm, issuesOnly, statusKey]);
+      });
+    });
+  }, [active, searchTerm, activeSegment, activeRowsListKey, namespace]);
+
+  // Side rail: per kind, its count and how many rows need attention. The open
+  // kind counts from the rows on screen (live every few seconds); the others
+  // from the namespace summary (every 30 s).
+  const railGroups = RESOURCE_GROUPS.map((group) => ({
+    key: group.key,
+    label: group.label,
+    items: group.tabs
+      .filter((tabKey) => tabKeys.includes(tabKey))
+      .map((tabKey) => {
+        const def = tabDefinition(tabKey);
+        const listKey = def.listKey;
+        let count = null;
+        let issues = 0;
+        let tone = "";
+        if (tabKey === resolvedTab && isTabLoaded(listKey) && !(allNsMode && tabKey === "pods")) {
+          const rows = data.resources?.[listKey] || [];
+          count = tabKey === "pvs" ? rows.filter((row) => row.claimNamespace === namespace).length : rows.length;
+          for (const row of rows) {
+            const rowLevel = rowTone(listKey, row, namespace);
+            if (rowLevel) {
+              issues += 1;
+              tone = tone === "crit" || rowLevel === "crit" ? "crit" : "warn";
+            }
+          }
+        } else if (summary.kinds?.[listKey]) {
+          ({ count, issues, tone } = summary.kinds[listKey]);
+        }
+        return { tabKey, title: def.title, clusterScoped: Boolean(def.clusterScoped), count, issues, tone };
+      }),
+  })).filter((group) => group.items.length);
+
+  const attentionItems = (summary.attention || [])
+    .map((item) => {
+      const tabKey = tabKeyForListKey(item.listKey);
+      return {
+        ...item,
+        key: `${item.listKey}/${item.name}`,
+        tabKey,
+        kindTitle: tabDefinition(tabKey)?.title || item.listKey,
+      };
+    })
+    .filter((item) => item.tabKey && tabKeys.includes(item.tabKey));
 
   const workloadFilterLabel = workloadPodFilter.kind
     ? workloadPodFilter.kind.replace(/([A-Z])/g, " $1").trim()
     : "workload";
 
-  const activeListKey = activeTab ? listKeyForTab(activeTab) : "";
+  const activeListKey = resolvedTab ? listKeyForTab(resolvedTab) : "";
   const rawResourceList = rawResources?.[activeListKey] || [];
   const filteredResourceList = data.resources?.[activeListKey] || [];
   const activeTabError = tabErrors[activeListKey] || "";
@@ -877,189 +1081,201 @@ export default function ResourcesPage({
         />
       ) : (
         <>
-          <div className="resources-tab-toolbar">
-            <nav className="tab-bar resources-tab-bar" aria-label="resource-tabs">
-              {Object.entries(visibleTableConfig).map(([key, config]) => (
-                <button
-                  key={key}
-                  type="button"
-                  className={key === activeTab ? "active" : ""}
-                  onClick={() => {
-                    setActiveTab(key);
-                    if (key !== "pods") {
-                      setWorkloadPodFilter({ name: "", kind: "" });
-                    }
-                  }}
-                >
-                  {config.title}
-                </button>
-              ))}
-            </nav>
-            <div className="resources-tab-actions">
-              <input
-                type="search"
-                className="resource-search-input"
-                placeholder={`Search ${active?.title || "resources"}…`}
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                aria-label="Search resources"
-              />
-              {canFilterIssues ? (
-                <button
-                  type="button"
-                  className={`btn-outline btn-sm resources-issues-filter${issuesOnly ? " active" : ""}`}
-                  onClick={() => setIssuesOnly((prev) => !prev)}
-                  aria-pressed={issuesOnly}
-                  title="Show only resources with errors (CrashLoopBackOff, ImagePullBackOff, ContainerCreating, Pending, Error…)"
-                >
-                  {issuesOnly ? "Issues only ✓" : "Issues only"}
-                </button>
-              ) : null}
-              {activeTab === "pods" ? (
-                <button
-                  type="button"
-                  className={`btn-outline btn-sm resources-allns-filter${allNsMode ? " active" : ""}`}
-                  onClick={() => setAllNsMode((prev) => !prev)}
-                  aria-pressed={allNsMode}
-                  title="Scan every namespace in this cluster for pods with issues (CrashLoopBackOff, ImagePullBackOff, ContainerCreating, Pending, Error…)"
-                >
-                  {allNsMode ? "All namespaces ✓" : "All namespaces"}
-                </button>
-              ) : null}
-              {onLiveChange ? (
-                <button
-                  type="button"
-                  className={`btn-outline btn-sm resources-live-toggle${live ? " active" : ""}`}
-                  onClick={() => onLiveChange(!live)}
-                  aria-pressed={live}
-                  title={
-                    live
-                      ? `Live: statuses update every ${Math.round(liveIntervalMs / 1000)}s. Click to pause.`
-                      : "Paused: click to update statuses automatically"
-                  }
-                >
-                  <span className="resources-live-dot" aria-hidden="true" />
-                  {live ? "Live" : "Paused"}
-                </button>
-              ) : null}
-              {onRefreshTab ? (
-                <button
-                  type="button"
-                  className="btn-outline btn-sm resources-tab-refresh"
-                  onClick={isAllNsPods ? () => loadAllNsIssues() : onRefreshTab}
-                  disabled={isAllNsPods ? allNsData.loading : tabLoading || tabRefreshing}
-                  aria-busy={isAllNsPods ? allNsData.loading : tabRefreshing}
-                >
-                  {(isAllNsPods ? allNsData.loading : tabRefreshing) ? "Refreshing…" : "Refresh"}
-                </button>
-              ) : null}
-            </div>
-          </div>
-          {isAllNsPods ? (
-            <>
-              <p className="muted resource-pod-filter-hint">
-                Showing pods with issues across <strong>all namespaces</strong> in this cluster.{" "}
-                <button type="button" className="btn-text" onClick={() => setAllNsMode(false)}>
-                  Back to {namespace || "namespace"} view
-                </button>
-              </p>
-              {allNsData.loading ? (
-                <LoadingState label="Scanning all namespaces for issues..." />
-              ) : allNsData.error ? (
-                <p className="muted empty-state-inline resource-tab-error">{allNsData.error}</p>
-              ) : filteredRows.length === 0 ? (
-                searchTerm ? (
-                  <p className="muted empty-state-inline">
-                    No pods match “{search.trim()}”.{" "}
-                    <button type="button" className="btn-text" onClick={() => setSearch("")}>
-                      Clear search
-                    </button>
-                  </p>
-                ) : (
-                  <p className="muted empty-state-inline">
-                    No pods with issues across any namespace in this cluster. 🎉
-                  </p>
-                )
-              ) : (
-                <DataTable
-                  columns={active.columns}
-                  rows={filteredRows}
-                  tableClassName="resources-table resources-table--allns"
-                  pageSize={Math.max(filteredRows.length, 1)}
-                />
-              )}
-            </>
-          ) : (
-            <>
-              {activeTabError ? (
-                <p className="muted empty-state-inline resource-tab-error">{activeTabError}</p>
-              ) : null}
-              {tabLoading && !activeTabHasBeenLoaded ? (
-                <LoadingState label={`Loading ${active?.title || "resources"}...`} />
-              ) : null}
-              {workloadPodFilter.name && activeTab === "pods" ? (
-                <p className="muted resource-pod-filter-hint">
-                  Showing pods for {workloadFilterLabel}{" "}
-                  <strong>{workloadPodFilter.name}</strong>.{" "}
-                  <button
-                    type="button"
-                    className="btn-text"
-                    onClick={() => setWorkloadPodFilter({ name: "", kind: "" })}
-                  >
-                    Clear filter
-                  </button>
-                </p>
-              ) : null}
-              {!tabLoading || activeTabHasBeenLoaded ? (
-                !active || active.rows.length === 0 ? (
-                  <p className="muted empty-state-inline">
-                    {getEmptyTabMessage({
-                      title: active?.title,
-                      namespace,
-                      workloadPodFilter,
-                      workloadFilterLabel,
-                      isAdmin,
-                      rawCount: rawResourceList.length,
-                      filteredCount: filteredResourceList.length,
-                    })}
-                  </p>
-                ) : filteredRows.length === 0 ? (
-                  searchTerm ? (
-                    <p className="muted empty-state-inline">
-                      No {(active.title || "resources").toLowerCase()} match “{search.trim()}”.{" "}
-                      <button type="button" className="btn-text" onClick={() => setSearch("")}>
-                        Clear search
-                      </button>
-                    </p>
+          <ResourceAttentionStrip
+            items={attentionItems}
+            total={Math.max(summary.attentionTotal || 0, attentionItems.length)}
+            onOpen={openAttentionItem}
+          />
+          <div className="resources-layout">
+            <ResourceKindRail groups={railGroups} activeTab={resolvedTab} onSelect={selectKind} />
+            <section className="resources-main" aria-labelledby="resources-kind-title">
+              <header className="resources-kind-head">
+                <div className="resources-kind-head__top">
+                  <h3 id="resources-kind-title" className="resources-kind-head__title">
+                    {activeDef?.title || active?.title}
+                  </h3>
+                  {activeDef?.apiKind ? (
+                    <span className="resources-kind-head__api">{activeDef.apiKind}</span>
+                  ) : null}
+                  {isAllNsPods ? (
+                    <span className="resources-scope-tag resources-scope-tag--cluster">
+                      All namespaces · pods with problems
+                    </span>
+                  ) : activeDef?.clusterScoped ? (
+                    <span className="resources-scope-tag resources-scope-tag--cluster">
+                      Cluster-wide · the namespace picker doesn’t narrow it
+                    </span>
                   ) : (
-                    <p className="muted empty-state-inline">
-                      No {(active.title || "resources").toLowerCase()} with issues in the{" "}
-                      {namespace || "selected"} namespace.{" "}
-                      <button type="button" className="btn-text" onClick={() => setIssuesOnly(false)}>
-                        Show all
+                    <span className="resources-scope-tag">Namespace · {namespace}</span>
+                  )}
+                </div>
+                {activeDef?.describe ? (
+                  <p className="resources-kind-head__desc">{activeDef.describe(namespace || "this namespace")}</p>
+                ) : null}
+                <div className="resources-kind-tools">
+                  <input
+                    type="search"
+                    className="resource-search-input"
+                    placeholder={`Search ${(activeDef?.title || "resources").toLowerCase()}…`}
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                    aria-label={`Search ${(activeDef?.title || "resources").toLowerCase()}`}
+                  />
+                  {segments.length ? (
+                    <div className="resources-segments" role="group" aria-label="Show">
+                      {segments.map((seg) => (
+                        <button
+                          key={seg.id}
+                          type="button"
+                          className={seg.id === activeSegment ? "is-on" : ""}
+                          aria-pressed={seg.id === activeSegment}
+                          onClick={() => setSegmentByTab((prev) => ({ ...prev, [resolvedTab]: seg.id }))}
+                        >
+                          {seg.label}
+                          {segmentCounts[seg.id] != null ? (
+                            <span className="resources-segments__count">{segmentCounts[seg.id]}</span>
+                          ) : null}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  {resolvedTab === "pods" ? (
+                    <button
+                      type="button"
+                      className={`btn-outline btn-sm resources-allns-filter${allNsMode ? " active" : ""}`}
+                      onClick={() => setAllNsMode((prev) => !prev)}
+                      aria-pressed={allNsMode}
+                      title="Scan every namespace in this cluster for pods with problems (CrashLoopBackOff, ImagePullBackOff, Pending, Error…)"
+                    >
+                      All namespaces
+                    </button>
+                  ) : null}
+                </div>
+              </header>
+
+              <div className="resources-main__body">
+                {isAllNsPods ? (
+                  <>
+                    <p className="muted resource-pod-filter-hint">
+                      Showing pods with problems across <strong>all namespaces</strong> in this cluster.{" "}
+                      <button type="button" className="btn-text" onClick={() => setAllNsMode(false)}>
+                        Back to {namespace || "namespace"}
                       </button>
                     </p>
-                  )
+                    {allNsData.loading ? (
+                      <LoadingState label="Scanning all namespaces for problems..." />
+                    ) : allNsData.error ? (
+                      <p className="muted empty-state-inline resource-tab-error">{allNsData.error}</p>
+                    ) : filteredRows.length === 0 ? (
+                      searchTerm ? (
+                        <p className="muted empty-state-inline">
+                          No pods match “{search.trim()}”.{" "}
+                          <button type="button" className="btn-text" onClick={() => setSearch("")}>
+                            Clear search
+                          </button>
+                        </p>
+                      ) : (
+                        <p className="muted empty-state-inline">
+                          No pods with problems in any namespace of this cluster.
+                        </p>
+                      )
+                    ) : (
+                      <DataTable
+                        columns={active.columns}
+                        rows={filteredRows}
+                        tableClassName="resources-table resources-table--allns"
+                        pageSize={Math.max(filteredRows.length, 1)}
+                      />
+                    )}
+                  </>
                 ) : (
-                  <DataTable
-                    columns={active.columns}
-                    rows={filteredRows}
-                    tableClassName="resources-table"
-                    // While a search term or the issues filter is active, show every
-                    // match on one page so a result is never hidden on a later page.
-                    pageSize={searchTerm || issuesOnly ? Math.max(filteredRows.length, 1) : undefined}
-                  />
-                )
-              ) : null}
-            </>
-          )}
-          {activeTab === "services" &&
-          tabKeys.includes("services") &&
-          (data.resources.services || []).some((s) => s.canViewPorts === false || !(s.ports || []).length) ? (
-            <p className="muted empty-state-inline">
-              Some service ports are hidden — you need services:ports:view and an access rule for each port.
-            </p>
-          ) : null}
+                  <>
+                    {activeTabError ? (
+                      <p className="muted empty-state-inline resource-tab-error">{activeTabError}</p>
+                    ) : null}
+                    {tabLoading && !activeTabHasBeenLoaded ? (
+                      <LoadingState label={`Loading ${(activeDef?.title || "resources").toLowerCase()}...`} />
+                    ) : null}
+                    {workloadPodFilter.name && resolvedTab === "pods" ? (
+                      <p className="muted resource-pod-filter-hint">
+                        Showing pods for {workloadFilterLabel}{" "}
+                        <strong>{workloadPodFilter.name}</strong>.{" "}
+                        <button
+                          type="button"
+                          className="btn-text"
+                          onClick={() => setWorkloadPodFilter({ name: "", kind: "" })}
+                        >
+                          Clear filter
+                        </button>
+                      </p>
+                    ) : null}
+                    {!tabLoading || activeTabHasBeenLoaded ? (
+                      !active || active.rows.length === 0 ? (
+                        <p className="muted empty-state-inline">
+                          {getEmptyTabMessage({
+                            tabKey: resolvedTab,
+                            title: activeDef?.title || active?.title,
+                            namespace,
+                            workloadPodFilter,
+                            workloadFilterLabel,
+                            isAdmin,
+                            rawCount: rawResourceList.length,
+                            filteredCount: filteredResourceList.length,
+                          })}
+                        </p>
+                      ) : filteredRows.length === 0 ? (
+                        searchTerm ? (
+                          <p className="muted empty-state-inline">
+                            No {(activeDef?.title || "resources").toLowerCase()} match “{search.trim()}”.{" "}
+                            <button type="button" className="btn-text" onClick={() => setSearch("")}>
+                              Clear search
+                            </button>
+                          </p>
+                        ) : (
+                          (() => {
+                            const empty = segmentEmptyMessage(activeSegment, activeDef?.title, namespace);
+                            return (
+                              <p className="muted empty-state-inline">
+                                {empty.text}{" "}
+                                <button
+                                  type="button"
+                                  className="btn-text"
+                                  onClick={() =>
+                                    setSegmentByTab((prev) => ({ ...prev, [resolvedTab]: "all" }))
+                                  }
+                                >
+                                  {empty.action}
+                                </button>
+                              </p>
+                            );
+                          })()
+                        )
+                      ) : (
+                        <DataTable
+                          columns={active.columns}
+                          rows={filteredRows}
+                          tableClassName={`resources-table resources-table--${resolvedTab}`}
+                          // While searching or filtered, show every match on one
+                          // page so a result is never hidden on a later page.
+                          pageSize={
+                            searchTerm || activeSegment !== "all"
+                              ? Math.max(filteredRows.length, 1)
+                              : undefined
+                          }
+                        />
+                      )
+                    ) : null}
+                  </>
+                )}
+                {resolvedTab === "services" &&
+                (data.resources.services || []).some((s) => s.canViewPorts === false || !(s.ports || []).length) ? (
+                  <p className="muted empty-state-inline">
+                    Some service ports are hidden — you need services:ports:view and an access rule for each port.
+                  </p>
+                ) : null}
+              </div>
+            </section>
+          </div>
         </>
       )}
       {inspectModal.open ? (

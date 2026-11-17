@@ -251,7 +251,9 @@ def _resource_kinds() -> tuple:
                 "type": "string",
                 "description": (
                     "One of pods, deployments, replicasets, statefulsets, daemonsets, "
-                    "jobs, cronjobs, services, configmaps, secrets, ingress."
+                    "jobs, cronjobs, services, configmaps, secrets, ingress, events, "
+                    "hpas (autoscalers), networkpolicies, pvcs (volume claims), "
+                    "pvs (volumes claimed from namespaces you can see), storageclasses."
                 ),
             },
             "limit": {"type": "integer", "minimum": 1, "maximum": MAX_ROWS},
@@ -284,13 +286,13 @@ def _namespace_resources(arguments: Dict[str, Any]) -> Dict[str, Any]:
         except K8sCommandError as exc:
             raise ToolError(f"Failed to read '{cluster_id}/{namespace}': {exc}")
     else:
-        from ...mock_data import NAMESPACES, NAMESPACE_RESOURCES
+        from ...mock_data import NAMESPACES, NAMESPACE_RESOURCES, mock_resource_list
 
         if NAMESPACES.get(cluster_id) is None:
             raise ToolError(f"No cluster '{cluster_id}'.")
         found = (NAMESPACE_RESOURCES.get(cluster_id) or {}).get(namespace) or {}
         resources = (
-            {"namespace": namespace, kind: found.get(kind) or []}
+            {"namespace": namespace, kind: mock_resource_list(cluster_id, namespace, kind, found)}
             if kind
             else {"namespace": namespace, **{key: found.get(key) or [] for key in kinds}}
         )

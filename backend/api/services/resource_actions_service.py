@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from ..access_engine import can_access_namespace, can_access_resource, user_has_permission
+from ..access_engine import can_access_namespace, can_access_resource, is_admin, user_has_permission
 from ..audit import log_audit
 from ..k8s_provider import (
     K8sCommandError,
@@ -44,7 +44,28 @@ KIND_ALIASES = {
     "ingress": "ingress",
     "ingresses": "ingress",
     "ing": "ingress",
+    "persistentvolumeclaim": "persistentvolumeclaim",
+    "persistentvolumeclaims": "persistentvolumeclaim",
+    "pvc": "persistentvolumeclaim",
+    "pvcs": "persistentvolumeclaim",
+    "persistentvolume": "persistentvolume",
+    "persistentvolumes": "persistentvolume",
+    "pv": "persistentvolume",
+    "pvs": "persistentvolume",
+    "storageclass": "storageclass",
+    "storageclasses": "storageclass",
+    "horizontalpodautoscaler": "horizontalpodautoscaler",
+    "horizontalpodautoscalers": "horizontalpodautoscaler",
+    "hpa": "horizontalpodautoscaler",
+    "hpas": "horizontalpodautoscaler",
+    "networkpolicy": "networkpolicy",
+    "networkpolicies": "networkpolicy",
+    "netpol": "networkpolicy",
 }
+
+# Not namespaced: kubectl ignores -n for these, so the namespace in the URL says
+# nothing about who may read them. persistentvolume is checked by its claim.
+CLUSTER_SCOPED_KINDS = {"persistentvolume", "storageclass"}
 
 KIND_PERMISSION = {
     "pod": "pods:view",
@@ -60,6 +81,11 @@ KIND_PERMISSION = {
     "configmap": "resources:view",
     "secret": "resources:view",
     "ingress": "resources:view",
+    "persistentvolumeclaim": "resources:view",
+    "persistentvolume": "resources:view",
+    "storageclass": "resources:view",
+    "horizontalpodautoscaler": "resources:view",
+    "networkpolicy": "resources:view",
 }
 
 # kubectl kind -> proper YAML kind casing for mock-mode YAML output.
@@ -72,6 +98,11 @@ _YAML_KIND_CASING = {
     "secret": "Secret",
     "cronjob": "CronJob",
     "ingress": "Ingress",
+    "persistentvolumeclaim": "PersistentVolumeClaim",
+    "persistentvolume": "PersistentVolume",
+    "storageclass": "StorageClass",
+    "horizontalpodautoscaler": "HorizontalPodAutoscaler",
+    "networkpolicy": "NetworkPolicy",
 }
 
 # Kinds that support the Resources "Restart" action. Pods are restarted by
@@ -143,6 +174,44 @@ def _check_resource_read_access(
         )
         return "Forbidden", 403
 
+    # The same rule as the Volumes list: a non-admin reads a volume only when
+    # it is claimed from a namespace they can reach.
+    if user and normalized == "persistentvolume" and not is_admin(user):
+        claim_ns = _persistent_volume_claim_namespace(cluster_id, name)
+        if not claim_ns or not can_access_namespace(user, cluster_id, claim_ns):
+            log_audit(
+                "forbidden_access_attempt",
+                actor=user,
+                target_type=normalized,
+                target_id=f"{cluster_id}/{name}",
+                details={"action": action},
+            )
+            return "Forbidden", 403
+
+    return None
+
+
+def _persistent_volume_claim_namespace(cluster_id: str, name: str) -> Optional[str]:
+    """Namespace of the claim bound to volume ``name``; None if unclaimed or unknown."""
+    if not should_use_real_k8s(cluster_id):
+        from ..mock_data import PERSISTENT_VOLUMES
+
+        for pv in PERSISTENT_VOLUMES.get(cluster_id) or []:
+            if pv.get("name") == name:
+                return pv.get("claimNamespace") or None
+        return None
+    access = resolve_cluster_access(cluster_id)
+    if not access:
+        return None
+    from ..k8s_provider import cluster_list_items
+
+    try:
+        items = cluster_list_items(access, "persistentvolumes")
+    except (K8sCommandError, ValueError):
+        return None
+    for pv in items:
+        if (pv.get("metadata") or {}).get("name") == name:
+            return ((pv.get("spec") or {}).get("claimRef") or {}).get("namespace") or None
     return None
 
 

@@ -36,6 +36,7 @@ from ..k8s_provider import (
     list_nodes_from_k8s,
     list_storage_classes_from_k8s,
     namespace_events_from_k8s,
+    namespace_resource_lists_from_k8s,
     namespace_resource_list_from_k8s,
     namespace_resources_from_k8s,
     NAMESPACE_RESOURCE_LIST_KEYS,
@@ -655,24 +656,69 @@ def namespace_resource_list(cluster_id: str, namespace: str, resource_type: str)
     if namespace not in namespace_names:
         return error_response("Namespace not found", 404)
 
-    cluster_resources = NAMESPACE_RESOURCES.get(cluster_id)
-    if cluster_resources is None:
-        payload = {"namespace": namespace, resource_type: []}
-        if user:
-            payload = filter_namespace_resources(user, cluster_id, payload)
-        return success_response(payload)
+    from ..mock_data import mock_resource_list
 
-    resources = cluster_resources.get(namespace)
-    if resources is None:
-        payload = {"namespace": namespace, resource_type: []}
-        if user:
-            payload = filter_namespace_resources(user, cluster_id, payload)
-        return success_response(payload)
-
-    payload = {"namespace": namespace, resource_type: resources.get(resource_type) or []}
+    found = (NAMESPACE_RESOURCES.get(cluster_id) or {}).get(namespace)
+    payload = {
+        "namespace": namespace,
+        resource_type: mock_resource_list(cluster_id, namespace, resource_type, found),
+    }
     if user:
         payload = filter_namespace_resources(user, cluster_id, payload)
     return success_response(payload)
+
+
+@clusters_bp.route("/<cluster_id>/namespaces/<namespace>/resource-summary", methods=["GET"])
+@require_permission("resources:view")
+@require_cluster_access
+@require_namespace_access
+def namespace_resource_summary(cluster_id: str, namespace: str):
+    """Counts and problems per kind, for the Resources page's side rail.
+
+    Reads every list through the same per-list cache the tabs use, so opening
+    a tab after this is answered from that cache."""
+    from ..services.resource_summary import summarize_namespace_resources
+
+    user = get_current_user()
+    if user and not is_admin(user) and not can_access_namespace(user, cluster_id, namespace):
+        from ..audit import log_audit
+
+        log_audit(
+            "forbidden_access_attempt",
+            actor=user,
+            target_type="namespace",
+            target_id=f"{cluster_id}/{namespace}",
+        )
+        return error_response("Forbidden", 403)
+
+    access, err = _resolve_cluster_access_or_error(cluster_id)
+    if err:
+        return err
+    if access:
+        lists, failed = namespace_resource_lists_from_k8s(access, namespace, max_age=_max_age_arg())
+    else:
+        from ..mock_data import mock_resource_list
+
+        if NAMESPACES.get(cluster_id) is None:
+            return error_response("Cluster not found", 404)
+        found = (NAMESPACE_RESOURCES.get(cluster_id) or {}).get(namespace)
+        lists = {
+            "namespace": namespace,
+            **{
+                key: mock_resource_list(cluster_id, namespace, key, found)
+                for key in NAMESPACE_RESOURCE_LIST_KEYS
+            },
+        }
+        failed = []
+
+    if user:
+        lists = filter_namespace_resources(user, cluster_id, lists)
+    summary = summarize_namespace_resources(namespace, lists)
+    # A kind whose read failed has no count: the rail shows it blank, not 0.
+    for key in failed:
+        summary["kinds"].pop(key, None)
+    summary["unavailable"] = sorted(failed)
+    return success_response(summary)
 
 
 @clusters_bp.route("/<cluster_id>/pod-issues", methods=["GET"])

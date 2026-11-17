@@ -369,6 +369,91 @@ NAMESPACE_RESOURCES: Dict[str, Dict[str, Dict[str, Any]]] = {
                     "actions": ["logs", "describe"],
                 },
             ],
+            "hpas": [
+                {
+                    "name": "payments-api",
+                    "targetKind": "Deployment",
+                    "targetName": "payments-api",
+                    "minReplicas": 4,
+                    "maxReplicas": 20,
+                    "currentReplicas": 10,
+                    "desiredReplicas": 10,
+                    "metrics": "cpu 44% / 70%",
+                    "status": "Healthy",
+                    "health": "ok",
+                    "age": "34d",
+                    "actions": ["describe", "yaml"],
+                },
+                {
+                    "name": "ledger-worker",
+                    "targetKind": "Deployment",
+                    "targetName": "ledger-worker",
+                    "minReplicas": 2,
+                    "maxReplicas": 6,
+                    "currentReplicas": 6,
+                    "desiredReplicas": 6,
+                    "metrics": "cpu 91% / 60%",
+                    "status": "At max replicas",
+                    "health": "warn",
+                    "age": "34d",
+                    "actions": ["describe", "yaml"],
+                },
+            ],
+            "networkpolicies": [
+                {
+                    "name": "default-deny-all",
+                    "appliesTo": "All pods",
+                    "policyTypes": ["Ingress", "Egress"],
+                    "ingressRules": ["nothing (deny all)"],
+                    "egressRules": ["nothing (deny all)"],
+                    "age": "90d",
+                    "actions": ["describe", "yaml"],
+                },
+                {
+                    "name": "allow-api-from-ingress",
+                    "appliesTo": "app=payments-api",
+                    "policyTypes": ["Ingress"],
+                    "ingressRules": ["from kubernetes.io/metadata.name=ingress-nginx on 80/TCP"],
+                    "egressRules": [],
+                    "age": "90d",
+                    "actions": ["describe", "yaml"],
+                },
+                {
+                    "name": "allow-dns-egress",
+                    "appliesTo": "All pods",
+                    "policyTypes": ["Egress"],
+                    "ingressRules": [],
+                    "egressRules": ["to kubernetes.io/metadata.name=kube-system on 53/UDP, 53/TCP"],
+                    "age": "90d",
+                    "actions": ["describe", "yaml"],
+                },
+            ],
+            "pvcs": [
+                {
+                    "name": "ledger-data",
+                    "status": "Bound",
+                    "health": "ok",
+                    "capacity": "50Gi",
+                    "accessModes": "RWO",
+                    "storageClass": "gp3",
+                    "volume": "pvc-3f2a91c0",
+                    "usedBy": ["ledger-worker-0"],
+                    "age": "60d",
+                    "actions": ["describe", "yaml"],
+                },
+                {
+                    "name": "ledger-archive",
+                    "status": "Pending",
+                    "health": "warn",
+                    "capacity": "200Gi",
+                    "accessModes": "RWX",
+                    "storageClass": "efs",
+                    "volume": "",
+                    "usedBy": [],
+                    "age": "14m",
+                    "actions": ["describe", "yaml"],
+                },
+            ],
         }
     },
     "staging-eu-west": {
@@ -588,3 +673,81 @@ HELM_RELEASE_DETAILS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+
+# Cluster-wide volumes, as the Volumes list shows them (see
+# k8s_provider._build_persistent_volumes for the real shape).
+PERSISTENT_VOLUMES: Dict[str, List[Dict[str, Any]]] = {
+    "prod-us-east": [
+        {
+            "name": "pvc-3f2a91c0",
+            "status": "Bound",
+            "health": "ok",
+            "reason": "",
+            "capacity": "50Gi",
+            "accessModes": "RWO",
+            "reclaimPolicy": "Delete",
+            "storageClass": "gp3",
+            "claimNamespace": "payments",
+            "claimName": "ledger-data",
+            "age": "60d",
+            "actions": ["describe", "yaml"],
+        },
+        {
+            "name": "pvc-0c77b2e4",
+            "status": "Released",
+            "health": "warn",
+            "reason": "",
+            "capacity": "20Gi",
+            "accessModes": "RWO",
+            "reclaimPolicy": "Retain",
+            "storageClass": "gp3",
+            "claimNamespace": "payments",
+            "claimName": "old-exports",
+            "age": "120d",
+            "actions": ["describe", "yaml"],
+        },
+        {
+            "name": "pvc-5aa19d03",
+            "status": "Bound",
+            "health": "ok",
+            "reason": "",
+            "capacity": "8Gi",
+            "accessModes": "RWO",
+            "reclaimPolicy": "Delete",
+            "storageClass": "gp3",
+            "claimNamespace": "monitoring",
+            "claimName": "prometheus-data",
+            "age": "200d",
+            "actions": ["describe", "yaml"],
+        },
+    ],
+}
+
+
+def mock_resource_list(
+    cluster_id: str,
+    namespace: str,
+    list_key: str,
+    namespace_resources: Dict[str, Any] | None,
+) -> List[Dict[str, Any]]:
+    """One Resources-page list in mock mode, in the shape the real reader returns."""
+    if list_key == "events":
+        events = (NAMESPACE_EVENTS.get(cluster_id) or {}).get(namespace) or []
+        return [{**event, "namespace": namespace} for event in events]
+    if list_key == "pvs":
+        return [dict(pv) for pv in PERSISTENT_VOLUMES.get(cluster_id) or []]
+    if list_key == "storageclasses":
+        return [
+            {
+                "name": sc.get("name", ""),
+                "default": bool(sc.get("default")),
+                "provisioner": sc.get("provisioner") or "-",
+                "reclaimPolicy": sc.get("reclaimPolicy") or "Delete",
+                "bindingMode": sc.get("bindingMode") or "WaitForFirstConsumer",
+                "allowExpansion": bool(sc.get("allowExpansion", True)),
+                "age": sc.get("age") or "200d",
+                "actions": ["describe", "yaml"],
+            }
+            for sc in STORAGE_CLASSES.get(cluster_id) or []
+        ]
+    return list((namespace_resources or {}).get(list_key) or [])

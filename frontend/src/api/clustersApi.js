@@ -66,6 +66,13 @@ export const getResourceListByType = (clusterId, namespace, resourceType, option
     { query: resourceQuery(options) }
   );
 
+/** Per-kind counts and the rows that need attention, for the Resources side rail. */
+export const getResourceSummary = (clusterId, namespace, options = {}) =>
+  request(
+    `/api/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/resource-summary`,
+    { query: resourceQuery(options) }
+  );
+
 export const getClusterPodIssues = (clusterId) =>
   request(`/api/clusters/${encodeURIComponent(clusterId)}/pod-issues`);
 

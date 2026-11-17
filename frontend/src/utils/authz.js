@@ -794,11 +794,24 @@ export function getAllowedResources(user, clusterId, namespace, resources = {}) 
       };
     });
 
-  // Ingresses have no per-resource access rules; they follow namespace visibility
-  // (mirrors the backend's configmap/secret/ingress handling).
-  const ingress = canAccessNamespace(user, clusterId, namespace)
-    ? resources.ingress || []
-    : [];
+  // ConfigMaps, Secrets, Ingresses, network policies, volume claims and storage
+  // classes have no per-resource access rules; they follow namespace visibility
+  // (mirrors filter_namespace_resources in the backend).
+  const namespaceVisible = canAccessNamespace(user, clusterId, namespace);
+  const byNamespace = (key) => (namespaceVisible ? resources[key] || [] : []);
+
+  // An autoscaler is seen by whoever may see what it scales.
+  const hpas = byNamespace("hpas").filter((hpa) => {
+    const targetType = SCALE_TARGET_RESOURCE_TYPE[hpa?.targetKind || ""];
+    return !targetType || !hpa.targetName
+      ? true
+      : canAccessResource(user, clusterId, namespace, targetType, hpa.targetName);
+  });
+
+  // Volumes are cluster-wide: only those claimed from a namespace this user can reach.
+  const pvs = (resources.pvs || []).filter(
+    (pv) => pv?.claimNamespace && canAccessNamespace(user, clusterId, pv.claimNamespace)
+  );
 
   return {
     pods,
@@ -809,9 +822,24 @@ export function getAllowedResources(user, clusterId, namespace, resources = {}) 
     jobs,
     cronjobs,
     services,
-    ingress,
+    configmaps: byNamespace("configmaps"),
+    secrets: byNamespace("secrets"),
+    ingress: byNamespace("ingress"),
+    // The server already narrowed events to the objects this user may see.
+    events: byNamespace("events"),
+    hpas,
+    networkpolicies: byNamespace("networkpolicies"),
+    pvcs: byNamespace("pvcs"),
+    pvs,
+    storageclasses: byNamespace("storageclasses"),
   };
 }
+
+const SCALE_TARGET_RESOURCE_TYPE = {
+  Deployment: "deployment",
+  StatefulSet: "statefulset",
+  ReplicaSet: "replicaset",
+};
 
 export function getLogVisiblePods(user, clusterId, namespace, pods = []) {
   if (!hasPermission(user, "logs:view")) {

@@ -1847,7 +1847,21 @@ NAMESPACE_RESOURCE_LIST_KEYS = (
     "configmaps",
     "secrets",
     "ingress",
+    "events",
+    "hpas",
+    "networkpolicies",
+    "pvcs",
+    "pvs",
+    "storageclasses",
 )
+
+# Lists on the Resources page that are not namespaced. They are still served
+# under a namespace URL (the page always has one); RBAC narrows them per item.
+CLUSTER_SCOPED_LIST_KEYS = frozenset({"pvs", "storageclasses"})
+
+# How many events one namespace list returns (newest first). A busy namespace
+# holds thousands; the page needs the recent ones.
+_NAMESPACE_EVENT_LIST_LIMIT = int(os.getenv("K8S_NAMESPACE_EVENT_LIST_LIMIT", "500"))
 
 
 def _namespace_endpoints_by_name(access: ClusterAccess, namespace: str) -> Dict[str, Any]:
@@ -2318,6 +2332,353 @@ def _build_namespace_cronjobs(namespace: str, cj_items: List[Dict[str, Any]]) ->
     return cronjobs
 
 
+# --- Storage, autoscaling, network policy and event lists -------------------
+
+_ACCESS_MODE_SHORT = {
+    "ReadWriteOnce": "RWO",
+    "ReadOnlyMany": "ROX",
+    "ReadWriteMany": "RWX",
+    "ReadWriteOncePod": "RWOP",
+}
+
+# A list row's `health`: "ok", "warn" or "crit". The page colours the row's
+# status by it and counts it under "Needs attention".
+_PVC_PHASE_HEALTH = {"Bound": "ok", "Pending": "warn", "Lost": "crit"}
+_PV_PHASE_HEALTH = {
+    "Bound": "ok",
+    "Available": "ok",
+    "Pending": "warn",
+    "Released": "warn",
+    "Failed": "crit",
+}
+
+
+def _short_access_modes(modes: Any) -> str:
+    return ", ".join(_ACCESS_MODE_SHORT.get(m, str(m)) for m in (modes or [])) or "-"
+
+
+def _cluster_items_or_note(
+    access: ClusterAccess, kind: str, failures: List[str]
+) -> List[Dict[str, Any]]:
+    """Cluster-scoped items; [] (and a transient failure noted) when kubectl fails."""
+    try:
+        return cluster_list_items(access, kind)
+    except (K8sCommandError, ValueError) as exc:
+        if not _is_permanent_read_failure(str(exc)):
+            failures.append(kind)
+        return []
+
+
+def _namespace_event_list(
+    access: ClusterAccess, namespace: str, failures: List[str]
+) -> List[Dict[str, Any]]:
+    try:
+        payload = namespace_events_from_k8s(access, namespace, limit=_NAMESPACE_EVENT_LIST_LIMIT)
+    except (K8sCommandError, ValueError) as exc:
+        if not _is_permanent_read_failure(str(exc)):
+            failures.append("events")
+        return []
+    return [{**event, "namespace": namespace} for event in payload.get("items") or []]
+
+
+# Only pod names and the claims they mount: the full pod list is the heaviest
+# read in a namespace and this column needs none of the rest.
+_POD_CLAIMS_JSONPATH = (
+    "jsonpath={range .items[*]}{.metadata.name}{\"\\t\"}"
+    "{range .spec.volumes[*]}{.persistentVolumeClaim.claimName}{\" \"}{end}{\"\\n\"}{end}"
+)
+
+
+def _pvc_users_by_claim(access: ClusterAccess, namespace: str) -> Dict[str, List[str]]:
+    """claim name -> pods mounting it. {} when the read fails (the column is extra)."""
+    try:
+        output = _run_for_access(
+            access, ["get", "pods", "-n", namespace, "-o", _POD_CLAIMS_JSONPATH]
+        )
+    except K8sCommandError:
+        return {}
+    users: Dict[str, List[str]] = {}
+    for line in (output or "").splitlines():
+        pod_name, _, claims = line.partition("\t")
+        pod_name = pod_name.strip()
+        if not pod_name:
+            continue
+        for claim in claims.split():
+            users.setdefault(claim, []).append(pod_name)
+    return {claim: sorted(set(pods)) for claim, pods in users.items()}
+
+
+def _build_namespace_pvcs(
+    namespace: str,
+    pvc_items: List[Dict[str, Any]],
+    users_by_claim: Dict[str, List[str]],
+) -> List[Dict[str, Any]]:
+    from .k8s_metrics import format_k8s_age
+
+    items: List[Dict[str, Any]] = []
+    for pvc in pvc_items:
+        meta = pvc.get("metadata") or {}
+        spec = pvc.get("spec") or {}
+        stat = pvc.get("status") or {}
+        name = meta.get("name") or ""
+        phase = stat.get("phase") or "Unknown"
+        requested = ((spec.get("resources") or {}).get("requests") or {}).get("storage")
+        items.append(
+            {
+                "name": name,
+                "namespace": namespace,
+                "labels": meta.get("labels") or {},
+                "status": phase,
+                "health": _PVC_PHASE_HEALTH.get(phase, "warn"),
+                "capacity": (stat.get("capacity") or {}).get("storage") or requested or "-",
+                "accessModes": _short_access_modes(stat.get("accessModes") or spec.get("accessModes")),
+                "storageClass": spec.get("storageClassName") or "-",
+                "volume": spec.get("volumeName") or "",
+                "usedBy": users_by_claim.get(name, []),
+                "age": format_k8s_age(meta.get("creationTimestamp")),
+                "actions": ["describe", "yaml"],
+            }
+        )
+    return items
+
+
+def _build_persistent_volumes(pv_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    from .k8s_metrics import format_k8s_age
+
+    items: List[Dict[str, Any]] = []
+    for pv in pv_items:
+        meta = pv.get("metadata") or {}
+        spec = pv.get("spec") or {}
+        stat = pv.get("status") or {}
+        claim = spec.get("claimRef") or {}
+        phase = stat.get("phase") or "Unknown"
+        items.append(
+            {
+                "name": meta.get("name") or "",
+                "status": phase,
+                "health": _PV_PHASE_HEALTH.get(phase, "warn"),
+                "reason": stat.get("reason") or "",
+                "capacity": (spec.get("capacity") or {}).get("storage") or "-",
+                "accessModes": _short_access_modes(spec.get("accessModes")),
+                "reclaimPolicy": spec.get("persistentVolumeReclaimPolicy") or "-",
+                "storageClass": spec.get("storageClassName") or "-",
+                "claimNamespace": claim.get("namespace") or "",
+                "claimName": claim.get("name") or "",
+                "age": format_k8s_age(meta.get("creationTimestamp")),
+                "actions": ["describe", "yaml"],
+            }
+        )
+    items.sort(key=lambda item: item["name"])
+    return items
+
+
+def _build_storage_classes(sc_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    from .k8s_metrics import format_k8s_age
+
+    items: List[Dict[str, Any]] = []
+    for sc in sc_items:
+        meta = sc.get("metadata") or {}
+        annotations = meta.get("annotations") or {}
+        items.append(
+            {
+                "name": meta.get("name") or "",
+                "default": annotations.get("storageclass.kubernetes.io/is-default-class") == "true"
+                or annotations.get("storageclass.beta.kubernetes.io/is-default-class") == "true",
+                "provisioner": sc.get("provisioner") or "-",
+                "reclaimPolicy": sc.get("reclaimPolicy") or "Delete",
+                "bindingMode": sc.get("volumeBindingMode") or "Immediate",
+                "allowExpansion": bool(sc.get("allowVolumeExpansion")),
+                "age": format_k8s_age(meta.get("creationTimestamp")),
+                "actions": ["describe", "yaml"],
+            }
+        )
+    items.sort(key=lambda item: (not item["default"], item["name"]))
+    return items
+
+
+def _hpa_metrics_text(hpa: Dict[str, Any]) -> str:
+    """'cpu 62% / 70%' per metric: what it is now against the target."""
+    spec = hpa.get("spec") or {}
+    stat = hpa.get("status") or {}
+    # autoscaling/v1 objects (old clusters) carry one CPU target as plain fields.
+    if spec.get("targetCPUUtilizationPercentage") is not None:
+        now = stat.get("currentCPUUtilizationPercentage")
+        now_text = f"{now}%" if now is not None else "?"
+        return f"cpu {now_text} / {spec['targetCPUUtilizationPercentage']}%"
+
+    current_by_name: Dict[str, Dict[str, Any]] = {}
+    for metric in stat.get("currentMetrics") or []:
+        if metric.get("type") == "Resource":
+            res = metric.get("resource") or {}
+            current_by_name[res.get("name") or ""] = res.get("current") or {}
+
+    parts: List[str] = []
+    for metric in spec.get("metrics") or []:
+        mtype = metric.get("type") or ""
+        if mtype != "Resource":
+            parts.append(f"{mtype.lower() or 'custom'} metric")
+            continue
+        res = metric.get("resource") or {}
+        name = res.get("name") or "?"
+        target = res.get("target") or {}
+        current = current_by_name.get(name, {})
+        if target.get("averageUtilization") is not None:
+            now = current.get("averageUtilization")
+            now_text = f"{now}%" if now is not None else "?"
+            parts.append(f"{name} {now_text} / {target['averageUtilization']}%")
+        else:
+            goal = target.get("averageValue") or target.get("value") or "?"
+            parts.append(f"{name} {current.get('averageValue') or '?'} / {goal}")
+    return "; ".join(parts) or "-"
+
+
+def _hpa_status(hpa: Dict[str, Any]) -> Tuple[str, str]:
+    """(status text, health) from the autoscaler's conditions and replica counts."""
+    spec = hpa.get("spec") or {}
+    stat = hpa.get("status") or {}
+    conditions = {c.get("type"): c for c in stat.get("conditions") or [] if c.get("type")}
+    able = conditions.get("AbleToScale") or {}
+    active = conditions.get("ScalingActive") or {}
+    if able.get("status") == "False":
+        return "Unable to scale", "crit"
+    if active.get("status") == "False":
+        if active.get("reason") == "ScalingDisabled":
+            return "Scaling disabled", "warn"
+        return "Metrics unavailable", "crit"
+    max_replicas = spec.get("maxReplicas")
+    desired = stat.get("desiredReplicas")
+    current = stat.get("currentReplicas")
+    limited = conditions.get("ScalingLimited") or {}
+    if max_replicas and (
+        (limited.get("status") == "True" and limited.get("reason") == "TooManyReplicas")
+        or (desired is not None and desired >= max_replicas and (current or 0) >= max_replicas)
+    ):
+        return "At max replicas", "warn"
+    return "Healthy", "ok"
+
+
+def _build_namespace_hpas(namespace: str, hpa_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    from .k8s_metrics import format_k8s_age
+
+    items: List[Dict[str, Any]] = []
+    for hpa in hpa_items:
+        meta = hpa.get("metadata") or {}
+        spec = hpa.get("spec") or {}
+        stat = hpa.get("status") or {}
+        target = spec.get("scaleTargetRef") or {}
+        status, health = _hpa_status(hpa)
+        items.append(
+            {
+                "name": meta.get("name") or "",
+                "namespace": namespace,
+                "labels": meta.get("labels") or {},
+                "targetKind": target.get("kind") or "",
+                "targetName": target.get("name") or "",
+                "minReplicas": spec.get("minReplicas", 1),
+                "maxReplicas": spec.get("maxReplicas"),
+                "currentReplicas": stat.get("currentReplicas", 0),
+                "desiredReplicas": stat.get("desiredReplicas", 0),
+                "metrics": _hpa_metrics_text(hpa),
+                "status": status,
+                "health": health,
+                "age": format_k8s_age(meta.get("creationTimestamp")),
+                "actions": ["describe", "yaml"],
+            }
+        )
+    return items
+
+
+def _label_selector_text(selector: Optional[Dict[str, Any]]) -> str:
+    if not selector:
+        return ""
+    parts = [f"{k}={v}" for k, v in sorted((selector.get("matchLabels") or {}).items())]
+    for expr in selector.get("matchExpressions") or []:
+        values = ",".join(str(v) for v in expr.get("values") or [])
+        text = f"{expr.get('key', '?')} {str(expr.get('operator', '')).lower()}"
+        parts.append(f"{text} ({values})" if values else text)
+    return ", ".join(parts)
+
+
+def _policy_peer_text(peer: Dict[str, Any]) -> str:
+    block = peer.get("ipBlock")
+    if block:
+        excepts = block.get("except") or []
+        cidr = block.get("cidr") or "?"
+        return f"{cidr} except {', '.join(excepts)}" if excepts else cidr
+    ns_sel = peer.get("namespaceSelector")
+    pod_sel = peer.get("podSelector")
+    pods = _label_selector_text(pod_sel) if pod_sel is not None else ""
+    if ns_sel is not None:
+        namespaces = _label_selector_text(ns_sel) or "any namespace"
+        if pod_sel is not None:
+            return f"{pods or 'any pod'} in {namespaces}"
+        return namespaces
+    if pod_sel is not None:
+        return pods or "any pod in this namespace"
+    return "anywhere"
+
+
+def _policy_ports_text(ports: Optional[List[Dict[str, Any]]]) -> str:
+    texts: List[str] = []
+    for port in ports or []:
+        number = port.get("port")
+        end = port.get("endPort")
+        protocol = port.get("protocol") or "TCP"
+        if number is None:
+            texts.append(f"any {protocol} port")
+        elif end:
+            texts.append(f"{number}-{end}/{protocol}")
+        else:
+            texts.append(f"{number}/{protocol}")
+    return ", ".join(texts)
+
+
+def _policy_rules_text(rules: List[Dict[str, Any]], peer_field: str) -> List[str]:
+    """One plain phrase per rule: 'from app=gateway on 8080/TCP'."""
+    texts: List[str] = []
+    for rule in rules:
+        peers = rule.get(peer_field) or []
+        who = "; ".join(_policy_peer_text(p) for p in peers) if peers else "anywhere"
+        ports = _policy_ports_text(rule.get("ports"))
+        texts.append(f"{peer_field} {who}" + (f" on {ports}" if ports else ""))
+    return texts
+
+
+def _build_namespace_network_policies(
+    namespace: str, np_items: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    from .k8s_metrics import format_k8s_age
+
+    items: List[Dict[str, Any]] = []
+    for policy in np_items:
+        meta = policy.get("metadata") or {}
+        spec = policy.get("spec") or {}
+        ingress = spec.get("ingress")
+        egress = spec.get("egress")
+        types = spec.get("policyTypes") or (["Ingress"] + (["Egress"] if egress else []))
+        # A direction listed in policyTypes with no rules lets nothing through.
+        ingress_text: List[str] = []
+        if "Ingress" in types:
+            ingress_text = _policy_rules_text(ingress or [], "from") or ["nothing (deny all)"]
+        egress_text: List[str] = []
+        if "Egress" in types:
+            egress_text = _policy_rules_text(egress or [], "to") or ["nothing (deny all)"]
+        items.append(
+            {
+                "name": meta.get("name") or "",
+                "namespace": namespace,
+                "labels": meta.get("labels") or {},
+                "appliesTo": _label_selector_text(spec.get("podSelector")) or "All pods",
+                "policyTypes": list(types),
+                "ingressRules": ingress_text,
+                "egressRules": egress_text,
+                "age": format_k8s_age(meta.get("creationTimestamp")),
+                "actions": ["describe", "yaml"],
+            }
+        )
+    return items
+
+
 def namespace_resources_from_k8s(
     access: ClusterAccess,
     namespace: str,
@@ -2443,6 +2804,42 @@ def namespace_resource_list_from_k8s(
     )
 
 
+_SUMMARY_READ_WORKERS = int(os.getenv("K8S_RESOURCE_SUMMARY_WORKERS", "6"))
+
+
+def namespace_resource_lists_from_k8s(
+    access: ClusterAccess,
+    namespace: str,
+    max_age: Optional[float] = None,
+) -> Tuple[Dict[str, Any], List[str]]:
+    """Every Resources-page list for a namespace, each read through its own cache.
+
+    Returns ``(lists, failed_keys)``. The reads share the per-list cache keys
+    the tabs use, so the side-rail summary and the tab a viewer opens next
+    cost one kubectl call between them."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    lists: Dict[str, Any] = {"namespace": namespace}
+    failed: List[str] = []
+
+    def _read(list_key: str) -> List[Dict[str, Any]]:
+        payload = namespace_resource_list_from_k8s(access, namespace, list_key, max_age=max_age)
+        return payload.get(list_key) or []
+
+    with ThreadPoolExecutor(max_workers=max(1, _SUMMARY_READ_WORKERS)) as pool:
+        futures = {key: pool.submit(_read, key) for key in NAMESPACE_RESOURCE_LIST_KEYS}
+        for key, future in futures.items():
+            try:
+                lists[key] = future.result()
+            except Exception as exc:  # noqa: BLE001 — one kind failing must not hide the rest
+                logging.getLogger(__name__).warning(
+                    "resource summary: %s/%s %s failed: %s", access.cluster_id, namespace, key, exc
+                )
+                lists[key] = []
+                failed.append(key)
+    return lists, failed
+
+
 def _namespace_resource_list_from_k8s_uncached(
     access: ClusterAccess, namespace: str, list_key: str
 ) -> Dict[str, Any]:
@@ -2482,6 +2879,21 @@ def _namespace_resource_list_from_k8s_uncached(
     elif list_key == "ingress":
         ing_items = _get_namespace_items(access, "ingress", namespace, failures)
         items = _build_namespace_ingress(namespace, ing_items)
+    elif list_key == "events":
+        items = _namespace_event_list(access, namespace, failures)
+    elif list_key == "hpas":
+        hpa_items = _get_namespace_items(access, "horizontalpodautoscalers", namespace, failures)
+        items = _build_namespace_hpas(namespace, hpa_items)
+    elif list_key == "networkpolicies":
+        np_items = _get_namespace_items(access, "networkpolicies", namespace, failures)
+        items = _build_namespace_network_policies(namespace, np_items)
+    elif list_key == "pvcs":
+        pvc_items = _get_namespace_items(access, "persistentvolumeclaims", namespace, failures)
+        items = _build_namespace_pvcs(namespace, pvc_items, _pvc_users_by_claim(access, namespace))
+    elif list_key == "pvs":
+        items = _build_persistent_volumes(_cluster_items_or_note(access, "persistentvolumes", failures))
+    elif list_key == "storageclasses":
+        items = _build_storage_classes(_cluster_items_or_note(access, "storageclasses", failures))
     else:
         cj_items = _get_namespace_items(access, "cronjobs", namespace, failures)
         items = _build_namespace_cronjobs(namespace, cj_items)

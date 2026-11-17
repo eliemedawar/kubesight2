@@ -802,11 +802,6 @@ tbody tr:hover {
   box-shadow: var(--shadow-sm);
 }
 
-.resources-tab-toolbar {
-  margin-bottom: var(--space-2);
-  align-items: center;
-}
-
 .resources-page .resources-table .status-pill {
   min-width: 4.5rem;
 }

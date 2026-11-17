@@ -76,7 +76,20 @@ NAMESPACE_RESOURCE_LIST_KEYS = (
     "configmaps",
     "secrets",
     "ingress",
+    "events",
+    "hpas",
+    "networkpolicies",
+    "pvcs",
+    "pvs",
+    "storageclasses",
 )
+
+# What an autoscaler can point at, as the resource type access rules name.
+_SCALE_TARGET_RESOURCE_TYPE = {
+    "Deployment": "deployment",
+    "StatefulSet": "statefulset",
+    "ReplicaSet": "replicaset",
+}
 
 
 def _request_memo(name: str) -> Optional[Dict[int, Any]]:
@@ -927,6 +940,38 @@ def filter_namespace_resources(user: User, cluster_id: str, resources: Dict[str,
     # Ingresses have no per-resource access rules; like ConfigMaps/Secrets they are
     # visible to any non-admin who can reach the namespace and hold resources:view.
     ingress = (resources.get("ingress") or []) if namespace_visible else []
+    # Same namespace-level rule for policies, claims and storage classes: none
+    # of them has per-resource rules, and none carries a value worth hiding.
+    networkpolicies = (resources.get("networkpolicies") or []) if namespace_visible else []
+    pvcs = (resources.get("pvcs") or []) if namespace_visible else []
+    storageclasses = (resources.get("storageclasses") or []) if namespace_visible else []
+
+    # An autoscaler is seen by whoever may see what it scales.
+    hpas = []
+    if namespace_visible:
+        for hpa in resources.get("hpas") or []:
+            target_type = _SCALE_TARGET_RESOURCE_TYPE.get(hpa.get("targetKind") or "")
+            target_name = hpa.get("targetName") or ""
+            if target_type and target_name and not can_access_resource(
+                user, cluster_id, namespace, target_type, target_name
+            ):
+                continue
+            hpas.append(hpa)
+
+    # Events follow the object they are about (the same rule as the Events API).
+    events = []
+    if namespace_visible and resources.get("events"):
+        events = filter_namespace_events(
+            user, cluster_id, namespace, {"items": resources.get("events") or []}
+        ).get("items") or []
+
+    # Volumes are cluster-wide: a non-admin sees only those claimed from a
+    # namespace they can reach. An unclaimed volume belongs to no one they can see.
+    pvs = []
+    for pv in resources.get("pvs") or []:
+        claim_ns = pv.get("claimNamespace") or ""
+        if claim_ns and can_access_namespace(user, cluster_id, claim_ns):
+            pvs.append(pv)
 
     return {
         "namespace": namespace,
@@ -941,6 +986,20 @@ def filter_namespace_resources(user: User, cluster_id: str, resources: Dict[str,
         "configmaps": configmaps,
         "secrets": secrets,
         "ingress": ingress,
+        # The newer kinds come back only when they were read: the all-kinds
+        # reader does not fetch them, and a kind not read is not an empty one.
+        **{
+            key: value
+            for key, value in (
+                ("events", events),
+                ("hpas", hpas),
+                ("networkpolicies", networkpolicies),
+                ("pvcs", pvcs),
+                ("pvs", pvs),
+                ("storageclasses", storageclasses),
+            )
+            if key in resources
+        },
     }
 
 
