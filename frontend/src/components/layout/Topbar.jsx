@@ -39,6 +39,24 @@ function formatBadgeCount(count) {
   return count > 9 ? "9+" : String(count);
 }
 
+const isMac =
+  typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || "");
+
+// Alt+C / Alt+N (⌥C / ⌥N) open the cluster and namespace pickers. Not Ctrl+N:
+// browsers keep Ctrl+N (and Ctrl+T, Ctrl+W) for themselves.
+const PICKER_SHORTCUTS = { KeyC: "cluster", KeyN: "namespace" };
+const shortcutLabel = (letter) => (isMac ? `⌥${letter}` : `Alt ${letter}`);
+
+function isTextEntry(target) {
+  if (!target || !(target instanceof Element)) return false;
+  if (target.isContentEditable) return true;
+  if (target.tagName === "TEXTAREA") return true;
+  if (target.tagName !== "INPUT") return false;
+  return !["button", "checkbox", "radio", "range", "submit", "reset", "file", "color"].includes(
+    (target.getAttribute("type") || "text").toLowerCase()
+  );
+}
+
 export default function Topbar({
   allowedClusters,
   allowedNamespaces,
@@ -74,6 +92,33 @@ export default function Topbar({
 }) {
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const notificationsRef = useRef(null);
+  const clusterFieldRef = useRef(null);
+  const namespaceFieldRef = useRef(null);
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.defaultPrevented) {
+        return;
+      }
+      // event.code, not event.key: on a Mac ⌥N types a character, not "n".
+      const picker = PICKER_SHORTCUTS[event.code];
+      if (!picker) return;
+      // On a Mac ⌥+letter types accented characters, so leave text fields alone there.
+      if (isMac && isTextEntry(event.target)) return;
+      // A dialog owns the keyboard; the pickers sit behind it.
+      if (document.querySelector('[aria-modal="true"]')) return;
+      const field = picker === "cluster" ? clusterFieldRef.current : namespaceFieldRef.current;
+      const trigger = field?.querySelector(".ss-trigger");
+      if (!trigger || trigger.disabled) return;
+      event.preventDefault();
+      trigger.focus();
+      if (trigger.getAttribute("aria-expanded") !== "true") {
+        trigger.click();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, []);
   const badgeLabel = formatBadgeCount((alertBadgeCount || 0) + (requestBadgeCount || 0));
 
   useEffect(() => {
@@ -142,9 +187,18 @@ export default function Topbar({
         </button>
         <div className="topbar-selectors">
         {showClusterSelector ? (
-          <div className="topbar-field" data-tour="cluster-select">
-            <p className="eyebrow">Active Cluster</p>
+          <div
+            className="topbar-field"
+            data-tour="cluster-select"
+            ref={clusterFieldRef}
+            title={`Change cluster (${shortcutLabel("C")})`}
+          >
+            <p className="eyebrow topbar-field__label">
+              Active Cluster
+              <kbd className="topbar-kbd" aria-hidden="true">{shortcutLabel("C")}</kbd>
+            </p>
             <SearchableSelect
+              aria-label={`Active cluster (${shortcutLabel("C")})`}
               value={selectedClusterId}
               onChange={(event) => onClusterChange(event.target.value)}
               disabled={loadingCore || !allowedClusters.length}
@@ -159,9 +213,18 @@ export default function Topbar({
           </div>
         ) : null}
         {showNamespaceSelector ? (
-          <div className="topbar-field" data-tour="namespace-select">
-            <p className="eyebrow">Active Namespace</p>
+          <div
+            className="topbar-field"
+            data-tour="namespace-select"
+            ref={namespaceFieldRef}
+            title={`Change namespace (${shortcutLabel("N")})`}
+          >
+            <p className="eyebrow topbar-field__label">
+              Active Namespace
+              <kbd className="topbar-kbd" aria-hidden="true">{shortcutLabel("N")}</kbd>
+            </p>
             <SearchableSelect
+              aria-label={`Active namespace (${shortcutLabel("N")})`}
               value={selectedNamespace}
               onChange={(event) => onNamespaceChange(event.target.value)}
               disabled={loadingNamespaces || loadingResources || !allowedNamespaces.length}

@@ -395,3 +395,50 @@ def test_summary_route_counts_every_kind(client, admin_token):
     attention = {(a["listKey"], a["name"]) for a in data["attention"]}
     assert ("hpas", "ledger-worker") in attention and ("pvcs", "ledger-archive") in attention
     assert data["unavailable"] == []
+
+
+# --- a kind the cluster will not let KubeSight read ---------------------------
+
+
+class _Access:
+    cluster_id = "c1"
+
+
+def test_a_refused_read_is_reported_not_shown_as_empty(monkeypatch):
+    import api.k8s_provider as provider
+
+    def refuse(access, args, timeout=None):
+        raise provider.K8sCommandError(
+            'Error from server (Forbidden): networkpolicies.networking.k8s.io is forbidden: '
+            'User "system:serviceaccount:kubesight:kubesight-backend" cannot list resource'
+        )
+
+    monkeypatch.setattr(provider, "_run_for_access", refuse)
+    payload = provider._namespace_resource_list_from_k8s_uncached(_Access(), "ai-guard", "networkpolicies")
+    assert payload["networkpolicies"] == []
+    assert payload["forbidden"] == ["networkpolicies"]
+
+
+def test_a_kind_the_cluster_does_not_serve_is_just_empty(monkeypatch):
+    import api.k8s_provider as provider
+
+    def missing(access, args, timeout=None):
+        raise provider.K8sCommandError('error: the server doesn\'t have a resource type "networkpolicies"')
+
+    monkeypatch.setattr(provider, "_run_for_access", missing)
+    payload = provider._namespace_resource_list_from_k8s_uncached(_Access(), "ns", "networkpolicies")
+    assert payload["networkpolicies"] == [] and "forbidden" not in payload
+
+
+def test_summary_leaves_a_refused_kind_uncounted(monkeypatch):
+    import api.k8s_provider as provider
+
+    def fake_list(access, namespace, key, fresh=False, max_age=None):
+        if key == "networkpolicies":
+            return {"namespace": namespace, key: [], "forbidden": ["networkpolicies"]}
+        return {"namespace": namespace, key: [{"name": "x"}]}
+
+    monkeypatch.setattr(provider, "namespace_resource_list_from_k8s", fake_list)
+    lists, unreadable = provider.namespace_resource_lists_from_k8s(_Access(), "ns")
+    assert unreadable == ["networkpolicies"]
+    assert lists["pods"] == [{"name": "x"}]

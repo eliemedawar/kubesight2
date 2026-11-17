@@ -35,8 +35,9 @@ rules:
   - apiGroups: [apiregistration.k8s.io]
     resources: [apiservices]
     verbs: [get, list, watch]
+  # networkpolicies: the Resources page's Network policies list.
   - apiGroups: [networking.k8s.io]
-    resources: [ingresses, ingressclasses]
+    resources: [ingresses, ingressclasses, networkpolicies]
     verbs: [get, list, watch]
   - apiGroups: [apps]
     resources: [deployments, replicasets, statefulsets, daemonsets]

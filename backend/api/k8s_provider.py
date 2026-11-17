@@ -1703,18 +1703,33 @@ def _get_namespace_items(
     resource_kind: str,
     namespace: str,
     failures: Optional[List[str]] = None,
+    denied: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Items of one kind in a namespace; [] when kubectl fails.
 
     ``failures`` (optional) collects the kinds whose read failed transiently,
-    so a cached caller can refuse to cache that empty list."""
+    so a cached caller can refuse to cache that empty list. ``denied``
+    (optional) collects the kinds the cluster refused (RBAC), so the page can
+    say "not allowed" instead of "none"."""
     try:
         output = _run_for_access(access, ["get", resource_kind, "-n", namespace, "-o", "json"])
         return json.loads(output).get("items", [])
     except (K8sCommandError, ValueError) as exc:
-        if failures is not None and not _is_permanent_read_failure(str(exc)):
-            failures.append(resource_kind)
+        _note_read_failure(resource_kind, str(exc), failures, denied)
         return []
+
+
+def _note_read_failure(
+    kind: str,
+    message: str,
+    failures: Optional[List[str]],
+    denied: Optional[List[str]] = None,
+) -> None:
+    if not _is_permanent_read_failure(message):
+        if failures is not None:
+            failures.append(kind)
+    elif denied is not None and "forbidden" in (message or "").lower():
+        denied.append(kind)
 
 
 # The Secrets tab shows name, type, labels and age; `get secrets -o json`
@@ -2358,25 +2373,29 @@ def _short_access_modes(modes: Any) -> str:
 
 
 def _cluster_items_or_note(
-    access: ClusterAccess, kind: str, failures: List[str]
+    access: ClusterAccess,
+    kind: str,
+    failures: List[str],
+    denied: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Cluster-scoped items; [] (and a transient failure noted) when kubectl fails."""
+    """Cluster-scoped items; [] (and the failure noted) when kubectl fails."""
     try:
         return cluster_list_items(access, kind)
     except (K8sCommandError, ValueError) as exc:
-        if not _is_permanent_read_failure(str(exc)):
-            failures.append(kind)
+        _note_read_failure(kind, str(exc), failures, denied)
         return []
 
 
 def _namespace_event_list(
-    access: ClusterAccess, namespace: str, failures: List[str]
+    access: ClusterAccess,
+    namespace: str,
+    failures: List[str],
+    denied: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     try:
         payload = namespace_events_from_k8s(access, namespace, limit=_NAMESPACE_EVENT_LIST_LIMIT)
     except (K8sCommandError, ValueError) as exc:
-        if not _is_permanent_read_failure(str(exc)):
-            failures.append("events")
+        _note_read_failure("events", str(exc), failures, denied)
         return []
     return [{**event, "namespace": namespace} for event in payload.get("items") or []]
 
@@ -2814,91 +2833,99 @@ def namespace_resource_lists_from_k8s(
 ) -> Tuple[Dict[str, Any], List[str]]:
     """Every Resources-page list for a namespace, each read through its own cache.
 
-    Returns ``(lists, failed_keys)``. The reads share the per-list cache keys
-    the tabs use, so the side-rail summary and the tab a viewer opens next
-    cost one kubectl call between them."""
+    Returns ``(lists, unreadable_keys)``: a key is unreadable when its read
+    failed or the cluster refused it (RBAC). The reads share the per-list
+    cache keys the tabs use, so the side-rail summary and the tab a viewer
+    opens next cost one kubectl call between them."""
     from concurrent.futures import ThreadPoolExecutor
 
     lists: Dict[str, Any] = {"namespace": namespace}
-    failed: List[str] = []
+    unreadable: List[str] = []
 
-    def _read(list_key: str) -> List[Dict[str, Any]]:
+    def _read(list_key: str) -> Tuple[List[Dict[str, Any]], bool]:
         payload = namespace_resource_list_from_k8s(access, namespace, list_key, max_age=max_age)
-        return payload.get(list_key) or []
+        return payload.get(list_key) or [], bool(payload.get("forbidden"))
 
     with ThreadPoolExecutor(max_workers=max(1, _SUMMARY_READ_WORKERS)) as pool:
         futures = {key: pool.submit(_read, key) for key in NAMESPACE_RESOURCE_LIST_KEYS}
         for key, future in futures.items():
             try:
-                lists[key] = future.result()
+                items, refused = future.result()
             except Exception as exc:  # noqa: BLE001 — one kind failing must not hide the rest
                 logging.getLogger(__name__).warning(
                     "resource summary: %s/%s %s failed: %s", access.cluster_id, namespace, key, exc
                 )
-                lists[key] = []
-                failed.append(key)
-    return lists, failed
+                items, refused = [], True
+            lists[key] = items
+            if refused:
+                unreadable.append(key)
+    return lists, unreadable
 
 
 def _namespace_resource_list_from_k8s_uncached(
     access: ClusterAccess, namespace: str, list_key: str
 ) -> Dict[str, Any]:
     failures: List[str] = []
+    denied: List[str] = []
     if list_key == "pods":
         from .k8s_metrics import fetch_pod_top_metrics
 
-        pod_items = _get_namespace_items(access, "pods", namespace, failures)
+        pod_items = _get_namespace_items(access, "pods", namespace, failures, denied)
         top_by_pod = fetch_pod_top_metrics(access)
         items = _build_namespace_pods(namespace, pod_items, top_by_pod)
     elif list_key == "services":
-        svc_items = _get_namespace_items(access, "services", namespace, failures)
+        svc_items = _get_namespace_items(access, "services", namespace, failures, denied)
         endpoints_by_name = _namespace_endpoints_by_name(access, namespace)
         node_ips = _node_ips_for_services(access, svc_items)
         items = _build_namespace_services(namespace, svc_items, endpoints_by_name, node_ips)
     elif list_key == "deployments":
-        dep_items = _get_namespace_items(access, "deployments", namespace, failures)
+        dep_items = _get_namespace_items(access, "deployments", namespace, failures, denied)
         items = _build_namespace_deployments(namespace, dep_items)
     elif list_key == "replicasets":
-        rs_items = _get_namespace_items(access, "replicasets", namespace, failures)
+        rs_items = _get_namespace_items(access, "replicasets", namespace, failures, denied)
         items = _build_namespace_replicasets(namespace, rs_items)
     elif list_key == "statefulsets":
-        sts_items = _get_namespace_items(access, "statefulsets", namespace, failures)
+        sts_items = _get_namespace_items(access, "statefulsets", namespace, failures, denied)
         items = _build_namespace_statefulsets(namespace, sts_items)
     elif list_key == "daemonsets":
-        ds_items = _get_namespace_items(access, "daemonsets", namespace, failures)
+        ds_items = _get_namespace_items(access, "daemonsets", namespace, failures, denied)
         items = _build_namespace_daemonsets(namespace, ds_items)
     elif list_key == "jobs":
-        job_items = _get_namespace_items(access, "jobs", namespace, failures)
+        job_items = _get_namespace_items(access, "jobs", namespace, failures, denied)
         items = _build_namespace_jobs(namespace, job_items)
     elif list_key == "configmaps":
-        cm_items = _get_namespace_items(access, "configmaps", namespace, failures)
+        cm_items = _get_namespace_items(access, "configmaps", namespace, failures, denied)
         items = _build_namespace_configmaps(namespace, cm_items)
     elif list_key == "secrets":
         secret_items = _secret_summary_items(access, namespace, failures)
         items = _build_namespace_secrets(namespace, secret_items)
     elif list_key == "ingress":
-        ing_items = _get_namespace_items(access, "ingress", namespace, failures)
+        ing_items = _get_namespace_items(access, "ingress", namespace, failures, denied)
         items = _build_namespace_ingress(namespace, ing_items)
     elif list_key == "events":
-        items = _namespace_event_list(access, namespace, failures)
+        items = _namespace_event_list(access, namespace, failures, denied)
     elif list_key == "hpas":
-        hpa_items = _get_namespace_items(access, "horizontalpodautoscalers", namespace, failures)
+        hpa_items = _get_namespace_items(access, "horizontalpodautoscalers", namespace, failures, denied)
         items = _build_namespace_hpas(namespace, hpa_items)
     elif list_key == "networkpolicies":
-        np_items = _get_namespace_items(access, "networkpolicies", namespace, failures)
+        np_items = _get_namespace_items(access, "networkpolicies", namespace, failures, denied)
         items = _build_namespace_network_policies(namespace, np_items)
     elif list_key == "pvcs":
-        pvc_items = _get_namespace_items(access, "persistentvolumeclaims", namespace, failures)
+        pvc_items = _get_namespace_items(access, "persistentvolumeclaims", namespace, failures, denied)
         items = _build_namespace_pvcs(namespace, pvc_items, _pvc_users_by_claim(access, namespace))
     elif list_key == "pvs":
-        items = _build_persistent_volumes(_cluster_items_or_note(access, "persistentvolumes", failures))
+        items = _build_persistent_volumes(_cluster_items_or_note(access, "persistentvolumes", failures, denied))
     elif list_key == "storageclasses":
-        items = _build_storage_classes(_cluster_items_or_note(access, "storageclasses", failures))
+        items = _build_storage_classes(_cluster_items_or_note(access, "storageclasses", failures, denied))
     else:
-        cj_items = _get_namespace_items(access, "cronjobs", namespace, failures)
+        cj_items = _get_namespace_items(access, "cronjobs", namespace, failures, denied)
         items = _build_namespace_cronjobs(namespace, cj_items)
 
     payload = {"namespace": namespace, list_key: items}
+    if denied:
+        # The cluster refused the read: the list is unknown, not empty. Cached
+        # like any answer — RBAC does not change from one second to the next.
+        payload["forbidden"] = sorted(set(denied))
     if failures:
         raise DegradedRead(payload)
     return payload

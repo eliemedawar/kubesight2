@@ -10,6 +10,19 @@ export function liveMaxAgeSeconds(liveIntervalMs) {
   return Math.max(1, Math.round((Number(liveIntervalMs) || 0) / 1000) - 1);
 }
 
+/** The message for a list the cluster would not let KubeSight read ("" when it could). */
+export function forbiddenMessage(kinds) {
+  const list = Array.isArray(kinds) ? kinds.filter(Boolean) : [];
+  if (!list.length) {
+    return "";
+  }
+  const names = list.join(", ");
+  return (
+    `KubeSight is not allowed to list ${names} on this cluster, so this list cannot be shown. ` +
+    `Its service account needs get and list on ${names} (a ClusterRole rule).`
+  );
+}
+
 function setsEqual(a, b) {
   if (a.size !== b.size) {
     return false;
@@ -139,7 +152,13 @@ export function useNamespaceResourceCache({
           });
           const items = payload[listKey] || [];
           applyListKey(clusterId, namespace, listKey, items);
+          // The cluster refused KubeSight's own read (RBAC): the list is
+          // unknown, not empty, so say so where the rows would be.
+          const refused = forbiddenMessage(payload.forbidden);
           setTabErrors((prev) => {
+            if (refused) {
+              return prev[listKey] === refused ? prev : { ...prev, [listKey]: refused };
+            }
             if (!prev[listKey]) {
               return prev;
             }

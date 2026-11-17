@@ -641,8 +641,12 @@ def namespace_resource_list(cluster_id: str, namespace: str, resource_type: str)
             resources = namespace_resource_list_from_k8s(
                 access, namespace, resource_type, fresh=fresh, max_age=_max_age_arg()
             )
+            forbidden = resources.get("forbidden")
             if user:
                 resources = filter_namespace_resources(user, cluster_id, resources)
+            if forbidden:
+                # KubeSight's own credentials may not list this kind here.
+                resources = {**resources, "forbidden": forbidden}
             return success_response(resources)
         except K8sCommandError as exc:
             return error_response(f"Failed to load {resource_type}: {exc}", 503)

@@ -1211,6 +1211,8 @@ export default function ResourcesPage({
                     ) : null}
                     {!tabLoading || activeTabHasBeenLoaded ? (
                       !active || active.rows.length === 0 ? (
+                        // An error above already says why there are no rows.
+                        activeTabError ? null : (
                         <p className="muted empty-state-inline">
                           {getEmptyTabMessage({
                             tabKey: resolvedTab,
@@ -1223,6 +1225,7 @@ export default function ResourcesPage({
                             filteredCount: filteredResourceList.length,
                           })}
                         </p>
+                        )
                       ) : filteredRows.length === 0 ? (
                         searchTerm ? (
                           <p className="muted empty-state-inline">

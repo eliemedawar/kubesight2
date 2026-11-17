@@ -132,3 +132,16 @@ describe("getAllowedResources for the newer kinds", () => {
     expect(allowed.pvs).toHaveLength(1);
   });
 });
+
+describe("a list the cluster will not let KubeSight read", async () => {
+  const { forbiddenMessage } = await import("../hooks/useNamespaceResourceCache.js");
+
+  it("says not allowed, naming the kind, instead of showing an empty list", () => {
+    expect(forbiddenMessage(["networkpolicies"])).toMatch(/not allowed to list networkpolicies/);
+  });
+
+  it("says nothing when the read was allowed", () => {
+    expect(forbiddenMessage(undefined)).toBe("");
+    expect(forbiddenMessage([])).toBe("");
+  });
+});
