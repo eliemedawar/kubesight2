@@ -1,23 +1,24 @@
-# Header handling on kubesight-gateway. Applied with kubectl, like the rest of
-# this folder.
+# PLATFORM REQUEST, not applied by us: header handling for KubeSight's
+# listener on the platform's front door (areeba-fabric in namespace fabric,
+# CHG-20261103-010). A ClientTrafficPolicy has to live in the Gateway's own
+# namespace, which the platform owns.
 #
 # Envoy Gateway's default is to REJECT any request carrying a header whose
 # name has an underscore, with a 400 that never reaches KubeSight. Zoho Desk
 # sends one on every webhook call (`Zsec_user_import_url: true`), so its
-# webhook check failed and "Set up in Zoho Desk" could never register the
-# webhooks. Dropping the header instead lets the request through; KubeSight
-# does not read it.
+# webhook check fails and "Set up in Zoho Desk" cannot register the webhooks.
+# Dropping the header instead lets the request through; KubeSight does not
+# read it. sectionName keeps the change to KubeSight's listener only.
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: ClientTrafficPolicy
 metadata:
   name: kubesight-client-traffic
-  namespace: kubesight
-  labels:
-    areeba.com/module: kubesight-frontend
+  namespace: fabric
 spec:
   targetRefs:
     - group: gateway.networking.k8s.io
       kind: Gateway
-      name: kubesight-gateway
+      name: areeba-fabric
+      sectionName: https-kubesight
   headers:
     withUnderscoresAction: DropHeader

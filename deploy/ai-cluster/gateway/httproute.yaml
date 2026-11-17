@@ -14,9 +14,14 @@ metadata:
     areeba.com/change: CHG-KS-004
 spec:
   hostnames: [kubesight.areeba.com]
+  # The platform's shared front door since CHG-20261103-010, not
+  # kubesight-gateway any more: applying the old parent detaches KubeSight.
   parentRefs:
-    - name: kubesight-gateway
-      sectionName: https
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: areeba-fabric
+      namespace: fabric
+      sectionName: https-kubesight
   rules:
     - matches:
         - path: {type: PathPrefix, value: /}
