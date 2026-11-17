@@ -19,9 +19,9 @@ definitions:
       memory: 3072
 
   steps:
-    # The test steps run on EVERY pull request (whatever its target), on every
-    # push to the main branch, and before any image is built — tag pipelines
-    # included, so a release image is never published from a red commit.
+    # The test steps run on EVERY pull request (whatever its target) and before
+    # any image is built — tag pipelines included, so a release image is never
+    # published from a red commit. Pushes to the main branch run nothing.
     - step: &backend-tests
         name: Backend tests (pytest)
         image: python:3.12
@@ -71,14 +71,8 @@ definitions:
           - docker inspect --format '{{index .RepoDigests 0}}' "$DOCKER_REGISTRY/kubesight-provisioner:$IMAGE_TAG"
 
 pipelines:
-  branches:
-    # Merges land here; test them too, not only the PR that proposed them.
-    # Both names, because the repository's default branch has been called both.
-    "{main,master}":
-      - parallel:
-          - step: *backend-tests
-          - step: *frontend-build
-
+  # No branch pipelines: a push to main starts nothing here. Tests still run on
+  # every pull request and before every release image is built.
   tags:
     # Bitbucket selects this more-specific glob for x.y.0 tags.
     "*.*.0":
