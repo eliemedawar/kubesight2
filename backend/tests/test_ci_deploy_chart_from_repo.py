@@ -411,3 +411,53 @@ def test_chart_rules_need_a_deploy_stage_with_a_repository_chart(app, service):
         row = db.session.get(CiService, service.id)
         with pytest.raises(merge_checks.MergeCheckError, match="Chart rules"):
             merge_checks.save_config(row, {"toolsMode": "custom", "tools": ["chart"]})
+
+
+# ---------------------------------------------------------------------------
+# "Values only from Git": the release's own values are not kept
+# ---------------------------------------------------------------------------
+
+def test_values_from_git_only_is_written_only_when_on():
+    off = deploy_config.normalize(_repo_target("payments"), "deploy", "Deploy")
+    assert "valuesFromGitOnly" not in off["helm"] and not deploy_config.values_from_git_only(off)
+    on = deploy_config.normalize(_repo_target("payments", valuesFromGitOnly=True), "deploy", "Deploy")
+    assert deploy_config.values_from_git_only(on)
+    assert deploy_config.signature(on) != deploy_config.signature(off)
+    # An Inventory chart has no Git to take its values from: the switch is ignored.
+    inventory = _helm_deploy("payments")
+    inventory["helm"]["valuesFromGitOnly"] = True
+    assert not deploy_config.values_from_git_only(deploy_config.normalize(inventory, "deploy", "Deploy"))
+
+
+def test_values_only_from_git_drop_what_the_release_held(app, client, admin_token, service, local_git):
+    _approvals(app, 0)
+    _with_repository(app, service.id)
+    chart_id = _slug(client, admin_token)
+    _save(client, admin_token, service.pipeline_id, _helm_stages(_repo_target(chart_id, valuesFromGitOnly=True)))
+    fake = FakeHelm(
+        releases={"payments": {"name": "payments", "revision": "4", "status": "deployed"}},
+        current={"replicaCount": 6, "database": {"password": "set-by-hand"}, "legacy": True},
+    )
+    installed, runner = _patched(fake)
+    with installed, runner:
+        build_id = _run(app, client, admin_token, service.id)
+
+    data = _build(client, admin_token, build_id)
+    assert data["status"] == "success", data
+    # Never asked for: the release's values are not read.
+    assert not [call for call in fake.calls if call[:2] == ["get", "values"]]
+    values = fake.installed_values[0]
+    assert "database" not in values and "legacy" not in values
+    assert values["replicaCount"] == 3  # the values file, not the release's 6
+    assert values["feature"] == {"enabled": True, "mode": "strict"}
+    assert values["image"]["tag"] == "2.0.0"
+    log = _logs(client, admin_token, build_id, data["stages"][2]["id"])
+    assert "values only from Git" in log and "not kept" in log
+
+
+def test_the_signature_covers_where_the_chart_comes_from():
+    base = deploy_config.signature(deploy_config.normalize(_repo_target("payments"), "deploy", "Deploy"))
+    for change in ({"chartPath": "charts/other"}, {"valuesPath": "deploy/values-prod.yaml"},
+                   {"policy": "ai-cluster"}, {"valuesFromGitOnly": True}):
+        changed = deploy_config.normalize(_repo_target("payments", **change), "deploy", "Deploy")
+        assert deploy_config.signature(changed) != base, change

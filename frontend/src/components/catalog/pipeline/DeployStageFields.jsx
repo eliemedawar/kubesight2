@@ -908,6 +908,25 @@ function HelmChartFields({ ids, deploy, editable, onChange, imageStages }) {
           </Field>
         </div>
       ) : null}
+      {fromRepository ? (
+        <label className="pl-check">
+          <input
+            type="checkbox"
+            checked={Boolean(helm.valuesFromGitOnly)}
+            disabled={!editable}
+            onChange={(event) => setChart({ valuesFromGitOnly: event.target.checked || undefined })}
+          />
+          <span>
+            <strong>Values only from Git</strong>
+            <small>
+              Each deploy uses only the chart&apos;s values.yaml, the values file and the images, all from the commit
+              built. A change or a removal in Git always reaches the cluster. Values set on the release by hand
+              (outside Git) are removed on the next deploy, so keep secrets in OpenBao or a Secret, never in the
+              release values. Off, the release&apos;s own values are kept under the values file.
+            </small>
+          </span>
+        </label>
+      ) : null}
       <div className="pl-grid pl-deploy-target">
         <Field
           label="Inventory chart"
@@ -1411,7 +1430,9 @@ function HelmReleaseStatus({ deploy, info, target, targetKey, clusterName }) {
         <p>
           <strong>Installed</strong> · revision {release.revision} · <code>{release.chart}</code> · {release.status}
           <small>
-            {repoValues ? (
+            {fromRepo && deploy.helm?.valuesFromGitOnly ? (
+              <>Each build upgrades it to {chart} of its commit with values only from Git: the chart&apos;s defaults{repoValues ? <>, <code>{repoValues}</code></> : null} and the images. Values it holds now are not kept.</>
+            ) : repoValues ? (
               <>Each build upgrades it to {chart} of its commit, keeping the values it runs with, then <code>{repoValues}</code> over them, then the images.</>
             ) : (
               <>Each build upgrades it to {chart}{fromRepo ? " of its commit" : ""}, keeping the values it runs with — only the image values change.</>

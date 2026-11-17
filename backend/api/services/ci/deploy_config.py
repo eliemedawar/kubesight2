@@ -572,6 +572,10 @@ def _normalize_helm(value: Dict[str, Any], stage_name: str) -> Dict[str, Any]:
             raise DeployConfigError(
                 f"Stage '{stage_name}': the values file '{helm['valuesPath']}' must be a .yaml file."
             )
+        if helm_in.get("valuesFromGitOnly") is True:
+            # Each deploy uses the chart's values.yaml, the values file and the
+            # images — nothing the release held before. Only written when on.
+            helm["valuesFromGitOnly"] = True
     return {
         "target": "helm",
         "clusterId": cluster_id,
@@ -605,6 +609,11 @@ def _repo_path(value: Any, what: str, stage_name: str, *, required: bool) -> str
 def chart_from_repository(config: Optional[Dict[str, Any]]) -> bool:
     """The Helm target deploys the chart in the service's own repository."""
     return is_helm(config) and ((config.get("helm") or {}).get("chartSource") == "repository")
+
+
+def values_from_git_only(config: Optional[Dict[str, Any]]) -> bool:
+    """An upgrade drops the release's own values: only Git decides."""
+    return chart_from_repository(config) and bool((config.get("helm") or {}).get("valuesFromGitOnly"))
 
 
 def _image_values(value: Any, stage_name: str, where: str) -> Dict[str, str]:
@@ -925,6 +934,12 @@ def signature(config: Optional[Dict[str, Any]]) -> str:
             # Which images go where — a fixed reference included. Only for
             # several images, so every one-image stamp stays valid.
             material["helm"]["images"] = helm_images(config)
+        # Where the chart and its values come from, the rules it is held to and
+        # whether the release's values survive: part of what is deployed. Only
+        # when set, so every Inventory-chart stamp stays valid.
+        for key in ("chartSource", "chartPath", "valuesPath", "policy", "valuesFromGitOnly"):
+            if helm.get(key):
+                material["helm"][key] = helm[key]
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode("utf-8")).hexdigest()
 
 

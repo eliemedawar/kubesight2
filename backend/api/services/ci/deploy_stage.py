@@ -708,7 +708,19 @@ def _helm_change(stage: CiBuildStage, config: Dict[str, Any], user, image: str, 
         # release's own values (upgrade). Never a credential.
         "valuesYaml": yaml.safe_dump(image_values, sort_keys=False, default_flow_style=False),
     }
-    if is_upgrade:
+    if is_upgrade and deploy_config.values_from_git_only(config):
+        # Only Git decides: the chart's values.yaml, the values file, the
+        # images. Whatever the release held before — set by hand, or an old
+        # default — is replaced, so a change or a removal in Git always lands.
+        payload.update({"isUpgrade": True})
+        revision = int(current.get("revision") or 0) or None
+        _log(
+            stage,
+            f"Upgrading Helm release '{release}' (revision {revision or '?'}) with values only from Git: "
+            f"the chart's defaults{', ' + helm['valuesPath'] if helm.get('valuesPath') else ''} and "
+            f"{_image_value_label(config)} set to {image}. Values the release held before are not kept.",
+        )
+    elif is_upgrade:
         # The values the release runs with are read on the server when the
         # upgrade runs — also when an approved change runs later.
         payload.update({"isUpgrade": True, "keepCurrentValues": True})
