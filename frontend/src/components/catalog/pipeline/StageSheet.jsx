@@ -22,6 +22,7 @@ import {
   Switch,
 } from "./controls.jsx";
 import ApprovalStageFields from "./ApprovalStageFields.jsx";
+import ChartCheckFields from "./ChartCheckFields.jsx";
 import DeployStageFields from "./DeployStageFields.jsx";
 import StoreUploadFields from "./StoreUploadFields.jsx";
 import ScanStageFields from "./ScanStageFields.jsx";
@@ -458,6 +459,16 @@ export default function StageSheet({
             editable={editable}
             onChange={onChange}
             error={problemFor("approval")}
+          />
+        )}
+
+        {stage.stageType === "chart_check" && (
+          <ChartCheckFields
+            ids={ids}
+            stage={stage}
+            editable={editable}
+            onChange={onChange}
+            error={problemFor("chartCheck")}
           />
         )}
 

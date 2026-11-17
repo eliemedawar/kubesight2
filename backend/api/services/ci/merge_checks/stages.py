@@ -785,6 +785,8 @@ def generated_commands(
     """The default script for one tool — what "Reset to the default" restores."""
     if tool in LINTERS:
         return linter_commands(tool)
+    if tool == "chart":
+        return []  # KubeSight runs it itself: no script to edit
     if tool == "eslint":
         return _eslint_commands(bool(gate.get("eslintCountWarnings")))
     if tool == "semgrep":
@@ -874,6 +876,7 @@ def build_stages(
     custom_commands: Optional[Dict[str, List[str]]] = None,
     app_type: str = "",
     deps_image: str = "",
+    chart: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Checkout, the JVM dependency step when a check needs jars, then one
     stage per selected tool, in canonical order.
@@ -907,8 +910,36 @@ def build_stages(
             app_type=app_type,
         )
         for tool in ordered
+        if tool != "chart"
     )
+    if "chart" in ordered and chart:
+        # A server stage, so after every runner stage (the pipeline requires it).
+        stages.append(chart_stage(chart))
     return stages
+
+
+def chart_stage(chart: Dict[str, str]) -> Dict[str, Any]:
+    """The Chart check stage for a chart folder, values file and rule set
+    (see ci/chart_check_stage.py)."""
+    from ..chart_check_stage import ENV_CHART, ENV_POLICY, ENV_VALUES
+
+    env = {STAGE_TOOL_ENV: "chart", ENV_CHART: chart.get("chartPath") or ""}
+    if chart.get("valuesPath"):
+        env[ENV_VALUES] = chart["valuesPath"]
+    if chart.get("policy"):
+        env[ENV_POLICY] = chart["policy"]
+    if chart.get("namespace"):
+        env["KUBESIGHT_CHART_NAMESPACE"] = chart["namespace"]
+    return {
+        "name": stage_name_for("chart"),
+        "stageType": "chart_check",
+        "runnerLabels": [],
+        "commands": [],
+        "env": env,
+        "continueOnFailure": True,
+        "timeoutSeconds": 600,
+        "enabled": True,
+    }
 
 
 def unconfigured_environments(tools: List[str]) -> List[Dict[str, str]]:

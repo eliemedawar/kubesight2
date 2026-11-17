@@ -53,12 +53,16 @@ MERGE_CHECK_TOOLS = (
     "dart_analyze",
     "hadolint",
     "shellcheck",
+    # The service's Helm chart, rendered with its values and checked against
+    # the platform rules (ci/chart_check_stage.py). Runs on the server.
+    "chart",
     "semgrep",
     "sonar",
     "dependency_check",
 )
 
 TOOL_LABELS = {
+    "chart": "Chart rules",
     "eslint": "ESLint",
     "ruff": "Ruff",
     "pmd": "PMD",

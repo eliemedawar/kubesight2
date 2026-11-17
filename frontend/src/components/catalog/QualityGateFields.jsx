@@ -87,6 +87,16 @@ export const TOOLS = [
     counts: { type: "text", text: "Errors and warnings" },
   },
   {
+    // Rendered with its values file and checked against the AI cluster rules
+    // on the server. Its limit is not a setting: the server always says 0.
+    key: "chart",
+    capKey: "maxChartProblems",
+    fixed: true,
+    label: "Chart rules",
+    hint: "The Helm chart a Deploy stage takes from this repository, against the AI cluster rules.",
+    counts: { type: "text", text: "Broken rules, and a chart that does not render" },
+  },
+  {
     key: "semgrep",
     capKey: "maxSemgrepProblems",
     label: "Semgrep",
@@ -199,7 +209,7 @@ export default function QualityGateFields({
           <span role="columnheader">Counts</span>
         </div>
 
-        {TOOLS.map(({ key, capKey, label, hint, counts }) => (
+        {TOOLS.map(({ key, capKey, label, hint, counts, fixed }) => (
           <div className="sg-qg-row" role="row" key={key}>
             <div className="sg-qg-check" role="cell">
               <span className="sg-qg-name">{label}</span>
@@ -207,17 +217,21 @@ export default function QualityGateFields({
             </div>
 
             <div role="cell">
-              <input
-                type="number"
-                min="0"
-                inputMode="numeric"
-                className="sg-qg-num"
-                aria-label={`Maximum problems from ${label}`}
-                value={asText(values[capKey])}
-                disabled={disabled}
-                placeholder={placeholder(capKey)}
-                onChange={(event) => onChange(capKey, asNumber(event.target.value))}
-              />
+              {fixed ? (
+                <span className="sg-qg-hint">0, always</span>
+              ) : (
+                <input
+                  type="number"
+                  min="0"
+                  inputMode="numeric"
+                  className="sg-qg-num"
+                  aria-label={`Maximum problems from ${label}`}
+                  value={asText(values[capKey])}
+                  disabled={disabled}
+                  placeholder={placeholder(capKey)}
+                  onChange={(event) => onChange(capKey, asNumber(event.target.value))}
+                />
+              )}
             </div>
 
             <div role="cell">

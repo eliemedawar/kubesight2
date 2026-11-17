@@ -597,7 +597,9 @@ def _store_upload(value: Any, stage_type: str, stage_name: str) -> Optional[Dict
 # Server stages other than Deploy run nothing in a container, so a command,
 # image or file pattern sent with one was written by somebody expecting it to
 # run. (Deploy predates this check and keeps accepting — and ignoring — them.)
-_SERVER_KIND_LABELS = {"deploy": "Deploy", "approval": "Approval", "store_upload": "App store upload"}
+_SERVER_KIND_LABELS = {
+    "deploy": "Deploy", "approval": "Approval", "store_upload": "App store upload", "chart_check": "Chart check",
+}
 
 
 def _server_stage_fields(payload: Dict[str, Any], stage_type: str, stage_name: str) -> None:
@@ -614,6 +616,35 @@ def _server_stage_fields(payload: Dict[str, Any], stage_type: str, stage_name: s
             "stage that builds them.",
             code=f"invalid_{stage_type}",
         )
+
+
+def _chart_check_env(env: Dict[str, str], stage_name: str) -> Dict[str, str]:
+    """A Chart check stage's settings live in its environment (see
+    chart_check_stage): the chart folder, the values file, the rule set."""
+    from . import chart_check_stage as chart_check
+    from .chart_policy import POLICIES
+    from .deploy_config import DeployConfigError, _repo_path
+
+    try:
+        chart = _repo_path(env.get(chart_check.ENV_CHART), "chart folder", stage_name, required=True)
+        values = _repo_path(env.get(chart_check.ENV_VALUES), "values file", stage_name, required=False)
+    except DeployConfigError as exc:
+        raise PipelineError(str(exc), code="invalid_chart_check")
+    if values and not values.lower().endswith((".yaml", ".yml")):
+        raise PipelineError(f"Stage '{stage_name}': the values file '{values}' must be a .yaml file.",
+                            code="invalid_chart_check")
+    policy = str(env.get(chart_check.ENV_POLICY) or "").strip().lower()
+    if policy and policy not in POLICIES:
+        raise PipelineError(f"Stage '{stage_name}': '{policy}' is not a rule set. Use one of: "
+                            f"{', '.join(POLICIES)}.", code="invalid_chart_check")
+    out = dict(env)
+    out[chart_check.ENV_CHART] = chart
+    for key, value in ((chart_check.ENV_VALUES, values), (chart_check.ENV_POLICY, policy)):
+        if value:
+            out[key] = value
+        else:
+            out.pop(key, None)
+    return out
 
 
 def _code_scan(value: Any, stage_type: str, stage_name: str) -> Optional[Dict[str, Any]]:
@@ -751,7 +782,7 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
         raise PipelineError(f"Stage '{name}' is a command stage but has no commands.")
     if stage_type == "scan":
         _scan_stage_fields(payload, name)
-    if stage_type in ("approval", "store_upload"):
+    if stage_type in ("approval", "store_upload", "chart_check"):
         _server_stage_fields(payload, stage_type, name)
     scan_config, gate = _scan(payload, stage_type, name, known_keys)
 
@@ -767,6 +798,8 @@ def normalize_stage(payload: Dict[str, Any], position: int, known_keys: set) -> 
         )
 
     env = _env_map(payload.get("env"))
+    if stage_type == "chart_check":
+        env = _chart_check_env(env, name)
     _check_image_tag_template(env, name)
     _check_stage_build_inputs(env, payload.get("workingDirectory"), name)
 

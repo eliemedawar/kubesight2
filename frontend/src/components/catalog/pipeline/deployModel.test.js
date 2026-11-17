@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   blankDeploy,
+  cleanRepoPath,
   deployOutcome,
   deployProblems,
   deployTarget,
@@ -216,6 +217,20 @@ describe("a Helm target", () => {
     expect(deployProblems(same)[0].message).toMatch(/different chart values/);
     const bad = { ...ready, helm: { ...ready.helm, imageValues: { mode: "full", path: "image..x" } } };
     expect(deployProblems(bad)[0].message).toMatch(/chart value/);
+  });
+
+  it("takes the chart from the repository with a chart folder and an optional values file", () => {
+    const fromRepo = (helm) => helmTarget({
+      helm: { ...helmTarget().helm, chartTemplateId: "payments", chartSource: "repository", ...helm },
+    });
+    expect(deployProblems(fromRepo({ chartPath: "charts/payments" }))).toEqual([]);
+    expect(deployProblems(fromRepo({ chartPath: "./charts/payments/", valuesPath: "deploy/values-uat.yaml" }))).toEqual([]);
+    expect(deployProblems(fromRepo({ chartPath: "" }))[0].message).toMatch(/Name the chart folder/);
+    expect(deployProblems(fromRepo({ chartPath: "../x" }))[0].message).toMatch(/no '\.\.'/);
+    expect(deployProblems(fromRepo({ chartPath: "charts/p", valuesPath: "deploy/values.json" }))[0].message).toMatch(/\.yaml file/);
+    const noChart = helmTarget({ helm: { ...helmTarget().helm, chartSource: "repository", chartPath: "charts/p" } });
+    expect(deployProblems(noChart)[0].message).toMatch(/recorded under/);
+    expect(cleanRepoPath("./charts\\payments/")).toBe("charts/payments");
   });
 
   it("reads as the release and its chart", () => {

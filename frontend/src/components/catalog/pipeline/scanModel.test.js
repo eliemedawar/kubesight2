@@ -40,6 +40,7 @@ describe("the scan kind", () => {
       "deploy",
       "approval",
       "store_upload",
+      "chart_check",
     ]);
     expect(kindOf("scan")).toMatchObject({ verb: "Scan code & dependencies", icon: "scan" });
     expect(defaultStageName("scan")).toBe("Security scan");

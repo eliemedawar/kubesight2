@@ -57,6 +57,11 @@ HELM_IMAGE_MODES = ("split", "full")
 # image, each naming the image stage it comes from (or a fixed image) and its
 # own chart values, all set in the same install/upgrade.
 HELM_IMAGE_SETS = ("one", "several")
+# Where a Helm target's chart comes from: a version stored in Inventory, or the
+# chart folder in the service's own repository at the commit the build built.
+HELM_CHART_SOURCES = ("inventory", "repository")
+# A path inside the repository: plain segments, no '..', no leading '/'.
+_REPO_PATH_RE = re.compile(r"^[A-Za-z0-9_.@+-]+(/[A-Za-z0-9_.@+-]+){0,15}$")
 # Where a row of a ``several`` target takes its image from.
 HELM_IMAGE_SOURCES = ("stage", "fixed")
 MAX_HELM_IMAGES = 12
@@ -535,6 +540,38 @@ def _normalize_helm(value: Dict[str, Any], stage_name: str) -> Dict[str, Any]:
         # Only written when used, so a one-image target reads (and signs) as
         # it did before several images existed.
         helm.update({"imageSet": "several", "images": images})
+    policy = _clean(helm_in.get("policy"), 32).lower()
+    if policy:
+        from .chart_policy import POLICIES
+
+        if policy not in POLICIES:
+            raise DeployConfigError(
+                f"Stage '{stage_name}': '{policy}' is not a rule set. Use one of: {', '.join(POLICIES)}."
+            )
+        # The rendered chart must keep these platform rules before it deploys.
+        helm["policy"] = policy
+    chart_source = _clean(helm_in.get("chartSource"), 16).lower() or "inventory"
+    if chart_source not in HELM_CHART_SOURCES:
+        raise DeployConfigError(
+            f"Stage '{stage_name}': '{chart_source}' is not where a chart comes from. "
+            "Use inventory or repository."
+        )
+    if chart_source == "repository":
+        # The chart travels with the code: each build deploys the chart folder
+        # (and values file) of the commit it built, recorded as a new version
+        # of the Inventory chart above. Only written when used, so an Inventory
+        # target reads (and signs) as before.
+        helm.update({
+            "chartSource": "repository",
+            "chartPath": _repo_path(helm_in.get("chartPath"), "chart folder", stage_name, required=True),
+            "valuesPath": _repo_path(helm_in.get("valuesPath"), "values file", stage_name, required=False),
+            "chartVersion": "",
+            "valuesFile": "",
+        })
+        if helm["valuesPath"] and not helm["valuesPath"].lower().endswith((".yaml", ".yml")):
+            raise DeployConfigError(
+                f"Stage '{stage_name}': the values file '{helm['valuesPath']}' must be a .yaml file."
+            )
     return {
         "target": "helm",
         "clusterId": cluster_id,
@@ -549,6 +586,25 @@ def _normalize_helm(value: Dict[str, Any], stage_name: str) -> Dict[str, Any]:
         "manifest": "",
         "helm": helm,
     }
+
+
+def _repo_path(value: Any, what: str, stage_name: str, *, required: bool) -> str:
+    path = "/".join(part for part in _clean(value, 300).replace("\\", "/").split("/") if part and part != ".")
+    if not path:
+        if required:
+            raise DeployConfigError(f"Stage '{stage_name}': name the {what} in the repository, like charts/my-app.")
+        return ""
+    if ".." in path.split("/") or not _REPO_PATH_RE.match(path):
+        raise DeployConfigError(
+            f"Stage '{stage_name}': '{path}' is not a {what} path in the repository "
+            "(letters, digits, '.', '_', '-' and '/', no '..')."
+        )
+    return path
+
+
+def chart_from_repository(config: Optional[Dict[str, Any]]) -> bool:
+    """The Helm target deploys the chart in the service's own repository."""
+    return is_helm(config) and ((config.get("helm") or {}).get("chartSource") == "repository")
 
 
 def _image_values(value: Any, stage_name: str, where: str) -> Dict[str, str]:

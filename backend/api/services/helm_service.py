@@ -749,6 +749,35 @@ def _render_for_checks(
         return None, str(exc)
 
 
+def _chart_checks(
+    payload: Dict[str, Any],
+    rendered: Optional[str],
+    render_err: Optional[str],
+    on_findings: Optional[Callable[[List[Dict[str, str]]], None]],
+) -> str:
+    """Why the change is refused by its ``chartChecks``, or "" to go on."""
+    checks = payload.get("chartChecks") if isinstance(payload.get("chartChecks"), dict) else {}
+    policy = str(checks.get("policy") or "")
+    if (checks.get("render") or policy) and not rendered:
+        return f"The chart does not render with these values, so nothing was deployed: {render_err or 'no output'}"
+    if not policy:
+        return ""
+    from .ci import chart_policy
+
+    findings = chart_policy.check(policy, rendered or "")
+    if on_findings is not None:
+        on_findings(findings)
+    fails = [item for item in findings if item["level"] == "FAIL"]
+    if not fails:
+        return ""
+    shown = "; ".join(chart_policy.describe(item) for item in fails[:8])
+    more = f" (and {len(fails) - 8} more)" if len(fails) > 8 else ""
+    return (
+        f"The chart breaks {len(fails)} of {chart_policy.label(policy)}, so nothing was deployed: "
+        f"{shown}{more}"
+    )
+
+
 def _helm_preview(header: str, rendered: Optional[str], values_yaml: str) -> str:
     """Bundle preview for a Helm change: the rendered manifest (secrets redacted)
     or, when it could not be rendered, the values it will be installed with."""
@@ -785,8 +814,14 @@ def install_or_upgrade_release(
     run_helm_fn: Optional[RunHelmFn] = None,
     approval_context: Optional[str] = None,
     change_note: Optional[str] = None,
+    on_chart_checks: Optional[Callable[[List[Dict[str, str]]], None]] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], int]:
     """Install or upgrade a release, under the cluster's approval rule.
+
+    ``payload["chartChecks"]`` (a CI Deploy stage): ``render`` refuses a chart
+    that does not render; ``policy`` names platform rules (ci/chart_policy.py)
+    the rendered objects must keep — any FAIL refuses the change, and every
+    finding is handed to ``on_chart_checks``.
 
     On a cluster that needs approval (and no live approved request) the change
     is not refused: it is queued as a single-item change bundle with its full
@@ -858,6 +893,16 @@ def install_or_upgrade_release(
         rendered, render_err = _render_for_checks(
             runner, access, release_name, chart_target, namespace, values_path, version_args
         )
+        refused = _chart_checks(payload, rendered, render_err, on_chart_checks)
+        if refused:
+            log_audit(
+                "helm_upgrade_failed" if is_upgrade else "helm_install_failed",
+                actor=user,
+                target_type="helm_release",
+                target_id=f"{cluster_id}/{namespace}/{release_name}",
+                details={"error": refused[:500], "reason": "chart_checks"},
+            )
+            return None, refused, 422
         image_checks: List[Dict[str, Any]] = []
         if rendered:
             image_checks, image_blocking, image_err = check_registry_images(rendered, cluster_id)

@@ -37,7 +37,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ....audit import log_audit
 from ....db import db
-from ....models_ci import CiBuild, CiPipeline, CiSecret, CiService
+from ....models_ci import CiBuild, CiPipeline, CiPipelineStage, CiSecret, CiService
 from ....models_merge_checks import (
     DEFAULT_EVENTS,
     MERGE_CHECK_EVENTS,
@@ -157,7 +157,42 @@ def effective_tools(
     if tools_mode(row) == "custom":
         return list(row.tools or [])
     keys = known_secret_keys if known_secret_keys is not None else _known_secret_keys(service)
-    return profiles.recommended_tools(profiles.application_type(service), keys)[0]
+    tools = profiles.recommended_tools(profiles.application_type(service), keys)[0]
+    if chart_target(service) is not None and "chart" not in tools:
+        # The service deploys a chart from its repository: a pull request that
+        # changes it is checked before it can merge.
+        tools = [tool for tool in MERGE_CHECK_TOOLS if tool in set(tools) | {"chart"}]
+    return tools
+
+
+def chart_target(service: CiService) -> Optional[Dict[str, str]]:
+    """Where the service's chart lives, from the Deploy stage of one of its
+    build pipelines that takes the chart from the repository — the chart folder,
+    values file, rule set and namespace a pull request is checked with — or
+    None when no Deploy stage does."""
+    from ..deploy_config import chart_from_repository
+
+    stages_rows = (
+        db.session.query(CiPipelineStage, CiPipeline)
+        .join(CiPipeline, CiPipelineStage.pipeline_id == CiPipeline.id)
+        .filter(CiPipeline.service_id == service.id, CiPipelineStage.stage_type == "deploy")
+        .order_by(CiPipeline.is_default.desc(), CiPipeline.id.asc(), CiPipelineStage.position.asc())
+        .all()
+    )
+    for stage, pipeline in stages_rows:
+        if (pipeline.purpose or "build") != "build" or pipeline.enabled is False or stage.enabled is False:
+            continue
+        config = stage.deploy if isinstance(stage.deploy, dict) else None
+        if not chart_from_repository(config):
+            continue
+        helm = config.get("helm") or {}
+        return {
+            "chartPath": helm.get("chartPath") or "",
+            "valuesPath": helm.get("valuesPath") or "",
+            "policy": helm.get("policy") or "",
+            "namespace": config.get("namespace") or "",
+        }
+    return None
 
 
 def _clean_tools(value: Any, current: List[str]) -> List[str]:
@@ -221,6 +256,8 @@ def _clean_custom_commands(value: Any, current: Dict[str, Any]) -> Dict[str, Any
     for tool, raw in value.items():
         if tool not in MERGE_CHECK_TOOLS:
             raise MergeCheckError(f"'{tool}' is not a merge check KubeSight runs.")
+        if tool == "chart":
+            raise MergeCheckError("Chart rules run on the KubeSight server and have no script to edit.")
         if isinstance(raw, str):
             lines = raw.splitlines()
         elif isinstance(raw, (list, tuple)):
@@ -310,6 +347,11 @@ def save_config(
         raise MergeCheckError(
             "Merge checks need at least one check to run. Choose ESLint, "
             "SonarQube or Dependency-Check before switching them on."
+        )
+    if "chart" in (row.tools or []) and chart_target(service) is None:
+        raise MergeCheckError(
+            "Chart rules check the chart a Deploy stage takes from the repository, and no build "
+            "pipeline of this service has one. Set a Deploy stage's chart to \"This repository\" first."
         )
     if row.enabled and not service.source_ready():
         raise MergeCheckError(
@@ -432,6 +474,7 @@ def _sync_pipeline(
             custom_commands=dict(config.custom_commands or {}),
             app_type=profiles.application_type(service),
             deps_image=_build_tool_image(service),
+            chart=chart_target(service),
         ),
     }
 

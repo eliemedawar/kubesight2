@@ -79,12 +79,13 @@ STAGE_TYPES = (
     "scan",
     "approval",
     "store_upload",
+    "chart_check",
 )
 # Stages the KubeSight server executes itself instead of handing to a runner.
 # They come after every runner stage (enforced on save), so a whole-build runner
 # has finished — and uploaded the image and files it produced — before one
 # starts. See services/ci/server_stages.py for which module runs each.
-SERVER_STAGE_TYPES = ("deploy", "approval", "store_upload")
+SERVER_STAGE_TYPES = ("deploy", "approval", "store_upload", "chart_check")
 # Recognised so pipelines stored before they were retired still load (and are
 # still skipped, with a reason, by the engine), but refused on every NEW save:
 # no runner ever executed them, so offering them promised work that never ran.

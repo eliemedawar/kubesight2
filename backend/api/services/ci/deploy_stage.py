@@ -598,6 +598,58 @@ def _after_apply(build, stage, config, user, image, data, error, status, created
     _begin_rollout(stage)
 
 
+def _chart_from_repository(stage: CiBuildStage, config: Dict[str, Any], user):
+    """The chart folder (and values file) of the commit this build built,
+    recorded as a version of the Inventory chart: ``(version, values)``, or
+    None when the stage was failed here."""
+    from ...models_ci import CiService
+    from .. import helm_chart_template_service as charts
+
+    helm = config["helm"]
+    build = stage.build
+    service = db.session.get(CiService, build.service_id)
+    if service is None or not service.repository_url:
+        _fail(stage, "The chart comes from the service's repository, but the service has no "
+                     "repository. Nothing was deployed.")
+        return None
+    commit = build.commit_sha or ""
+    try:
+        taken = charts.prepare_repository_chart(
+            repository_url=service.repository_url,
+            credential_profile_id=service.credential_profile_id,
+            commit=commit,
+            branch=build.branch or service.default_branch or "",
+            chart_path=helm["chartPath"],
+            values_path=helm.get("valuesPath") or "",
+        )
+        prepared = taken["prepared"]
+        base, _, meta = str(prepared.get("version") or "0.1.0").partition("+")
+        # Semver build metadata: which build, which commit. Unique per build,
+        # the same when a build's deploy is retried.
+        tag = ".".join(part for part in (meta, f"b{build.number}", commit[:7]) if part)
+        version = charts.record_build_version(
+            helm["chartTemplateId"], prepared, f"{base}+{tag}"[:64],
+            actor_user_id=getattr(user, "id", None),
+        )
+    except charts.ChartTemplateError as exc:
+        _fail(stage, f"The chart could not be taken from the repository: {exc} Nothing was deployed.")
+        return None
+    except Exception as exc:  # noqa: BLE001 — Git or the disk: the stage fails, the build reports it
+        logger.exception("chart from repository failed for build %s", build.id)
+        _fail(stage, f"The chart could not be taken from the repository ({type(exc).__name__}). "
+                     "Nothing was deployed.")
+        return None
+    at = commit[:12] if commit else f"the tip of {build.branch or service.default_branch}"
+    _log(
+        stage,
+        f"Chart {helm['chartPath']} at {at} recorded as {helm.get('chartName') or helm['chartTemplateId']} "
+        f"{version}" + (f"; values from {helm['valuesPath']}." if helm.get("valuesPath") else "."),
+    )
+    for warning in (prepared.get("warnings") or [])[:5]:
+        _log(stage, f"Chart: {warning}")
+    return version, taken["values"]
+
+
 def _helm_change(stage: CiBuildStage, config: Dict[str, Any], user, image: str, note: str):
     """Install or upgrade the release with the build's image.
 
@@ -632,10 +684,22 @@ def _helm_change(stage: CiBuildStage, config: Dict[str, Any], user, image: str, 
         )
         return None
     is_upgrade = current is not None and status != "uninstalled"
+    chart_version = helm.get("chartVersion") or ""
+    if deploy_config.chart_from_repository(config):
+        taken = _chart_from_repository(stage, config, user)
+        if taken is None:
+            return None
+        chart_version, repo_values = taken
+        if repo_values:
+            # The repository's values file, then the images over it: what is in
+            # Git wins over the release's own values on every upgrade.
+            from ..helm_chart_template_service import _merge_values
+
+            image_values = _merge_values(repo_values, image_values)
     payload: Dict[str, Any] = {
         "chartSource": "template",
         "chartTemplateId": helm["chartTemplateId"],
-        "chartVersion": helm.get("chartVersion") or "",
+        "chartVersion": chart_version,
         "clusterId": config["clusterId"],
         "namespace": config["namespace"],
         "releaseName": release,
@@ -668,11 +732,29 @@ def _helm_change(stage: CiBuildStage, config: Dict[str, Any], user, image: str, 
         {"created": not is_upgrade, "helmRevision": revision, "previousImage": None, "containerName": ""},
     )
     created = [] if is_upgrade else [{"kind": "HelmRelease", "name": release}]
+    checks: Dict[str, Any] = {}
+    if deploy_config.chart_from_repository(config):
+        checks["render"] = True  # a chart from the code must render before it deploys
+    if helm.get("policy"):
+        checks["policy"] = helm["policy"]
+    if checks:
+        payload["chartChecks"] = checks
+
+    def report(findings: List[Dict[str, str]]) -> None:
+        from . import chart_policy
+
+        fails, warns = chart_policy.summary(findings)
+        _log(stage, f"Checked the rendered chart against {chart_policy.label(helm['policy'])}: "
+                    f"{fails} FAIL, {warns} WARN.")
+        for finding in findings[:40]:
+            _log(stage, "  " + chart_policy.describe(finding))
+
     result = helm_service.install_or_upgrade_release(
         user,
         payload,
         helm_service.expected_confirmation(release, config["namespace"], is_upgrade),
         change_note=note,
+        on_chart_checks=report,
     )
     return result, created
 

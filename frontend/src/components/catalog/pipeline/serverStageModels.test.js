@@ -158,3 +158,22 @@ describe("server stages come last", () => {
     expect(orderProblem(stages[1], 1, stages).message).toContain("App store upload stage “To Play”");
   });
 });
+
+describe("a Chart check stage", () => {
+  it("is a server stage whose settings are its env", async () => {
+    const { chartCheckProblems, chartCheckSettings, withChartCheckSetting } = await import("./chartCheckModel.js");
+    const stage = blankStage("chart_check");
+    expect(isServerStage(stage)).toBe(true);
+    expect(chartCheckSettings(stage)).toEqual({ chartPath: "", valuesPath: "", policy: "ai-cluster" });
+    expect(chartCheckProblems(stage)[0].message).toMatch(/Name the chart folder/);
+    let env = withChartCheckSetting(stage.env, "chart", "charts/ai-guard");
+    env = withChartCheckSetting(env, "values", "deploy/");
+    expect(env.KUBESIGHT_VALUES_PATH).toBe("deploy/");
+    env = withChartCheckSetting(env, "values", "deploy/values.yaml");
+    const ready = { ...stage, env };
+    expect(chartCheckProblems(ready)).toEqual([]);
+    expect(stageSummary(ready)).toBe("Renders charts/ai-guard and checks the AI cluster rules");
+    expect(withChartCheckSetting(env, "policy", "").KUBESIGHT_CHART_POLICY).toBeUndefined();
+    expect(changeKindPatch("chart_check").env).toEqual({ KUBESIGHT_CHART_PATH: "", KUBESIGHT_CHART_POLICY: "ai-cluster" });
+  });
+});

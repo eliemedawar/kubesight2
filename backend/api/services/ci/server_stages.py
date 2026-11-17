@@ -15,18 +15,20 @@ from __future__ import annotations
 from types import ModuleType
 from typing import Dict
 
-from . import approval_stage, deploy_stage, store_upload_stage
+from . import approval_stage, chart_check_stage, deploy_stage, store_upload_stage
 
 EXECUTORS: Dict[str, ModuleType] = {
     "deploy": deploy_stage,
     "approval": approval_stage,
     "store_upload": store_upload_stage,
+    "chart_check": chart_check_stage,
 }
 
 START_FAILED = {
     "deploy": "The Deploy stage could not start; see the server log. Nothing was deployed.",
     "approval": "The Approval stage could not start; see the server log. Nothing after it ran.",
     "store_upload": "The App store upload stage could not start; see the server log. Nothing was published.",
+    "chart_check": "The Chart check stage could not start; see the server log. The chart was not checked.",
 }
 
 ADVANCE_FAILED = {
@@ -42,6 +44,7 @@ ADVANCE_FAILED = {
         "The App store upload stage failed unexpectedly while it was running; see the server "
         "log. Check the release in Mobile Apps before retrying — an upload may have started."
     ),
+    "chart_check": "The Chart check stage failed unexpectedly; see the server log. The chart was not checked.",
 }
 
 

@@ -2056,6 +2056,135 @@ def import_git_chart(
         return None, f"Unable to read the Git repository: {exc}", 400
 
 
+# ---------------------------------------------------------------------------
+# A chart that travels with the code (CI Deploy stage, chart source
+# "repository"): the chart folder and values file of the commit a build built.
+# ---------------------------------------------------------------------------
+
+MAX_REPOSITORY_VALUES_BYTES = 1024 * 1024
+_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+
+
+def _run_git(command: List[str], env: Dict[str, str], hide: Tuple[str, ...], timeout: int = 120) -> None:
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, check=False, timeout=timeout, env=env)
+    except FileNotFoundError as exc:
+        raise ChartTemplateError("Git is not installed on the backend server.") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ChartTemplateError(f"Git timed out after {timeout} seconds.") from exc
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or "Git failed.").strip()
+        raise ChartTemplateError(_redact_git_message(message, *hide))
+
+
+def _git_fetch_commit(payload: Dict[str, Any], destination: str, askpass_dir: str,
+                      commit: str, branch: str) -> Tuple[str, str]:
+    """Check out exactly ``commit`` (or the tip of ``branch`` when the build has
+    no commit) into ``destination``. Returns ``(url, the ref checked out)``.
+
+    The commit is fetched on its own first (one commit, no history); a server
+    that refuses unadvertised commits gets the branch's history instead, and
+    the commit is checked out from it."""
+    url, username, token = _git_connection(payload)
+    env = _git_environment(username, token, askpass_dir)
+    hide = (token, username)
+    git = ["git", "-c", "credential.helper=", "-C", destination]
+    os.makedirs(destination, exist_ok=True)
+    _run_git(["git", "init", "-q", destination], env, hide)
+    _run_git(git + ["remote", "add", "origin", url], env, hide)
+    if commit:
+        if not _COMMIT_RE.match(commit):
+            raise ChartTemplateError(f"'{commit[:80]}' is not a commit.")
+        try:
+            _run_git(git + ["fetch", "-q", "--depth", "1", "--no-tags", "origin", commit], env, hide)
+        except ChartTemplateError:
+            if not branch:
+                raise
+            _run_git(git + ["fetch", "-q", "--no-tags", "origin", branch], env, hide, timeout=240)
+        _run_git(git + ["checkout", "-q", "--detach", commit], env, hide)
+        return url, commit
+    if not branch:
+        raise ChartTemplateError("The build has neither a commit nor a branch to take the chart from.")
+    _run_git(git + ["fetch", "-q", "--depth", "1", "--no-tags", "origin", branch], env, hide)
+    _run_git(git + ["checkout", "-q", "--detach", "FETCH_HEAD"], env, hide)
+    return url, branch
+
+
+def prepare_repository_chart(
+    *,
+    repository_url: str,
+    credential_profile_id: Any,
+    commit: str,
+    branch: str,
+    chart_path: str,
+    values_path: str = "",
+    name: str = "",
+) -> Dict[str, Any]:
+    """The chart folder (and values file) of one commit of a repository.
+
+    Returns ``{"prepared": <what _persist_version takes>, "values": <the values
+    file as a dict, {} without one>, "ref": <commit or branch>}``. The chart
+    is read exactly like a Git import, scrubbing included.
+    """
+    payload = {"repositoryUrl": repository_url, "credentialProfileId": credential_profile_id}
+    if credential_profile_id in (None, ""):
+        payload.pop("credentialProfileId")
+    with _private_import_directory() as temp_dir:
+        repo_root = Path(temp_dir) / "repository"
+        url, ref = _git_fetch_commit(payload, str(repo_root), temp_dir, commit, branch)
+        at = ref[:12] if commit else ref
+        try:
+            selected = _resolve_subpath(repo_root, chart_path, label="repository")
+        except ChartTemplateError as exc:
+            raise ChartTemplateError(f"The chart folder '{chart_path}' at {at}: {exc}") from exc
+        if not (selected / "Chart.yaml").is_file():
+            raise ChartTemplateError(f"'{chart_path}' at {at} has no Chart.yaml: it is not a chart folder.")
+        prepared = _prepare_existing_chart(
+            selected,
+            payload={"name": name},
+            source_type="git-chart",
+            source_ref=f"{url}@{ref}:{chart_path}",
+        )
+        values: Dict[str, Any] = {}
+        if values_path:
+            try:
+                target = _resolve_subpath(repo_root, values_path, label="repository")
+            except ChartTemplateError as exc:
+                raise ChartTemplateError(f"The values file '{values_path}' at {at}: {exc}") from exc
+            if not target.is_file() or target.is_symlink():
+                raise ChartTemplateError(f"The values file '{values_path}' at {at} is not a file.")
+            if target.stat().st_size > MAX_REPOSITORY_VALUES_BYTES:
+                raise ChartTemplateError(f"The values file '{values_path}' is larger than 1 MB.")
+            try:
+                loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, yaml.YAMLError) as exc:
+                raise ChartTemplateError(f"The values file '{values_path}' could not be read: {exc}") from exc
+            if loaded is not None and not isinstance(loaded, dict):
+                raise ChartTemplateError(f"The values file '{values_path}' must hold a YAML object.")
+            values = loaded or {}
+    return {"prepared": prepared, "values": values, "ref": ref}
+
+
+def record_build_version(
+    slug: str, prepared: Dict[str, Any], version: str, *, actor_user_id: Optional[int] = None
+) -> str:
+    """Store a chart a build deploys as a version of the Inventory chart
+    ``slug`` — not made current: Inventory's current version stays a person's
+    choice — and return the version. A retried build reuses the version it
+    stored, as long as it came from the same source."""
+    row = _get_row(slug)
+    _backfill_versions(row)
+    existing = next((item for item in row.versions if item.version == version), None)
+    if existing is not None:
+        if (existing.source_ref or "") == (_clean_text(prepared.get("source_ref"), 1000) or ""):
+            return version
+        raise ChartTemplateError(
+            f"{row.name} already has a version {version} from somewhere else; nothing was recorded."
+        )
+    _persist_version(row, {**prepared, "version": version}, make_current=False, actor_user_id=actor_user_id)
+    return version
+
+
 def _decode_archive(payload: Dict[str, Any]) -> bytes:
     raw = payload.get("archiveBase64") or payload.get("archive_base64") or ""
     if not isinstance(raw, str) or not raw.strip():

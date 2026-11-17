@@ -237,6 +237,9 @@ def resolve_gate(config: Any = None, policy: Any = None) -> Dict[str, Any]:
                 resolved[key] = value
                 sources[key] = "service"
 
+    # Chart rules are the cluster's, not a setting: any broken rule blocks.
+    resolved["maxChartProblems"] = 0
+    sources["maxChartProblems"] = "platform"
     resolved["mode"] = "override" if overriding else "inherit"
     resolved["sources"] = sources
     return resolved
@@ -291,7 +294,9 @@ def evaluate(gate: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
         counted[tool] = problems
         total += problems
 
-        cap = gate.get(TOOL_CAP_FIELD[tool])
+        # A chart that breaks a platform rule is never allowed through: the
+        # rules are the cluster's, not a service's to relax.
+        cap = 0 if tool == "chart" else gate.get(TOOL_CAP_FIELD[tool])
         if cap is not None and problems > cap:
             reasons.append(
                 f"{_tool_label(tool)} reported {problems} "

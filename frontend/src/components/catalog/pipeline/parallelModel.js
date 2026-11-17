@@ -26,6 +26,7 @@ const KIND_LABELS = {
   deploy: "Deploy",
   approval: "Approval",
   store_upload: "App store upload",
+  chart_check: "Chart check",
   publish_artifact: "Publish artifact",
 };
 
@@ -81,7 +82,7 @@ function kindReason(stageType, { previous = false } = {}) {
       ? "The stage before is the checkout, and every stage after it needs the source it clones — nothing can run alongside it."
       : "A checkout cannot run in parallel: every stage after it needs the source it clones.";
   }
-  if (["deploy", "approval", "store_upload"].includes(stageType)) {
+  if (["deploy", "approval", "store_upload", "chart_check"].includes(stageType)) {
     return previous
       ? `The stage before is a ${label} stage, which runs on the KubeSight server after the build, one at a time.`
       : `${label} stages run on the KubeSight server after the build, one at a time — they cannot join a group.`;

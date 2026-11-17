@@ -17,6 +17,7 @@ import {
 } from "./approvalModel.js";
 import { blankStoreUpload, storeUploadProblems, storeUploadSummary } from "./storeUploadModel.js";
 import { groupProblems } from "./parallelModel.js";
+import { blankChartCheckEnv, chartCheckProblems, chartCheckSummary } from "./chartCheckModel.js";
 
 export const MIN_TIMEOUT_SECONDS = 30;
 export const MAX_TIMEOUT_SECONDS = 24 * 3600;
@@ -82,6 +83,14 @@ export const STAGE_KINDS = [
       "Send the build's AAB or IPA to a Google Play track or TestFlight, through Mobile Apps.",
     icon: "store",
   },
+  {
+    value: "chart_check",
+    label: "Chart check",
+    verb: "Check the Helm chart",
+    description:
+      "Render the chart in this repository with its values file and check it against the AI cluster rules — before a Deploy, or on pull requests.",
+    icon: "scan",
+  },
 ];
 
 export const kindOf = (stageType) =>
@@ -114,6 +123,8 @@ export const STAGE_FIELDS = {
   deploy: new Set(["deploy"]),
   approval: new Set(["approval"]),
   store_upload: new Set(["storeUpload"]),
+  // Runs on the KubeSight server; its settings are three env keys (chartCheckModel.js).
+  chart_check: new Set(["chartCheck"]),
   publish_artifact: new Set([]),
   // KubeSight writes the image and script and keeps the report itself, so no
   // image, commands or files to keep. Variables and secrets still reach the
@@ -210,6 +221,7 @@ export function changeKindPatch(stageType) {
     patch.timeoutSeconds = DEFAULT_APPROVAL_TIMEOUT_SECONDS;
   }
   if (stageType === "store_upload") patch.storeUpload = blankStoreUpload();
+  if (stageType === "chart_check") patch.env = blankChartCheckEnv();
   return patch;
 }
 
@@ -229,7 +241,7 @@ export const blankStage = (stageType = "command") => ({
   image: "",
   workingDirectory: "",
   commands: [],
-  env: {},
+  env: stageType === "chart_check" ? blankChartCheckEnv() : {},
   secretRefs: [],
   artifacts: [],
   hostAliases: [],
@@ -275,6 +287,7 @@ export const defaultStageName = (stageType) =>
     deploy: "Deploy",
     approval: "Approval",
     store_upload: "Publish to store",
+    chart_check: "Chart check",
   })[stageType] || "Stage";
 
 /**
@@ -421,6 +434,7 @@ export function stageSummary(stage) {
   if (stage.stageType === "deploy") return deploySummary(stage);
   if (stage.stageType === "approval") return approvalSummary(stage);
   if (stage.stageType === "store_upload") return storeUploadSummary(stage);
+  if (stage.stageType === "chart_check") return chartCheckSummary(stage);
   if (stage.stageType === "publish_artifact") return "Unsupported — publish artifact";
   if (stage.stageType === "scan") return scanSummary(stage);
   return firstCommand(stage) || "No commands yet";
@@ -510,6 +524,9 @@ export function stageProblems(stage, index, stages, parameters) {
   }
   if (stage.stageType === "store_upload") {
     problems.push(...storeUploadProblems(stage.storeUpload));
+  }
+  if (stage.stageType === "chart_check") {
+    problems.push(...chartCheckProblems(stage));
   }
   if (stage.stageType === "container_image") {
     problems.push(...buildArgProblems(stage));

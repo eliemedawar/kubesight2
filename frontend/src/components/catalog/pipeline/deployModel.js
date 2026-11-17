@@ -156,6 +156,37 @@ export const isLinkedDeploy = (deploy) => deploy?.target === "linked";
 /** The stage installs, then upgrades, a release of an Inventory Helm chart. */
 export const isHelmDeploy = (deploy) => deploy?.target === "helm";
 
+/** The chart travels with the code: each build deploys the chart folder (and
+ * values file) of the commit it built (deploy_config chartSource "repository"). */
+export const chartFromRepository = (helm) => helm?.chartSource === "repository";
+
+// deploy_config._REPO_PATH_RE
+const REPO_PATH = /^[A-Za-z0-9_.@+-]+(\/[A-Za-z0-9_.@+-]+){0,15}$/;
+
+/** A path in the repository as the backend stores it: no "./", no slashes at the ends. */
+export const cleanRepoPath = (value) =>
+  String(value || "").replace(/\\/g, "/").split("/").filter((part) => part && part !== ".").join("/");
+
+/** What a save would refuse about a chart taken from the repository. */
+export function repositoryChartProblems(helm) {
+  const problems = [];
+  const add = (message) => problems.push({ field: "deploy", message });
+  const chartPath = cleanRepoPath(helm.chartPath);
+  const valuesPath = cleanRepoPath(helm.valuesPath);
+  if (!chartPath) add("Name the chart folder in the repository, like charts/my-app.");
+  else if (chartPath.split("/").includes("..") || !REPO_PATH.test(chartPath)) {
+    add("The chart folder may use letters, digits, '.', '_', '-' and '/', and no '..'.");
+  }
+  if (valuesPath) {
+    if (valuesPath.split("/").includes("..") || !REPO_PATH.test(valuesPath)) {
+      add("The values file may use letters, digits, '.', '_', '-' and '/', and no '..'.");
+    } else if (!/\.ya?ml$/i.test(valuesPath)) {
+      add("The values file must be a .yaml file.");
+    }
+  }
+  return problems;
+}
+
 export const blankHelm = () => ({
   chartTemplateId: "",
   chartName: "",
@@ -462,7 +493,12 @@ export function deployProblems(deploy, stages) {
       add(`The release name must be lowercase letters, digits and '-', at most ${MAX_RELEASE} characters.`);
     }
     const helm = deploy.helm || {};
-    if (!helm.chartTemplateId) add("Pick the Inventory chart to deploy.");
+    if (!helm.chartTemplateId) {
+      add(chartFromRepository(helm)
+        ? "Pick the Inventory chart each build's chart is recorded under."
+        : "Pick the Inventory chart to deploy.");
+    }
+    if (chartFromRepository(helm)) problems.push(...repositoryChartProblems(helm));
     if (setsSeveralImages(helm)) {
       problems.push(...helmImagesProblems(helm.images || [], stages));
       return problems;
@@ -515,6 +551,7 @@ export const SERVER_STAGE_KINDS = {
   deploy: "Deploy",
   approval: "Approval",
   store_upload: "App store upload",
+  chart_check: "Chart check",
 };
 
 export const isServerStage = (stage) => Boolean(SERVER_STAGE_KINDS[stage?.stageType]);

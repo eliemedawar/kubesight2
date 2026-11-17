@@ -12,6 +12,8 @@ import {
   blankHelmImage,
   guessImageRows,
   blankDeploymentRow,
+  chartFromRepository,
+  cleanRepoPath,
   guessImageValues,
   isHelmDeploy,
   MAX_DEPLOYMENTS,
@@ -846,10 +848,71 @@ function HelmChartFields({ ids, deploy, editable, onChange, imageStages }) {
     setChart({ imageSet: "several", images: guessImageRows(defaultValues, stageNames) });
   };
 
+  const fromRepository = chartFromRepository(helm);
   return (
     <>
+      <Field
+        label="Chart from"
+        hint={
+          fromRepository
+            ? "Each build deploys the chart folder and values file of the commit it built, and records them as a new version of the Inventory chart below (not made current)."
+            : "A version stored in Inventory. A chart that changes with the code is better taken from the repository."
+        }
+      >
+        <Segmented
+          label="Chart from"
+          value={fromRepository ? "repository" : "inventory"}
+          options={[
+            { value: "inventory", label: "An Inventory version" },
+            { value: "repository", label: "This repository" },
+          ]}
+          disabled={!editable}
+          onChange={(source) =>
+            setChart(
+              source === "repository"
+                ? { chartSource: "repository", chartPath: helm.chartPath || "", valuesPath: helm.valuesPath || "", chartVersion: "", valuesFile: "" }
+                : { chartSource: undefined }
+            )
+          }
+        />
+      </Field>
+      {fromRepository ? (
+        <div className="pl-grid pl-deploy-target">
+          <Field label="Chart folder" hint="In the service's repository, at the commit the build built.">
+            <input
+              id={`${ids}-chart-path`}
+              className="is-mono"
+              value={helm.chartPath || ""}
+              placeholder="charts/my-app"
+              disabled={!editable}
+              spellCheck={false}
+              onChange={(event) => setChart({ chartPath: event.target.value })}
+              onBlur={(event) => setChart({ chartPath: cleanRepoPath(event.target.value) })}
+            />
+          </Field>
+          <Field
+            label="Values file"
+            optional
+            hint="This environment's values, from the same commit. They go over the chart's defaults and the release's own values on every deploy. No secrets: those come from OpenBao."
+          >
+            <input
+              id={`${ids}-values-path`}
+              className="is-mono"
+              value={helm.valuesPath || ""}
+              placeholder="deploy/values-uat.yaml"
+              disabled={!editable}
+              spellCheck={false}
+              onChange={(event) => setChart({ valuesPath: event.target.value })}
+              onBlur={(event) => setChart({ valuesPath: cleanRepoPath(event.target.value) })}
+            />
+          </Field>
+        </div>
+      ) : null}
       <div className="pl-grid pl-deploy-target">
-        <Field label="Inventory chart" hint="From Inventory → Helm charts.">
+        <Field
+          label="Inventory chart"
+          hint={fromRepository ? "Where each build's chart is recorded as a version, with its commit." : "From Inventory → Helm charts."}
+        >
           <SearchableSelect
             id={`${ids}-chart`}
             aria-label="Inventory chart"
@@ -872,6 +935,8 @@ function HelmChartFields({ ids, deploy, editable, onChange, imageStages }) {
             onChange={(event) => pickChart(event.target.value)}
           />
         </Field>
+        {fromRepository ? null : (
+        <>
         <Field label="Version" hint="The current one follows the chart: a newer version set current in the inventory is used by the next build.">
           <SearchableSelect
             id={`${ids}-chart-version`}
@@ -905,7 +970,27 @@ function HelmChartFields({ ids, deploy, editable, onChange, imageStages }) {
             onChange={(event) => setChart({ valuesFile: event.target.value })}
           />
         </Field>
+        </>
+        )}
       </div>
+      <label className="pl-check">
+        <input
+          type="checkbox"
+          checked={helm.policy === "ai-cluster"}
+          disabled={!editable}
+          onChange={(event) => setChart({ policy: event.target.checked ? "ai-cluster" : undefined })}
+        />
+        <span>
+          <strong>Check the chart against the AI cluster rules</strong>
+          <small>
+            Before deploying, the rendered chart is checked like the platform team&apos;s areeba-check: one front door
+            (no load balancers or Ingress), secrets only through OpenBao, the database through the pooler, images from
+            registry.areeba.com, pod security, resources, no card data. A broken rule stops the deploy; advice goes to
+            the build log.
+            {fromRepository ? " A chart from the repository must also render, checked or not." : ""}
+          </small>
+        </span>
+      </label>
       <Field
         label="Images"
         hint={
@@ -1314,7 +1399,11 @@ function HelmReleaseStatus({ deploy, info, target, targetKey, clusterName }) {
   }
   if (!deploy.releaseName) return null;
   const release = (info?.helmReleases || []).find((item) => item.name === deploy.releaseName);
-  const chart = deploy.helm?.chartName || "the chart";
+  const fromRepo = chartFromRepository(deploy.helm);
+  const chart = fromRepo
+    ? `the chart in ${deploy.helm?.chartPath || "the repository"}`
+    : deploy.helm?.chartName || "the chart";
+  const repoValues = fromRepo && deploy.helm?.valuesPath ? deploy.helm.valuesPath : "";
   if (release) {
     return (
       <div className="pl-deploy-status is-exists">
@@ -1322,7 +1411,11 @@ function HelmReleaseStatus({ deploy, info, target, targetKey, clusterName }) {
         <p>
           <strong>Installed</strong> · revision {release.revision} · <code>{release.chart}</code> · {release.status}
           <small>
-            Each build upgrades it to {chart}, keeping the values it runs with — only the image values change.
+            {repoValues ? (
+              <>Each build upgrades it to {chart} of its commit, keeping the values it runs with, then <code>{repoValues}</code> over them, then the images.</>
+            ) : (
+              <>Each build upgrades it to {chart}{fromRepo ? " of its commit" : ""}, keeping the values it runs with — only the image values change.</>
+            )}
           </small>
         </p>
       </div>
@@ -1333,7 +1426,7 @@ function HelmReleaseStatus({ deploy, info, target, targetKey, clusterName }) {
       <PlIcon name="plus" />
       <p>
         <strong>Not installed in {deploy.namespace} yet</strong> — the first build installs {chart} with{" "}
-        {deploy.helm?.valuesFile ? <code>{deploy.helm.valuesFile}</code> : "its own values"}. Nothing has to be
+        {repoValues || deploy.helm?.valuesFile ? <code>{repoValues || deploy.helm.valuesFile}</code> : "its own values"}. Nothing has to be
         filled in.
       </p>
     </div>
