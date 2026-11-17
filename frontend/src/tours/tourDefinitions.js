@@ -13,6 +13,7 @@
 // can differ between admins and other roles.
 
 import { pageNeedsClusterContext, pageNeedsNamespaceContext } from "../utils/authz.js";
+import { shortcutLabel } from "../lib/shortcuts.js";
 
 export const WELCOME_TOUR_KEY = "welcome";
 
@@ -22,8 +23,8 @@ const WELCOME_STEPS = [
     title: "Welcome to KubeSight",
     body: (ctx) =>
       ctx.isAdmin
-        ? "The sidebar is your map, grouped by what you are doing: build applications, deliver them, run the infrastructure, observe it, and administer the platform. Press Ctrl+K to jump anywhere."
-        : "The sidebar is your map. It only lists the areas your role has access to, so what you see here is exactly what you can use. Press Ctrl+K to jump anywhere.",
+        ? `The sidebar is your map, grouped by what you are doing: build applications, deliver them, run the infrastructure, observe it, and administer the platform. Press ${shortcutLabel("K")} to jump anywhere.`
+        : `The sidebar is your map. It only lists the areas your role has access to, so what you see here is exactly what you can use. Press ${shortcutLabel("K")} to jump anywhere.`,
   },
   {
     target: '[data-tour="cluster-select"]',

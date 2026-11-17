@@ -13,7 +13,7 @@ function score(target, query) {
 }
 
 /**
- * Ctrl/⌘+K: type a few letters, Enter, you are there. Lists every page and
+ * Alt/⌥+K: type a few letters, Enter, you are there. Lists every page and
  * workspace tab the user may open — the same set the sidebar shows.
  */
 export default function JumpPalette({ open, targets, onClose, onSelect }) {

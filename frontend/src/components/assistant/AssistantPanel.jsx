@@ -12,6 +12,7 @@ import { parseApiTime } from "../../lib/apiTime.js";
 import { parseBlocks, parseInline } from "../../lib/chatMarkdown.js";
 import { confirmDialog } from "../../lib/dialogs.js";
 import { setVisibleInterval } from "../../lib/visibleInterval.js";
+import { shortcutLabel } from "../../lib/shortcuts.js";
 
 const STORAGE_KEY = "kubesight.assistant.conversation";
 // While Hermes answers, the reply row fills in as it streams: poll quickly so
@@ -176,7 +177,7 @@ function PendingReply({ since, activity, content }) {
 }
 
 /**
- * Ctrl/⌘+G: chat with Hermes — the same Hermes as the Telegram bot, with the
+ * Alt/⌥+G: chat with Hermes — the same Hermes as the Telegram bot, with the
  * kubesight skill and KubeSight's MCP tools — without leaving the page. Admins
  * only (the backend refuses everyone else). Non-modal, so the page stays
  * usable beside it; each question carries what is on screen.
@@ -487,7 +488,7 @@ export default function AssistantPanel({ open, onClose, context }) {
         </div>
         <p className="as-hint">
           {context?.clusterName ? `Sees: ${[context.pageLabel, context.clusterName, context.namespace].filter(Boolean).join(" · ")}` : context?.pageLabel ? `Sees: ${context.pageLabel}` : ""}
-          <span><kbd>Enter</kbd> send · <kbd>Shift+Enter</kbd> new line · <kbd>Ctrl+G</kbd> close</span>
+          <span><kbd>Enter</kbd> send · <kbd>Shift+Enter</kbd> new line · <kbd>{shortcutLabel("G").replace(" ", "+")}</kbd> or <kbd>Esc</kbd> close</span>
         </p>
       </form>
     </aside>

@@ -3,7 +3,7 @@
  *
  * Every destination is visible: groups are labelled lists, not hover flyouts.
  * Built only on the theme tokens so light and dark follow automatically.
- *   .nav-jump        "Jump to…" button (opens the Ctrl/⌘+K palette)
+ *   .nav-jump        "Jump to…" button (opens the Alt/⌥+K palette)
  *   .nav-group       a labelled, foldable group of links
  *   .nav-ws          a workspace entry with its tabs nested while active
  *   .ws-bar          the workspace header + tab strip on top of the page

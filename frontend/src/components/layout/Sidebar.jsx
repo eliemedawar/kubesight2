@@ -5,6 +5,7 @@ import { buildNavGroups, sidebarKeyFor } from "../../lib/navigation.js";
 import { navIcon } from "./navIcons.jsx";
 import { getApprovalsCount } from "../../api/approvalsApi.js";
 import { setVisibleInterval } from "../../lib/visibleInterval";
+import { shortcutLabel } from "../../lib/shortcuts.js";
 import {
   approvalsCountClaimed,
   setApprovalsWaiting,
@@ -78,9 +79,6 @@ function useApprovalsWaiting(enabled) {
   }, [enabled]);
   return enabled ? count || 0 : 0;
 }
-
-const isMac =
-  typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || "");
 
 /**
  * Primary navigation: every destination is visible at once, grouped by what
@@ -172,7 +170,7 @@ export default function Sidebar({
             <SearchGlyph />
           </span>
           <span className="nav-jump-label">Jump to…</span>
-          <kbd className="nav-jump-kbd">{isMac ? "⌘K" : "Ctrl K"}</kbd>
+          <kbd className="nav-jump-kbd">{shortcutLabel("K")}</kbd>
         </button>
       ) : null}
 

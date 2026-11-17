@@ -1,6 +1,6 @@
 import { request } from "./client";
 
-// The in-app assistant (Ctrl+G, admins only): chat with the Hermes that has the
+// The in-app assistant (Alt+G, admins only): chat with the Hermes that has the
 // kubesight skill. Sending returns at once with a pending reply; poll the
 // conversation until `pending` is false.
 

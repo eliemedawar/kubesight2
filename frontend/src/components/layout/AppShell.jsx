@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { altShortcutLetter } from "../../lib/shortcuts.js";
 import ErrorBanner from "../common/ErrorBanner";
 import { useEscapeToClose } from "../../hooks/useEscapeToClose.js";
 import LoadingState from "../common/LoadingState";
@@ -73,17 +74,15 @@ export default function AppShell({
     [closeSidebar, onNavigate]
   );
 
-  // Ctrl/⌘+K opens the jump palette from anywhere; Ctrl/⌘+G the Hermes chat
-  // (admins only — the backend refuses everyone else too).
+  // Alt+K (⌥K) opens the jump palette from anywhere; Alt+G (⌥G) the Hermes
+  // chat (admins only — the backend refuses everyone else too). lib/shortcuts.js
   useEffect(() => {
     const handleKeyDown = (event) => {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
-      const key = event.key.toLowerCase();
-      if (key === "k") {
+      const letter = altShortcutLetter(event);
+      if (letter === "K") {
         event.preventDefault();
         setJumpOpen((isOpen) => !isOpen);
-      } else if (key === "g" && assistantEnabled) {
-        // Also the browser's "find next" — taken over only for admins.
+      } else if (letter === "G" && assistantEnabled) {
         event.preventDefault();
         setAssistantOpen((isOpen) => !isOpen);
       }

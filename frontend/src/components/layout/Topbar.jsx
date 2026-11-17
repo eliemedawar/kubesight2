@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import NotificationsDropdown from "./NotificationsDropdown.jsx";
 import SearchableSelect from "../common/SearchableSelect.jsx";
+import { altShortcutLetter, shortcutLabel } from "../../lib/shortcuts.js";
 
 const IconBell = () => (
   <svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -39,23 +40,8 @@ function formatBadgeCount(count) {
   return count > 9 ? "9+" : String(count);
 }
 
-const isMac =
-  typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || "");
-
-// Alt+C / Alt+N (⌥C / ⌥N) open the cluster and namespace pickers. Not Ctrl+N:
-// browsers keep Ctrl+N (and Ctrl+T, Ctrl+W) for themselves.
-const PICKER_SHORTCUTS = { KeyC: "cluster", KeyN: "namespace" };
-const shortcutLabel = (letter) => (isMac ? `⌥${letter}` : `Alt ${letter}`);
-
-function isTextEntry(target) {
-  if (!target || !(target instanceof Element)) return false;
-  if (target.isContentEditable) return true;
-  if (target.tagName === "TEXTAREA") return true;
-  if (target.tagName !== "INPUT") return false;
-  return !["button", "checkbox", "radio", "range", "submit", "reset", "file", "color"].includes(
-    (target.getAttribute("type") || "text").toLowerCase()
-  );
-}
+// Alt+C / Alt+N (⌥C / ⌥N) open the cluster and namespace pickers (lib/shortcuts.js).
+const PICKER_SHORTCUTS = { C: "cluster", N: "namespace" };
 
 export default function Topbar({
   allowedClusters,
@@ -97,14 +83,8 @@ export default function Topbar({
 
   useEffect(() => {
     const handleKeyDown = (event) => {
-      if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.defaultPrevented) {
-        return;
-      }
-      // event.code, not event.key: on a Mac ⌥N types a character, not "n".
-      const picker = PICKER_SHORTCUTS[event.code];
+      const picker = PICKER_SHORTCUTS[altShortcutLetter(event)];
       if (!picker) return;
-      // On a Mac ⌥+letter types accented characters, so leave text fields alone there.
-      if (isMac && isTextEntry(event.target)) return;
       // A dialog owns the keyboard; the pickers sit behind it.
       if (document.querySelector('[aria-modal="true"]')) return;
       const field = picker === "cluster" ? clusterFieldRef.current : namespaceFieldRef.current;

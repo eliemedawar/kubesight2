@@ -9,7 +9,7 @@ import { registerGuard } from "../routes/leaveGuard.js";
  *   });
  *
  * While `isDirty` is true the page holds a leave guard: the router asks before
- * any move that would lose the draft (sidebar, Ctrl+K, a link, Back/Forward,
+ * any move that would lose the draft (sidebar, Alt+K, a link, Back/Forward,
  * a typed address) and the browser asks before the tab closes or reloads.
  *
  * Options (read at the moment of asking, so they may change every render):
