@@ -291,7 +291,7 @@ export default function RunnersModal({ canManage, onClose }) {
                                 onClick={async () => {
                                   setBusyId(runner.id);
                                   try {
-                                    setIssued(await rotateCiAgentToken(runner.id));
+                                    setIssued({ ...(await rotateCiAgentToken(runner.id)), rotated: true });
                                     await load();
                                   } catch (err) {
                                     setError(err.message || "Could not rotate the token.");

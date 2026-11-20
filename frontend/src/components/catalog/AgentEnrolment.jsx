@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import AgentInstallHelp from "./AgentInstallHelp.jsx";
 
 const PLATFORMS = [
@@ -159,6 +159,15 @@ function Token({ issued, onDone }) {
   const [showHelp, setShowHelp] = useState(true);
   const install = issued.install || {};
   const command = `python3 kubesight-agent.py --url ${install.url || ""} --token ${issued.token}`;
+  // The panel sits at the top of the runner list, and "New token" is clicked on
+  // a row that may be far below it: bring it into view, or the token (shown
+  // once) is issued where nobody sees it.
+  const panelRef = useRef(null);
+  const headingRef = useRef(null);
+  useEffect(() => {
+    panelRef.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+    headingRef.current?.focus?.({ preventScroll: true });
+  }, [issued.token]);
 
   const copy = async (text, what) => {
     try {
@@ -171,11 +180,16 @@ function Token({ issued, onDone }) {
   };
 
   return (
-    <section className="sg-ci-agent-token">
-      <h4>{issued.name} registered</h4>
+    <section className="sg-ci-agent-token" ref={panelRef}>
+      <h4 ref={headingRef} tabIndex={-1}>
+        {issued.rotated ? `New token for ${issued.name}` : `${issued.name} registered`}
+      </h4>
       <p className="muted">
         This token is shown once — only its hash is stored. Copy it now; if it is
         lost, issue a new one from this dialog.
+        {issued.rotated
+          ? " The previous token has stopped working: put this one in the agent's settings and restart it."
+          : ""}
       </p>
 
       <div className="sg-ci-agent-token-row">
