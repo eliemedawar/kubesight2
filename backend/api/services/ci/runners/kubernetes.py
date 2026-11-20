@@ -360,7 +360,12 @@ def _b64(value: str) -> str:
 # ---------------------------------------------------------------------------
 
 _CHECKOUT_SCRIPT = r"""set -eu
-umask 077
+# The ordinary umask, so the checkout has the modes git records (644, 755
+# for executables) as in anyone's clone. 077 made every file 600: an image
+# build then copied them in unreadable to its non-root user (nginx answered
+# 403 for files from public/, such as favicon.png and config.js). Nothing
+# secret is written here; git's credentials stay in the environment.
+umask 022
 export HOME=/tmp TMPDIR=/tmp
 # Never fall back to an interactive prompt: without this a rejected credential
 # surfaces as "could not read Username", which hides the actual 401.

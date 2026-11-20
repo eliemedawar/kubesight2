@@ -1523,3 +1523,25 @@ def test_stages_are_told_where_their_workspace_is():
     env = {item["name"]: item.get("value") for item in stage["env"]}
     assert env["KUBESIGHT_WORKSPACE"] == "/workspace"
     assert env["KUBESIGHT_SOURCE"] == "/workspace/source"
+
+
+def test_checkout_keeps_the_file_modes_git_records():
+    """The checkout used umask 077, so every file came out 600: an image built
+    from it served nothing from public/ to a non-root nginx (403 favicon.png,
+    config.js). It must check out with the ordinary 022."""
+    import shutil
+    import subprocess
+
+    from api.services.ci.runners.kubernetes import _CHECKOUT_SCRIPT
+
+    assert "umask 022" in _CHECKOUT_SCRIPT
+    assert "umask 077" not in _CHECKOUT_SCRIPT
+
+    sh = shutil.which("sh")
+    if not sh:
+        return
+    # What the umask does to a file git writes (git creates files 0666 & ~umask).
+    probe = 'umask 022; f=$(mktemp -u); : > "$f"; ls -l "$f" | cut -c1-10; rm -f "$f"'
+    out = subprocess.run([sh, "-c", probe], capture_output=True, text=True).stdout.strip()
+    if out.startswith("-"):
+        assert out == "-rw-r--r--"
