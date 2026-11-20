@@ -540,13 +540,21 @@ export function ArtifactRows({ value, onChange, disabled }) {
 
 /** Tags typed as words: Enter or comma makes a chip, Backspace takes one back.
  * Lowercased by default (runner capabilities are); branch names are not. */
-export function ChipsInput({ value, onChange, disabled, placeholder, label, lowercase = true }) {
+/**
+ * Chips typed into one box. By default a comma or a space ends a chip.
+ * `paths`: only a comma (or Enter) ends one, and spaces are dropped, so
+ * "modules/ ${MODULE}" is one path, not "modules" and "${MODULE}".
+ */
+export function ChipsInput({ value, onChange, disabled, placeholder, label, lowercase = true, paths = false }) {
   const [text, setText] = useState("");
   const items = value || [];
+  const separators = paths ? /[,\n]+/ : /[,\s]+/;
+  const endsWithSeparator = paths ? /[,\n]$/ : /[,\s]$/;
   const commit = (raw) => {
     const next = String(raw)
-      .split(/[,\s]+/)
-      .map((item) => (lowercase ? item.trim().toLowerCase() : item.trim()))
+      .split(separators)
+      .map((item) => (paths ? item.replace(/\s+/g, "") : item.trim()))
+      .map((item) => (lowercase ? item.toLowerCase() : item))
       .filter(Boolean)
       .filter((item) => !items.includes(item));
     if (next.length) onChange([...items, ...next]);
@@ -576,7 +584,7 @@ export function ChipsInput({ value, onChange, disabled, placeholder, label, lowe
           placeholder={items.length ? "" : placeholder}
           onChange={(event) => {
             const next = event.target.value;
-            if (/[,\s]$/.test(next)) commit(next);
+            if (endsWithSeparator.test(next)) commit(next);
             else setText(next);
           }}
           onKeyDown={(event) => {

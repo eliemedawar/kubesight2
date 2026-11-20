@@ -97,8 +97,8 @@ export default function ScanStageFields({
               <>
                 Empty scans everything under <code>{serviceDirectory || "the repository root"}</code>.
                 Name one or more modules to scan only those — e.g. <code>payments-core</code>, or{" "}
-                <code>{"${MODULE}"}</code> to pick the module from a build input. A directory missing
-                from the checkout fails the stage.
+                <code>{"modules/${MODULE}"}</code> to pick the module from a build input. Separate
+                directories with a comma or Enter. A directory missing from the checkout fails the stage.
               </>
             }
           >
@@ -106,6 +106,7 @@ export default function ScanStageFields({
               label="Directories to scan"
               value={scan.paths || []}
               lowercase={false}
+              paths
               placeholder="Whole tree — or e.g. payments-core, modules/${MODULE}"
               disabled={!editable}
               onChange={(paths) => setScan({ paths })}
