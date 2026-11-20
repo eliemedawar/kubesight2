@@ -194,6 +194,19 @@ data:
   # here must fit on the node beside buildkitd's layer cache; KubeSight raises it
   # on its own only to match a larger limit a service or stage was granted.
   CI_WORKSPACE_SIZE_LIMIT: "off"
+  # Put /workspace on the node's own big disk instead of the kubelet's (5 GiB
+  # here, shared with every pod's logs, which is what got builds evicted).
+  # Each build gets <dir>/<job name> on its node; a root-only first step hands
+  # it to the build user, the collector empties it at the end, and a later
+  # build on the node removes folders of builds that were evicted or cancelled
+  # once their deadline has passed. Only "ci-b<number>-..." folders are ever
+  # removed. CI_WORKSPACE_SIZE_LIMIT does not apply to it. Empty = emptyDir.
+  CI_WORKSPACE_HOST_DIR: "/data/kubesight-ci/workspaces"
+  # Optional "key=value": only nodes that have that disk (every worker here
+  # has /data, so none is set).
+  CI_WORKSPACE_HOST_NODE_SELECTOR: ""
+  # A folder whose prep step died before stamping it goes after this long.
+  CI_WORKSPACE_HOST_STALE_HOURS: "24"
 
   # --- Housekeeping ---------------------------------------------------------
   CI_JOB_TTL_SECONDS: "900"

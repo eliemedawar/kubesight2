@@ -551,9 +551,40 @@ for image in images:
         print("[kubesight] image record failed:", exc)
         failures += 1
 
+""" + r"""
+def empty_workspace():
+    # A workspace on the node's own disk (CI_WORKSPACE_HOST_DIR) outlives the
+    # pod, so its contents go now that everything is uploaded. The stamp the
+    # prep step wrote stays: the next build on this node removes the empty
+    # folder once its deadline has passed (it is root's, in a root folder).
+    if os.environ.get("KUBESIGHT_WORKSPACE_EMPTY_AT_END") != "1":
+        return
+    root = os.environ.get("KUBESIGHT_WORKSPACE_PATH") or "/workspace"
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return
+    freed = 0
+    for name in names:
+        if name == ".kubesight-workspace":
+            continue
+        path = os.path.join(root, name)
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.remove(path)
+            freed += 1
+        except OSError:
+            pass
+    print("[kubesight] emptied the build's folder on the node (%d entries)" % freed)
+""" + r"""
+
 if failures:
+    empty_workspace()
     # A build must not report success while its declared outputs are missing.
     sys.exit(1)
+empty_workspace()
 print("[kubesight] artifact collection complete")
 """
 
@@ -1864,6 +1895,121 @@ def _workspace_medium(plan: Optional[List[StageExecution]] = None) -> Dict[str, 
 
 
 # ---------------------------------------------------------------------------
+# Workspace on the node's own disk (CI_WORKSPACE_HOST_DIR)
+#
+# An emptyDir lives on the kubelet's disk. Where that disk is small (5 GiB on
+# the on-prem nodes, shared with every pod's logs), a Node or Gradle build
+# fills it and kubelet evicts whatever uses most — the build, or a neighbour.
+# With CI_WORKSPACE_HOST_DIR set, /workspace is <dir>/<job name> on the node
+# instead (a hostPath), which kubelet does not count as ephemeral storage.
+#
+# What a hostPath does not do on its own, and what replaces it:
+# * it arrives owned by root -> a first init container (root, CHOWN and
+#   DAC_OVERRIDE only) hands it to the build user before any stage runs;
+# * it outlives the pod -> the collector empties it after uploading, and that
+#   same first container removes OTHER builds' folders on this node whose
+#   deadline has passed (evicted, cancelled, timed out). Only folders named
+#   like a build's Job are ever touched, so a setting that names a shared
+#   directory by mistake cannot delete anything else in it.
+# ---------------------------------------------------------------------------
+
+WORKSPACE_PREP_CONTAINER = "workspace-prep"
+WORKSPACE_STAMP = ".kubesight-workspace"
+_HOST_ROOT_MOUNT = "/kubesight-workspaces"
+
+
+def workspace_host_dir() -> str:
+    """The node directory build workspaces go under, or "" (emptyDir)."""
+    raw = _env("CI_WORKSPACE_HOST_DIR", "").strip()
+    if not raw or _is_off(raw):
+        return ""
+    path = "/" + "/".join(part for part in raw.split("/") if part)
+    parts = [part for part in path.split("/") if part]
+    if not raw.startswith("/") or any(part in (".", "..") for part in parts):
+        raise RunnerError(
+            f"CI_WORKSPACE_HOST_DIR must be an absolute path on the node, not '{raw}'."
+        )
+    if len(parts) < 2:
+        raise RunnerError(
+            f"CI_WORKSPACE_HOST_DIR '{raw}' is a top-level directory. Give builds a folder "
+            "of their own under it, e.g. /data/kubesight-ci/workspaces."
+        )
+    return path
+
+
+def workspace_node_selector() -> Dict[str, str]:
+    """CI_WORKSPACE_HOST_NODE_SELECTOR "key=value[,key=value]": only nodes that
+    have the disk. Read only while workspaces are on the node."""
+    out: Dict[str, str] = {}
+    for item in _env("CI_WORKSPACE_HOST_NODE_SELECTOR", "").split(","):
+        key, sep, value = item.strip().partition("=")
+        if key.strip() and sep:
+            out[key.strip()] = value.strip()
+    return out
+
+
+def workspace_prep_script() -> str:
+    """Runs as root before the first stage: own the folder, stamp it, sweep.
+
+    Never fails the build: a sweep that cannot remove something costs disk,
+    not a build, and a folder that could not be handed over shows up as the
+    first stage's own "Permission denied", which says more than this would.
+    """
+    return (
+        'set -u\n'
+        'ws=/workspace; root=' + _HOST_ROOT_MOUNT + '; now=$(date +%s)\n'
+        'if chmod 0775 "$ws" && chown 65532:65532 "$ws"; then :; else\n'
+        '  echo "[kubesight] could not hand $ws to the build user" >&2; fi\n'
+        'echo "expires=$((now + KUBESIGHT_WORKSPACE_TTL))" > "$ws/' + WORKSPACE_STAMP + '" || true\n'
+        'removed=0\n'
+        'for dir in "$root"/*; do\n'
+        '  [ -d "$dir" ] || continue\n'
+        '  name=${dir##*/}\n'
+        '  [ "$name" = "$KUBESIGHT_JOB_NAME" ] && continue\n'
+        '  case "$name" in ci-b[0-9]*) ;; *) continue ;; esac\n'
+        '  exp=$(sed -n "s/^expires=//p" "$dir/' + WORKSPACE_STAMP + '" 2>/dev/null | head -n 1)\n'
+        '  case "$exp" in\n'
+        '    ""|*[!0-9]*)\n'
+        '      [ -n "$(find "$dir" -maxdepth 0 -mmin +"$KUBESIGHT_WORKSPACE_STALE_MINUTES" 2>/dev/null)" ] || continue ;;\n'
+        '    *) [ "$now" -gt "$exp" ] || continue ;;\n'
+        '  esac\n'
+        '  if rm -rf "$dir"; then removed=$((removed + 1)); echo "[kubesight] removed the finished build folder $name"; fi\n'
+        'done\n'
+        'echo "[kubesight] workspace on the node: $root/$KUBESIGHT_JOB_NAME (cleared $removed old)"\n'
+    )
+
+
+def _workspace_prep_container(job_name: str, ttl_seconds: int) -> Dict[str, Any]:
+    stale_hours = max(1, _int_env("CI_WORKSPACE_HOST_STALE_HOURS", 24))
+    return {
+        "name": WORKSPACE_PREP_CONTAINER,
+        "image": _worker_image(),
+        "imagePullPolicy": _env("CI_IMAGE_PULL_POLICY", "IfNotPresent"),
+        "command": ["/bin/sh", "-c", workspace_prep_script()],
+        "env": [
+            {"name": "KUBESIGHT_JOB_NAME", "value": job_name},
+            {"name": "KUBESIGHT_WORKSPACE_TTL", "value": str(int(ttl_seconds))},
+            {"name": "KUBESIGHT_WORKSPACE_STALE_MINUTES", "value": str(stale_hours * 60)},
+        ],
+        # Root only for chown and removing other builds' folders: no other
+        # capability, no escalation, read-only root filesystem.
+        "securityContext": {
+            "runAsUser": 0,
+            "runAsGroup": 0,
+            "runAsNonRoot": False,
+            "allowPrivilegeEscalation": False,
+            "readOnlyRootFilesystem": True,
+            "capabilities": {"drop": ["ALL"], "add": ["CHOWN", "DAC_OVERRIDE"]},
+        },
+        "volumeMounts": [
+            {"name": "workspace", "mountPath": "/workspace"},
+            {"name": "workspaces-root", "mountPath": _HOST_ROOT_MOUNT},
+        ],
+        "resources": {"requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"cpu": "500m", "memory": "256Mi"}},
+    }
+
+
+# ---------------------------------------------------------------------------
 # Dependency cache
 #
 # Without one, every build re-downloads its whole dependency graph: a Gradle or
@@ -2139,6 +2285,9 @@ def _build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
     namespace = _namespace()
     job_name = job_name_for(first)
     secret_name = f"{job_name}-secrets"
+    # Read once, up front: a bad value refuses the build before anything is
+    # created rather than after the Secret already exists.
+    host_dir = workspace_host_dir()
     callback_url = first.callback_url
     labels = {
         "app.kubernetes.io/name": "kubesight-ci",
@@ -2394,16 +2543,28 @@ def _build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
                 "value": str(int(_env("CI_MAX_ARTIFACT_MB", "512")) * 1024 * 1024),
             },
         ]
+        # A workspace on the node outlives the pod: empty it once uploaded.
+        + ([{"name": "KUBESIGHT_WORKSPACE_EMPTY_AT_END", "value": "1"}] if host_dir else [])
         + callback_env,
         "securityContext": dict(_SECURITY_CONTEXT),
         "volumeMounts": _mounts(),
         "resources": {"requests": dict(_DEFAULT_REQUESTS), "limits": {"cpu": "1", "memory": "1Gi"}},
     }
 
-    volumes = [
-        {"name": "workspace", "emptyDir": _workspace_medium(plan)},
-        {"name": "tmp", "emptyDir": {"sizeLimit": "512Mi"}},
-    ]
+    if host_dir:
+        volumes = [
+            # Not counted by kubelet as ephemeral storage, so no sizeLimit and
+            # no eviction for it: the node disk it names is the limit.
+            {
+                "name": "workspace",
+                "hostPath": {"path": f"{host_dir}/{job_name}", "type": "DirectoryOrCreate"},
+            },
+            # Mounted by the prep step only, to sweep finished builds' folders.
+            {"name": "workspaces-root", "hostPath": {"path": host_dir, "type": "DirectoryOrCreate"}},
+        ]
+    else:
+        volumes = [{"name": "workspace", "emptyDir": _workspace_medium(plan)}]
+    volumes.append({"name": "tmp", "emptyDir": {"sizeLimit": "512Mi"}})
     if cache_enabled():
         volumes.append(
             {
@@ -2438,6 +2599,12 @@ def _build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
         sum(int(execution.timeout_seconds or 1800) for execution in plan) + 900 + post_timeout_seconds
     )
     host_aliases = _merged_host_aliases(plan)
+    node_selector = workspace_node_selector() if host_dir else {}
+    if host_dir:
+        # First of all, before any stage: the folder must be the build user's.
+        # Its stamp outlives the Job's own deadline by an hour, so a sweep can
+        # never take the folder of a build that is still allowed to run.
+        init_containers.insert(0, _workspace_prep_container(job_name, total_timeout + 3600))
 
     job = {
         "apiVersion": "batch/v1",
@@ -2469,6 +2636,8 @@ def _build_job_resources(first: StageExecution) -> List[Dict[str, Any]]:
                     # starts, so a stage's commands never have to patch a file
                     # they cannot write (the root filesystem is read-only).
                     **({"hostAliases": host_aliases} if host_aliases else {}),
+                    # Only nodes that have the disk the workspaces go on.
+                    **({"nodeSelector": node_selector} if node_selector else {}),
                     "securityContext": {
                         "runAsNonRoot": True,
                         "seccompProfile": {"type": "RuntimeDefault"},
