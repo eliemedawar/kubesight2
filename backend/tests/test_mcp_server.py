@@ -228,6 +228,9 @@ def test_every_tool_declares_honestly_whether_it_writes(client, admin_token):
         "kubesight_shared_pipeline_create",
         "kubesight_shared_pipeline_attach",
         "kubesight_shared_pipeline_detach",
+        # One service's starting values for a shared pipeline's inputs — never
+        # the shared questions themselves, never another service's.
+        "kubesight_shared_pipeline_defaults_set",
         # Merge checks: moves the quality gate for every service that inherits
         # it. Nothing here can switch a service's checks off or re-send a
         # verdict — an agent relaxing a gate to get a merge through is the exact

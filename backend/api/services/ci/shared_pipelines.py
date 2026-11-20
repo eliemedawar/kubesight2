@@ -289,7 +289,14 @@ def copy_payload_of(service: CiService) -> Dict[str, Any]:
         stages = [pipeline_stage_to_dict(stage) for stage in effective.stages]
         return {
             "stages": [_as_payload(stage) for stage in stages],
-            "parameters": pipelines_service.parameter_definitions(effective),
+            # What it builds with today, so a linked service's own defaults.
+            "parameters": [
+                {k: v for k, v in param.items() if k != "sharedDefault"}
+                for param in pipelines_service.apply_parameter_defaults(
+                    effective.parameters,
+                    row.parameter_defaults if row.linked_pipeline_id else None,
+                )
+            ],
             "postActions": list(effective.post_actions or []),
         }
     try:
@@ -428,6 +435,10 @@ def attach(service: CiService, home: CiService, *, actor=None) -> Dict[str, Any]
         db.session.add(row)
         db.session.flush()
     previous = row.linked_pipeline_id
+    if previous != shared.id:
+        # Defaults picked for another pipeline's inputs are not answers to
+        # this one's, even where a name happens to match.
+        row.parameter_defaults = None
     row.linked_pipeline_id = shared.id
     row.version = int(row.version or 1) + 1
     row.updated_at = datetime.now(timezone.utc)
@@ -483,8 +494,15 @@ def detach(service: CiService, *, mode: str = "restore", actor=None) -> Dict[str
             )
         try:
             pipelines_service._apply_stages(row, stages, actor=actor)
+            # The copy keeps what this service was building with: its own
+            # defaults become the copied inputs' defaults.
             row.parameters = pipelines_service._parameters(
-                pipelines_service.parameter_definitions(shared)
+                [
+                    {k: v for k, v in param.items() if k != "sharedDefault"}
+                    for param in pipelines_service.apply_parameter_defaults(
+                        shared.parameters, row.parameter_defaults
+                    )
+                ]
             )
             row.post_actions = pipelines_service._post_actions(
                 list(shared.post_actions or []), service.id
@@ -494,6 +512,7 @@ def detach(service: CiService, *, mode: str = "restore", actor=None) -> Dict[str
             raise
 
     row.linked_pipeline_id = None
+    row.parameter_defaults = None
     row.version = int(row.version or 1) + 1
     row.updated_at = datetime.now(timezone.utc)
     db.session.add(row)

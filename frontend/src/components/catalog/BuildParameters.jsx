@@ -25,6 +25,48 @@ const SOURCES = [
 
 const typeLabel = (type) => TYPES.find((item) => item.value === type)?.label || "Text";
 
+const sharedDefaultOf = (param) =>
+  param.type === "boolean" ? (String(param.default) === "true" ? "true" : "false") : String(param.default ?? "");
+
+/**
+ * A linked service's own default for one shared input, or null when it has
+ * none or the one it has no longer fits (the option was removed on the shared
+ * pipeline). Mirrors pipelines.apply_parameter_defaults on the server, which
+ * ignores such an entry and builds with the shared default.
+ */
+export function ownDefaultFor(param, own) {
+  if (!own || !param?.name || !Object.prototype.hasOwnProperty.call(own, param.name)) return null;
+  const raw = own[param.name];
+  if (raw === null || raw === undefined) return null;
+  if (param.type === "boolean") return String(raw) === "true" ? "true" : "false";
+  const value = param.type === "multiline" ? String(raw) : String(raw).trim();
+  if (param.type === "choice" && !(param.choices || []).map(String).includes(value)) return null;
+  return value;
+}
+
+/** The shared inputs as this service's builds are asked them. */
+export function withServiceDefaults(parameters, own) {
+  return (parameters || []).map((param) => {
+    const value = ownDefaultFor(param, own);
+    return value === null ? param : { ...param, default: value };
+  });
+}
+
+/**
+ * What saving sends: only entries that apply, and none equal to the shared
+ * default (so "same as shared" keeps following the shared pipeline). An entry
+ * the shared pipeline no longer accepts is dropped rather than refused, since
+ * the person saving may be changing a different input.
+ */
+export function fittingServiceDefaults(parameters, own) {
+  const out = {};
+  for (const param of parameters || []) {
+    const value = ownDefaultFor(param, own);
+    if (value !== null && value !== sharedDefaultOf(param)) out[param.name] = value;
+  }
+  return out;
+}
+
 const blankParameter = (parameters) => {
   let name = "NEW_INPUT";
   for (let suffix = 2; parameters.some((item) => item.name === name); suffix += 1) {
@@ -50,8 +92,29 @@ const blankParameter = (parameters) => {
  * letting the save fail. The preview on the right is the Run Build dialog as
  * it will look, so an input is judged by the person who has to answer it.
  */
-export default function BuildParameters({ parameters, stages = [], canEdit, onChange, onOpenStage }) {
+export default function BuildParameters({
+  parameters,
+  stages = [],
+  canEdit,
+  onChange,
+  onOpenStage,
+  // Set when this service builds with a shared pipeline: { name, serviceName }.
+  // The questions are then read-only (edited on the Pipelines page) and each
+  // one gets a default of this service's own.
+  shared = null,
+  serviceDefaults = null,
+  canEditDefaults = false,
+  onServiceDefaultsChange,
+}) {
   const items = parameters || [];
+  const sharedMode = Boolean(shared);
+  const ownCount = sharedMode ? Object.keys(fittingServiceDefaults(items, serviceDefaults)).length : 0;
+  const setOwnDefault = (param, value) => {
+    const next = { ...(serviceDefaults || {}) };
+    if (value === null || value === sharedDefaultOf(param)) delete next[param.name];
+    else next[param.name] = value;
+    onServiceDefaultsChange?.(next);
+  };
   const [open, setOpen] = useState(items.length ? 0 : null);
 
   useEffect(() => {
@@ -99,10 +162,26 @@ export default function BuildParameters({ parameters, stages = [], canEdit, onCh
           <div>
             <span className="pl-kicker">Asked in the Run Build dialog</span>
             <h3>Build inputs</h3>
-            <p>
-              Each answer becomes an environment variable with the same name in every stage, and
-              can switch stages on or off with a run condition.
-            </p>
+            {sharedMode ? (
+              <p>
+                These questions come from the shared pipeline “{shared.name}” and are edited there.
+                What each one starts as is {shared.serviceName}'s own: set a default here and only
+                this service's builds, schedules and webhooks start with it.
+                {ownCount > 0 && (
+                  <>
+                    {" "}
+                    <strong>
+                      {ownCount} input{ownCount === 1 ? " starts" : "s start"} differently for {shared.serviceName}.
+                    </strong>
+                  </>
+                )}
+              </p>
+            ) : (
+              <p>
+                Each answer becomes an environment variable with the same name in every stage, and
+                can switch stages on or off with a run condition.
+              </p>
+            )}
           </div>
           {canEdit && items.length > 0 && (
             <button
@@ -123,8 +202,9 @@ export default function BuildParameters({ parameters, stages = [], canEdit, onCh
             </span>
             <strong>No build inputs</strong>
             <p>
-              Run Build asks only for the branch or tag. Add an input to ask for an environment,
-              a version, or a yes/no like “Deploy after build?”.
+              {sharedMode
+                ? `Run Build asks only for the branch or tag. Inputs are added on the shared pipeline “${shared.name}”.`
+                : "Run Build asks only for the branch or tag. Add an input to ask for an environment, a version, or a yes/no like “Deploy after build?”."}
             </p>
             {canEdit && (
               <button type="button" className="primary btn-compact" onClick={add}>
@@ -143,12 +223,26 @@ export default function BuildParameters({ parameters, stages = [], canEdit, onCh
                 problems={parameterProblems(param, index, items)}
                 usedBy={stagesUsingParameter(param.name, stages)}
                 open={open === index}
-                canEdit={canEdit}
+                canEdit={canEdit && !sharedMode}
                 onToggle={() => setOpen((current) => (current === index ? null : index))}
                 onChange={(patch) => mutate(index, patch)}
                 onMove={(delta) => move(index, delta)}
                 onRemove={() => remove(index)}
                 onOpenStage={onOpenStage}
+                own={
+                  sharedMode
+                    ? {
+                        serviceName: shared.serviceName,
+                        value: ownDefaultFor(param, serviceDefaults),
+                        stale:
+                          Boolean(serviceDefaults) &&
+                          Object.prototype.hasOwnProperty.call(serviceDefaults, param.name) &&
+                          ownDefaultFor(param, serviceDefaults) === null,
+                        canEdit: canEditDefaults,
+                        onChange: (value) => setOwnDefault(param, value),
+                      }
+                    : null
+                }
               />
             ))}
           </ol>
@@ -160,7 +254,97 @@ export default function BuildParameters({ parameters, stages = [], canEdit, onCh
         </p>
       </div>
 
-      <RunPreview parameters={items} />
+      <RunPreview parameters={sharedMode ? withServiceDefaults(items, serviceDefaults) : items} />
+    </div>
+  );
+}
+
+/**
+ * A linked service's own default for one shared input. The control matches
+ * the input's kind, so a choice can only start at one of its options.
+ */
+function OwnDefault({ param, own, ids }) {
+  const shared = sharedDefaultOf(param);
+  const value = own.value ?? shared;
+  const overridden = own.value !== null;
+  const choices = (param.choices || []).filter(Boolean);
+  const id = `${ids}-own`;
+  const label = `Default for ${own.serviceName}`;
+  const sharedText = param.type === "boolean" ? (shared === "true" ? "Yes" : "No") : shared || "empty";
+  const hint = overridden
+    ? `The shared pipeline starts it at “${sharedText}”; ${own.serviceName}'s builds start at this instead.`
+    : `Same as the shared pipeline. Change it to start ${own.serviceName}'s builds somewhere else.`;
+
+  let control;
+  if (param.type === "boolean") {
+    control = (
+      <Segmented
+        label={label}
+        value={value === "true" ? "true" : "false"}
+        options={[
+          { value: "true", label: "Yes" },
+          { value: "false", label: "No" },
+        ]}
+        disabled={!own.canEdit}
+        onChange={own.onChange}
+      />
+    );
+  } else if (param.type === "choice" && choices.length) {
+    control = (
+      <select id={id} value={choices.includes(value) ? value : choices[0]} disabled={!own.canEdit} onChange={(event) => own.onChange(event.target.value)}>
+        {choices.map((choice) => (
+          <option key={choice} value={choice}>
+            {choice}
+            {choice === shared ? " (shared default)" : ""}
+          </option>
+        ))}
+      </select>
+    );
+  } else if (param.type === "multiline") {
+    control = (
+      <textarea
+        id={id}
+        className="is-mono"
+        rows={6}
+        spellCheck={false}
+        value={value}
+        disabled={!own.canEdit}
+        onChange={(event) => own.onChange(event.target.value)}
+      />
+    );
+  } else {
+    control = (
+      <input
+        id={id}
+        className="is-mono"
+        value={value}
+        placeholder={param.type === "dynamic_choice" ? "A branch or tag name" : ""}
+        disabled={!own.canEdit}
+        spellCheck={false}
+        onChange={(event) => own.onChange(event.target.value)}
+      />
+    );
+  }
+
+  return (
+    <div className="pl-own-default">
+      <div className="pl-own-default-row">
+        <Field label={label} htmlFor={param.type === "boolean" ? undefined : id} hint={hint}>
+          {control}
+        </Field>
+        {overridden && own.canEdit && (
+          <button type="button" className="btn-outline btn-compact" onClick={() => own.onChange(null)}>
+            <PlIcon name="reset" /> Use shared default
+          </button>
+        )}
+      </div>
+      {own.stale && (
+        <p className="pl-own-default-stale" role="status">
+          <PlIcon name="alert" />
+          The default {own.serviceName} had is no longer one of this input's options, so its builds
+          start at the shared default. Saving clears it.
+        </p>
+      )}
     </div>
   );
 }
@@ -178,6 +362,7 @@ function InputCard({
   onMove,
   onRemove,
   onOpenStage,
+  own = null,
 }) {
   const ids = useId();
   const problemFor = (field) => problems.find((item) => item.field === field)?.message;
@@ -200,6 +385,16 @@ function InputCard({
               <code>{param.name || "—"}</code>
               <span className="pl-tag">{typeLabel(param.type)}</span>
               {param.required && param.type !== "boolean" && <span className="pl-tag">Required</span>}
+              {own?.value != null && (
+                <span className="pl-tag is-accent" title={`${own.serviceName}'s builds start at this`}>
+                  Starts at “{param.type === "boolean" ? (own.value === "true" ? "Yes" : "No") : own.value.split("\n")[0].slice(0, 40)}” here
+                </span>
+              )}
+              {own?.stale && (
+                <span className="pl-tag is-error">
+                  <PlIcon name="alert" /> Own default no longer fits
+                </span>
+              )}
               {usedBy.length > 0 && (
                 <span className="pl-tag is-info">
                   <PlIcon name="branch" /> Steers {usedBy.length} stage{usedBy.length === 1 ? "" : "s"}
@@ -231,6 +426,7 @@ function InputCard({
 
       {open && (
         <div className="pl-input-body" id={`${ids}-body`}>
+          {own && <OwnDefault param={param} own={own} ids={ids} />}
           <Field label="Kind of answer">
             <Segmented
               label="Kind of answer"
@@ -317,7 +513,7 @@ function InputCard({
             )}
 
             {param.type === "boolean" ? (
-              <Field label="Starts as">
+              <Field label={own ? "Shared default" : "Starts as"}>
                 <Segmented
                   label="Starts as"
                   value={String(param.default) === "true" ? "true" : "false"}
@@ -331,7 +527,7 @@ function InputCard({
               </Field>
             ) : param.type === "multiline" ? (
               <Field
-                label="Default text"
+                label={own ? "Shared default text" : "Default text"}
                 htmlFor={`${ids}-default`}
                 wide
                 optional
@@ -355,7 +551,7 @@ function InputCard({
                 />
               </Field>
             ) : param.type === "choice" && choices.filter(Boolean).length ? (
-              <Field label="Default" htmlFor={`${ids}-default`} error={problemFor("default")}>
+              <Field label={own ? "Shared default" : "Default"} htmlFor={`${ids}-default`} error={problemFor("default")}>
                 <select
                   id={`${ids}-default`}
                   value={param.default || ""}
@@ -371,7 +567,7 @@ function InputCard({
                 </select>
               </Field>
             ) : (
-              <Field label="Default" htmlFor={`${ids}-default`} optional>
+              <Field label={own ? "Shared default" : "Default"} htmlFor={`${ids}-default`} optional>
                 <input
                   id={`${ids}-default`}
                   className="is-mono"

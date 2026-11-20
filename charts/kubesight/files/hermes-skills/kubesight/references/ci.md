@@ -265,6 +265,17 @@ Things that follow from this, which you will be asked about:
   aimed at the *service* is refused, and the message says to edit the shared
   pipeline, under its own slug, or detach first. Editing the shared pipeline
   changes every service that uses it.
+- **Each service picks its own defaults for the shared build inputs.** The
+  questions belong to the shared pipeline; what they start as is per service.
+  `kubesight_pipeline_get` on the service returns `serviceDefaults` next to the
+  shared `parameters`. `kubesight_shared_pipeline_defaults_set {service:
+  "acquiring-ui", defaults: {APP_VARIANT: "acquiring"}}` sets them, merged into
+  what the service already has. `null` puts one input back on the shared
+  default, and `reset: true` clears all of them. A choice must be one of its
+  options. Only that service's Run Build dialog, schedules, webhooks and builds
+  change, and a value given at run time still wins. When asked to "build X with
+  variant Y by default", this is the tool, not an edit to the shared pipeline,
+  which would change every service. Confirm first.
 - Secrets resolve service first, then the shared pipeline, then global. A
   secret stored on the shared pipeline reaches every service that uses it.
 - A Deploy stage in a shared pipeline usually targets **"the service's linked

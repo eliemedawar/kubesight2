@@ -180,3 +180,50 @@ def test_a_viewer_can_list_but_not_create(app, client, viewer_token):
     ):
         result = call_tool(client, viewer_token, name, arguments)
         assert result.get("isError") and "permission" in error_text(result)
+
+
+def test_a_service_sets_its_own_defaults_for_a_shared_pipelines_inputs(app, client, admin_token, credential):
+    _create_service(client, admin_token)
+    call_tool(client, admin_token, "kubesight_shared_pipeline_create", {
+        "name": "Verto UI Shared",
+        "stages": [{"name": "Build", "stageType": "command", "commands": ["echo $APP_VARIANT"]}],
+        "parameters": [
+            {"name": "APP_VARIANT", "type": "choice", "choices": ["issuing", "acquiring"], "default": "issuing"},
+            {"name": "DEBUG", "type": "boolean", "default": "false"},
+        ],
+    })
+    call_tool(client, admin_token, "kubesight_shared_pipeline_attach",
+              {"service": "payments-api", "pipeline": "verto-ui-shared"})
+
+    result = call_tool(client, admin_token, "kubesight_shared_pipeline_defaults_set",
+                       {"service": "payments-api", "defaults": {"APP_VARIANT": "acquiring", "DEBUG": True}})
+    assert not result.get("isError"), error_text(result)
+    data = payload(result)
+    assert "APP_VARIANT issuing (shared) → acquiring" in data["changed"]
+    starts = {item["name"]: item["startsAt"] for item in data["inputs"]}
+    assert starts == {"APP_VARIANT": "acquiring", "DEBUG": "true"}
+
+    got = payload(call_tool(client, admin_token, "kubesight_pipeline_get", {"service": "payments-api"}))
+    assert got["serviceDefaults"] == {"APP_VARIANT": "acquiring", "DEBUG": "true"}
+    # The shared questions themselves are untouched.
+    assert {p["name"]: p["default"] for p in got["parameters"]}["APP_VARIANT"] == "issuing"
+
+    # Merged: null puts one back on the shared default and leaves the other.
+    data = payload(call_tool(client, admin_token, "kubesight_shared_pipeline_defaults_set",
+                             {"service": "payments-api", "defaults": {"DEBUG": None}}))
+    assert {i["name"]: i["serviceDefault"] for i in data["inputs"]} == {"APP_VARIANT": "acquiring", "DEBUG": None}
+
+    refused = call_tool(client, admin_token, "kubesight_shared_pipeline_defaults_set",
+                        {"service": "payments-api", "defaults": {"APP_VARIANT": "prod"}})
+    assert refused.get("isError") and "issuing, acquiring" in error_text(refused)
+
+    cleared = payload(call_tool(client, admin_token, "kubesight_shared_pipeline_defaults_set",
+                                {"service": "payments-api", "reset": True}))
+    assert all(item["serviceDefault"] is None for item in cleared["inputs"])
+
+
+def test_defaults_need_a_service_on_a_shared_pipeline(app, client, admin_token, credential):
+    _create_service(client, admin_token)
+    result = call_tool(client, admin_token, "kubesight_shared_pipeline_defaults_set",
+                       {"service": "payments-api", "defaults": {"X": "1"}})
+    assert result.get("isError") and "does not build with a shared pipeline" in error_text(result)

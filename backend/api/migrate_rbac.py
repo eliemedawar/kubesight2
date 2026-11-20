@@ -1002,6 +1002,10 @@ def _migrate_ci_columns() -> None:
         # A service pipeline that builds with a shared one. NULL = its own
         # stages, which is what every pipeline had before.
         _add_column_if_missing("ci_pipelines", "linked_pipeline_id", "INTEGER")
+        # A linked service's own defaults for the shared pipeline's build
+        # inputs. NULL = the shared defaults, which is what every link had.
+        _add_column_if_missing("ci_pipelines", "parameter_defaults", "JSON")
+        _retype_json_column("ci_pipelines", "parameter_defaults")
     if "ci_service_deployments" in existing:
         # Create-from-template for a linked deployment that is not there yet.
         _add_column_if_missing("ci_service_deployments", "template_id", "VARCHAR(120)")

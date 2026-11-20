@@ -259,6 +259,13 @@ def _pipeline_get(arguments: Dict[str, Any]) -> Dict[str, Any]:
         # are that pipeline's, edited under its own slug, not this service's.
         "sharedPipeline": pipeline.get("linkedPipeline"),
         "parameters": pipeline.get("parameters") or [],
+        # On a shared pipeline: what THIS service starts each input at instead
+        # of the shared default (kubesight_shared_pipeline_defaults_set).
+        **(
+            {"serviceDefaults": pipeline.get("parameterDefaults") or {}}
+            if pipeline.get("linkedPipeline")
+            else {}
+        ),
         "stages": [
             {
                 "position": stage.get("position"),

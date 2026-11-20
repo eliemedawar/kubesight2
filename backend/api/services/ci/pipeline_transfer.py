@@ -64,7 +64,15 @@ def _effective(pipeline: CiPipeline):
     if effective.stages:
         return (
             [_stage_payload(pipeline_stage_to_dict(stage)) for stage in effective.stages],
-            pipelines_service.parameter_definitions(effective),
+            # A linked service exports what it builds with: the shared inputs
+            # starting at its own defaults.
+            [
+                {k: v for k, v in param.items() if k != "sharedDefault"}
+                for param in pipelines_service.apply_parameter_defaults(
+                    effective.parameters,
+                    pipeline.parameter_defaults if pipeline.linked_pipeline_id else None,
+                )
+            ],
             list(effective.post_actions or []),
         )
     if (pipeline.purpose or "build") == "build" and pipeline.service is not None:
@@ -130,7 +138,16 @@ def export_pipeline(pipeline: CiPipeline, *, cluster_names: Dict[str, str], acto
             "purpose": pipeline.purpose or "build",
             # Builds with a shared pipeline: imported as a link to the one of the
             # same slug when the other side has it; the stages below otherwise.
-            "sharedPipeline": {"slug": home.slug, "name": home.name} if home else None,
+            "sharedPipeline": (
+                {
+                    "slug": home.slug,
+                    "name": home.name,
+                    # This service's own starting values for the shared inputs.
+                    "parameterDefaults": dict(pipeline.parameter_defaults or {}),
+                }
+                if home
+                else None
+            ),
             "parameters": parameters,
             "postActions": post_actions,
             "stages": stages,
@@ -357,10 +374,22 @@ def apply(
                     "its stages on the Pipelines page first."
                 )
             db.session.commit()
-            if pipeline.linked_pipeline_id == target.id:
-                result = pipelines_service.list_pipelines(service)[0]
-            else:
-                result = shared_pipelines.attach(service, home, actor=actor)
+            if pipeline.linked_pipeline_id != target.id:
+                shared_pipelines.attach(service, home, actor=actor)
+            # The exported service's own defaults, kept where they still fit
+            # the shared pipeline over here (its inputs may differ).
+            own_defaults = shared.get("parameterDefaults") if shared else None
+            linked_row = service.default_pipeline()
+            if isinstance(own_defaults, dict) and linked_row is not None:
+                fitting = {
+                    p["name"]: p["default"]
+                    for p in pipelines_service.apply_parameter_defaults(target.parameters, own_defaults)
+                    if "sharedDefault" in p
+                }
+                linked_row.parameter_defaults = fitting or None
+                db.session.add(linked_row)
+                db.session.commit()
+            result = pipelines_service.list_pipelines(service)[0]
         else:
             if pipeline.linked_pipeline_id:
                 # Stop using the shared pipeline; the imported stages replace the

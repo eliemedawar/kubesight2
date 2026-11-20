@@ -407,6 +407,13 @@ class CiPipeline(db.Model):
         nullable=True,
         index=True,
     )
+    # This service's own answers to the shared pipeline's build inputs, as
+    # {NAME: default}. Only read while linked: the shared pipeline owns the
+    # questions, each service picks what they start as (e.g. APP_VARIANT
+    # "issuing" for one service, "acquiring" for another). An entry that no
+    # longer fits — the input was removed, or the option is gone — is ignored
+    # and the shared default applies (pipelines.apply_parameter_defaults).
+    parameter_defaults = db.Column(db.JSON, nullable=True)
     created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=_now)
     updated_at = db.Column(

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "../../styles/signal/pipelineWorkspace.css";
-import BuildParameters from "./BuildParameters.jsx";
+import BuildParameters, { fittingServiceDefaults } from "./BuildParameters.jsx";
 import JenkinsfileImportModal from "./JenkinsfileImportModal.jsx";
 import PipelineFileImportModal from "./PipelineFileImportModal.jsx";
 import "../../styles/signal/sharedPipelines.css";
@@ -103,6 +103,9 @@ export default function PipelineEditor({
   // pipeline in the same request. Selected in the flow's "When the build
   // ends" block; mode "post" shows one, "post-add" the kind picker.
   const [postActions, setPostActions] = useState([]);
+  // A service on a shared pipeline: its own starting value for each of the
+  // shared build inputs ({NAME: value}). The only thing editable here then.
+  const [serviceDefaults, setServiceDefaults] = useState({});
   const [selectedPost, setSelectedPost] = useState(null);
   const [secretKeys, setSecretKeys] = useState([]);
   // The Scan stage's tool cards (image, configured, default rules) - sent with
@@ -180,7 +183,16 @@ export default function PipelineEditor({
     () => postActionsChanged(saved?.postActions || [], postActions),
     [saved, postActions]
   );
-  const dirty = forcedDirty || diff.count > 0 || postDirty;
+  // Compared as what would be saved, so typing a value back to the shared
+  // default is not a change, and a stale entry alone is not either.
+  const defaultsDirty = useMemo(() => {
+    if (!linked) return false;
+    const now = fittingServiceDefaults(parameters, serviceDefaults);
+    const before = fittingServiceDefaults(parameters, saved?.parameterDefaults || {});
+    const keys = new Set([...Object.keys(now), ...Object.keys(before)]);
+    return [...keys].some((key) => now[key] !== before[key]);
+  }, [linked, parameters, serviceDefaults, saved]);
+  const dirty = forcedDirty || diff.count > 0 || postDirty || defaultsDirty;
   const postProblems = useMemo(
     () => postActions.map((action, index) => postActionProblems(action, index, postActions, secretKeys)),
     [postActions, secretKeys]
@@ -229,10 +241,18 @@ export default function PipelineEditor({
     const nextStages = (data?.stages || []).map(withKey);
     const nextPost = (data?.postActions || []).map(withPostKey);
     setPipeline(data);
-    setSaved(clone({ stages: nextStages, parameters: data?.parameters || [], postActions: nextPost }));
+    setSaved(
+      clone({
+        stages: nextStages,
+        parameters: data?.parameters || [],
+        postActions: nextPost,
+        parameterDefaults: data?.parameterDefaults || {},
+      })
+    );
     setStages(nextStages);
     setParameters((data?.parameters || []).map((item) => ({ ...item })));
     setPostActions(nextPost.map((item) => ({ ...item })));
+    setServiceDefaults({ ...(data?.parameterDefaults || {}) });
     setSelectedPost((current) =>
       keepSelection && current !== null && current < nextPost.length ? current : null
     );
@@ -604,8 +624,36 @@ export default function PipelineEditor({
 
   // --- Save / discard / template / import ------------------------------------
 
+  const saveServiceDefaults = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      const result = await updateCiPipeline(pipeline.id, {
+        parameterDefaults: fittingServiceDefaults(parameters, serviceDefaults),
+      });
+      adopt(result, { keepSelection: true });
+      const count = Object.keys(result.parameterDefaults || {}).length;
+      setNotice(
+        count
+          ? `Saved. ${service.name}'s next build starts ${count} input${count === 1 ? "" : "s"} at its own default.`
+          : `Saved. ${service.name} starts every input at the shared pipeline's default.`
+      );
+      onChanged?.();
+    } catch (err) {
+      setError(err.message || "Could not save this service's defaults.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const save = async () => {
     if (!pipeline || !dirty || saving || generated) return;
+    // On a shared pipeline the stages and questions are not this service's to
+    // save; only its own defaults for the inputs are.
+    if (linked) {
+      if (pipeline.id && !linked.missing) await saveServiceDefaults();
+      return;
+    }
     if (blockingStages.length) {
       setView("stages");
       select(blockingStages[0].index);
@@ -687,6 +735,7 @@ export default function PipelineEditor({
     setStages(restored.stages.map((stage) => ({ ...stage })));
     setParameters(restored.parameters.map((item) => ({ ...item })));
     setPostActions((restored.postActions || []).map((item) => ({ ...item })));
+    setServiceDefaults({ ...(restored.parameterDefaults || {}) });
     setSelectedPost(null);
     setRemoved(null);
     setImportNotes(null);
@@ -1158,7 +1207,7 @@ export default function PipelineEditor({
             <p>
               {linked.missing
                 ? "Its builds are refused until it uses another one or goes back to its own pipeline."
-                : "These are that pipeline's stages, run against this service's own repository, Dockerfile and registry. They are edited on the Pipelines page, and a change there reaches this service from its next build. Its own stages are kept for if it stops using it."}
+                : "These are that pipeline's stages, run against this service's own repository, Dockerfile and registry. They are edited on the Pipelines page, and a change there reaches this service from its next build. What each build input starts as is this service's own, under Build inputs. Its own stages are kept for if it stops using it."}
               {!linked.missing && !linked.enabled && <strong className="sp-shared-off"> It is turned off right now, so builds are refused.</strong>}
             </p>
           </div>
@@ -1314,6 +1363,10 @@ export default function PipelineEditor({
             stages={stages}
             canEdit={editable}
             onChange={changeParameters}
+            shared={linked && !linked.missing ? { name: linked.name, serviceName: service.name } : null}
+            serviceDefaults={serviceDefaults}
+            canEditDefaults={canEdit && Boolean(linked) && !linked?.missing && Boolean(pipeline?.id) && !saving}
+            onServiceDefaultsChange={setServiceDefaults}
             onOpenStage={(index) => {
               setView("stages");
               select(index);
@@ -1467,13 +1520,15 @@ export default function PipelineEditor({
         {canEdit && dirty && (
           <div className="pl-savebar" role="region" aria-label="Unsaved pipeline changes">
             <span
-              className={`pl-savebar-dot${blockingStages.length || inputProblems || blockingPost >= 0 ? " is-error" : ""}`}
+              className={`pl-savebar-dot${!linked && (blockingStages.length || inputProblems || blockingPost >= 0) ? " is-error" : ""}`}
               aria-hidden="true"
             />
             <div className="pl-savebar-text">
               <strong>{saving ? "Saving…" : "Unsaved changes"}</strong>
               <span>
-                {blockingStages.length || inputProblems || blockingPost >= 0 ? (
+                {linked ? (
+                  `${service.name}'s build input defaults changed`
+                ) : blockingStages.length || inputProblems || blockingPost >= 0 ? (
                   `${
                     blockingStages.length + inputProblems + postProblems.filter((list) => list.length).length
                   } to fix before saving`
@@ -1488,7 +1543,7 @@ export default function PipelineEditor({
             </button>
             <button type="button" className="primary btn-compact" onClick={save} disabled={saving || generated}>
               <PlIcon name="check" />
-              {saving ? "Saving…" : "Save pipeline"}
+              {saving ? "Saving…" : linked ? "Save defaults" : "Save pipeline"}
               <kbd>Ctrl S</kbd>
             </button>
           </div>

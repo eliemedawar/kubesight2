@@ -2781,6 +2781,45 @@
   color: var(--info);
 }
 
+/* A linked service's own default for one shared build input: the one thing
+   editable on a shared pipeline's input, so it sits first and stands out. */
+.pl-root .pl-own-default {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-md);
+}
+
+.pl-root .pl-own-default-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.pl-root .pl-own-default-row > .pl-field {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+.pl-root .pl-own-default-stale {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--danger);
+  font-size: var(--font-size-xs);
+}
+
+.pl-root .pl-own-default-stale > svg {
+  width: 0.85rem;
+  height: 0.85rem;
+  flex: none;
+}
+
 /* Run Build preview */
 .pl-root .pl-preview {
   position: sticky;

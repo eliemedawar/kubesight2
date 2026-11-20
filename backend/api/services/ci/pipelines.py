@@ -1301,6 +1301,12 @@ def _linked_pipeline_dict(row: CiPipeline) -> Dict[str, Any]:
     data["isGeneratedDefault"] = False
     data["linkedPipeline"] = shared_summary(row)
     data["ownStageCount"] = len(row.stages)
+    # The shared definitions stay as the shared pipeline has them; this
+    # service's own starting values travel beside them, so the editor can show
+    # both and say which one a build gets.
+    data["parameterDefaults"] = (
+        dict(row.parameter_defaults) if isinstance(row.parameter_defaults, dict) else {}
+    )
     if shared is not None:
         shown = pipeline_to_dict(shared)
         data["stages"] = shown["stages"]
@@ -1417,6 +1423,25 @@ def update_pipeline(
     # post actions (or an MCP stage edit) must not wipe them.
     if "postActions" in payload:
         pipeline.post_actions = _post_actions(payload.get("postActions"), pipeline.service_id)
+    if "parameterDefaults" in payload:
+        # The one thing a linked service sets about its shared pipeline: what
+        # each build input starts as for it. Checked against the shared
+        # pipeline's definitions as they are now.
+        shared = pipeline.linked_pipeline if pipeline.linked_pipeline_id else None
+        if shared is None and payload.get("parameterDefaults"):
+            raise PipelineError(
+                "Only a service that builds with a shared pipeline sets its own defaults for it; "
+                "edit this pipeline's build inputs instead."
+            )
+        pipeline.parameter_defaults = (
+            _parameter_defaults(payload.get("parameterDefaults"), parameter_definitions(shared))
+            if shared is not None
+            else None
+        )
+    elif not pipeline.linked_pipeline_id:
+        # Its own stages again (e.g. an import replaced the link): defaults
+        # meant for a shared pipeline's inputs have nothing left to apply to.
+        pipeline.parameter_defaults = None
     # Bumped on every save so a build's snapshot records which revision ran.
     pipeline.version = int(pipeline.version or 1) + 1
     pipeline.updated_at = datetime.now(timezone.utc)
@@ -1434,8 +1459,17 @@ def update_pipeline(
             "pipeline": pipeline.name,
             "stageCount": len(pipeline.stages),
             "version": pipeline.version,
+            **(
+                {"parameterDefaults": dict(pipeline.parameter_defaults or {})}
+                if "parameterDefaults" in payload
+                else {}
+            ),
         },
     )
+    # A linked row is answered as the editor shows it: the shared stages and
+    # inputs with this service's defaults, not its own dormant stages.
+    if pipeline.linked_pipeline_id:
+        return _linked_pipeline_dict(pipeline)
     return pipeline_to_dict(pipeline)
 
 
@@ -1567,6 +1601,91 @@ def parameter_definitions(pipeline: CiPipeline) -> List[Dict[str, Any]]:
     from .serializers import _json_list
 
     return [p for p in _json_list(pipeline.parameters) if isinstance(p, dict)]
+
+
+def _override_value(param: Dict[str, Any], raw: Any) -> Tuple[Optional[str], str]:
+    """``(value, problem)`` for one service default against one definition.
+
+    ``value`` is None when the entry cannot be used; ``problem`` then says why
+    in words a person can act on.
+    """
+    label = param.get("label") or param.get("name")
+    param_type = param.get("type") or "text"
+    if param_type == "boolean":
+        return ("true" if _truthy(raw) else "false"), ""
+    if param_type == "multiline":
+        value = str(raw if raw is not None else "")
+        if len(value) > MAX_MULTILINE_CHARS:
+            return None, f"'{label}' is {len(value)} characters; the limit is {MAX_MULTILINE_CHARS}."
+        return value, ""
+    value = str(raw if raw is not None else "").strip()[:MAX_TEXT_CHARS]
+    if param_type == "choice":
+        choices = [str(c) for c in (param.get("choices") or [])]
+        if value not in choices:
+            return None, f"'{label}' can only start as one of: {', '.join(choices)}."
+    return value, ""
+
+
+def apply_parameter_defaults(
+    definitions: Any, overrides: Any
+) -> List[Dict[str, Any]]:
+    """A shared pipeline's input definitions with one service's own defaults.
+
+    Overrides are read leniently on purpose: the shared pipeline can change
+    after a service picked its defaults, and an entry for an input that is gone
+    (or an option that was removed) must not stop that service from building —
+    it falls back to the shared default, which is what the editor then shows.
+    Each overridden definition carries ``sharedDefault`` so a build's snapshot
+    and the editor can both tell the two apart.
+    """
+    from .serializers import _json_list
+
+    items = [dict(p) for p in _json_list(definitions) if isinstance(p, dict)]
+    if not isinstance(overrides, dict) or not overrides:
+        return items
+    for param in items:
+        name = str(param.get("name") or "")
+        if not name or name not in overrides:
+            continue
+        value, problem = _override_value(param, overrides.get(name))
+        if problem or value is None:
+            continue
+        param["sharedDefault"] = param.get("default", "")
+        param["default"] = value
+    return items
+
+
+def _parameter_defaults(value: Any, definitions: List[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+    """Validate a service's defaults for the shared pipeline it builds with.
+
+    Unlike :func:`apply_parameter_defaults` this is strict: it runs while a
+    person is looking at the form, so a value that would be ignored is refused
+    with the reason rather than saved and quietly not applied. An entry equal
+    to the shared default is dropped — "same as shared" should keep following
+    the shared pipeline when someone changes it there.
+    """
+    if value in (None, "", {}):
+        return None
+    if not isinstance(value, dict):
+        raise PipelineError("Service defaults must be an object of input name to value.")
+    by_name = {str(p.get("name")): p for p in definitions if p.get("name")}
+    out: Dict[str, str] = {}
+    for raw_name, raw in value.items():
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        param = by_name.get(name)
+        if param is None:
+            raise PipelineError(f"The shared pipeline has no build input named '{name}'.")
+        if raw is None:
+            continue
+        cleaned, problem = _override_value(param, raw)
+        if problem:
+            raise PipelineError(problem)
+        if cleaned == str(param.get("default") or ("false" if param.get("type") == "boolean" else "")):
+            continue
+        out[name] = cleaned
+    return out or None
 
 
 def resolve_parameters(service: CiService, pipeline: CiPipeline) -> List[Dict[str, Any]]:
@@ -1787,7 +1906,9 @@ def _shared_for_build(pipeline: CiPipeline) -> Tuple[Any, List[Any]]:
         is_default=pipeline.is_default,
         enabled=True,
         version=shared.version,
-        parameters=shared.parameters,
+        # The shared questions, starting at THIS service's answers: what the
+        # Run Build dialog, schedules, webhooks and the snapshot all read.
+        parameters=apply_parameter_defaults(shared.parameters, pipeline.parameter_defaults),
         # Never None: of_pipeline would otherwise fall back to the SERVICE
         # row's own (dormant) post actions.
         post_actions=list(shared.post_actions or []),

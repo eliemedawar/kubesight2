@@ -520,3 +520,95 @@ def _shared_detach(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
         "isGeneratedDefault": bool(result.get("isGeneratedDefault")),
         "stages": [stage.get("name") for stage in result.get("stages") or []],
     }
+
+
+@tool(
+    "kubesight_shared_pipeline_defaults_set",
+    permission="ci_pipelines:edit",
+    description=(
+        "Set what a shared pipeline's build inputs start as for ONE CI service that builds "
+        "with it — e.g. APP_VARIANT 'acquiring' for acquiring-ui while other services on the "
+        "same shared pipeline keep 'issuing'. The questions stay the shared pipeline's; only "
+        "this service's Run Build dialog, schedules, webhooks and builds start at these values "
+        "(a value given at run time still wins). `defaults` is merged into what the service "
+        "already has: a null value, or the shared default, puts that input back on the shared "
+        "default; reset: true clears them all first. A choice must be one of its options. "
+        "Read the inputs and current defaults with kubesight_pipeline_get. Confirm with the "
+        "person first — it changes what that service builds by default."
+    ),
+    write=True,
+    schema={
+        "type": "object",
+        "properties": {
+            "service": {"type": "string", "description": "The CI service (id/slug) that uses a shared pipeline."},
+            "defaults": {
+                "type": "object",
+                "description": "Input name → the value this service starts it at (null = back to the shared default).",
+                "additionalProperties": {"type": ["string", "boolean", "number", "null"]},
+            },
+            "reset": {"type": "boolean", "description": "Clear every default of this service first."},
+        },
+        "required": ["service"],
+    },
+)
+def _shared_defaults_set(arguments: Dict[str, Any], *, user=None) -> Dict[str, Any]:
+    from ...services.ci import pipelines
+
+    service = _catalog_service(arguments.get("service"))
+    row = service.default_pipeline()
+    if row is None or not row.linked_pipeline_id or row.linked_pipeline is None:
+        raise ToolError(
+            f"'{service.slug}' does not build with a shared pipeline, so it has no shared inputs "
+            "to set defaults for. Change its own build inputs with kubesight_pipeline_save."
+        )
+    given = arguments.get("defaults")
+    if given is not None and not isinstance(given, dict):
+        raise ToolError("`defaults` must be an object of input name to value.")
+    if not given and not arguments.get("reset"):
+        raise ToolError("Give `defaults` to set, or reset: true to clear them all.")
+
+    before = {} if arguments.get("reset") else dict(row.parameter_defaults or {})
+    merged = dict(before)
+    for name, value in (given or {}).items():
+        if value is None:
+            merged.pop(str(name), None)
+        else:
+            merged[str(name)] = "true" if value is True else "false" if value is False else str(value)
+    previous = dict(row.parameter_defaults or {})
+    try:
+        result = pipelines.update_pipeline(row, {"parameterDefaults": merged}, actor=user)
+    except pipelines.PipelineError as exc:
+        raise ToolError(str(exc))
+
+    now = result.get("parameterDefaults") or {}
+    shared_name = (result.get("linkedPipeline") or {}).get("name")
+    shared_defaults = {
+        str(param.get("name")): f"{param.get('default')} (shared)"
+        for param in result.get("parameters") or []
+    }
+    changes = [
+        f"{name} {previous.get(name, shared_defaults.get(name, 'shared default'))} → "
+        f"{now.get(name, shared_defaults.get(name, 'shared default'))}"
+        for name in sorted(set(previous) | set(now))
+        if previous.get(name) != now.get(name)
+    ]
+    return {
+        "service": service.slug,
+        "sharedPipeline": shared_name,
+        "changed": (
+            f"{service.slug}'s defaults for '{shared_name}': " + "; ".join(changes)
+            if changes
+            else f"nothing — {service.slug}'s defaults were already these"
+        ),
+        "inputs": [
+            {
+                "name": param.get("name"),
+                "type": param.get("type"),
+                "sharedDefault": param.get("default"),
+                "serviceDefault": now.get(param.get("name")),
+                "startsAt": now.get(param.get("name"), param.get("default")),
+                **({"choices": param.get("choices")} if param.get("type") == "choice" else {}),
+            }
+            for param in result.get("parameters") or []
+        ],
+    }
