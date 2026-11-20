@@ -179,6 +179,9 @@ export default function Topbar({
             </p>
             <SearchableSelect
               aria-label={`Active cluster (${shortcutLabel("C")})`}
+              searchPlaceholder="Search clusters…"
+              // Always a search box, focused on open (Alt+C or a click): type, Enter.
+              searchThreshold={0}
               value={selectedClusterId}
               onChange={(event) => onClusterChange(event.target.value)}
               disabled={loadingCore || !allowedClusters.length}
@@ -205,6 +208,9 @@ export default function Topbar({
             </p>
             <SearchableSelect
               aria-label={`Active namespace (${shortcutLabel("N")})`}
+              searchPlaceholder="Search namespaces…"
+              // Always a search box, focused on open (Alt+N or a click): type, Enter.
+              searchThreshold={0}
               value={selectedNamespace}
               onChange={(event) => onNamespaceChange(event.target.value)}
               disabled={loadingNamespaces || loadingResources || !allowedNamespaces.length}
